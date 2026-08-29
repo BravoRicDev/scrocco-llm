@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="<%= typeof lang !== 'undefined' ? lang : 'it' %>">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="<%= typeof csrfToken !== 'undefined' ? csrfToken : '' %>">
+  <title><%= typeof title !== 'undefined' ? title + ' — ' : '' %>Scrocco Web Panel</title>
+  <link rel="stylesheet" href="/css/app.css">
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('scw-theme') === 'dark') {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <nav class="sidebar">
+    <%- include('../partials/sidebar') %>
+  </nav>
+  <div class="main">
+    <div class="topbar">
+      <button type="button" class="menu-toggle" onclick="document.body.classList.toggle('sidebar-open')" aria-label="Menu">&#9776;</button>
+      <%- include('../partials/topbar') %>
+      <button type="button" id="themeToggle" class="btn btn-sm btn-outline" title="Cambia tema" aria-label="Cambia tema">Tema</button>
+    </div>
+    <div class="content">
+      <%- include('../partials/flash') %>
+      <%- body %>
+    </div>
+  </div>
+  <script src="/js/app.js"></script>
+</body>
+</html>

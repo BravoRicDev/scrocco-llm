@@ -1,0 +1,41 @@
+<h1>Editor CSV — <code><%= path %></code></h1>
+
+<div class="heading">
+  <span><strong><%= count %></strong> righe</span>
+  <% if (backups && backups.length) { %>
+    · ultimo backup: <code><%= backups[0].filename %></code>
+  <% } %>
+  · <a href="/config-history">storico configurazioni</a>
+</div>
+
+<div id="csvBanner" class="alert" style="display:none;"></div>
+
+<div class="card" style="max-width:100%;">
+  <div class="form-inline" style="margin-bottom:8px;">
+    <button type="button" class="btn" id="btnView" data-mode="table">Vista: Tabella</button>
+    <button type="button" class="btn btn-danger" id="btnSave">Salva (confirm)</button>
+  </div>
+
+  <div id="tableWrap" style="overflow-x:auto;">
+    <table class="table" id="csvTable">
+      <thead>
+        <tr><% (header || []).forEach(function(h){ %><th><%= h %></th><% }); %></tr>
+      </thead>
+      <tbody>
+        <% (rows || []).forEach(function(row){ %>
+          <tr>
+            <% (header || []).forEach(function(h){ %>
+              <td contenteditable="true"><%= row[h] %></td>
+            <% }); %>
+          </tr>
+        <% }); %>
+      </tbody>
+    </table>
+  </div>
+
+  <textarea id="rawArea" spellcheck="false"
+    style="display:none;width:100%;min-height:60vh;font-family:monospace;font-size:12px;"><%= raw %></textarea>
+</div>
+
+<script>window.__csvHeader = <%- JSON.stringify(header || []) %>;</script>
+<script src="/js/csv-editor.js"></script>

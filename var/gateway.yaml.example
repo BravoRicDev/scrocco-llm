@@ -1,0 +1,266 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# scrocco-llm · POLICY GATEWAY (template di default)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Questo file riflette la policy LIVE attualmente in produzione e funge da
+# TEMPLATE di default: copialo in `var/gateway.yaml` per un nuovo deploy e
+# personalizza profili/alias secondo le tue esigenze.
+#
+# TUTTE le sezioni sono OPZIONALI: se una chiave è omessa viene usato il
+# default hardcoded in `app/policy.py`. I valori qui sotto sono quelli
+# verificati e messi in produzione (2026-08-29).
+#
+# IMPORTANTE: qui NON vanno mai messi segreti. Le chiavi vivono in
+# `var/keys_rotation.csv` (deterministiche sk-<profilo>) o in `client_keys`
+# sotto (override), MAI in questo file di configurazione versionato.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURAZIONE GENERALE
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Step-up globale: quando un deployment fallisce, di quanto penalizzare il suo
+# punteggio per la prossima selezione.
+#   100 = disabilitato (nessuna penalità)
+#   <100 = più aggressivo (ruota prima verso altri candidati)
+step_up_pct: 100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROFILI — override per-profilo dei default globali
+# ─────────────────────────────────────────────────────────────────────────────
+# Ogni profilo (tenant) può avere la propria configurazione. Il nome del
+# profilo coincide con le colonne `scrocco-llm-<profilo>` in keys_rotation.csv.
+profiles:
+  # Profilo di esempio. Rinomina/rimuovi per i tuoi profili reali.
+  test:
+    # Step-up percentuale specifico per questo profilo (qui: come il globale)
+    step_up_pct: 100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STIMA TOKEN & COMPORTAMENTO STICKY
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Divisore per stimare i token dai caratteri del payload (chars / divisor).
+#   4 = approssimazione standard (1 token ≈ 4 caratteri)
+#   3 = più conservativo (stima più alta → contesto più ampio)
+estimate_divisor: 3
+
+# TTL in secondi dell'affinità "sticky": lo stesso deployment viene preferito
+# per richieste consecutive della stessa sessione.
+#   3600 = 1 ora ; 0 = sticky disabilitato
+sticky_ttl_sec: 3600
+
+# Cooldown base in secondi per chiavi/modelli che falliscono (600 = 10 minuti).
+# Vedere anche `cooldown_mode` più sotto per l'escalation.
+cooldown_sec: 600
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOTWORDS — rilevamento intent "deep think" per routing preferenziale
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Quante occorrenze di hotword servono per attivare il routing "pensaci bene"
+hotwords_window: 3
+
+# Pattern regex per rilevare richieste di ragionamento profondo
+# (la richiesta viene instradata verso modelli "reasoning" se disponibili)
+hotwords:
+  - pensaci\s+bene
+  - pensa\s+a\s+fondo
+  - \bragiona\b
+  - deep\s*think
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODELLO NELLE RISPOSTE NON-STREAMING
+# ─────────────────────────────────────────────────────────────────────────────
+# Quale nome di modello restituire al client nella risposta.
+#   upstream  (default) -> nome scritto dal PROVIDER
+#   deployment         -> unique (nome del deployment usato)
+#   requested          -> nome richiesto dal client
+response_model: upstream
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROTAZIONE ADATTIVA PREVENTIVA (anti rate-limit, anti saturazione)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Se true, il router adatta dinamicamente la scelta dei deployment basandosi
+# su latenza osservata, errori e "recency" d'uso (vedi sotto).
+adaptive_pick: true
+
+# Half-life in secondi per la "recency": i deployment usati di recente vengono
+# penalizzati nel punteggio, favorendo la distribuzione del carico.
+recency_halflife_sec: 20
+
+# Latency di riferimento in ms per il scoring adattivo (peso relativo alla
+# latenza media osservata dagli altri deployment del pool).
+latency_ref_ms: 1500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALIAS KEYS — chiavi custom per alias generici (MAI esposte via API)
+# ─────────────────────────────────────────────────────────────────────────────
+# Mappa chiave -> nome modello per consentire a un client di autenticarsi con
+# una chiave dedicata. Decommenta e personalizza:
+# alias_keys:
+#   mio-modello: sk-xxxxxxxxxxxxxxxx
+#   altro-alias: sk-yyyyyyyyyyyyyyyy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLIENT KEYS — override delle chiavi deterministiche per profilo
+# ─────────────────────────────────────────────────────────────────────────────
+# Se un profilo ha l'override qui, la chiave deterministica `sk-<profilo>`
+# viene DISATTIVATA per quel profilo (la chiave custom la SOSTITUISCE).
+# Decommenta e personalizza (segreti: NON versionare, restano in var/):
+# client_keys:
+#   collego: sk-mia-chiave-personale-001
+#   altro-profilo: sk-altra-chiave-002
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HEALTH PROATTIVO — verifica periodica modelli via GET /models (zero token)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# I modelli assenti dal provider vengono messi in cooldown preventivamente.
+proactive_health: false
+
+# Intervallo in secondi tra i controlli health (1800 = 30 minuti).
+health_interval_sec: 1800
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COOLDOWN ESCALATION — le chiavi morte non vengono ri-provate per sempre
+# ─────────────────────────────────────────────────────────────────────────────
+# Due modalità (si escludono a vicenda):
+#   escalation : esponenziale — cooldown_sec * 2^(streak-1), fino a
+#                max_cooldown_sec (legacy, sotto per compatibilità)
+#   linear     : lineare — cooldown_base_min minuti, poi +cooldown_linear_mult_min
+#                per ogni fallimento consecutivo (attuale in produzione)
+cooldown_mode: linear
+cooldown_base_min: 30            # esclusione iniziale in minuti
+cooldown_linear_mult_min: 30     # incremento per fallimento consecutivo
+# cooldown_escalation: true      # (solo se cooldown_mode=escalation)
+# max_cooldown_sec: 86400
+
+# Dopo quanto (sec) un deployment in cooldown per "stale" può essere riprovato.
+stale_cooldown_retry_sec: 300
+
+# Numero massimo di tentativi di fallback lungo la catena/ladder per richiesta.
+max_fallback_tries: 128
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LADDER — rotazione tra gruppi di contesto quando un livello si satura
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Dopo quanti fallimenti nel livello corrente si salta al gradino successivo.
+ladder_skip_after: 4
+
+# Soglia di deployment "stale" oltre la quale il ladder scatta.
+ladder_stale_max: 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUALITY CONTROL JSON + RETRY + WATCHDOG STREAMING
+# ─────────────────────────────────────────────────────────────────────────────
+qc_json:
+  # Timeout in ms per il PRIMO byte di contenuto utile (prima si ruota).
+  # 90000 = 90s (dai log: il ttfb valido massimo osservato è ~75s, margine 90s)
+  stream_first_content_ms: 90000
+
+  # Deadline totale in ms per l'INTERO stream (180000 = 3 minuti).
+  stream_total_deadline_ms: 180000
+
+  # Caratteri di risposta minimi per "impegnare" lo stream (evita di
+  # consegnare risposte troncate/vuote; 40 = buon compromesso).
+  stream_commit_min_chars: 40
+
+  # Cooldown in secondi del watchdog streaming dopo un errore (90s).
+  watchdog_cooldown_sec: 90
+
+  # Abilita QC JSON (validazione, strip fence, retry).
+  enabled: true
+
+  # Rimuove i fence ```json ... ``` dalle risposte prima di validare.
+  strip_fences: true
+
+  # Max tentativi totali (iniziale + retry) per ottenere JSON valido.
+  max_attempts: 3
+
+  # Annota il reasoning se il provider lo fornisce separatamente.
+  annotate_reasoning: true
+
+  # Retry automatico su errori 4xx dal provider (es. 400 per JSON invalido).
+  retry_provider_4xx: true
+
+  # Tier2 watchdog: logga warning se manca il marker [DONE] in streaming.
+  #   false = solo log ; true = trattato come errore (sconsigliato)
+  watchdog_mark_no_done: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SANITY QC — scarta SOLO risposte vuote/triviali (non-streaming)
+# ─────────────────────────────────────────────────────────────────────────────
+# Il caso JSON rotto resta a qc_json. Nessun rilevamento di rifiuti (falsi pos.).
+qc_sanity:
+  # Ruota su risposta vuota causata da esaurimento token (length) — attivo.
+  rotate_on_length_empty: true
+  # Contenuto sotto questa lunghezza (dopo strip) viene considerato vuoto.
+  min_chars: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALIAS — mappatura nomi corti → modelli/gruppi reali (per comodità client)
+# ─────────────────────────────────────────────────────────────────────────────
+aliases:
+  # "scrocco" = modello base del profilo (il router sceglie dimensione+velocità)
+  scrocco: scrocco-llm-collego
+  # Varianti di contesto esplicito:
+  scrocco-200k: scrocco-llm-collego-200k
+  scrocco-1000k: scrocco-llm-collego-1000k
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CAPACITÀ MODALITÀ — routing consapevole di immagini/video/audio/image_gen
+# ─────────────────────────────────────────────────────────────────────────────
+# Il gateway rileva le modalità richieste dal payload (image_url -> vision,
+# input_audio -> audio, file video/* o video_url -> video) e instrada SOLO
+# verso deployment il cui modello dichiara le capacità necessarie.
+#
+# ATTENZIONE: i pattern fnmatch confrontano l'INTERO nome modello upstream
+# (post infer_model_prefix, quindi CON prefisso provider: es "qwen/qwen2.5-vl-72b").
+# Usa un * iniziale se vuoi matchare a prescindere dal prefisso.
+capability_routing:
+  # Mappa pattern/modello-esatto -> capacità dichiarate.
+  # Capacità ammesse: text, vision, video, audio, image_gen, tools, stt, tts
+  model_capabilities:
+    Systran/faster-whisper-*: [stt]
+    speaches-ai/piper-it_IT-*: [tts]
+    openai/gpt-oss-120b: [text, tools]
+    models/gemini-*-flash: [text, vision]
+    "*qwen2.5-vl-*": [text, vision]
+    "*kokoro*": [tts]
+    "*piper*": [tts]
+    whisper-large-v3*: [stt]
+    models/gemini-*image: [image_gen]
+    "*nano-banana*": [image_gen]
+
+  # Capacità per modelli NON presenti nella mappa.
+  # [text] = conservativo: richiesta con immagini -> 400 chiaro
+  # (mai errore upstream criptico). Allarga dopo aver censito i modelli.
+  capabilities_default: [text]
+
+  # Token fittizi per la parte-immagine nella stima contesto (0 = ignora).
+  image_token_estimate: 800
+
+  # POST /v1/images/generations: se l'upstream non espone l'endpoint
+  # (404/400 provider-side), ritenta via chat/completions.
+  images_chat_fallback: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…
+# ─────────────────────────────────────────────────────────────────────────────
+# Ogni cap ha la terna <P>-C (free/priority) / -C-go (rinnovi) / -C-fallback
+# (paid). Il token "text" nella colonna indica che il modello sta anche nei
+# dims -Nk.
+capability_groups:
+  enabled: true             # ATTIVO in produzione (gruppi seedati nel CSV)
+  on_missing: dynamic       # dynamic = filtro legacy se la cap non ha gruppo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRICING — stima costi per /admin/insights (usata SOLO quando il provider
+# non riporta un costo reale; chiave = pattern fnmatch sul modello)
+# ─────────────────────────────────────────────────────────────────────────────
+pricing:
+  groq/*:
+    prompt_per_1m: 0.05       # $ per milione di token di input
+    completion_per_1m: 0.1    # $ per milione di token di output

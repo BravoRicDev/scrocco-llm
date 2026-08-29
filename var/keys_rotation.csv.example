@@ -1,0 +1,22 @@
+# Chiavi di rotazione per il gateway scrocco-llm
+# Colonne: commento, modello, provider, endpoint, data, context, max_input, priority, scrocco-llm-<PROFILO>
+# Ogni riga rappresenta una chiave attiva con il relativo modello/provider
+# Le chiavi fake iniziano con sk-FAKE-KEY-XXXXXXXXXXXXXXXXXXXX
+# Per aggiungere nuove chiavi, inserire una riga seguendo lo stesso formato
+# Rinomina l'ultima colonna con il nome del TUO profilo (es. scrocco-llm-mio-profilo)
+#
+# Colonna opzionale "caps": membership ai gruppi capacità strutturali.
+#   "" vuoto = solo testo (dims); "vision" = -vision/-vision-go/-vision-fallback;
+#   "text,vision" = anche nei dims. Token: text vision video audio image_gen tts stt
+
+commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test
+sk-FAKE-KEY-A1B2C3D4E5F6G7H8,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128,8000,0,sk-FAKE-KEY-A1B2C3D4E5F6G7H8
+sk-FAKE-KEY-F6G7H8I9J0K1L2M3,NVIDIA/nemotron-3.5-lightning:free,openrouter,https://openrouter.ai/api/v1,free,200,50000,0,sk-FAKE-KEY-F6G7H8I9J0K1L2M3
+sk-FAKE-KEY-L3M4N5O6P7Q8R9S0,mistral-medium-latest,mistral,https://api.mistral.ai/v1,free,128,50000,0,sk-FAKE-KEY-L3M4N5O6P7Q8R9S0
+sk-FAKE-KEY-T9U0V1W2X3Y4Z5A6,cohere/north-mini-code:free,openrouter,https://openrouter.ai/api/v1,free,256,50000,0,sk-FAKE-KEY-T9U0V1W2X3Y4Z5A6
+# STT locale (speaches/whisper nel docker-compose): chiave placeholder, il servizio
+# locale non la verifica. Il modello va censito in gateway.yaml: "*whisper*": [stt]
+# local-whisper,Systran/faster-whisper-base,speaches,http://speaches:8000/v1,free,128,0,10,placeholder-key
+# TTS locale (piper voce italiana paola, servizio speaches nel compose):
+# censire in gateway.yaml: "speaches-ai/piper-it_IT-*": [tts]
+# local-tts-it,speaches-ai/piper-it_IT-paola-medium,speaches,http://speaches:8000/v1,free,128,0,10,placeholder-key

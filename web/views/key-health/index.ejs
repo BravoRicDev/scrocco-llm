@@ -1,0 +1,87 @@
+<%
+const STATUS_META = {
+  retired:      { label: "Retired",      cls: "badge-disabled" },
+  dead_suspect: { label: "Sospetto morto", cls: "badge-danger" },
+  never_probed: { label: "Mai sondato",  cls: "badge-standalone" },
+  recovered:    { label: "Recovered",    cls: "badge-wrapped" },
+  ok:           { label: "OK",           cls: "badge-active" },
+};
+function statusBadge(s) {
+  const m = STATUS_META[s] || { label: s, cls: "badge-standalone" };
+  return '<span class="badge ' + m.cls + '">' + m.label + '</span>';
+}
+function num(v, d) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return d;
+  return n.toLocaleString("it-IT", { maximumFractionDigits: 0 });
+}
+const _counts = (typeof locals !== "undefined" && locals.counts) ? locals.counts : {};
+const statuses = ["retired", "dead_suspect", "never_probed", "recovered", "ok"];
+%>
+<h1>Health chiavi</h1>
+
+<div class="heading">
+  <p>Timeline salute: stato derivato per ogni deployment da cooldown, fail streak e probe del leaderboard 30d.</p>
+</div>
+
+<div class="alert alert-info">⚠ Unretire riattiva un deployment precedentemente ritirato (<strong>retired</strong>).</div>
+
+<div class="card" style="max-width:100%;">
+  <form class="form-inline" onsubmit="return false;">
+    <div class="form-group">
+      <label for="f-status">Filtro stato</label>
+      <select id="f-status" name="status">
+        <option value="all">Tutti (<%= timeline.length %>)</option>
+        <% statuses.forEach((s) => { %>
+          <option value="<%= s %>"><%= STATUS_META[s].label %> (<%= num(_counts[s], 0) %>)</option>
+        <% }) %>
+      </select>
+    </div>
+  </form>
+</div>
+
+<% if (!timeline || timeline.length === 0) { %>
+  <p>Nessun deployment.</p>
+<% } else { %>
+  <div class="card" style="max-width:100%;">
+    <table class="table" id="key-health-table">
+      <thead>
+        <tr>
+          <th>Unique</th>
+          <th>Modello</th>
+          <th>Gruppo</th>
+          <th>Stato</th>
+          <th>Ultimo motivo</th>
+          <th>Giorni morto</th>
+          <th>Fail streak</th>
+          <th>Cooldown residuo</th>
+          <th>Probe ms</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <% timeline.forEach((t) => { %>
+          <tr class="kh-row" data-status="<%= t.status %>">
+            <td><code title="<%= escapeAttr(t.unique) %>"><%= t.short %></code></td>
+            <td><%= t.modello || "—" %></td>
+            <td><%= t.group || "—" %></td>
+            <td><%- statusBadge(t.status) %></td>
+            <td><%= t.last_reason || "—" %></td>
+            <td><%= t.dead_since_days != null ? t.dead_since_days : "—" %></td>
+            <td><%= t.fail_streak > 0 ? t.fail_streak : "—" %></td>
+            <td><%= t.cooldown_remaining != null ? t.cooldown_remaining + "s" : "—" %></td>
+            <td><%= t.probe_ms != null ? t.probe_ms.toLocaleString("it-IT") + " ms" : "—" %></td>
+            <td>
+              <% if (t.status === "retired") { %>
+                <button type="button" class="btn btn-danger btn-sm kh-unretire" data-unique="<%= escapeAttr(t.unique) %>" data-destruct>Unretire</button>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+<% } %>
+
+<script src="/js/app.js"></script>
+<script src="/js/key-health.js"></script>

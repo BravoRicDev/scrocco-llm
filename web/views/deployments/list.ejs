@@ -1,0 +1,89 @@
+<%
+function catBadge(cat) {
+  const c = String(cat || "").toLowerCase();
+  if (c === "free") return "badge-active";
+  if (c === "credit") return "badge-wrapped";
+  if (c === "paid") return "badge-standalone";
+  return "badge-standalone";
+}
+function capList(d) {
+  return d.caps && d.caps.length ? d.caps : d.capabilities || [];
+}
+%>
+<h1>Deployments (<%= count %>)</h1>
+
+<div class="heading">
+  <p>Elenco read-only dei deployment configurati nel gateway.</p>
+</div>
+
+<div class="form-actions" style="margin:12px 0;">
+  <a href="/deployments/new" class="btn btn-primary">Nuovo deployment</a>
+</div>
+
+  <form method="GET" action="<%= escapeAttr(path) %>" class="form-inline">
+    <div class="form-group">
+      <label for="profile">Profilo</label>
+      <select id="profile" name="profile">
+        <option value="">Tutti i profili</option>
+        <% profiles.forEach((p) => { %>
+          <option value="<%= escapeAttr(p.name) %>" <%= p.name === currentProfile ? "selected" : "" %>><%= p.name %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="q">Ricerca</label>
+      <input type="text" id="q" name="q" value="<%= escapeAttr(q) %>" placeholder="modello, provider, endpoint, gruppo, id…">
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Filtra</button>
+    </div>
+  </form>
+
+<% if (count === 0) { %>
+  <p>Nessun deployment.</p>
+<% } else { %>
+  <div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Modello</th>
+        <th>Provider</th>
+        <th>Categoria</th>
+        <th>Ctx</th>
+        <th>Prio</th>
+        <th>Endpoint</th>
+        <th>Chiave</th>
+        <th>Gruppo</th>
+        <th>Caps</th>
+        <th>Azioni</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% deployments.forEach((d) => { %>
+        <tr>
+          <td><%= d.modello %></td>
+          <td><%= d.provider %></td>
+          <td><span class="badge <%= catBadge(d.data) %>"><%= d.data %></span></td>
+          <td><%= d.context_k %>k</td>
+          <td><%= d.priority %></td>
+          <td><%= d.endpoint %></td>
+          <td><code><%= d.key_masked %></code></td>
+          <td><%= d.group %></td>
+          <td>
+            <% capList(d).forEach((c) => { %>
+              <span class="badge badge-wrapped"><%= c %></span>
+            <% }) %>
+          </td>
+          <td>
+            <a href="<%= escapeAttr("/deployments/" + encodeURIComponent(d.id) + "/edit") %>" class="btn btn-sm">Modifica</a>
+            <form method="POST" action="<%= escapeAttr("/deployments/" + encodeURIComponent(d.id) + "/delete") %>" id="del-<%= d.id %>" style="display:inline;">
+              <button type="button" class="btn btn-danger btn-sm" data-destruct
+                onclick="scw.confirmForm('#del-<%= d.id %>', 'Eliminare definitivamente questo deployment?')">Elimina</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+  </div>
+<% } %>

@@ -1,0 +1,15 @@
+# Importazione dello snippet nel Caddyfile principale di gestione-siti-riccardom
+# (senza modificarlo): aggiungere nel file /etc/caddy/Caddyfile esistente la riga
+#   import /etc/caddy/scrocco-web.Caddyfile
+# prima del blocco finale (o copiare il blocco sottostante nel sito desiderato).
+
+:4002 {
+	tls internal
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
+	reverse_proxy scrocco-web:3000
+}

@@ -1,0 +1,48 @@
+services:
+  scrocco-web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    cap_add:
+      - NET_BIND_SERVICE          # node (non-root) puo' bindare la :80
+    # Pubblicato sul bridge wireguard-ui (172.20.0.1) alla porta 9120.
+    # wg-easy fa DNAT: http://10.9.0.111/ (dentro la VPN) -> 172.20.0.1:9120.
+    # Stesso schema di hermes-dashboard (10.9.0.109 -> 172.20.0.1:9119).
+    ports:
+      - "172.20.0.1:9120:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      internal:                   # solo per il db
+      scrocco-llm_default:        # per GATEWAY_URL=http://scrocco-llm:4001
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-scrocco_web}
+      POSTGRES_USER: ${POSTGRES_USER:-scwebuser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scwebuser} -d ${POSTGRES_DB:-scrocco_web}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+
+networks:
+  internal:
+    driver: bridge
+  scrocco-llm_default:
+    external: true

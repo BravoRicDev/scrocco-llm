@@ -1,0 +1,69 @@
+<%
+function n(v, d) {
+  return v === undefined || v === null || v === "" ? (d === undefined ? "—" : d) : v;
+}
+function humanizeSec(totalSec) {
+  const s = Math.max(0, Math.floor(totalSec || 0));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
+const sessList = Array.isArray(sessions) ? sessions : [];
+%>
+<h1>Sticky session</h1>
+
+<div class="heading">
+  <p>Sessione sticky attive sul gateway, raggruppate per deployment.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <div class="form-inline">
+    <div class="form-group" style="flex:1;">
+      <input type="search" id="sticky-filter" placeholder="filtra per gruppo">
+    </div>
+    <div class="form-group">
+      <span class="badge" id="sticky-count"><%= sessList.length %> attive</span>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <table class="table" id="sticky-table">
+    <thead>
+      <tr>
+        <th>Session ID</th>
+        <th>Gruppo</th>
+        <th>Età</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% if (sessList.length === 0) { %>
+        <tr id="sticky-empty"><td colspan="4">Nessuna sticky session attiva.</td></tr>
+      <% } else { %>
+        <% sessList.forEach((s) => { %>
+          <tr data-group="<%= escapeAttr(s.unique) %>">
+            <td><code><%= n(s.session_id) %></code></td>
+            <td><code><%= n(s.unique) %></code></td>
+            <td><%= humanizeSec(s.age_s) %></td>
+            <td class="text-right">
+              <form method="POST" action="/sticky/release" style="display:inline;" data-destruct data-confirm="Rilasciare questa sticky session?">
+                <input type="hidden" name="session_id" value="<%= escapeAttr(s.session_id) %>">
+                <button type="submit" class="btn btn-danger btn-sm">Release</button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+      <% } %>
+    </tbody>
+  </table>
+  <div class="x-actions" style="margin-top:1rem;">
+    <form method="POST" action="/sticky/release" data-destruct data-confirm="Rilasciare TUTTE le sticky session?">
+      <button type="submit" class="btn btn-danger">Release tutte</button>
+    </form>
+  </div>
+</div>
+
+<script src="/js/sticky.js"></script>

@@ -1,0 +1,113 @@
+<div class="heading">
+  <h1>Alert di salute pool (<%= count %>)</h1>
+</div>
+
+<div class="heading">
+  <p>
+    Stato poller:
+    <% if (poller.started) { %>
+      <span class="badge">attivo</span>
+    <% } else { %>
+      <span class="badge">spento</span>
+    <% } %>
+    <span class="badge">regole: <%= poller.activeRules %></span>
+    <% if (poller.lastRunAt) { %>
+      <span class="badge">ultimo run: <%= poller.lastRunAt %></span>
+    <% } %>
+  </p>
+  <p>Regole che notificano quando la salute di un pool scende sotto la soglia, via webhook o Telegram.</p>
+</div>
+
+<% if (count === 0) { %>
+  <p>Nessuna regola. Creane una qui sotto.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Attivo</th>
+        <th>Nome</th>
+        <th>Pool filter</th>
+        <th>Soglia %</th>
+        <th>Check (s)</th>
+        <th>Webhook</th>
+        <th>Telegram</th>
+        <th>Ultima notifica</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% rules.forEach((r) => { %>
+        <tr>
+          <td>
+            <form method="POST" action="<%= escapeAttr("/alerts/" + r.id + "/toggle") %>" style="display:inline;">
+              <button type="submit" class="btn btn-sm <%= r.enabled ? 'btn-primary' : 'btn' %>">
+                <%= r.enabled ? 'attiva' : 'disattiva' %>
+              </button>
+            </form>
+          </td>
+          <td><%= r.name %></td>
+          <td><%= r.pool_filter || '—' %></td>
+          <td><%= r.health_threshold_pct %>%</td>
+          <td><%= r.check_every_sec %></td>
+          <td><%= r.webhook_url || '—' %></td>
+          <td><%= r.telegram_chat_id || '—' %></td>
+          <td><%= r.last_notified_at ? r.last_notified_at : 'mai' %></td>
+          <td class="text-right">
+            <form method="POST" action="<%= escapeAttr("/alerts/" + r.id + "/delete") %>" style="display:inline;" onsubmit="return window.scw.confirm('Elimini la regola <%= escapeAttr(r.name) %>?');" data-destruct>
+              <button type="submit" class="btn btn-danger btn-sm">Elimina</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<hr>
+
+<div class="card">
+  <div class="card-body">
+    <h2>Nuova regola</h2>
+    <form method="POST" action="/alerts">
+      <div class="row">
+        <div class="col">
+          <label>Nome</label>
+          <input type="text" name="name" required maxlength="120" placeholder="es. pool mioaruba">
+        </div>
+        <div class="col">
+          <label>Pool filter</label>
+          <input type="text" name="pool_filter" maxlength="255" placeholder="es. scrocco-llm-mioaruba">
+        </div>
+      </div>
+      <div class="row">
+        <div class="col">
+          <label>Soglia salute (%)</label>
+          <input type="number" name="health_threshold_pct" min="0" max="100" value="50" required>
+        </div>
+        <div class="col">
+          <label>Check ogni (secondi)</label>
+          <input type="number" name="check_every_sec" min="5" max="86400" value="120" required>
+        </div>
+        <div class="col">
+          <label>Intervallo minimo notifica (s)</label>
+          <input type="number" name="notify_min_interval_sec" min="0" max="86400" value="900" required>
+        </div>
+      </div>
+      <div class="row">
+        <div class="col">
+          <label>Webhook URL</label>
+          <input type="url" name="webhook_url" maxlength="500" placeholder="https://example.com/hook">
+        </div>
+        <div class="col">
+          <label>Telegram chat id</label>
+          <input type="text" name="telegram_chat_id" maxlength="64" placeholder="es. -100123456789">
+        </div>
+      </div>
+      <div class="row">
+        <div class="col">
+          <button type="submit" class="btn btn-primary">Crea regola</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>

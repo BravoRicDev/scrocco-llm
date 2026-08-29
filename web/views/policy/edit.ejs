@@ -1,0 +1,106 @@
+<%
+const n = (v, d) => v === undefined || v === null || v === "" ? (d === undefined ? "—" : d) : v;
+const isKey = (name) => /(key|token|secret|password|api[_-]?key|auth)/i.test(name);
+const mask = (v) => { const s = String(v ?? ""); return s.length <= 10 ? s : s.slice(0, 6) + "...********..." + s.slice(-4); };
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const escapeAttr = (s) => esc(s).replace(/'/g, "&#39;");
+
+const scalarMeta = (meta && meta.scalar) || {};
+const listMeta = (meta && meta.list) || {};
+const mapMeta = (meta && meta.map) || {};
+
+const eff = (policy && policy.effective) || {};
+
+function typeOf(field, value) {
+  if (mapMeta[field]) return "map";
+  if (listMeta[field]) return "list";
+  if (scalarMeta[field]) return scalarMeta[field];
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return Number.isInteger(value) ? "int" : "num";
+  if (Array.isArray(value)) return "list";
+  return "str";
+}
+
+function inputFor(field, type, value, name) {
+  const id = "inp-" + name;
+  if (type === "bool") {
+    const checked = value === true || value === "true";
+    return '<select id="' + id + '" class="scw-value" name="value" data-field="' + escapeAttr(field) + '" data-type="bool">'
+      + '<option value="true"' + (checked ? " selected" : "") + '>si</option>'
+      + '<option value="false"' + (!checked ? " selected" : "") + '>no</option>'
+      + '</select>';
+  }
+  if (type === "int" || type === "num") {
+    const step = type === "num" ? "any" : "1";
+    return '<input id="' + id + '" class="scw-value" name="value" data-field="' + escapeAttr(field) + '" data-type="' + type + '" type="number" step="' + step + '" value="' + esc(value) + '">';
+  }
+  if (type === "list") {
+    const joined = Array.isArray(value) ? value.join(", ") : String(value ?? "");
+    return '<input id="' + id + '" class="scw-value" name="value" data-field="' + escapeAttr(field) + '" data-type="list" type="text" value="' + esc(joined) + '" placeholder="a, b, c">';
+  }
+  if (type === "map") {
+    const json = value !== undefined && value !== null ? JSON.stringify(value) : "{}";
+    return '<textarea id="' + id + '" class="scw-value" name="value" data-field="' + escapeAttr(field) + '" data-type="map" rows="5" placeholder="{\"chiave\": \"valore\"}">' + esc(json) + '</textarea>';
+  }
+  return '<input id="' + id + '" class="scw-value" name="value" data-field="' + escapeAttr(field) + '" data-type="str" type="text" value="' + esc(value) + '">';
+}
+
+// Flatten object preserving arrays/maps as single rows (non recursing into objects treated as values).
+function collectRows(obj, prefix, out, visited) {
+  if (isKey(prefix)) return;
+  visited = visited || new Set();
+  if (visited.has(obj)) return;
+  visited.add(obj);
+  Object.entries(obj || {}).forEach(([k, v]) => {
+    const path = prefix ? prefix + "." + k : k;
+    if (isKey(k)) return;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      // map nota -> riga singola; altrimenti ricorsione per oggetti di sezione
+      if (mapMeta[path]) {
+        out.push({ field: path, value: v, type: "map", section: k });
+      } else {
+        collectRows(v, path, out, visited);
+      }
+    } else {
+      out.push({ field: path, value: v, type: typeOf(path, v), section: k });
+    }
+  });
+  return out;
+}
+
+const rows = collectRows(eff, "", [], new Set());
+// indice per sezione/build table attualmente singola
+%>
+<h1>Modifica policy del gateway</h1>
+
+<div class="heading">
+  <p>Editor campo-per-campo (guarda <a href="/policy">policy</a> per la vista read-only). Click su una riga per modificarla.</p>
+</div>
+
+<div id="policy-flash" class="alert" style="display:none"></div>
+
+<table class="table policy-edit-table" id="policy-edit-table">
+  <thead>
+    <tr><th>Sezione</th><th>Parametro</th><th>Valore</th><th>Tipo</th></tr>
+  </thead>
+  <tbody>
+    <% if (rows.length === 0) { %>
+      <tr><td colspan="4">Nessun campo modificabile nella policy effective.</td></tr>
+    <% } else {
+      rows.forEach((r) => { %>
+      <tr class="scw-row" data-field="<%= esc(r.field) %>" data-type="<%= r.type %>">
+        <td class="scw-section"><%= esc(r.field.split(".").slice(0, -1).join(".") || "—") %></td>
+        <td class="scw-param" data-name="<%= escapeAttr(r.field) %>"><%= esc(r.field.split(".").pop()) %></td>
+        <td class="scw-value-cell">
+          <span class="scw-value-view"><%= r.type === "map" ? '<pre>' + esc(JSON.stringify(r.value, null, 2)) + '</pre>' : esc(r.type === "list" ? (Array.isArray(r.value) ? r.value.join(", ") : "—") : (r.value === true ? "si" : r.value === false ? "no" : r.value)) %></span>
+        </td>
+        <td class="scw-type"><%= r.type %></td>
+      </tr>
+      <% });
+    } %>
+  </tbody>
+</table>
+
+<a class="btn" href="/policy">Torna alla policy</a>
+
+<script src="/js/policy-edit.js"></script>

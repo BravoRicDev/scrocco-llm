@@ -1,0 +1,7 @@
+<% if (locals.flash && Array.isArray(flash)) { %>
+  <% flash.forEach(function(item) { %>
+    <div class="alert <%= item.type || 'info' %>">
+      <%= item.msg %>
+    </div>
+  <% }); %>
+<% } %>

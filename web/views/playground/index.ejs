@@ -1,0 +1,38 @@
+<h1>Playground</h1>
+<div class="heading">
+  <p>Rigira una chat come una richiesta reale di routing e mostra il trace di
+  fallback. <strong>Non</strong> altera cooldown/health del gateway.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <form id="pgForm" class="form-vert">
+    <label>Modello / alias / gruppo
+      <input list="pgModels" name="model" id="pgModel" required placeholder="es. scrocco-llm-mioaruba-200k">
+      <datalist id="pgModels">
+        <% (models || []).forEach(function(m){ %><option value="<%= m %>"></option><% }); %>
+      </datalist>
+    </label>
+    <label>Prompt
+      <textarea name="prompt" id="pgPrompt" rows="5" required placeholder="Scrivi qui il messaggio utente…"></textarea>
+    </label>
+    <button type="submit" class="btn btn-primary" id="pgRun">Esegui</button>
+  </form>
+</div>
+
+<div id="pgOut" style="display:none;">
+  <div class="card" style="max-width:100%;">
+    <h2>Risposta <span id="pgMeta" class="badge"></span></h2>
+    <pre id="pgContent" style="white-space:pre-wrap;overflow-x:auto;"></pre>
+  </div>
+  <div class="card" style="max-width:100%;">
+    <h2>Trace routing/fallback</h2>
+    <table class="table" id="pgTrace">
+      <thead><tr><th>#</th><th>deployment</th><th>gruppo</th><th>profilo</th><th>motivo</th><th>verdetto</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="pgErr" class="alert error" style="display:none;"></div>
+
+<script src="/js/playground.js"></script>

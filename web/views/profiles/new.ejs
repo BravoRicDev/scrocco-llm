@@ -1,0 +1,19 @@
+<div class="heading">
+  <h1>Nuovo profilo</h1>
+  <a href="<%= escapeAttr("/profiles") %>" class="btn">Annulla</a>
+</div>
+
+<div class="heading">
+  <p>Definisci prima il nome del profilo; poi aggiungi il primo deployment.</p>
+</div>
+
+<div class="card" style="max-width:560px;">
+  <form method="POST" action="<%= escapeAttr("/profiles") %>">
+    <div class="form-group">
+      <label for="name">Nome profilo</label>
+      <input type="text" id="name" name="name" value="<%= escapeAttr(profile) %>" placeholder="es. scrocco-llm-prod" required>
+      <small class="form-text">Definisci poi il primo deployment per completare il profilo.</small>
+    </div>
+    <button type="submit" class="btn btn-primary">Crea profilo</button>
+  </form>
+</div>

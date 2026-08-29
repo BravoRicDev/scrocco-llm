@@ -1,0 +1,119 @@
+<% function capList(d) { return d.caps && d.caps.length ? d.caps : d.capabilities || []; } %>
+<h1>Bulk Deployments</h1>
+
+<div class="heading">
+  <p>Esegui operazioni CRUD in blocco sui deployment (max 50 per richiesta).</p>
+</div>
+
+<% if (typeof message !== 'undefined' && message) { %>
+  <div class="alert alert-error"><%= message %></div>
+<% } %>
+
+<% if (errorsResults && errorsResults.length) { %>
+  <div class="alert alert-error">
+    <strong>Alcune operazioni non sono state applicate:</strong>
+    <ul>
+      <% errorsResults.forEach(function(e, i) { %>
+        <li><%= i + 1 %>. <%= e && e.message ? e.message : JSON.stringify(e) %></li>
+      <% }) %>
+    </ul>
+  </div>
+<% } %>
+
+<div class="row" style="display:flex; gap:24px; align-items:flex-start;">
+  <div class="card" style="flex:1.4; max-width:100%;">
+    <h2>Deployments</h2>
+    <table class="table">
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="bulk-select-all"></th>
+          <th>Id</th>
+          <th>Modello</th>
+          <th>Provider</th>
+          <th>Ctx</th>
+          <th>Gruppo</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% deployments.forEach(function(d) { %>
+          <tr>
+            <td><input type="checkbox" class="bulk-dep" value="<%= escapeAttr(d.id) %>"></td>
+            <td><code><%= d.id %></code></td>
+            <td><%= d.modello %></td>
+            <td><%= d.provider %></td>
+            <td><%= d.context_k %>k</td>
+            <td><%= d.group %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card" style="flex:1; max-width:100%;">
+    <h2>Nuova operazione</h2>
+    <form id="bulk-form">
+      <div class="form-group">
+        <label for="bulk-action">Operazione</label>
+        <select id="bulk-action" name="action">
+          <option value="create">create</option>
+          <option value="update">update</option>
+          <option value="delete">delete</option>
+        </select>
+      </div>
+
+      <div class="form-group" id="bulk-id-group">
+        <label for="bulk-id">Id (per update/delete)</label>
+        <input type="text" id="bulk-id" name="id" placeholder="es. mioaruba:openrouter:abcd1234" autocomplete="off">
+      </div>
+
+      <div id="bulk-create-fields">
+        <div class="form-group">
+          <label for="bulk-profile">Profilo</label>
+          <select id="bulk-profile" name="profile">
+            <% profiles.forEach(function(p) { %>
+              <option value="<%= escapeAttr(p.name) %>"><%= p.name %></option>
+            <% }) %>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="bulk-modello">Modello</label>
+          <input type="text" id="bulk-modello" name="modello" placeholder="es. deepseek/deepseek-chat" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="bulk-endpoint">Endpoint</label>
+          <input type="text" id="bulk-endpoint" name="endpoint" placeholder="https://openrouter.ai/api/v1" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="bulk-data">Data</label>
+          <input type="text" id="bulk-data" name="data" placeholder="free | credit | paid" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="bulk-key">Key</label>
+          <input type="password" id="bulk-key" name="key" placeholder="chiave API" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="bulk-context">Context (k)</label>
+          <input type="number" id="bulk-context" name="context" min="0" value="64" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="bulk-priority">Priority (update)</label>
+          <input type="number" id="bulk-priority" name="priority" min="0" value="0" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <button type="button" class="btn" id="bulk-add">Aggiungi all'anteprima</button>
+      </div>
+    </form>
+
+    <h3>Anteprima operazioni</h3>
+    <pre id="bulk-preview" style="max-height:280px; overflow:auto; background:#111; color:#9f9; padding:8px;">[]</pre>
+
+    <div class="form-group">
+      <button type="button" class="btn btn-danger" id="bulk-clear">Svuota</button>
+      <button type="button" class="btn btn-primary" id="bulk-submit">Esegui bulk</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/bulk.js"></script>

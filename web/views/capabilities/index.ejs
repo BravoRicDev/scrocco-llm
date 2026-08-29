@@ -1,0 +1,314 @@
+<%
+function n(v, d) {
+  return v === undefined || v === null || v === "" ? (d === undefined ? "—" : d) : v;
+}
+
+function boolBadge(v) {
+  if (v === true || v === 1 || v === "1" || v === "on" || v === "yes" || v === "enabled" || v === "active" || v === "primary") return '<span class="badge badge-active">ON</span>';
+  if (v === false || v === 0 || v === "0" || v === "off" || v === "no" || v === "disabled" || v === "offline") return '<span class="badge badge-disabled">OFF</span>';
+  return '<span class="badge badge-standalone">—</span>';
+}
+
+function modeBadge(mode) {
+  const m = String(mode || "").toLowerCase();
+  const label = mode === undefined || mode === null || mode === "" ? "—" : mode;
+  if (m === "primary") return '<span class="badge badge-active">primary</span>';
+  if (m === "go" || m === "active" || m === "on") return '<span class="badge badge-wrapped">go</span>';
+  if (m === "fallback") return '<span class="badge badge-standalone">fallback</span>';
+  if (m === "disabled" || m === "off" || m === "offline") return '<span class="badge badge-disabled">disabled</span>';
+  if (m === "on" || m === "enabled") return '<span class="badge badge-active">on</span>';
+  return '<span class="badge badge-standalone">' + String(label) + "</span>";
+}
+
+function fmtDt(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("it-IT", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+}
+
+function cnt(v) {
+  if (Array.isArray(v)) return v.length;
+  return n(v);
+}
+
+function pickChain(v) {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === "object") {
+    return v.order || v.uniques || v.chain || v.deployments || [];
+  }
+  return [];
+}
+
+const caps = (state && state.capabilities) || {};
+const routing = caps.routing || {};
+const health = (state && state.health) || {};
+const autoLearn = caps.auto_learn || {};
+const groupsBlock = caps.groups || caps.cap_groups || {};
+
+// per_capability raccoglie le capacità con un conteggio deployments.
+// fonte primaria: caps.per_capability; altrimenti le chiavi residue di caps.
+const perCapBlock = caps.per_capability || {};
+const SKIP_KEYS = ["routing", "per_capability", "groups", "cap_groups", "auto_learn"];
+let perCapRows = [];
+if (perCapBlock && typeof perCapBlock === "object" && Object.keys(perCapBlock).length) {
+  perCapRows = Object.entries(perCapBlock).map(([cap, c]) => ({
+    cap,
+    deployments: (c && typeof c === "object") ? cnt(c.deployments ?? c.count ?? c.n) : cnt(c),
+    mode: (c && typeof c === "object") ? (c.mode ?? c.status ?? c.state) : c,
+  }));
+} else {
+  Object.entries(caps).forEach(([cap, c]) => {
+    if (SKIP_KEYS.includes(cap)) return;
+    if (!c || typeof c !== "object") return;
+    perCapRows.push({
+      cap,
+      deployments: cnt(c.deployments ?? c.count ?? c.n),
+      mode: c.mode ?? c.status ?? c.state ?? (c.enabled ? "on" : "off"),
+    });
+  });
+}
+
+// gruppi di capacità del profilo corrente
+let groupRows = [];
+const profileGroups = groupsBlock && typeof groupsBlock === "object"
+  ? (groupsBlock[currentProfile] || groupsBlock.profiles?.[currentProfile])
+  : null;
+if (profileGroups && typeof profileGroups === "object") {
+  Object.entries(profileGroups).forEach(([cap, g]) => {
+    if (!g || typeof g !== "object") return;
+    groupRows.push({
+      cap,
+      primary: n(g.primary ?? g.primary_count ?? g.counts?.primary ?? 0),
+      go: n(g.go ?? g.go_count ?? g.counts?.go ?? 0),
+      fallback: n(g.fallback ?? g.fallback_count ?? g.counts?.fallback ?? 0),
+    });
+  });
+}
+
+// fallback per capacità, ordine canonico
+const fallbackBlock = caps.fallback || state && state.fallback || {};
+const FALLBACK_ORDER = ["vision", "video", "audio", "image_gen", "tts", "stt", "tools"];
+const fallbackByCap = {};
+if (Array.isArray(fallbackBlock)) {
+  fallbackBlock.forEach((row) => {
+    if (row && typeof row === "object") {
+      fallbackByCap[row.cap || row.capability] = { enabled: row.enabled, chain: pickChain(row.uniques || row.chain || row.order) };
+    }
+  });
+} else if (fallbackBlock && typeof fallbackBlock === "object") {
+  Object.entries(fallbackBlock).forEach(([cap, v]) => {
+    if (typeof v === "boolean") { fallbackByCap[cap] = { enabled: v, chain: [] }; return; }
+    if (Array.isArray(v)) { fallbackByCap[cap] = { enabled: true, chain: v }; return; }
+    if (v && typeof v === "object") {
+      fallbackByCap[cap] = { enabled: v.enabled, chain: pickChain(v) };
+    }
+  });
+}
+const fallbackRows = FALLBACK_ORDER
+  .filter((cap) => fallbackByCap[cap] !== undefined)
+  .map((cap) => ({ cap, enabled: fallbackByCap[cap].enabled, chain: fallbackByCap[cap].chain }));
+
+const autoLearnMode = autoLearn.mode ?? caps.auto_learn_mode;
+const autoLearnThreshold = autoLearn.threshold ?? autoLearn.min_confidence;
+const autoLearnStrikes = autoLearn.strikes ?? autoLearn.max_strikes;
+
+const anyProfile = profiles && profiles.length > 0;
+%>
+<h1>Capabilities</h1>
+
+<div class="heading">
+  <p>Stato read-only del capability routing e dei gruppi di capacità del gateway.</p>
+</div>
+
+<div class="heading">
+  <a href="<%= escapeAttr(path + "/audit") %>" class="btn btn-primary">Audit capacità</a>
+</div>
+
+<h2>Seed da capability map</h2>
+<div class="card" style="max-width:100%;">
+  <% const _seedProposals = (typeof seedProposals !== 'undefined' && seedProposals) ? seedProposals : null; %>
+  <% if (!_seedProposals || _seedProposals.length === 0) { %>
+    <form method="POST" action="<%= escapeAttr(path + "/seed") %>" class="form-inline">
+      <input type="hidden" name="dry_run" value="true">
+      <button type="submit" class="btn btn-primary">Calcola proposte (dry-run)</button>
+      <span class="hint">Calcola le proposte di aggiornamento capacità senza applicarle.</span>
+    </form>
+  <% } else { %>
+    <p>Proposte calcolate: <strong><%= _seedProposals.length %></strong> (dry-run).</p>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Modello</th>
+          <th>Current</th>
+          <th>Proposto</th>
+          <th>Motivo</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% _seedProposals.forEach((p) => { %>
+          <tr>
+            <td><code><%= p.unique || p.id || "—" %></code></td>
+            <td><%= p.model || "—" %></td>
+            <td><%= p.current || p.current_caps || "—" %></td>
+            <td class="diff-cell"><strong><%= p.add || p.proposed || p.suggest || "—" %></strong></td>
+            <td><%= p.reason || "—" %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+    <form method="POST" action="<%= escapeAttr(path + "/seed") %>" class="form-inline" onsubmit="return window.scw && window.scw.confirm ? window.scw.confirm('Applicare le ' + <%= _seedProposals.length %> + ' proposte di capacità?') : true;">
+      <input type="hidden" name="dry_run" value="false">
+      <button type="submit" class="btn btn-danger">Applica proposte</button>
+      <a href="<%= escapeAttr(path) %>" class="btn">Annulla</a>
+    </form>
+  <% } %>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <form method="GET" action="<%= escapeAttr(path) %>" class="form-inline">
+    <div class="form-group">
+      <label for="profile">Profilo</label>
+      <select id="profile" name="profile">
+        <% if (!anyProfile) { %>
+          <option value="">—</option>
+        <% } else { %>
+          <% profiles.forEach((p) => { %>
+            <option value="<%= escapeAttr(p.name) %>" <%= p.name === currentProfile ? "selected" : "" %>><%= p.name %></option>
+          <% }) %>
+        <% } %>
+      </select>
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Applica</button>
+    </div>
+  </form>
+</div>
+
+<% if (perCapRows.length || routing.enabled !== undefined) { %>
+<h2>Routing</h2>
+<table class="table kv-table">
+  <tbody>
+    <tr>
+      <th>Capability routing</th>
+      <td>
+        <%- boolBadge(routing.enabled) %>
+        <% if (routing.profile && currentProfile && routing.profile !== currentProfile) { %>
+          <span class="badge badge-standalone"><%= routing.profile %></span>
+        <% } %>
+      </td>
+    </tr>
+    <% if (routing.last_eval !== undefined || routing.generated_at !== undefined) { %>
+      <tr><th>Ultima valutazione</th><td><%= fmtDt(routing.last_eval ?? routing.generated_at) %></td></tr>
+    <% } %>
+  </tbody>
+</table>
+<% } %>
+
+<h2>Health proattivo</h2>
+<table class="table kv-table">
+  <tbody>
+    <tr><th>Abilitato</th><td><%- boolBadge(health.enabled ?? health.ok ?? health.active) %></td></tr>
+    <tr><th>Ultimo ciclo</th><td><%= fmtDt(health.last_cycle_at ?? health.last_run ?? health.since) %></td></tr>
+    <tr><th>Marked</th><td><%= n(health.marked) %></td></tr>
+    <tr><th>Accounts</th><td><%= n(health.accounts) %></td></tr>
+  </tbody>
+</table>
+
+<h2>Per capability</h2>
+<% if (perCapRows.length === 0) { %>
+  <p>Nessuna capability disponibile.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Capability</th>
+        <th>Deployments</th>
+        <th>Modalità</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% perCapRows.forEach((r) => { %>
+        <tr>
+          <td><code><%= r.cap %></code></td>
+          <td><%= r.deployments %></td>
+          <td><%- modeBadge(r.mode) %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<h2>Gruppi di capacità — <%= n(currentProfile, "profilo corrente") %></h2>
+<% if (groupRows.length === 0) { %>
+  <p>Nessun gruppo di capacità per il profilo corrente.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Capability</th>
+        <th>Primary</th>
+        <th>Go</th>
+        <th>Fallback</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% groupRows.forEach((r) => { %>
+        <tr>
+          <td><code><%= r.cap %></code></td>
+          <td><%= r.primary %></td>
+          <td><%= r.go %></td>
+          <td><%= r.fallback %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<h2>Fallback per capacità</h2>
+<% if (fallbackRows.length === 0) { %>
+  <p>Nessuna catena di fallback tracciata.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Capability</th>
+        <th>Stato</th>
+        <th>Catena percorsa (uniques)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% fallbackRows.forEach((r) => { %>
+        <tr>
+          <td><code><%= r.cap %></code></td>
+          <td><%- boolBadge(r.enabled) %></td>
+          <td>
+            <% if (r.chain.length === 0) { %>
+              —
+            <% } else { %>
+              <% r.chain.forEach((u, i) => { %>
+                <code><%= u %></code><%= i < r.chain.length - 1 ? " → " : "" %>
+              <% }) %>
+            <% } %>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<h2>Auto-learn</h2>
+<table class="table kv-table">
+  <tbody>
+    <tr><th>Mode</th><td><%= n(autoLearnMode, "off") %></td></tr>
+    <tr><th>Threshold</th><td><%= n(autoLearnThreshold) %></td></tr>
+    <tr><th>Strikes</th><td><%= n(autoLearnStrikes) %></td></tr>
+    <% if (autoLearn.enabled !== undefined) { %>
+      <tr><th>Abilitato</th><td><%- boolBadge(autoLearn.enabled) %></td></tr>
+    <% } %>
+  </tbody>
+</table>

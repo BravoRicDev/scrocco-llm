@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="<%= typeof lang !== 'undefined' ? lang : 'it' %>">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accedi — Scrocco Web Panel</title>
+  <link rel="stylesheet" href="/css/app.css">
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('scw-theme') === 'dark') {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <style>
+    body { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+    .login-msg { margin-top: 10px; min-height: 1.2em; font-size: var(--fs-sm); }
+    .login-alt { margin-top: 14px; font-size: var(--fs-xs); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Scrocco Web Panel</h1>
+    <p>Accedi con email e password.</p>
+    <form id="loginForm" autocomplete="on">
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" autocomplete="username" required placeholder="tua@email.com">
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn" id="submitBtn">Accedi</button>
+    </form>
+    <div id="msg" class="login-msg"></div>
+    <div class="login-alt">
+      <a href="#" id="magicLink">Ricevi un magic-link via email</a>
+      <span id="magicMsg"></span>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const msg = document.getElementById('msg');
+    const btn = document.getElementById('submitBtn');
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      msg.className = 'login-msg'; msg.textContent = 'Accesso in corso…';
+      btn.disabled = true;
+      try {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: form.email.value.trim(), password: form.password.value }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) { window.location.href = '/'; return; }
+        msg.className = 'login-msg alert alert-danger';
+        msg.textContent = (d.error && d.error.message) || 'Credenziali non valide.';
+      } catch {
+        msg.className = 'login-msg alert alert-danger';
+        msg.textContent = 'Errore di connessione.';
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    document.getElementById('magicLink').onclick = async (e) => {
+      e.preventDefault();
+      const mm = document.getElementById('magicMsg');
+      const email = form.email.value.trim();
+      if (!email) { mm.textContent = " — inserisci prima l'email"; return; }
+      mm.textContent = ' — invio…';
+      try {
+        const r = await fetch('/api/auth/login/magic', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const d = await r.json().catch(() => ({}));
+        mm.textContent = d.sent ? ' — controlla la posta' : ' — ' + (d.reason || 'non disponibile');
+      } catch { mm.textContent = ' — errore'; }
+    };
+  </script>
+</body>
+</html>

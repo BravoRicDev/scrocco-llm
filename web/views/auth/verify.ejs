@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="<%= typeof lang !== 'undefined' ? lang : 'it' %>">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= t('auth.verify.title') %> — Scrocco Web Panel</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div class="card">
+    <h1><%= t('auth.verify.title') %></h1>
+    <p><%= t('auth.verify.subtitle') %></p>
+    <form id="verifyForm">
+      <input type="hidden" name="token" value="<%= typeof token !== 'undefined' ? token : '' %>">
+      <div class="form-group">
+        <label for="otp"><%= t('auth.verify.otp_label') %></label>
+        <input type="text" id="otp" name="otp" required maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]{6}">
+      </div>
+      <button type="submit" class="btn"><%= t('auth.verify.submit') %></button>
+    </form>
+    <div id="msg" class="msg"></div>
+  </div>
+
+  <script>
+    const i18n = <%= JSON.stringify({
+      invalidCodeFallback: t('auth.verify.invalid_code_fallback'),
+      requestNewCode: t('auth.verify.request_new_code'),
+      connectionError: t('auth.verify.connection_error'),
+      resendToken: t('auth.verify.resend_token')
+    }).replace(/</g, '\\u003c') %>;
+    document.getElementById('verifyForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const token = e.target.token.value;
+      const otp = e.target.otp.value;
+      const msg = document.getElementById('msg');
+      try {
+        const r = await fetch('/api/auth/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, otp }) });
+        const d = await r.json();
+        if (d.user) { window.location.href = '/admin/dashboard'; }
+        else {
+          const errMsg = d.error || i18n.invalidCodeFallback;
+          msg.innerHTML = '<span class="error">' + errMsg +
+            (r.status === 401
+              ? '<br><a href="/login" style="color:#4f46e5;font-weight:600;display:inline-block;margin-top:8px;">' + i18n.requestNewCode + '</a>'
+              : '') + '</span>';
+        }
+      } catch { msg.innerHTML = '<span class="error">' + i18n.connectionError + '</span>'; }
+    };
+  </script>
+</body>
+</html>

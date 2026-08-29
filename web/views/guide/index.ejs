@@ -1,0 +1,15 @@
+<h1>Guida agente</h1>
+
+<div class="heading">
+  <p>Guida ufficiale del protocollo <strong><%= app.name %></strong>.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+    <span>Testo integrale della guida</span>
+    <a class="btn" href="<%= escapeAttr(path) %>?download=1">Scarica (.md)</a>
+  </div>
+  <pre style="max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--bg-soft);padding:1rem;border-radius:6px;"><%= markdown %></pre>
+</div>
+
+<p class="muted">Fonte: endpoint <code>/admin/guide</code> del gateway. La guida è aggiornata in tempo reale; ricarica la pagina per la versione più recente.</p>

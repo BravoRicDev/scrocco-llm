@@ -1,0 +1,14 @@
+<% if (user) { %>
+  <span class="user">
+    <%= user.email %>
+    <% if (user.role) { %>
+      <span class="role"><%= user.role %></span>
+    <% } %>
+    <% if (user.profile) { %>
+      <span class="profile"><%= user.profile %></span>
+    <% } %>
+  </span>
+<% } %>
+<button type="button" class="btn btn-danger btn-sm" aria-label="Esci dalla sessione" onclick="fetch('/api/auth/logout', { method: 'POST' }).then(() => window.location.href='/login')">
+  Logout
+</button>

@@ -1,0 +1,71 @@
+<%
+function roleBadge(r) {
+  if (r === "admin") return "badge-active";
+  if (r === "operator") return "badge-wrapped";
+  return "badge";
+}
+function statusBadge(s) {
+  return s === "active" ? "badge-active" : "badge-danger";
+}
+%>
+<h1>Utenti (<%= users.length %>)</h1>
+
+<div class="heading">
+  <p>Gestione utenti del pannello (admin-only).</p>
+</div>
+
+<div class="x-actions" style="margin-bottom:1rem;">
+  <a class="btn btn-primary" href="<%= escapeAttr('/users/new') %>">Nuovo utente</a>
+</div>
+
+<% if (users.length === 0) { %>
+  <p>Nessun utente.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Email</th>
+        <th>Nome</th>
+        <th>Ruolo</th>
+        <th>Stato</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% users.forEach((u) => { %>
+        <tr>
+          <td>
+            <%= u.email %>
+            <% if (String(u.id) === String(currentUserId)) { %>
+              <span class="badge">tu</span>
+            <% } %>
+          </td>
+          <td><%= u.name || "" %></td>
+          <td><span class="badge <%= roleBadge(u.role) %>"><%= u.role %></span></td>
+          <td><span class="badge <%= statusBadge(u.status) %>"><%= u.status %></span></td>
+          <td>
+            <% if (String(u.id) !== String(currentUserId)) { %>
+              <form method="POST" action="<%= escapeAttr('/users/' + u.id + '/toggle') %>" style="display:inline;" data-scw-confirm="Confermi di cambiare lo stato?">
+                <button type="submit" class="btn <%= u.status === 'active' ? 'btn-danger' : 'btn' %>">
+                  <%= u.status === 'active' ? 'Disabilita' : 'Attiva' %>
+                </button>
+              </form>
+              <form method="POST" action="<%= escapeAttr('/users/' + u.id + '/role') %>" style="display:inline;">
+                <select name="role" class="form-control" style="width:auto;display:inline-block;">
+                  <% ROLES.forEach((r) => { %>
+                    <option value="<%= r %>" <%= u.role === r ? "selected" : "" %>><%= r %></option>
+                  <% }) %>
+                </select>
+                <button type="submit" class="btn">Ruolo</button>
+              </form>
+              <form method="POST" action="<%= escapeAttr('/users/' + u.id + '/password') %>" style="display:inline;">
+                <input type="password" name="password" placeholder="nuova password" class="form-control" style="width:auto;display:inline-block;" required>
+                <button type="submit" class="btn">Reset pw</button>
+              </form>
+            <% } %>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>

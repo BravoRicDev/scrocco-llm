@@ -1,0 +1,248 @@
+{
+  "deployments": [
+    {
+      "id": "mioaruba:openrouter:abcd1234",
+      "profile": "scrocco-llm-mioaruba",
+      "modello": "deepseek/deepseek-chat",
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "data": "free",
+      "category": "free",
+      "context_k": 200,
+      "max_input": 180000,
+      "priority": 0,
+      "key_masked": "sk-or-...********...9f2c",
+      "group": "scrocco-llm-mioaruba-200k",
+      "capabilities": ["text"],
+      "caps": [],
+      "cap_groups": [],
+      "_expires_in_days": 90
+    },
+    {
+      "id": "neth:azure:z9x7c3",
+      "profile": "scrocco-llm-neth",
+      "modello": "gpt-4o",
+      "provider": "azure",
+      "endpoint": "https://neth.openai.azure.com/openai",
+      "data": "credit",
+      "category": "credit",
+      "context_k": 128,
+      "max_input": 120000,
+      "priority": 10,
+      "key_masked": "sk-az-...********...3f1a",
+      "group": "scrocco-llm-neth-128k",
+      "capabilities": ["text", "vision"],
+      "caps": ["vision"],
+      "cap_groups": ["vision"],
+      "_expires_in_days": 12
+    },
+    {
+      "id": "aruba:openrouter:7bdde901",
+      "profile": "scrocco-llm-aruba",
+      "modello": "anthropic/claude-3-5-sonnet",
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "data": "free",
+      "category": "free",
+      "context_k": 64,
+      "max_input": 60000,
+      "priority": 5,
+      "key_masked": "sk-or-...********...77aa",
+      "group": "scrocco-llm-aruba-64k",
+      "capabilities": ["text"],
+      "caps": [],
+      "cap_groups": [],
+      "_expires_in_days": 45
+    }
+  ],
+  "profiles": {
+    "count": 3,
+    "profiles": [
+      {
+        "name": "scrocco-llm-mioaruba",
+        "base_model": "deepseek/deepseek-chat",
+        "dims_k": [8, 32, 64, 128, 200],
+        "groups": ["scrocco-llm-mioaruba-200k", "scrocco-llm-mioaruba-64k"],
+        "deployments": 1,
+        "step_up_pct": 15
+      },
+      {
+        "name": "scrocco-llm-neth",
+        "base_model": "gpt-4o",
+        "dims_k": [8, 32, 64, 128],
+        "groups": ["scrocco-llm-neth-128k"],
+        "deployments": 1,
+        "step_up_pct": 10
+      },
+      {
+        "name": "scrocco-llm-aruba",
+        "base_model": "claude-3-5-sonnet",
+        "dims_k": [8, 32, 64],
+        "groups": ["scrocco-llm-aruba-64k"],
+        "deployments": 1,
+        "step_up_pct": 20
+      }
+    ]
+  },
+  "adminState": {
+    "budget": {
+      "monthly": { "limit": 1000, "spent": 412.5, "currency": "EUR" },
+      "daily": { "limit": 50, "spent": 18.3 }
+    },
+    "capabilities": {
+      "vision": { "enabled": true, "deployments": 1 },
+      "audio": { "enabled": false, "deployments": 0 }
+    },
+    "health": {
+      "ok": true,
+      "since": "2026-08-28T10:00:00Z",
+      "checks": { "llm": "ok", "db": "ok" }
+    },
+    "adaptive": {
+      "enabled": true,
+      "step_up_pct": 15,
+      "min_context_k": 8
+    },
+    "policy": {
+      "client_aliases": { "client-01": "mioaruba" },
+      "priority": { "free": 0, "credit": 10 }
+    }
+  },
+  "policy": {
+    "file": "gateway.yaml",
+    "configured": {
+      "server": { "host": "0.0.0.0", "port": 4001 },
+      "master_key": "sk-master-...********...c01d",
+      "clients": [
+        {
+          "name": "client-01",
+          "key_masked": "sk-cli-...********...a4b8",
+          "limits": { "rpm": 60, "tpm": 100000 },
+          "aliases": ["mioaruba"]
+        }
+      ]
+    },
+    "effective": {
+      "master_key": "sk-master-...********...c01d",
+      "clients": [
+        {
+          "name": "client-01",
+          "key_masked": "sk-cli-...********...a4b8",
+          "aliases": ["mioaruba"],
+          "rpm": 60
+        }
+      ],
+      "timeouts": { "connect": 5000, "read": 60000 }
+    }
+  },
+  "history": [
+    { "ts": "2026-08-27T09:12:00Z", "op": "create", "id": "mioaruba:openrouter:abcd1234", "profile": "scrocco-llm-mioaruba" },
+    { "ts": "2026-08-27T14:45:00Z", "op": "update", "id": "neth:azure:z9x7c3", "profile": "scrocco-llm-neth" }
+  ],
+  "cooldowns_active": [
+    { "unique": "neth:azure:z9x7c3", "until": "2026-08-28T16:20:00Z", "reason": "rate_limit" }
+  ],
+  "sticky_sessions": [
+    { "session_id": "sess_9f8a", "unique": "mioaruba:openrouter:abcd1234", "age_s": 42 }
+  ],
+  "backups": [],
+  "insights": {
+    "total": 12840,
+    "by_profile": {
+      "scrocco-llm-mioaruba": { "calls": 7840, "errors": 34 },
+      "scrocco-llm-neth": { "calls": 3200, "errors": 12 },
+      "scrocco-llm-aruba": { "calls": 1800, "errors": 8 }
+    },
+    "by_group": {
+      "scrocco-llm-mioaruba-200k": { "calls": 6100 },
+      "scrocco-llm-neth-128k": { "calls": 3200 },
+      "scrocco-llm-aruba-64k": { "calls": 1800 }
+    },
+    "aggregate": { "calls": 12840, "error_rate": 0.42, "fb_rate": 3.1, "avg_ms": 812 }
+  },
+  "insightsSummary": {
+    "window_hours": 24,
+    "calls": 482,
+    "by_kind": {
+      "chat": { "calls": 412, "errors": 3, "avg_ms": 780 },
+      "embedding": { "calls": 70, "errors": 0, "avg_ms": 45 }
+    }
+  },
+  "leaderboard": {
+    "window_days": 7,
+    "count": 3,
+    "rows": [
+      { "dep": "mioaruba:openrouter:abcd1234", "profile": "scrocco-llm-mioaruba", "group": "scrocco-llm-mioaruba-200k", "provider": "openrouter", "model": "deepseek/deepseek-chat", "calls": 7840, "error_rate": 0.4, "fb_rate": 2.8, "qc_rate": 0.1, "wd_rate": 0.0, "probe_ms": 412 },
+      { "dep": "neth:azure:z9x7c3", "profile": "scrocco-llm-neth", "group": "scrocco-llm-neth-128k", "provider": "azure", "model": "gpt-4o", "calls": 3200, "error_rate": 0.3, "fb_rate": 4.2, "qc_rate": 0.2, "wd_rate": 0.05, "probe_ms": 890 },
+      { "dep": "aruba:openrouter:7bdde901", "profile": "scrocco-llm-aruba", "group": "scrocco-llm-aruba-64k", "provider": "openrouter", "model": "anthropic/claude-3-5-sonnet", "calls": 1800, "error_rate": 0.4, "fb_rate": 1.9, "qc_rate": 0.0, "wd_rate": 0.02, "probe_ms": 655 }
+    ]
+  },
+  "logsCalls": {
+    "events": [
+      { "ts": "2026-08-28T15:59:01Z", "profile": "scrocco-llm-mioaruba", "group": "scrocco-llm-mioaruba-200k", "dep": "mioaruba:openrouter:abcd1234", "model": "deepseek/deepseek-chat", "tries": 1, "fb": 0, "ms": 812, "status": 200 },
+      { "ts": "2026-08-28T15:58:40Z", "profile": "scrocco-llm-neth", "group": "scrocco-llm-neth-128k", "dep": "neth:azure:z9x7c3", "model": "gpt-4o", "tries": 1, "fb": 0, "ms": 1240, "status": 200 },
+      { "ts": "2026-08-28T15:57:12Z", "profile": "scrocco-llm-aruba", "group": "scrocco-llm-aruba-64k", "dep": "aruba:openrouter:7bdde901", "model": "anthropic/claude-3-5-sonnet", "tries": 2, "fb": 1, "ms": 1520, "status": 200 }
+    ]
+  },
+  "logsErrors": {
+    "events": [
+      { "ts": "2026-08-28T15:50:00Z", "level": "error", "msg": "timeout su openrouter", "dep": "mioaruba:openrouter:abcd1234", "profile": "scrocco-llm-mioaruba" },
+      { "ts": "2026-08-28T15:40:11Z", "level": "warn", "msg": "cooldown attivo", "dep": "neth:azure:z9x7c3", "profile": "scrocco-llm-neth" }
+    ]
+  },
+  "guide": "# Guida Gateway LLM\n\n## Endpoint amministrativi\n- `GET /admin/deployments` — elenco deployment (opzionale `?profile=`)\n- `POST /admin/deployments` — crea deployment\n- `GET /admin/profiles` — profili con dimensioni contesto\n- `GET /admin/state` — stato runtime (cooldown, sticky, budget)\n- `GET /admin/policy` — policy client (chiavi mascherate)\n- `PATCH /admin/policy` — patch parziale della policy\n- `GET /admin/history` — storico mutazioni\n\n## Playground\nUsa `POST /admin/playground` per testare un modello con fallback automatico.\n",
+  "healthz": { "ok": true, "version": "0.9.2", "uptime_s": 48210 },
+  "models": {
+    "object": "list",
+    "data": [
+      { "id": "deepseek/deepseek-chat", "object": "model", "owned_by": "deepseek" },
+      { "id": "gpt-4o", "object": "model", "owned_by": "openai" },
+      { "id": "anthropic/claude-3-5-sonnet", "object": "model", "owned_by": "anthropic" }
+    ]
+  },
+  "bootstrap": {
+    "playbook": [
+      { "step": 1, "title": "Imposta GATEWAY_MASTER_KEY", "done": true },
+      { "step": 2, "title": "Crea il primo deployment", "done": true },
+      { "step": 3, "title": "Configura la policy client", "done": false }
+    ],
+    "status": "in_progress"
+  },
+  "bootstrapStatus": {
+    "gaps": [{ "key": "policy.clients", "label": "Nessun client configurato" }],
+    "ok": false
+  },
+  "bootstrapProviders": {
+    "providers": [
+      { "name": "openrouter", "base_url": "https://openrouter.ai/api/v1", "env_key": "OPENROUTER_API_KEY" },
+      { "name": "azure", "base_url": "https://{res}.openai.azure.com/openai", "env_key": "AZURE_OPENAI_API_KEY" }
+    ]
+  },
+  "csv": {
+    "path": "/data/clients.csv",
+    "raw": "name,key_masked,aliases,rpm\nclient-01,sk-cli-...********...a4b8,mioaruba,60\nclient-02,sk-cli-...********...c77d,aruba,30\n",
+    "parsed": {
+      "header": ["name", "key_masked", "aliases", "rpm"],
+      "rows": [
+        ["client-01", "sk-cli-...********...a4b8", "mioaruba", "60"],
+        ["client-02", "sk-cli-...********...c77d", "aruba", "30"]
+      ]
+    },
+    "count": 2,
+    "backups": []
+  },
+  "policyRaw": "master_key: \"sk-master-...********...c01d\"\ntimeouts:\n  connect: 5000\n  read: 60000\nclients:\n  - name: client-01\n    key_masked: \"sk-cli-...********...a4b8\"\n    aliases: [mioaruba]\n    rpm: 60\n",
+  "capProposals": [
+    { "unique": "neth:azure:z9x7c3", "model": "gpt-4o", "add": "vision", "reason": "capabilities dichiarate" },
+    { "unique": "mioaruba:openrouter:abcd1234", "model": "deepseek/deepseek-chat", "add": "none", "reason": "ok" }
+  ],
+  "capAudit": {
+    "accounts": [
+      { "profile": "scrocco-llm-mioaruba", "keys": 2, "ok": true },
+      { "profile": "scrocco-llm-neth", "keys": 1, "ok": true }
+    ],
+    "missing_models": [],
+    "cap_suggestions": [{ "unique": "neth:azure:z9x7c3", "suggest": "vision" }],
+    "errors": []
+  }
+}

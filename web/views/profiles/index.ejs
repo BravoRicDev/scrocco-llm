@@ -1,0 +1,54 @@
+<div class="heading">
+  <h1>Profili (<%= count %>)</h1>
+  <a href="<%= escapeAttr("/profiles/new") %>" class="btn btn-primary">Nuovo profilo</a>
+</div>
+
+<div class="heading">
+  <p>Elenco dei profili configurati nel gateway.</p>
+</div>
+
+<% if (count === 0) { %>
+  <p>Nessun profilo.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Nome</th>
+        <th>Base model</th>
+        <th>Dims (k)</th>
+        <th>Gruppi</th>
+        <th>Deployments</th>
+        <th>Step up %</th>
+        <th>Speed min dim (k)</th>
+        <th>Speed qualify %</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% profiles.forEach((p) => { %>
+        <tr>
+          <td><%= p.name %></td>
+          <td><%= p.base_model %></td>
+          <td><%= (p.dims_k || []).join(", ") %></td>
+          <td>
+            <% (p.groups || []).forEach((g) => { %>
+              <span class="badge badge-wrapped"><%= g %></span>
+            <% }) %>
+          </td>
+          <td><%= p.deployments %></td>
+          <td><%= p.step_up_pct %>%</td>
+          <td><%= p.speed_min_dim_k %></td>
+          <td><%= p.speed_qualify_pct %></td>
+          <td class="text-right">
+            <a href="<%= escapeAttr("/deployments?profile=" + encodeURIComponent(p.name)) %>">vedi deployment</a>
+            <% if ((p.deployments || 0) === 0) { %>
+              <form method="POST" action="<%= escapeAttr("/profiles/" + encodeURIComponent(p.name) + "/purge") %>" style="display:inline;" onsubmit="return window.scw.confirm('Purghi il profilo <%= escapeAttr(p.name) %>?');" data-destruct>
+                <button type="submit" class="btn btn-danger btn-sm">Purga</button>
+              </form>
+            <% } %>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>

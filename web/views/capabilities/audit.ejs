@@ -1,0 +1,131 @@
+<%
+function n(v, d) {
+  return v === undefined || v === null || v === "" ? (d === undefined ? "—" : d) : v;
+}
+
+function fmtDt(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("it-IT", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+}
+
+const audit = audit || {};
+const accounts = Array.isArray(audit.accounts) ? audit.accounts : [];
+const missing = Array.isArray(audit.missing_models) ? audit.missing_models : [];
+const suggestions = Array.isArray(audit.cap_suggestions) ? audit.cap_suggestions : [];
+const errors = Array.isArray(audit.errors) ? audit.errors : [];
+const checked = accounts.filter((a) => a && a.ok !== false).length;
+%>
+<h1>Audit capacità</h1>
+
+<div class="heading">
+  <p>Verifica controller-vs-map: account non checkati, modelli mancanti e suggerimenti di capacità.</p>
+</div>
+
+<div class="heading">
+  <a href="<%= escapeAttr(path) %>" class="btn btn-primary">Riesegui audit</a>
+  <a href="<%= escapeAttr(path) %>" class="btn">Torna a Capabilities</a>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <table class="table kv-table">
+    <tbody>
+      <tr><th>Checked at</th><td><%= fmtDt(audit.checked_at ?? audit.generated_at ?? audit.ts) %></td></tr>
+      <tr><th>Account checkati</th><td><%= checked %> / <%= accounts.length %></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Accounts</h2>
+<% if (accounts.length === 0) { %>
+  <p>Nessun account esaminato.</p>
+<% } else { %>
+  <div class="cards">
+    <% accounts.forEach((a) => { %>
+      <div class="card stat-card">
+        <div class="stat-value"><%= n(a.keys) %></div>
+        <div class="stat-label"><%= a.profile || a.name || "—" %></div>
+        <div class="stat-sub"><span class="badge <%= a.ok === false ? "badge-disabled" : "badge-active" %>"><%= a.ok === false ? "FAIL" : "OK" %></span>
+          <% if (a.reason) { %> — <%= a.reason %><% } %>
+        </div>
+      </div>
+    <% }) %>
+  </div>
+<% } %>
+
+<h2>Modelli mancanti</h2>
+<% if (missing.length === 0) { %>
+  <p>Nessun modello mancante.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Modello</th>
+        <th>Endpoint</th>
+        <th>Key</th>
+        <th>Candidati</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% missing.forEach((m) => { %>
+        <tr>
+          <td><%= m.model || m.name || "—" %></td>
+          <td><code><%= m.endpoint || m.url || "—" %></code></td>
+          <td><code><%= m.key_masked || m.key || "—" %></code></td>
+          <td>
+            <% if (Array.isArray(m.candidates)) { %>
+              <% m.candidates.forEach((c, i) => { %>
+                <code><%= c %></code><%= i < m.candidates.length - 1 ? ", " : "" %>
+              <% }) %>
+            <% } else { %>
+              <%= n(m.candidates) %>
+            <% } %>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<h2>Suggerimenti di capacità</h2>
+<% if (suggestions.length === 0) { %>
+  <p>Nessun suggerimento.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Modello</th>
+        <th>Capacità suggerite</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% suggestions.forEach((s) => { %>
+        <tr>
+          <td><code><%= s.unique || s.model || s.deployment || "—" %></code></td>
+          <td>
+            <% const caps = Array.isArray(s.caps) ? s.caps : (s.suggest ? [s.suggest] : []); %>
+            <% if (caps.length === 0) { %>—<% } %>
+            <% caps.forEach((c, i) => { %>
+              <span class="badge badge-standalone"><%= c %></span><%= i < caps.length - 1 ? " " : "" %>
+            <% }) %>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<h2>Errori</h2>
+<% if (errors.length === 0) { %>
+  <p>Nessun errore.</p>
+<% } else { %>
+  <ul class="list">
+    <% errors.forEach((e) => { %>
+      <li><span class="badge badge-disabled">ERR</span> <%= e && typeof e === "object" ? (e.message || e.detail || JSON.stringify(e)) : e %></li>
+    <% }) %>
+  </ul>
+<% } %>

@@ -1,0 +1,64 @@
+<%
+function opBadge(op) {
+  const o = String(op || "").toLowerCase();
+  if (o === "create") return "badge-active";
+  if (o === "delete") return "badge-disabled";
+  if (o === "bulk") return "badge-wrapped";
+  return "badge-standalone";
+}
+function fmtTs(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts ?? "");
+  return d.toLocaleString("it-IT");
+}
+function detail(entry) {
+  const copy = { ...entry };
+  delete copy.ts;
+  delete copy.op;
+  const keys = Object.keys(copy);
+  if (!keys.length) return "—";
+  let s = JSON.stringify(copy);
+  if (s.length > 300) s = s.slice(0, 300) + "…";
+  return s;
+}
+%>
+<h1>Journal operazioni gateway (totale <%= total %>)</h1>
+
+<div class="heading">
+  <p>Storico read-only delle mutazioni eseguite sul gateway.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <form method="GET" action="<%= escapeAttr(path) %>" class="form-inline">
+    <div class="form-group">
+      <label for="limit">Righe</label>
+      <input type="number" id="limit" name="limit" min="1" max="100" value="<%= limit %>">
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Applica</button>
+    </div>
+  </form>
+</div>
+
+<% if (entries.length === 0) { %>
+  <p>Nessuna operazione registrata.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Op</th>
+        <th>Dettaglio</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% entries.forEach((entry) => { %>
+        <tr>
+          <td><%= fmtTs(entry.ts) %></td>
+          <td><span class="badge <%= opBadge(entry.op) %>"><%= entry.op %></span></td>
+          <td><code><%= detail(entry) %></code></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>

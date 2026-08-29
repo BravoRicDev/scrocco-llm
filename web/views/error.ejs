@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="<%= typeof lang !== 'undefined' ? lang : 'it' %>">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Errore — Scrocco Web Panel</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Si è verificato un errore</h1>
+    <p><%= (typeof message !== 'undefined' && message) ? message : 'Errore imprevisto.' %></p>
+    <a href="/" class="btn btn-primary">Torna alla dashboard</a>
+  </div>
+</body>
+</html>

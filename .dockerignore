@@ -1,0 +1,18 @@
+# Credenziali e segreti: MAI nell'immagine
+var/
+.env.gateway
+*.bak*
+*.bak
+
+# Sviluppo
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+run.sh
+scripts/
+docs/BOOTSTRAP.md
+*.md
+!docs/AGENT.md
