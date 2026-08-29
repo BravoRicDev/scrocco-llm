@@ -97,6 +97,12 @@ class QcJson:
     stream_total_deadline_ms: int = 90000  # tetto wall-clock su tutto il giro
     stream_commit_include_reasoning: bool = False  # True: bastano i reasoning
                                            # token per impegnare lo stream
+    # PARACADUTE: sulla catena -go/-fallback (ULTIMO scaglione del ladder) il
+    # timeout sul primo contenuto NON deve produrre un 503: la catena e' il
+    # paracadute finale, non c'e' dove ruotare. True = lo stream parte comunque
+    # (si trasmette quel che arriva). False = comportamento legacy (timeout ->
+    # rotazione/503), utile solo se le catene hanno molti account validi.
+    stream_parachute_no_timeout: bool = True
 
 
 @dataclass
@@ -582,6 +588,10 @@ class Policy:
                 p.qc_json.stream_commit_include_reasoning = _coerce_bool(
                     qj["stream_commit_include_reasoning"],
                     "qc_json.stream_commit_include_reasoning")
+            if "stream_parachute_no_timeout" in qj:
+                p.qc_json.stream_parachute_no_timeout = _coerce_bool(
+                    qj["stream_parachute_no_timeout"],
+                    "qc_json.stream_parachute_no_timeout")
             # stream_buffer_ms / stream_emit_error_tail / on_empty_response:
             # rimossi. Catena esaurita -> sempre 503 retryable, mai un turno
             # finto. Chiavi ignorate se presenti in un vecchio gateway.yaml.

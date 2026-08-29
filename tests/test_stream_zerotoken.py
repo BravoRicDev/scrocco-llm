@@ -22,14 +22,20 @@ def M():
     qj = _M.router.policy.qc_json
     qs = _M.router.policy.qc_sanity
     snap = (qj.stream_first_content_ms, qj.stream_total_deadline_ms,
-            qj.stream_commit_include_reasoning, qs.rotate_on_length_empty)
+            qj.stream_commit_include_reasoning, qs.rotate_on_length_empty,
+            qj.stream_parachute_no_timeout)
     cooldown_keys = set(_M.router._cooldown)
+    groups_keys = set(_M.config.groups)
     yield _M
     (qj.stream_first_content_ms, qj.stream_total_deadline_ms,
-     qj.stream_commit_include_reasoning, qs.rotate_on_length_empty) = snap
+     qj.stream_commit_include_reasoning, qs.rotate_on_length_empty,
+     qj.stream_parachute_no_timeout) = snap
     for k in list(_M.router._cooldown):
         if k not in cooldown_keys:
             _M.router._cooldown.pop(k, None)
+    for k in list(_M.config.groups):
+        if k not in groups_keys:
+            _M.config.groups.pop(k, None)
 
 
 def _fake_stream_response(chunks, delay=0.0):
@@ -341,3 +347,91 @@ def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
     out = asyncio.run(_run())
     assert b"meta" in out and b'"error"' not in out
     assert dep["unique"] in M.router._cooldown
+
+
+# ------------------------------------------- paracadute (-go/-fallback)
+def _mute_stream_response():
+    """Upstream che NON produce contenuto entro il budget: _peek_stream ->
+    timeout. Resta muto oltre il clamp minimo di fc_ms (2s), poi yielda un
+    chunk non-answer (che non committa) e termina."""
+    async def _stream_response(dep, payload):
+        async def _gen():
+            await asyncio.sleep(3.0)      # oltre fc_ms clamp (2s) -> timeout
+            yield b"data: {}\n\n"          # non-answer, non committa
+        return _gen()
+    return _stream_response
+
+
+def _parachute_dep(M, suffix="-go"):
+    base = "scrocco-llm-test" + suffix
+    dep = {"unique": base + "__fake__0", "group": base,
+           "model": "fake-model", "api_key": "sk-fake",
+           "api_base": "https://fake.test/v1"}
+    M.config.groups.setdefault(base, [dep])
+    return dep
+
+
+def test_parachute_go_timeout_transmits_not_503(M, monkeypatch):
+    """Sulla catena -go (paracadute) il timeout primo-contenuto NON produce 503:
+    lo stream parte comunque (parametro default True)."""
+    qj = M.router.policy.qc_json
+    qj.stream_first_content_ms = 60
+    qj.stream_parachute_no_timeout = True
+    dep = _parachute_dep(M, suffix="-go")
+    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        assert isinstance(resp, StreamingResponse), "deve trasmettere, non 503"
+        await _drain(resp)
+    asyncio.run(_run())
+
+
+def test_parachute_go_timeout_legacy_503(M, monkeypatch):
+    """Parametro disattivato (stream_parachute_no_timeout=False): sulla -go il
+    timeout resta rotazione/503 (utile con molte chiavi valide in catena)."""
+    qj = M.router.policy.qc_json
+    qj.stream_first_content_ms = 60
+    qj.stream_parachute_no_timeout = False
+    dep = _parachute_dep(M, suffix="-go")
+    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        assert isinstance(resp, JSONResponse) and resp.status_code == 503
+    asyncio.run(_run())
+
+
+def test_parachute_does_not_affect_dims(M, monkeypatch):
+    """I -dim NON sono paracadute: il timeout primo-contenuto resta timeout
+    (rotazione) anche col parametro attivo — comportamento invariato."""
+    qj = M.router.policy.qc_json
+    qj.stream_first_content_ms = 60
+    qj.stream_parachute_no_timeout = True
+    dep = _parachute_dep(M, suffix="-200k")
+    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        assert isinstance(resp, JSONResponse) and resp.status_code == 503
+    asyncio.run(_run())
+
+
+def test_parachute_verdict_helper(M):
+    pol = M.router.policy
+    dep_go = {"group": "scrocco-llm-test-go"}
+    dep_fb = {"group": "scrocco-llm-test-fallback"}
+    dep_dim = {"group": "scrocco-llm-test-200k"}
+    pol.qc_json.stream_parachute_no_timeout = True
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "content"
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_fb, pol) == "content"
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_dim, pol) == "timeout"
+    assert M._parachute_verdict("empty_eof", pol.qc_json, dep_go, pol) == "empty_eof"
+    pol.qc_json.stream_parachute_no_timeout = False
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "timeout"

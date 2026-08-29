@@ -167,6 +167,12 @@ qc_json:
   # consegnare risposte troncate/vuote; 40 = buon compromesso).
   stream_commit_min_chars: 40
 
+  # PARACADUTE (-go/-fallback): True = sulla catena finale del ladder il
+  # timeout sul primo contenuto NON scatta: lo stream parte comunque (non c'è
+  # dove ruotare). False = comportamento legacy (timeout -> rotazione/503),
+  # da usare solo se hai molte chiavi valide in quelle catene.
+  stream_parachute_no_timeout: true
+
   # Cooldown in secondi del watchdog streaming dopo un errore (90s).
   watchdog_cooldown_sec: 90
 
