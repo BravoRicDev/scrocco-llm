@@ -1,0 +1,9 @@
+# scrocco-llm · dipendenze runtime
+# Pin compatibili Python 3.12+; nessun extra non usato dal codice.
+fastapi>=0.115,<1.0
+uvicorn>=0.32,<1.0
+httpx>=0.27,<1.0
+PyYAML>=6.0.2,<7.0
+# multipart/form-data parsing per /v1/audio/transcriptions|translations
+# (request.form() in Starlette lo richiede: senza, ogni STT torna 400).
+python-multipart>=0.0.18

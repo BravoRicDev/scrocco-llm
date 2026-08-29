@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>scrocco-web API — docs</title>
+  <link rel="stylesheet" href="/css/app.css">
+  <style>
+    body { padding: 24px; max-width: 1000px; margin: 0 auto; }
+    .op { border: 1px solid var(--muted, #ccc); border-radius: 6px; margin: 6px 0; padding: 8px 12px; }
+    .m { display: inline-block; min-width: 58px; font-weight: 700; font-size: 12px; }
+    .m-get { color: #2563eb; } .m-post { color: #16a34a; } .m-put { color: #d97706; }
+    .m-patch { color: #7c3aed; } .m-delete { color: #dc2626; }
+    .tag-h { margin-top: 20px; }
+    code { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>scrocco-web API <small id="ver"></small></h1>
+  <p>Auth: <code>Authorization: Bearer &lt;token&gt;</code> (JWT-agent o <code>agtok_…</code>) o sessione cookie.
+     Spec grezza: <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+  <div id="root">Carico…</div>
+  <script src="/js/openapi-render.js"></script>
+</body>
+</html>

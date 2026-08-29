@@ -1,0 +1,78 @@
+<%
+const filePath = (typeof path === "string" && path) ? path : "gateway.yaml";
+const initialRaw = (typeof raw === "string") ? raw : "";
+%>
+<style>
+  .pr-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .pr-toolbar .badge { margin-left: 8px; }
+  .pr-badge-ok { background: var(--ok, #e8f5e9); color: var(--ok-fg, #1b5e20); }
+  .pr-badge-error { background: var(--err, #fdecea); color: var(--err-fg, #b71c1c); }
+  .pr-textarea {
+    width: 100%;
+    height: 70vh;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 10px;
+    box-sizing: border-box;
+    white-space: pre;
+    overflow: auto;
+  }
+  .pr-line-text {
+    margin: 0;
+    padding: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .pr-col-type { width: 40px; text-align: center; font-weight: bold; }
+  #pr-diff-body tr.pr-add td { background: rgba(76, 175, 80, 0.12); }
+  #pr-diff-body tr.pr-add .pr-col-type { color: #2e7d32; }
+  #pr-diff-body tr.pr-del td { background: rgba(244, 67, 54, 0.12); }
+  #pr-diff-body tr.pr-del .pr-col-type { color: #c62828; }
+  #pr-diff-body tr.pr-ctx .pr-col-type { color: #9e9e9e; }
+  .pr-diff-summary { font-size: 13px; color: #555; }
+</style>
+
+<h1>Editor raw <code><%= filePath %></code></h1>
+
+<div class="heading">
+  <p>Modifica direttamente il file <code class="pr-path" id="pr-path"><%= filePath %></code>.
+  Il confronto "Diff" mostra le modifiche rispetto alla versione attiva; "Salva (reload)"
+  valida lo YAML e ricarica la policy.</p>
+</div>
+
+<div id="pr-flash"></div>
+
+<section class="card">
+  <div class="pr-toolbar">
+    <button type="button" id="pr-diff-btn" class="btn">Diff</button>
+    <button type="button" id="pr-save-btn" class="btn">Salva (reload)</button>
+    <span id="pr-status" class="badge" style="display:none"></span>
+  </div>
+
+  <div id="pr-validate" class="alert alert-danger" style="display:none"></div>
+
+  <textarea id="pr-raw" class="pr-textarea" spellcheck="false" placeholder="gateway.yaml — incolla o modifica il contenuto…"><%= initialRaw %></textarea>
+</section>
+
+<section class="card" id="pr-diff-card" style="display:none">
+  <h2>Diff vs versione attiva</h2>
+  <p id="pr-diff-summary" class="pr-diff-summary"></p>
+  <table class="table">
+    <thead>
+      <tr><th class="pr-col-type">Tipo</th><th>Contenuto</th></tr>
+    </thead>
+    <tbody id="pr-diff-body"></tbody>
+  </table>
+</section>
+
+<script>
+  window.POLICY_RAW_STATE = {
+    activeRaw: <%- JSON.stringify(initialRaw) %>,
+  };
+</script>
+<script src="/js/vendor/js-yaml.min.js"></script>
+<script src="/js/policy-raw.js"></script>

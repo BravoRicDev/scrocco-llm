@@ -1,0 +1,3 @@
+# scrocco-llm · dipendenze sviluppo/test (README: pip install -r requirements.txt -r requirements-dev.txt)
+-r requirements.txt
+pytest>=8.0

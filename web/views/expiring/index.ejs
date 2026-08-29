@@ -1,0 +1,65 @@
+<%
+const visible = expiring.filter((e) => e.in_days <= days && (!profile || e.profile === profile));
+const daysOptions = [1, 3, 7, 15, 30, 60, 90];
+%>
+<h1>Scadenze (<%= visible.length %>)</h1>
+
+<div class="heading">
+  <p>Deployments in scadenza entro i giorni selezionati.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <form method="GET" action="<%= escapeAttr(path) %>" class="form-inline">
+    <div class="form-group">
+      <label for="days">Scadenza entro</label>
+      <select id="days" name="days">
+        <% daysOptions.forEach((d) => { %>
+          <option value="<%= d %>" <%= d === days ? "selected" : "" %>><%= d %> giorni</option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="profile">Profilo</label>
+      <select id="profile" name="profile">
+        <option value="">Tutti i profili</option>
+        <% profiles.forEach((p) => { %>
+          <option value="<%= escapeAttr(p.name) %>" <%= p.name === profile ? "selected" : "" %>><%= p.name %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Filtra</button>
+    </div>
+  </form>
+</div>
+
+<% if (visible.length === 0) { %>
+  <p>Nessuna scadenza<% if (profile) { %> per il profilo selezionato<% } %> nei prossimi <%= days %> giorni.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Id</th>
+        <th>Modello</th>
+        <th>Tra giorni</th>
+        <th>Categoria</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% visible.forEach((d) => { %>
+        <tr>
+          <td><code><%= d.id %></code></td>
+          <td><%= d.modello %></td>
+          <td>
+            <% if (d.in_days <= 3) { %>
+              <span class="badge" style="color:#fff;background:var(--btn-danger)"><%= d.in_days %></span>
+            <% } else { %>
+              <span class="badge badge-active"><%= d.in_days %></span>
+            <% } %>
+          </td>
+          <td><%= d.data_raw %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>

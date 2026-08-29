@@ -1,0 +1,71 @@
+function allow(actions, roles) {
+  const out = {};
+  for (const a of actions) out[a] = true;
+  return out;
+}
+
+export const PERMISSIONS = {
+  admin: {
+    deployments: allow(["read", "create", "update", "delete", "bulk", "probe", "unretire"], ["admin"]),
+    profiles: allow(["read", "create", "purge"], ["admin"]),
+    policy: allow(["read", "update"], ["admin"]),
+    capabilities: allow(["read", "seed", "audit"], ["admin"]),
+    state: allow(["read"], ["admin"]),
+    expiring: allow(["read"], ["admin"]),
+    history: allow(["read"], ["admin"]),
+    insights: allow(["read"], ["admin"]),
+    observability: allow(["read"], ["admin"]),
+    bootstrap: allow(["read"], ["admin"]),
+    guide: allow(["read"], ["admin"]),
+    system: allow(["reload", "cooldowns", "sessions", "release"], ["admin"]),
+    keys: allow(["read", "rotate"], ["admin"]),
+    users: allow(["list", "create", "update", "delete"], ["admin"]),
+    api_tokens: allow(["list", "create", "revoke"], ["admin"]),
+    csv: allow(["read", "write"], ["admin"]),
+    playground: allow(["use"], ["admin"]),
+    config_snapshots: allow(["read", "restore"], ["admin"]),
+    alerts: allow(["read", "create", "update", "delete"], ["admin"]),
+    audit: allow(["read"], ["admin"]),
+    ui_settings: allow(["read", "write"], ["admin"]),
+  },
+  operator: {
+    deployments: allow(["read", "create", "update", "delete", "bulk", "probe", "unretire"], ["operator"]),
+    profiles: allow(["read", "create", "purge"], ["operator"]),
+    policy: allow(["read"], ["operator"]),
+    capabilities: allow(["read", "seed", "audit"], ["operator"]),
+    state: allow(["read"], ["operator"]),
+    expiring: allow(["read"], ["operator"]),
+    history: allow(["read"], ["operator"]),
+    insights: allow(["read"], ["operator"]),
+    observability: allow(["read"], ["operator"]),
+    bootstrap: allow(["read"], ["operator"]),
+    guide: allow(["read"], ["operator"]),
+    system: allow(["reload", "cooldowns", "sessions", "release"], ["operator"]),
+    keys: allow(["read"], ["operator"]),
+    api_tokens: allow(["list", "create", "revoke"], ["operator"]),
+    csv: allow(["read"], ["operator"]),
+    playground: allow(["use"], ["operator"]),
+    config_snapshots: allow(["read"], ["operator"]),
+    audit: allow(["read"], ["operator"]),
+    ui_settings: allow(["read", "write"], ["operator"]),
+  },
+  viewer: {
+    deployments: allow(["read"], ["viewer"]),
+    profiles: allow(["read"], ["viewer"]),
+    policy: allow(["read"], ["viewer"]),
+    capabilities: allow(["read", "audit"], ["viewer"]),
+    state: allow(["read"], ["viewer"]),
+    expiring: allow(["read"], ["viewer"]),
+    history: allow(["read"], ["viewer"]),
+    insights: allow(["read"], ["viewer"]),
+    observability: allow(["read"], ["viewer"]),
+    bootstrap: allow(["read"], ["viewer"]),
+    guide: allow(["read"], ["viewer"]),
+    keys: allow(["read"], ["viewer"]),
+    api_tokens: allow(["list", "create", "revoke"], ["viewer"]),
+    audit: allow(["read"], ["viewer"]),
+    ui_settings: allow(["read", "write"], ["viewer"]),
+  },
+};
+
+export default PERMISSIONS;

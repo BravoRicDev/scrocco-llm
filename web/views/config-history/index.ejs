@@ -1,0 +1,42 @@
+<h1>Storico configurazioni</h1>
+<div class="heading">
+  <p>Snapshot di <code>keys_rotation.csv</code> e <code>gateway.yaml</code>
+  salvati automaticamente. Il ripristino riapplica il contenuto sul gateway.</p>
+</div>
+
+<div class="card" style="max-width:100%;overflow-x:auto;">
+  <% if (!snapshots || !snapshots.length) { %>
+    <p class="muted">Nessuno snapshot ancora.</p>
+  <% } else { %>
+  <table class="table">
+    <thead><tr><th>ID</th><th>Tipo</th><th>Data</th><th>SHA-256</th><th>Dim.</th><th>Azioni</th></tr></thead>
+    <tbody>
+      <% snapshots.forEach(function(s){ %>
+        <tr>
+          <td>#<%= s.id %></td>
+          <td><span class="badge <%= s.kind === 'csv' ? 'badge-active' : 'badge-standalone' %>"><%= s.kind %></span></td>
+          <td><%= new Date(s.created_at).toLocaleString("it-IT") %></td>
+          <td><code><%= String(s.source_sha256 || "").slice(0,12) %></code></td>
+          <td><%= s.size %></td>
+          <td>
+            <button type="button" class="btn" data-diff="<%= s.id %>">Diff</button>
+            <% if (typeof user !== 'undefined' && user && user.role === 'admin') { %>
+              <form method="POST" action="/config-history/<%= s.id %>/restore" style="display:inline"
+                    onsubmit="return window.scw && window.scw.confirm ? window.scw.confirm('Ripristinare lo snapshot #<%= s.id %>?') : true;">
+                <button type="submit" class="btn btn-danger">Ripristina</button>
+              </form>
+            <% } %>
+          </td>
+        </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+</div>
+
+<div class="card" id="diffCard" style="display:none;max-width:100%;">
+  <h2>Diff (corrente → snapshot <span id="diffId"></span>)</h2>
+  <pre id="diffOut" style="overflow-x:auto;"></pre>
+</div>
+
+<script src="/js/config-history.js"></script>

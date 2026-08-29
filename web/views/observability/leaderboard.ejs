@@ -1,0 +1,112 @@
+<%
+function num(v, d = "—") {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return d;
+  return n.toLocaleString("it-IT", { maximumFractionDigits: 0 });
+}
+
+function pct(v, d = "—") {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return d;
+  return n.toLocaleString("it-IT", { maximumFractionDigits: 2 }) + "%";
+}
+
+function ms(v, d = "—") {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return d;
+  return n.toLocaleString("it-IT", { maximumFractionDigits: 0 }) + " ms";
+}
+
+const windowOptions = ["24h", "7d", "30d", "90d"];
+const sortable = ["dep", "profile", "group", "provider", "model", "calls", "error_rate", "fb_rate", "qc_rate", "wd_rate", "probe_ms"];
+const wTitle = typeof titles !== "undefined" && titles && titles[window] ? titles[window] : window;
+%>
+<h1>Leaderboard deployment</h1>
+
+<div class="heading">
+  <p>Classifica dei deployment per traffico e qualita' (read-only).</p>
+</div>
+
+<style>
+  th[data-key] { cursor: pointer; user-select: none; }
+  th[data-key]:hover { text-decoration: underline; }
+  th[data-active] { color: var(--accent, #06c); }
+  th[data-active]::after {
+    content: attr(data-order);
+    font-size: 0.7em;
+    margin-left: 4px;
+  }
+  .lb-meta { color: var(--muted, #666); font-size: 13px; }
+  .lb-status { margin-left: 8px; }
+  .lb-status.live { color: #0a6; }
+  .lb-status.stale { color: #c55; }
+</style>
+
+<div class="card" style="max-width:100%;">
+  <form method="GET" action="/observability/leaderboard" class="form-inline">
+    <div class="form-group">
+      <label for="f-window">Finestra</label>
+      <select id="f-window" name="window">
+        <% windowOptions.forEach((w) => { %>
+          <option value="<%= w %>" <%= w === window ? "selected" : "" %>><%= titles ? titles[w] : w %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="f-profile">Profilo</label>
+      <input type="text" id="f-profile" name="profile" value="<%= escapeAttr(profile) %>" placeholder="scrocco-llm-...">
+    </div>
+    <div class="form-group">
+      <label for="refresh-toggle" class="form-check">
+        <input type="checkbox" id="refresh-toggle" name="refresh" value="1">
+        Refresh 15s
+      </label>
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Applica</button>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <table class="table" id="leaderboard-table" data-window="<%= window %>" data-sort="<%= sort %>" data-order="<%= order %>" data-profile="<%= escapeAttr(profile) %>">
+    <thead>
+      <tr>
+        <th data-key="dep" <%= sort === "dep" ? 'data-active="1" data-order="' + order + '"' : "" %>>Deployment</th>
+        <th data-key="profile" <%= sort === "profile" ? 'data-active="1" data-order="' + order + '"' : "" %>>Profilo</th>
+        <th data-key="group" <%= sort === "group" ? 'data-active="1" data-order="' + order + '"' : "" %>>Gruppo</th>
+        <th data-key="provider" <%= sort === "provider" ? 'data-active="1" data-order="' + order + '"' : "" %>>Provider</th>
+        <th data-key="model" <%= sort === "model" ? 'data-active="1" data-order="' + order + '"' : "" %>>Modello</th>
+        <th data-key="calls" <%= sort === "calls" ? 'data-active="1" data-order="' + order + '"' : "" %>>Calls</th>
+        <th data-key="error_rate" <%= sort === "error_rate" ? 'data-active="1" data-order="' + order + '"' : "" %>>Err%</th>
+        <th data-key="fb_rate" <%= sort === "fb_rate" ? 'data-active="1" data-order="' + order + '"' : "" %>>FB%</th>
+        <th data-key="qc_rate" <%= sort === "qc_rate" ? 'data-active="1" data-order="' + order + '"' : "" %>>QC%</th>
+        <th data-key="wd_rate" <%= sort === "wd_rate" ? 'data-active="1" data-order="' + order + '"' : "" %>>WD%</th>
+        <th data-key="probe_ms" <%= sort === "probe_ms" ? 'data-active="1" data-order="' + order + '"' : "" %>>Probe ms</th>
+      </tr>
+    </thead>
+    <tbody id="leaderboard-tbody">
+      <% rows.forEach((r) => { %>
+        <tr>
+          <td><code><%= r.dep %></code></td>
+          <td><%= r.profile %></td>
+          <td><%= r.group %></td>
+          <td><%= r.provider %></td>
+          <td><%= r.model %></td>
+          <td><%= num(r.calls) %></td>
+          <td><%= pct(r.error_rate) %></td>
+          <td><%= pct(r.fb_rate) %></td>
+          <td><%= pct(r.qc_rate) %></td>
+          <td><%= pct(r.wd_rate) %></td>
+          <td><%= ms(r.probe_ms) %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+  <p class="lb-meta">
+    <span id="lb-count"><%= rows.length %></span> righe — finestra <strong id="lb-title" data-title="<%= escapeAttr(wTitle) %>"><%= wTitle %></strong>
+    <span id="lb-status" class="lb-status"></span>
+  </p>
+</div>
+
+<script src="/js/leaderboard.js"></script>

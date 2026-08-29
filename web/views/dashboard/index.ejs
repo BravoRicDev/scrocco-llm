@@ -1,0 +1,165 @@
+<%
+function n(v, d = "—") {
+  return v === undefined || v === null || v === "" ? d : v;
+}
+
+function boolBadge(v) {
+  if (v === true || v === 1 || v === "1" || v === "on" || v === "yes" || v === "enabled") return '<span class="badge badge-active">ON</span>';
+  if (v === false || v === 0 || v === "0" || v === "off" || v === "no" || v === "disabled") return '<span class="badge badge-disabled">OFF</span>';
+  return '<span class="badge badge-standalone">—</span>';
+}
+
+function mmss(iso) {
+  if (!iso) return "—";
+  const ms = new Date(iso).getTime() - Date.now();
+  if (Number.isNaN(ms)) return "—";
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  return String(m).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+}
+
+function cnt(v) {
+  if (Array.isArray(v)) return v.length;
+  return n(v);
+}
+
+const budget = state?.budget || {};
+const caps = state?.capabilities || {};
+const health = state?.health || {};
+const adaptive = state?.adaptive || {};
+const policy = state?.policy || {};
+const counts = state?.counts || {};
+const cooldowns = Array.isArray(state?.cooldowns_active) ? state.cooldowns_active : [];
+const stickies = Array.isArray(state?.sticky_sessions) ? state.sticky_sessions : [];
+
+const budgetEnabled = budget.enabled ?? (budget.monthly && budget.monthly.limit ? true : false);
+const budgetMonthly = budget.monthly || {};
+const budgetDaily = budget.daily || {};
+const aliasesCount = policy.aliases_count ?? Object.keys(policy.client_aliases || {}).length ?? "—";
+const speedHotwords = Array.isArray(policy.speed_hotwords) ? policy.speed_hotwords.length : policy.speed_hotwords_count ?? "—";
+%>
+<h1>Dashboard</h1>
+
+<div class="heading">
+  <p>Panoramica dello stato corrente del gateway.</p>
+</div>
+
+<div class="dash-grid">
+  <div class="dash-card"><div class="dash-num"><%= n(counts.deployments) %></div><div class="dash-label">Deployments</div></div>
+  <div class="dash-card"><div class="dash-num"><%= n(counts.profiles) %></div><div class="dash-label">Profiles</div></div>
+  <div class="dash-card"><div class="dash-num"><%= n(counts.groups) %></div><div class="dash-label">Gruppi</div></div>
+  <div class="dash-card"><div class="dash-num"><%= cooldowns.length %></div><div class="dash-label">Cooldown attivi</div></div>
+  <div class="dash-card"><div class="dash-num"><%= stickies.length %></div><div class="dash-label">Sticky session</div></div>
+  <div class="dash-card">
+    <div class="dash-num"><%- boolBadge(budgetEnabled) %></div>
+    <div class="dash-label">Budget</div>
+    <% if (budgetMonthly.limit) { %><div class="dash-sub"><%= n(budgetMonthly.spent) %> / <%= n(budgetMonthly.limit) %> <%= n(budgetMonthly.currency, "") %></div><% } %>
+  </div>
+  <div class="dash-card">
+    <div class="dash-num"><%- boolBadge(caps.routing?.enabled) %></div>
+    <div class="dash-label">Capability routing</div>
+  </div>
+</div>
+
+<h2>Cooldown</h2>
+<% if (cooldowns.length === 0) { %>
+  <p>Nessun cooldown attivo.</p>
+<% } else { %>
+  <div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Deployment</th>
+        <th>Rimanente</th>
+        <th>Attempts</th>
+        <th>Motivo</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% cooldowns.forEach((c) => { %>
+        <tr>
+          <td><code><%= n(c.unique) %></code></td>
+          <td><%= mmss(c.until) %></td>
+          <td><%= n(c.attempts) %></td>
+          <td><%= n(c.reason) %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+  </div>
+<% } %>
+
+<h2>Sticky session</h2>
+<% if (stickies.length === 0) { %>
+  <p>Nessuna sticky session.</p>
+<% } else { %>
+  <div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Session ID</th>
+        <th>Gruppo</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% stickies.forEach((s) => { %>
+        <tr>
+          <td><code><%= n(s.session_id) %></code></td>
+          <td><%= n(s.group ?? s.unique) %></td>
+          <td><%= n(s.count ?? s.age_s) %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+  </div>
+<% } %>
+
+<h2>Health</h2>
+<div class="table-wrap">
+<table class="table kv-table">
+  <tbody>
+    <tr><th>Ultimo ciclo</th><td><%= n(health.last_cycle_at ?? health.since) %></td></tr>
+    <tr><th>Marked</th><td><%= n(health.marked) %></td></tr>
+    <tr><th>Account</th><td><%= n(health.accounts) %></td></tr>
+    <tr><th>Abilitato</th><td><%- boolBadge(health.enabled ?? health.ok) %></td></tr>
+    <% if (health.checks) { %>
+      <tr><th>Check</th><td><%= JSON.stringify(health.checks) %></td></tr>
+    <% } %>
+  </tbody>
+</table>
+</div>
+
+<h2>Adattivo</h2>
+<div class="table-wrap">
+<table class="table kv-table">
+  <tbody>
+    <tr><th>Abilitato</th><td><%- boolBadge(adaptive.enabled) %></td></tr>
+    <tr><th>Tracked</th><td><%= n(adaptive.tracked) %></td></tr>
+    <tr><th>Recency halflife (s)</th><td><%= n(adaptive.recency_halflife_sec) %></td></tr>
+    <tr><th>Latency ref (ms)</th><td><%= n(adaptive.latency_ref_ms) %></td></tr>
+    <% if (adaptive.step_up_pct !== undefined) { %><tr><th>Step-up %</th><td><%= n(adaptive.step_up_pct) %></td></tr><% } %>
+    <% if (adaptive.min_context_k !== undefined) { %><tr><th>Min context (k)</th><td><%= n(adaptive.min_context_k) %></td></tr><% } %>
+  </tbody>
+</table>
+</div>
+
+<h2>Policy</h2>
+<div class="table-wrap">
+<table class="table kv-table">
+  <tbody>
+    <tr><th>Step-up %</th><td><%= n(policy.step_up_pct ?? adaptive.step_up_pct) %></td></tr>
+    <tr><th>Step-up per profile</th><td><%= n(policy.step_up_per_profile) %></td></tr>
+    <tr><th>Aliases</th><td><%= n(aliasesCount) %></td></tr>
+    <tr><th>Speed hotwords</th><td><%= n(speedHotwords) %></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="heading">
+  <p>
+    <a href="/deployments" class="btn">Deployments</a>
+    <a href="/admin/api-tokens" class="btn">API Token</a>
+    <a href="/health" class="btn">Health</a>
+  </p>
+</div>

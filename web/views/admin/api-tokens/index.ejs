@@ -1,0 +1,85 @@
+<% layout("layouts/admin") -%>
+<h1>Token API</h1>
+
+<div class="heading">
+  <p>Genera e gestisci i token per l'accesso programmatico (agent).</p>
+</div>
+
+<% if (newToken) { %>
+  <div class="alert alert-success">
+    <strong>Salva subito questo token: non sara' piu' mostrato</strong>
+    <div>
+      <input readonly value="<%= newToken.token %>" style="width:100%;max-width:640px">
+    </div>
+    <p>
+      Prefix: <code><%= newToken.prefix %></code> —
+      Scadenza: <%= new Date(newToken.expiresAt).toLocaleString("it-IT") %>
+    </p>
+  </div>
+<% } %>
+
+<div class="card">
+  <h2>Crea token</h2>
+  <form method="POST" action="/admin/api-tokens" class="form-inline">
+    <div class="form-group">
+      <label for="name">Nome</label>
+      <input type="text" id="name" name="name" required placeholder="es. deploy-on-github">
+    </div>
+    <div class="form-group">
+      <label for="expires_days">Scadenza</label>
+      <select name="expires_days">
+        <option value="30">30 giorni</option>
+        <option value="60">60 giorni</option>
+        <option value="90">90 giorni</option>
+        <option value="120" selected>120 giorni</option>
+        <option value="180">180 giorni</option>
+        <option value="365">365 giorni</option>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary">Crea token</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Token esistenti</h2>
+  <% if (!tokens || tokens.length === 0) { %>
+    <p>Nessun token creato.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Prefix</th>
+          <th>Nome</th>
+          <th>Scadenza</th>
+          <th>Ultimo uso</th>
+          <th>Stato</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <% tokens.forEach((t) => { %>
+          <tr>
+            <td class="token_prefix"><code><%= t.token_prefix %></code></td>
+            <td><%= t.name %></td>
+            <td><%= t.expires_at ? new Date(t.expires_at).toLocaleString("it-IT") : "—" %></td>
+            <td><%= t.last_used_at ? new Date(t.last_used_at).toLocaleString("it-IT") : "mai" %></td>
+            <td>
+              <% if (t.revoked_at) { %>
+                <span>revocato</span>
+              <% } else { %>
+                <span>attivo</span>
+              <% } %>
+            </td>
+            <td>
+              <% if (!t.revoked_at) { %>
+                <form method="POST" action="/admin/api-tokens/<%= t.id %>/revoke" class="inline">
+                  <button type="submit" class="btn btn-danger">Revoca</button>
+                </form>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>

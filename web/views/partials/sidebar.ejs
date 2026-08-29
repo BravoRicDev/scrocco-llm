@@ -1,0 +1,55 @@
+<%
+  const cp = (typeof currentPath !== 'undefined' && currentPath) ? currentPath : '';
+  const groups = [
+    ['Pannello', [
+      ['/', 'Dashboard'],
+      ['/deployments', 'Deployments'],
+      ['/deployments/bulk', 'Bulk'],
+      ['/probe', 'Probe'],
+      ['/profiles', 'Profili'],
+      ['/policy', 'Policy'],
+      ['/policy/keys', 'Chiavi policy'],
+      ['/capabilities', 'Capacità'],
+      ['/expiring', 'Scadenze'],
+      ['/insights', 'Insights'],
+      ['/history', 'History'],
+      ['/system', 'Sistema'],
+      ['/users', 'Utenti'],
+      ['/bootstrap', 'Bootstrap'],
+      ['/guide', 'Guide'],
+      ['/admin/api-tokens', 'API token'],
+    ]],
+    ['Osservabilità', [
+      ['/observability/live', 'Live'],
+      ['/observability/errors', 'Errori'],
+      ['/observability/leaderboard', 'Leaderboard'],
+      ['/observability/charts', 'Grafici'],
+    ]],
+    ['Strumenti', [
+      ['/playground', 'Playground'],
+      ['/csv-editor', 'CSV editor'],
+      ['/policy-raw', 'gateway.yaml'],
+      ['/config-history', 'Config history'],
+      ['/key-health', 'Key health'],
+      ['/sticky', 'Sticky'],
+      ['/alerts', 'Alerts'],
+    ]],
+    ['Agenti', [
+      ['/api/v1/docs', 'API docs'],
+      ['/agent-guide', 'Guida agente'],
+    ]],
+  ];
+  const isAdmin = (typeof user !== 'undefined' && user && user.role === 'admin');
+  if (isAdmin) groups.push(['Admin', [['/admin/audit', 'Audit']]]);
+  const active = (href) => ((href === '/' ? cp === '/' : cp.indexOf(href) === 0) ? 'active' : '');
+%>
+<h2><%= (typeof app !== 'undefined' && app && app.name) ? app.name : 'scrocco-web' %></h2>
+<%- include('search') %>
+<% groups.forEach(function(g) { %>
+  <div class="nav-group">
+    <div class="nav-group-title"><%= g[0] %></div>
+    <% g[1].forEach(function(item) { %>
+      <a href="<%= item[0] %>" data-nav-item class="<%= active(item[0]) %>"><%= item[1] %></a>
+    <% }); %>
+  </div>
+<% }); %>

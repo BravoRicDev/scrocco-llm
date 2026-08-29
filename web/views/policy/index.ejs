@@ -1,0 +1,144 @@
+<%
+function n(v, d) {
+  return v === undefined || v === null || v === "" ? (d === undefined ? "—" : d) : v;
+}
+
+function isKey(name) {
+  return /(key|token|secret|password|api[_-]?key|auth)/i.test(name);
+}
+
+function mask(v) {
+  const s = String(v ?? "");
+  if (s.length <= 10) return s;
+  return s.slice(0, 6) + "...********..." + s.slice(-4);
+}
+
+function fmt(v, name) {
+  if (v === undefined || v === null) return "—";
+  if (typeof v === "boolean") return v ? "si" : "no";
+  if (isKey(name) && !/masked/i.test(name)) return mask(v);
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function isObj(v) {
+  return v && typeof v === "object" && !Array.isArray(v);
+}
+
+function groupKeys(block) {
+  const sections = { generali: [], routing: [], timing: [], adattivo: [], health: [], qc: [], capability: [] };
+  const order = ["timing", "adattivo", "routing", "qc"];
+  const rx = {
+    generali: /^(server|host|port|debug|env|log|log_level|name|id|version|mode|profile)/i,
+    routing: /(routing|capacity|profile|prefer|primary|fallback|deploy)/i,
+    timing: /(timeout|ttl|cooldown|interval|period|retry|rate|rpm|tpm|limit|quota|window)/i,
+    adattivo: /(adattiv|adaptiv|adaptive|learn|strike|confidence|threshold|health)/i,
+    qc: /(qc|quality|routing|dedup|dedupe|validate)/i,
+  };
+  Object.entries(block || {}).forEach(([k, v]) => {
+    for (const sec of order) {
+      if (rx[sec].test(k)) { sections[sec].push([k, v]); return; }
+    }
+    if (rx.generali.test(k)) { sections.generali.push([k, v]); return; }
+    sections.generali.push([k, v]);
+  });
+  return sections;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderKV(rows) {
+  let out = '<table class="table kv-table"><tbody>';
+  rows.forEach(([k, v]) => {
+    out += '<tr><th>' + esc(k) + '</th>';
+    if (isObj(v) || Array.isArray(v)) {
+      out += '<td><pre>' + esc(JSON.stringify(v, null, 2)) + '</pre></td>';
+    } else {
+      out += '<td>' + (isKey(k) && !/masked/i.test(k) ? esc(mask(v)) : esc(fmt(v, k))) + '</td>';
+    }
+    out += '</tr>';
+  });
+  return out + '</tbody></table>';
+}
+
+function renderSection(title, rows) {
+  if (!rows || !rows.length) return "";
+  return '<details open><summary>' + esc(title) + '</summary>' + renderKV(rows) + '</details>';
+}
+
+const cfg = (policy && policy.configured) || {};
+const eff = (policy && policy.effective) || {};
+const clientList = (eff.clients && Array.isArray(eff.clients)) ? eff.clients : [];
+function clientRows(list) {
+  const rows = [];
+  (list || []).forEach((c) => {
+    if (!c || typeof c !== "object") return;
+    rows.push({ name: n(c.name), key: c.key_masked || mask(c.key) });
+  });
+  return rows;
+}
+const aliases = [];
+clientList.forEach((c) => {
+  const km = c.key_masked || mask(c.key);
+  const list = Array.isArray(c.aliases) ? c.aliases : [];
+  if (list.length) list.forEach((a) => aliases.push({ alias: a, key: km }));
+  else if (c.name) aliases.push({ alias: c.name, key: km });
+});
+%>
+<%
+const roleCanEdit = typeof user !== 'undefined' && user ? (user.role === 'admin') : false;
+%>
+<h1>Policy del gateway</h1>
+
+<div class="heading">
+  <p>Configurazione read-only della policy del gateway (file: <code><%= n(policy.file) %></code>).</p>
+  <% if (roleCanEdit) { %>
+    <a class="btn" href="/policy/edit">Modifica policy</a>
+  <% } %>
+</div>
+
+<%- renderSection("Generali — configured", groupKeys(cfg).generali) %>
+<%- renderSection("Routing — configured", groupKeys(cfg).routing) %>
+<%- renderSection("Timing — configured", groupKeys(cfg).timing) %>
+<%- renderSection("Adattivo — configured", groupKeys(cfg).adattivo) %>
+<%- renderSection("Health — configured", groupKeys(cfg).health) %>
+<%- renderSection("QC — configured", groupKeys(cfg).qc) %>
+<%- renderSection("Capability routing — configured", groupKeys(cfg).capability) %>
+
+<%- renderSection("Generali — effective", groupKeys(eff).generali) %>
+<%- renderSection("Routing — effective", groupKeys(eff).routing) %>
+<%- renderSection("Timing — effective", groupKeys(eff).timing) %>
+<%- renderSection("Adattivo — effective", groupKeys(eff).adattivo) %>
+<%- renderSection("Health — effective", groupKeys(eff).health) %>
+<%- renderSection("QC — effective", groupKeys(eff).qc) %>
+<%- renderSection("Capability routing — effective", groupKeys(eff).capability) %>
+
+<h2>Alias</h2>
+<% if (aliases.length === 0) { %>
+  <p>Nessun alias configurato.</p>
+<% } else { %>
+<table class="table">
+  <thead><tr><th>Alias</th><th>Client key</th></tr></thead>
+  <tbody>
+    <% aliases.forEach((r) => { %>
+      <tr><td><code><%= r.alias %></code></td><td><code><%= r.key %></code></td></tr>
+    <% }) %>
+  </tbody>
+</table>
+<% } %>
+
+<h2>Client keys</h2>
+<% if (clientList.length === 0) { %>
+  <p>Nessun client configurato.</p>
+<% } else { %>
+<table class="table">
+  <thead><tr><th>Profilo</th><th>Client key</th></tr></thead>
+  <tbody>
+    <% clientRows(clientList).forEach((r) => { %>
+      <tr><td><code><%= r.name %></code></td><td><code><%= r.key %></code></td></tr>
+    <% }) %>
+  </tbody>
+</table>
+<% } %>

@@ -1,0 +1,51 @@
+<h1>Grafici insights</h1>
+
+<div class="heading">
+  <p>Trend giornalieri di p95, chiamate, costo ed error rate (ultimi <%= days %> giorni).</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <form method="GET" action="<%= escapeAttr('/observability/charts') %>" class="form-inline" style="gap:12px; flex-wrap:wrap; align-items:flex-end;">
+    <div class="form-group" style="margin-bottom:0;">
+      <label for="days">Giorni</label>
+      <select id="days" name="days">
+        <% [7, 14, 30, 60, 90].forEach((d) => { %>
+          <option value="<%= d %>" <%= d === days ? "selected" : "" %>><%= d %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:0;">
+      <button type="submit" class="btn btn-primary">Applica</button>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>P95 / avg (ms)</h2>
+  <div id="chart-p95" style="width:100%;"></div>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>Chiamate</h2>
+  <div id="chart-calls" style="width:100%;"></div>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>Costo (USD)</h2>
+  <div id="chart-cost" style="width:100%;"></div>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>Error rate %</h2>
+  <p style="margin-bottom:8px;">Linea tratteggiata: soglia 20%.</p>
+  <div id="chart-err" style="width:100%;"></div>
+</div>
+
+<p id="chart-note" class="badge badge-standalone" style="display:none;"></p>
+
+<link rel="stylesheet" href="<%= escapeAttr('/vendor/uplot/uPlot.min.css') %>">
+<script src="<%= escapeAttr('/vendor/uplot/uplot.min.js') %>"></script>
+<script>
+  window.scwCharts = { days: <%= days %> };
+</script>
+<script src="<%= escapeAttr('/js/charts.js') %>"></script>

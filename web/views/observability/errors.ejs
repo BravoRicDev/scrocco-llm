@@ -1,0 +1,66 @@
+<%
+function fmtTs(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts ?? "");
+  return d.toLocaleString("it-IT");
+}
+function statusOf(e) {
+  if (e.status !== undefined && e.status !== null && e.status !== "") return e.status;
+  return e.level ? e.level : "—";
+}
+function typeOf(e) {
+  if (e.type !== undefined && e.type !== null && e.type !== "") return e.type;
+  if (e.op) return e.op;
+  return e.dep ? "deployment" : "—";
+}
+const evts = Array.isArray(events) ? events : [];
+%>
+<h1>Errori osservabilità</h1>
+
+<div class="heading">
+  <p>Ultimi errori e warning registrati dal gateway.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <div class="form-inline">
+    <div class="form-group" style="flex:1;">
+      <input type="search" id="errors-filter" placeholder="status o testo"
+        value="<%= (typeof filter !== 'undefined' && filter) ? escapeAttr(filter) : '' %>">
+    </div>
+    <div class="form-group">
+      <span class="badge" id="errors-status">auto-refresh 5s</span>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <table class="table" id="errors-table">
+    <thead>
+      <tr>
+        <th>Ora</th>
+        <th>Status</th>
+        <th>Tipo</th>
+        <th>Messaggio</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% if (evts.length === 0) { %>
+        <tr id="errors-empty"><td colspan="4">Nessun errore registrato.</td></tr>
+      <% } else { %>
+        <% evts.forEach((e) => { %>
+          <tr>
+            <td><%= fmtTs(e.ts) %></td>
+            <td><span class="badge"><%= statusOf(e) %></span></td>
+            <td><code><%= escapeAttr(typeOf(e)) %></code></td>
+            <td><%= (typeof e.msg !== 'undefined') ? e.msg : JSON.stringify(e) %></td>
+          </tr>
+        <% }) %>
+      <% } %>
+    </tbody>
+  </table>
+  <% if ((typeof up !== 'undefined') && !up) { %>
+    <p class="text-muted">Gateway non raggiungibile: dati non disponibili.</p>
+  <% } %>
+</div>
+
+<script src="/js/errors.js"></script>

@@ -1,0 +1,165 @@
+<%
+function num(v, dec) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return n.toLocaleString("it-IT", { maximumFractionDigits: dec == null ? 0 : dec });
+}
+function cost(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return "$" + n.toLocaleString("it-IT", { minimumFractionDigits: 4, maximumFractionDigits: 6 });
+}
+function pct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return (n * 100).toLocaleString("it-IT", { maximumFractionDigits: 2 }) + "%";
+}
+const s = summary || {};
+const calls24 = Number(s.calls ?? 0);
+const tokIn = (s.by_kind?.chat?.tokens_in ?? 0) + (s.by_kind?.embedding?.tokens_in ?? 0);
+const tokOut = (s.by_kind?.chat?.tokens_out ?? 0) + (s.by_kind?.embedding?.tokens_out ?? 0);
+const cost24 = Number(s.cost_usd ?? 0);
+const groupByOptions = ["model", "profile", "group", "none"];
+%>
+<h1>Insights</h1>
+
+<div class="heading">
+  <p>Statistiche read-only di utilizzo del gateway (ultime <%= days %> giorni).</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>Grafici</h2>
+  <p>Trend giornalieri di p95, chiamate, costo ed error rate.</p>
+  <a href="<%= escapeAttr('/observability/charts') %>" class="btn btn-primary">Grafici</a>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <form method="GET" action="<%= escapeAttr(path) %>" class="form-inline">
+    <div class="form-group">
+      <label for="days">Giorni</label>
+      <input type="number" id="days" name="days" min="1" max="90" value="<%= days %>">
+    </div>
+    <div class="form-group">
+      <label for="group_by">Raggruppa per</label>
+      <select id="group_by" name="group_by">
+        <% groupByOptions.forEach((g) => { %>
+          <option value="<%= g %>" <%= g === groupBy ? "selected" : "" %>><%= g %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Applica</button>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>Ultime 24h</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Chiamate</th>
+        <th>Token in</th>
+        <th>Token out</th>
+        <th>Totale token</th>
+        <th>Costo riportato</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr data-sort-key="calls">
+        <td><%= num(calls24) %></td>
+        <td><%= num(tokIn) %></td>
+        <td><%= num(tokOut) %></td>
+        <td><%= num(tokIn + tokOut) %></td>
+        <td><%= cost(cost24) %></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <h2>Dettaglio per <%= groupBy %> (<%= rows.length %>)</h2>
+  <% if (none) { %>
+    <p>Raggruppamento "none" abilitato: mostra solo il totale aggregato.</p>
+  <% } else if (rows.length === 0) { %>
+    <p>Nessun dato per il raggruppamento selezionato.</p>
+  <% } else { %>
+    <table class="table" id="insights-table">
+      <thead>
+        <tr>
+          <th data-key="key">Chiave</th>
+          <th data-key="calls" class="sortable">Calls</th>
+          <th data-key="prompt_tokens" class="sortable">Prompt</th>
+          <th data-key="completion_tokens" class="sortable">Compl</th>
+          <th data-key="total_tokens" class="sortable">Tot token</th>
+          <th data-key="cost_usd" class="sortable">Costo rep</th>
+          <th data-key="cost_est" class="sortable">Costo est</th>
+          <th data-key="avg_dur_ms" class="sortable">Avg ms</th>
+          <th data-key="fb_rate" class="sortable">FB%</th>
+          <th data-key="qc_rate" class="sortable">QC%</th>
+          <th data-key="wd_rate" class="sortable">WD%</th>
+          <th data-key="bad_rate" class="sortable">Bad%</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% rows.forEach((r) => { %>
+          <tr>
+            <td><%= r.key %></td>
+            <td><%= num(r.calls) %></td>
+            <td><%= num(r.prompt_tokens) %></td>
+            <td><%= num(r.completion_tokens) %></td>
+            <td><%= num(r.total_tokens) %></td>
+            <td><%= cost(r.cost_usd) %></td>
+            <td><%= cost(r.cost_est) %></td>
+            <td><%= num(r.avg_dur_ms, 0) %></td>
+            <td><%= pct(r.fb_rate) %></td>
+            <td><%= pct(r.qc_rate) %></td>
+            <td><%= pct(r.wd_rate) %></td>
+            <td><%= pct(r.bad_rate) %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<script>
+(function () {
+  var table = document.getElementById("insights-table");
+  if (!table) return;
+  var headers = table.querySelectorAll("thead th.sortable");
+  headers.forEach(function (th) {
+    th.addEventListener("click", function () {
+      var key = th.getAttribute("data-key");
+      var tbody = table.tBodies[0];
+      var rows = Array.prototype.slice.call(tbody.rows);
+      var dir = th.getAttribute("data-dir") === "asc" ? -1 : 1;
+      rows.sort(function (a, b) {
+        var av = a.cells[a.cells.length - 1];
+        var bv = b.cells[b.cells.length - 1];
+        var cmp;
+        if (key === "key") {
+          cmp = a.cells[0].textContent.localeCompare(b.cells[0].textContent, "it");
+        } else {
+          var ai = a.cells[getColIndex(key)];
+          var bi = b.cells[getColIndex(key)];
+          var an = parseFloat(ai.textContent.replace(/[^\d.\-]/g, "")) || 0;
+          var bn = parseFloat(bi.textContent.replace(/[^\d.\-]/g, "")) || 0;
+          cmp = an - bn;
+        }
+        return cmp * dir;
+      });
+      rows.forEach(function (r) { tbody.appendChild(r); });
+      headers.forEach(function (h) { h.removeAttribute("data-dir"); });
+      th.setAttribute("data-dir", dir === 1 ? "asc" : "desc");
+    });
+  });
+  function getColIndex(key) {
+    var ths = table.querySelectorAll("thead th");
+    for (var i = 0; i < ths.length; i++) {
+      if (ths[i].getAttribute("data-key") === key) return i;
+    }
+    return 0;
+  }
+})();
+</script>

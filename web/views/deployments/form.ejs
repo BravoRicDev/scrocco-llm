@@ -1,0 +1,98 @@
+<%
+const isEdit = !!deployment;
+const d = deployment || {};
+function v(name) {
+  return d[name] !== undefined && d[name] !== null ? d[name] : "";
+}
+%>
+<h1><%= isEdit ? "Modifica deployment" : "Nuovo deployment" %></h1>
+
+<div class="heading">
+  <p><%= isEdit ? "Modifica la configurazione del deployment." : "Crea un nuovo deployment nel gateway." %></p>
+</div>
+
+<div class="card" style="max-width:720px;">
+  <form method="POST" action="<%= escapeAttr(isEdit ? "/deployments/" + d.id + "/edit" : "/deployments") %>">
+    <% if (!isEdit) { %>
+      <input type="hidden" name="_method" value="POST">
+    <% } %>
+
+    <div class="form-group">
+      <label for="profile">Profilo *</label>
+      <select id="profile" name="profile" <%= isEdit ? "" : "required" %>>
+        <option value="">— seleziona —</option>
+        <% profiles.forEach((p) => { %>
+          <option value="<%= escapeAttr(p.name) %>" <%= String(v("profile")) === p.name ? "selected" : "" %>><%= p.name %></option>
+        <% }) %>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="modello">Modello *</label>
+      <input type="text" id="modello" name="modello" value="<%= escapeAttr(v("modello")) %>" placeholder="es. gpt-4o" <%= isEdit ? "" : "required" %>>
+    </div>
+
+    <div class="form-group">
+      <label for="provider">Provider</label>
+      <input type="text" id="provider" name="provider" value="<%= escapeAttr(v("provider")) %>" placeholder="openai, anthropic, mistral…">
+    </div>
+
+    <div class="form-group">
+      <label for="endpoint">Endpoint *</label>
+      <input type="text" id="endpoint" name="endpoint" value="<%= escapeAttr(v("endpoint")) %>" placeholder="https://…" <%= isEdit ? "" : "required" %>>
+    </div>
+
+    <div class="form-group">
+      <label for="data">Data (categoria) *</label>
+      <select id="data" name="data" <%= isEdit ? "" : "required" %>>
+        <option value="">— seleziona —</option>
+        <% ["free", "credit", "paid"].forEach((cat) => { %>
+          <option value="<%= cat %>" <%= String(v("data")).toLowerCase() === cat ? "selected" : "" %>><%= cat %></option>
+        <% }) %>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="key">Chiave API <%= isEdit ? "(opzionale)" : "*" %></label>
+      <input type="password" id="key" name="key" value="" autocomplete="new-password" placeholder="<%= isEdit ? "lascia vuota per non ruotare" : "sk-…" %>" <%= isEdit ? "" : "required" %>>
+      <% if (isEdit) { %>
+        <small>
+          <span class="badge badge-wrapped">lascia key vuota per non ruotare</span>
+          chiave attuale: <code><%= v("key_masked") %></code>
+        </small>
+      <% } %>
+    </div>
+
+    <div class="form-group">
+      <label for="commento">Commento</label>
+      <input type="text" id="commento" name="commento" value="<%= escapeAttr(v("commento")) %>">
+    </div>
+
+    <div class="form-group">
+      <label for="context">Context (k)</label>
+      <input type="number" id="context" name="context" value="<%= escapeAttr(v("context_k")) %>" min="0" step="1">
+      <small>lascia vuoto per il default del gateway.</small>
+    </div>
+
+    <div class="form-group">
+      <label for="priority">Priorità</label>
+      <input type="number" id="priority" name="priority" value="<%= escapeAttr(v("priority")) %>" step="1">
+    </div>
+
+    <div class="form-group">
+      <label for="caps">Capabilities</label>
+      <input type="text" id="caps" name="caps" value="<%= escapeAttr((v("caps") || []).join(", ")) %>" placeholder="text, vision… (separate da virgola)">
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary"><%= isEdit ? "Salva modifiche" : "Crea deployment" %></button>
+      <a href="/deployments" class="btn">Annulla</a>
+    </div>
+  </form>
+  <% if (isEdit) { %>
+    <form method="POST" action="<%= escapeAttr("/deployments/" + d.id + "/delete") %>" id="delete-form" style="margin-top:12px;">
+      <button type="button" class="btn btn-danger" data-destruct
+        onclick="scw.confirmForm('#delete-form', 'Eliminare definitivamente questo deployment?')">Elimina</button>
+    </form>
+  <% } %>
+</div>

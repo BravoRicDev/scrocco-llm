@@ -1,0 +1,201 @@
+<%
+function sevBadge(s) {
+  const v = String(s || "").toLowerCase();
+  if (v === "critical" || v === "fatal" || v === "error") return "badge-disabled";
+  if (v === "warning" || v === "warn") return "badge-standalone";
+  return "badge-wrapped";
+}
+const st = status || {};
+const issues = Array.isArray(st.issues) ? st.issues : [];
+const legacyGaps = Array.isArray(st.gaps) ? st.gaps : [];
+const actions = Array.isArray(st.actions) ? st.actions : [];
+const coverage = Array.isArray(st.cap_coverage) ? st.cap_coverage : [];
+const covCols = coverage.length ? Object.keys(coverage[0]).filter((k) => k !== "items") : [];
+const pr = providers || {};
+const provs = Array.isArray(pr.providers) ? pr.providers : [];
+const cats = Array.isArray(pr.data_categories) ? pr.data_categories : [];
+const rawPlaybook = (playbook && typeof playbook === "object" && !Array.isArray(playbook) && Array.isArray(playbook.playbook)) ? playbook.playbook : playbook;
+const isMarkdown = typeof rawPlaybook === "string";
+const steps = Array.isArray(rawPlaybook) ? rawPlaybook : [];
+const hasApiIssues = issues.length > 0;
+const hasLegacyGaps = legacyGaps.length > 0;
+%>
+<h1>Bootstrap</h1>
+
+<div class="heading">
+  <p>Playbook di avvio, gap-analysis live e registry dei provider configurati nel gateway.</p>
+</div>
+
+<details open class="card" style="max-width:100%;">
+  <summary><strong>Status / Gap</strong></summary>
+
+  <% if (st.ok !== undefined) { %>
+    <p>
+      Stato:
+      <% if (st.ok) { %><span class="badge badge-active">OK</span><% } else { %><span class="badge badge-disabled">GAP</span><% } %>
+      <% if (st.profiles) { %><span class="muted">— profili: <%= Array.isArray(st.profiles) ? st.profiles.length : st.profiles %></span><% } %>
+      <% if (st.deployments) { %><span class="muted">— deployment: <%= Array.isArray(st.deployments) ? st.deployments.length : st.deployments %></span><% } %>
+    </p>
+  <% } %>
+
+  <% if (errors.status) { %>
+    <div class="alert alert-danger">Errore parziale (status): <%= errors.status %></div>
+  <% } %>
+
+  <% if (!hasApiIssues && !hasLegacyGaps) { %>
+    <% if (!errors.status) { %>
+      <p>Nessuna gap rilevata.</p>
+    <% } %>
+  <% } else { %>
+    <ul class="list">
+      <% issues.forEach((iss) => { %>
+        <li style="margin-bottom:8px;">
+          <span class="badge <%= sevBadge(iss.severity) %>"><%= iss.severity || "info" %></span>
+          <code><%= iss.code %></code> — <%= iss.detail %>
+          <% if (iss.count) { %><span class="muted">(x<%= iss.count %>)</span><% } %>
+          <% if (Array.isArray(iss.items) && iss.items.length) { %>
+            <ul class="muted" style="margin-top:4px;">
+              <% iss.items.forEach((it) => { %>
+                <li>
+                  <%= it.id || it.name || it.key %>
+                  <% if (it.dead_since_days != null) { %><span class="muted">— ferma da <%= it.dead_since_days %>gg</span><% } %>
+                  <% if (it.last_reason) { %><span class="muted">(<%= it.last_reason %>)</span><% } %>
+                </li>
+              <% }) %>
+            </ul>
+          <% } %>
+        </li>
+      <% }) %>
+      <% legacyGaps.forEach((g) => { %>
+        <li style="margin-bottom:8px;">
+          <span class="badge badge-standalone">gap</span>
+          <code><%= g.key %></code> — <%= g.label %>
+        </li>
+      <% }) %>
+    </ul>
+  <% } %>
+
+  <% if (actions.length) { %>
+    <h3>Azioni consigliate</h3>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Azione</th>
+          <th>Endpoint</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% actions.forEach((a) => { %>
+          <tr>
+            <td><%= a.do %></td>
+            <td><code><%= a.endpoint %></code></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+
+  <% if (coverage.length) { %>
+    <h3>Copertura capability</h3>
+    <table class="table">
+      <thead>
+        <tr>
+          <% covCols.forEach((col) => { %>
+            <th><%= col %></th>
+          <% }) %>
+        </tr>
+      </thead>
+      <tbody>
+        <% coverage.forEach((row) => { %>
+          <tr>
+            <% covCols.forEach((col) => { %>
+              <td><%= row[col] %></td>
+            <% }) %>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+
+  <% if (st.next) { %>
+    <p class="muted">Prossimo passo: <%= st.next %></p>
+  <% } %>
+</details>
+
+<details class="card" style="max-width:100%;">
+  <summary><strong>Playbook</strong></summary>
+
+  <% if (errors.playbook) { %>
+    <div class="alert alert-danger">Errore parziale (playbook): <%= errors.playbook %></div>
+  <% } else if (isMarkdown) { %>
+    <pre style="max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--bg-soft);padding:1rem;border-radius:6px;"><%= playbook %></pre>
+  <% } else if (steps.length) { %>
+    <ol class="list">
+      <% steps.forEach((s) => { %>
+        <li style="margin-bottom:6px;">
+          <% if (s.done) { %><span class="badge badge-active">done</span><% } else { %><span class="badge badge-standalone">todo</span><% } %>
+          <%= s.title %>
+        </li>
+      <% }) %>
+    </ol>
+  <% } else { %>
+    <p>Playbook non ancora disponibile.</p>
+  <% } %>
+
+  <% if (playbook && typeof playbook === "object" && !Array.isArray(playbook) && playbook.status) { %>
+    <p class="muted">Stato bootstrap: <code><%= playbook.status %></code></p>
+  <% } %>
+</details>
+
+<details class="card" style="max-width:100%;">
+  <summary><strong>Providers</strong></summary>
+
+  <% if (errors.providers) { %>
+    <div class="alert alert-danger">Errore parziale (providers): <%= errors.providers %></div>
+  <% } else { %>
+    <% if (pr.disclaimer) { %>
+      <div class="alert alert-info"><%= pr.disclaimer %></div>
+    <% } %>
+
+    <% if (cats.length) { %>
+      <h3>Categorie dati</h3>
+      <p>
+        <% cats.forEach((c) => { %>
+          <span class="badge badge-wrapped"><%= typeof c === "object" ? (c.name || c.key || c) : c %></span>
+        <% }) %>
+      </p>
+    <% } %>
+
+    <% if (provs.length) { %>
+      <h3>Registry provider</h3>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Base URL</th>
+            <th>Env key</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% provs.forEach((p) => { %>
+            <tr>
+              <td><%= p.name %></td>
+              <td><code><%= p.base_url %></code></td>
+              <td><code><%= p.env_key %></code></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    <% } %>
+
+    <% if (!provs.length && !cats.length && !pr.disclaimer) { %>
+      <p>Nessun provider configurato.</p>
+    <% } %>
+
+    <% if (Array.isArray(pr.research_hints) && pr.research_hints.length) { %>
+      <p class="muted">Note: <%= pr.research_hints.join("; ") %></p>
+    <% } %>
+  <% } %>
+</details>
+
+<p class="muted">Fonti: <code>/bootstrap</code>, <code>/bootstrap/status</code>, <code>/bootstrap/providers</code> del gateway. Dati aggiornati a ogni reload.</p>

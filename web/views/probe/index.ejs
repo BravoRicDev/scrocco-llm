@@ -1,0 +1,124 @@
+<%
+function statusBadge(r) {
+  if (!r) return '<span class="badge badge-standalone">—</span>';
+  if (r.cached === true) return '<span class="badge badge-wrapped">cached</span>';
+  if (r.ok === true) return '<span class="badge badge-active">ok</span>';
+  if (r.ok === false) return '<span class="badge badge-disabled">ko</span>';
+  return '<span class="badge badge-standalone">?</span>';
+}
+function lat(r) {
+  if (!r || r.latency_ms === undefined || r.latency_ms === null) return "—";
+  return r.latency_ms + " ms";
+}
+function errCls(r) {
+  return r && r.error_class ? r.error_class : "—";
+}
+%>
+<h1>Probe chiavi</h1>
+
+<div class="heading">
+  <p>Valida le chiavi dei deployment contro il gateway: <strong>cached</strong> non brucia quota, <strong>force</strong> sì.</p>
+</div>
+
+<div class="alert alert-info">⚠ probe = consumo quota sui free-tier: usa cached</div>
+
+<h2>Deployments</h2>
+<% if (!deployments || deployments.length === 0) { %>
+  <p>Nessun deployment.</p>
+<% } else { %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Modello</th>
+        <th>Provider</th>
+        <th>Endpoint</th>
+        <th>Chiave</th>
+        <th>Gruppo</th>
+        <th>Probe</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% deployments.forEach((d) => { %>
+        <tr>
+          <td><code><%= d.id %></code></td>
+          <td><%= d.modello %></td>
+          <td><%= d.provider %></td>
+          <td><%= d.endpoint %></td>
+          <td><code><%= d.key_masked %></code></td>
+          <td><%= d.group %></td>
+          <td>
+            <form method="POST" action="<%= escapeAttr("/probe/" + encodeURIComponent(d.id)) %>" class="form-inline">
+              <label><input type="checkbox" name="force" value="true"> force</label>
+              <button type="submit" class="btn btn-sm">Probe</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+<% } %>
+
+<h2>Probe bulk</h2>
+<div class="card" style="max-width:100%;">
+  <form method="POST" action="<%= escapeAttr("/probe/bulk") %>" class="form-inline" id="probe-bulk-form">
+    <div class="form-group">
+      <label for="filter">Filtro</label>
+      <select id="filter" name="filter">
+        <option value="all" <%= filter === "all" ? "selected" : "" %>>Tutti</option>
+        <option value="cap:vision" <%= filter === "cap:vision" ? "selected" : "" %>>cap:vision</option>
+        <% profiles.forEach((p) => { %>
+          <option value="<%= escapeAttr(p.name) %>" <%= filter === p.name ? "selected" : "" %>><%= p.name %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="form-group">
+      <label><input type="checkbox" id="bulk-force" name="force" value="true" <%= force ? "checked" : "" %>> force (brucia quota)</label>
+    </div>
+    <div class="form-group">
+      <button type="submit" class="btn btn-primary">Probe tutti (cached)</button>
+      <button type="submit" class="btn btn-danger" id="probe-bulk-force">Probe tutti (FORCE)</button>
+    </div>
+  </form>
+</div>
+
+<h2>Risultati</h2>
+<% if (!probeResult && results === null) { %>
+  <p>Nessun probe eseguito in questa sessione.</p>
+<% } else { %>
+  <% if (results !== null) { %>
+    <p>Probe bulk su <strong><%= filter %></strong>: <%= results.length %> esiti (<%= force ? "force" : "cached" %>).</p>
+  <% } %>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Unique</th>
+        <th>Esito</th>
+        <th>Latency</th>
+        <th>Error class</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% if (probeResult) { %>
+        <tr>
+          <td><code><%= probeResult.unique || probeResult.id || "—" %></code></td>
+          <td><%- statusBadge(probeResult) %></td>
+          <td><%= lat(probeResult) %></td>
+          <td><%= errCls(probeResult) %></td>
+        </tr>
+      <% } %>
+      <% if (results !== null) { %>
+        <% results.forEach((r) => { %>
+          <tr>
+            <td><code><%= r.unique || "—" %></code></td>
+            <td><%- statusBadge(r) %></td>
+            <td><%= lat(r) %></td>
+            <td><%= errCls(r) %></td>
+          </tr>
+        <% }) %>
+      <% } %>
+    </tbody>
+  </table>
+<% } %>
+
+<script src="/js/probe.js"></script>

@@ -1,0 +1,123 @@
+# scrocco-llm · runtime containerizzato
+#
+# - var/ è BIND MOUNTATA: le credenziali (keys_rotation.csv) e la policy
+#   (gateway.yaml) restano file dell'HOST; l'admin API del container le
+#   modifica con rename atomico DENTRO il mount -> l'host vede tutto.
+# - I segreti arrivano da .env.gateway (env_file): MAI nell'immagine.
+services:
+  scrocco-llm:
+    build:
+      context: .
+      args:
+        UID: 1001          # allinea al tuo utente host (id -u) per i permessi di var/
+        GID: 1001
+    image: scrocco-llm:latest
+    container_name: scrocco-llm
+    env_file: .env.gateway
+    environment:
+      GATEWAY_HOST: 0.0.0.0        # dentro la rete docker; fuori solo via bind port
+      GATEWAY_WATCH_SECONDS: "5"
+    ports:
+      - "127.0.0.1:4001:4001"      # loopback host-only, come systemd faceva
+    volumes:
+      - ./var:/app/var
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    depends_on:
+      speaches:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------- STT locale
+  # Speaches (ex faster-whisper-server): API OpenAI-compatible per
+  # /v1/audio/transcriptions e /v1/audio/translations.
+  # Il gateway lo raggiunge come http://speaches:8000/v1 (rete compose interna).
+  # Modello "base" pre-caricato allo startup e mai scaricato (stt_model_ttl=-1).
+  # Altri modelli whisper vengono caricati ON-DEMAND se richiesti nel payload.
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: speaches
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      LOG_LEVEL: info
+      ENABLE_UI: "false"           # niente gradio: solo API
+      STT_MODEL_TTL: "-1"          # il modello resta caricato (prima risposta veloce)
+      PRELOAD_MODELS: '["Systran/faster-whisper-base"]'
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+    ports:
+      - "127.0.0.1:8009:8000"      # debug diretto dal host (loopback-only)
+    volumes:
+      - speaches_models:/root/.cache/huggingface   # cache modelli persistente
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;r=urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5);raise SystemExit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s            # tempo di download/avvio modello al primo giro
+      retries: 3
+
+  # Scarica i modelli STT/TTS allo startup se non c'è già nel volume (idempotente).
+  # NOTA: l'env PRELOAD_MODELS di questa versione immagine non è affidabile ->
+  # usiamo l'API di gestione modelli del server (POST /v1/models/{model_id}).
+  speaches-init:
+    image: curlimages/curl:8.10.1
+    container_name: speaches-init
+    depends_on:
+      speaches:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - 'curl -sfb 300 -X POST http://speaches:8000/v1/models/Systran/faster-whisper-base && echo " [init] whisper-base ok"; curl -sfb 300 -X POST http://speaches:8000/v1/models/speaches-ai/piper-it_IT-paola-medium && echo " [init] piper-it-paola ok"'
+
+  # ---------------------------------------------------------------- WEB UI
+  # Pannello admin Node/Express (sorgente in web/): consolidato nel repo
+  # scrocco-llm (prima viveva nel repo esterno scrocco-web).
+  scrocco-web:
+    build:
+      context: ./web
+    container_name: scrocco-web
+    restart: unless-stopped
+    env_file: web/.env
+    cap_add:
+      - NET_BIND_SERVICE          # node (non-root) puo' bindare la :80
+    # Pubblicato sul bridge wireguard-ui (172.20.0.1) alla porta 9120.
+    # wg-easy fa DNAT: http://10.9.0.111/ (dentro la VPN) -> 172.20.0.1:9120.
+    ports:
+      - "172.20.0.1:9120:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Postgres del pannello web. Volume EXTERNAL: riusa scrocco-web_pgdata
+  # (il DB esistente del deploy precedente) per non perdere dati.
+  db:
+    image: postgres:16-alpine
+    container_name: scrocco-web-db
+    restart: unless-stopped
+    volumes:
+      - scrocco-web_pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-scrocco_web}
+      POSTGRES_USER: ${POSTGRES_USER:-scwebuser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scwebuser} -d ${POSTGRES_DB:-scrocco_web}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  speaches_models:
+  scrocco-web_pgdata:
+    external: true

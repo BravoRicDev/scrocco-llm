@@ -1,0 +1,51 @@
+<h1>Live calls</h1>
+
+<div class="heading">
+  <p>Streaming delle chiamate al gateway in tempo reale.</p>
+</div>
+
+<div class="card" style="max-width:100%;">
+  <div class="form-inline" style="gap:12px; flex-wrap:wrap;">
+    <span class="badge badge-active" id="live-status">live</span>
+    <button type="button" class="btn btn-danger" id="live-pause">Pausa</button>
+  </div>
+</div>
+
+<div class="alert alert-warning" id="live-banner" style="display:none;">Gateway non raggiungibile: riprovo...</div>
+
+<div class="card" style="max-width:100%;">
+  <form onsubmit="return false;" class="form-inline">
+    <div class="form-group">
+      <label for="live-tag">Tag</label>
+      <select id="live-tag" name="tag">
+        <option value="summary">summary</option>
+        <option value="route">route</option>
+        <option value="identity">identity</option>
+        <option value="fallback">fallback</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="live-since">Min since</label>
+      <input type="text" id="live-since" name="since" placeholder="ISO ts">
+    </div>
+    <button type="button" class="btn btn-primary" id="live-reload">Carica</button>
+  </form>
+</div>
+
+<table class="table" id="live">
+  <thead>
+    <tr>
+      <th>Ts</th>
+      <th>Gruppo</th>
+      <th>Deployment</th>
+      <th>Modello</th>
+      <th>Tries</th>
+      <th>FB</th>
+      <th>ms</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script src="/js/live.js"></script>

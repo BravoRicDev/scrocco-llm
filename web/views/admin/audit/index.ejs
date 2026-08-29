@@ -1,0 +1,30 @@
+<h1>Audit log</h1>
+<div class="heading">
+  <p>Ultime 200 mutazioni registrate dal pannello (sola lettura, admin).</p>
+</div>
+
+<div class="card" style="max-width:100%;overflow-x:auto;">
+  <% if (!rows || !rows.length) { %>
+    <p class="muted">Nessuna riga.</p>
+  <% } else { %>
+  <table class="table">
+    <thead>
+      <tr><th>Data</th><th>Utente</th><th>Op</th><th>Target</th><th>Metodo</th><th>Gateway path</th><th>IP</th><th>Dettagli</th></tr>
+    </thead>
+    <tbody>
+      <% rows.forEach(function(r){ %>
+        <tr>
+          <td><%= new Date(r.created_at).toLocaleString("it-IT") %></td>
+          <td><%= r.actor_email || ("#" + (r.user_id || "?")) %></td>
+          <td><code><%= r.op %></code></td>
+          <td><%= r.target || "" %></td>
+          <td><%= r.route_method || "" %></td>
+          <td><%= r.gateway_path || "" %></td>
+          <td><%= r.ip || "" %></td>
+          <td><code><%= (r.detail ? JSON.stringify(r.detail) : "").slice(0, 300) %></code></td>
+        </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+</div>

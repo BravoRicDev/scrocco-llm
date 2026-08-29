@@ -1,0 +1,117 @@
+<%
+function n(v, d) {
+  return v === undefined || v === null || v === "" ? (d === undefined ? "—" : d) : v;
+}
+
+function humanizeSec(totalSec) {
+  const s = Math.max(0, Math.floor(totalSec || 0));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
+
+function remainingSec(c) {
+  if (typeof c.remaining_sec === "number") return c.remaining_sec;
+  if (c.until) {
+    const ms = new Date(c.until).getTime() - Date.now();
+    if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
+  }
+  return null;
+}
+
+const cdList = Array.isArray(cooldowns) ? cooldowns : [];
+const sessList = Array.isArray(sessions) ? sessions : [];
+%>
+<h1>Azioni di sistema</h1>
+
+<div class="heading">
+  <p>Operazioni di controllo a caldo sul gateway: cooldown, sticky session, reload configurazione e riattivazione deployment.</p>
+</div>
+
+<h2>Cooldown</h2>
+<div class="card" style="max-width:100%;">
+  <% if (cdList.length === 0) { %>
+    <p>Nessun cooldown attivo.</p>
+  <% } else { %>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Deployment</th>
+          <th>Rimanente</th>
+          <th>Attempts</th>
+          <th>Motivo</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <% cdList.forEach((c) => { %>
+          <tr>
+            <td><code><%= n(c.unique) %></code></td>
+            <td><%= remainingSec(c) === null ? n(c.until) : humanizeSec(remainingSec(c)) %></td>
+            <td><%= n(c.attempts) %></td>
+            <td><%= n(c.reason) %></td>
+            <td class="text-right">
+              <form method="POST" action="/system/cooldowns/clear" style="display:inline;" data-destruct data-confirm="Sbloccare questo cooldown?">
+                <input type="hidden" name="unique" value="<%= escapeAttr(c.unique) %>">
+                <button type="submit" class="btn btn-danger btn-sm">Sblocca</button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+  <div class="x-actions" style="margin-top:1rem;">
+    <form method="POST" action="/system/cooldowns/clear" data-destruct data-confirm="Sbloccare TUTTI i cooldown attivi?">
+      <button type="submit" class="btn btn-danger">Sblocca tutti</button>
+    </form>
+  </div>
+</div>
+
+<h2>Sticky session</h2>
+<div class="card" style="max-width:100%;">
+  <% if (sessList.length === 0) { %>
+    <p>Nessuna sticky session attiva.</p>
+  <% } else { %>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Session ID</th>
+          <th>Gruppo</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <% sessList.forEach((s) => { %>
+          <tr>
+            <td><code><%= n(s.session_id) %></code></td>
+            <td><%= n(s.group ?? s.unique) %></td>
+            <td class="text-right">
+              <form method="POST" action="/system/sessions/release" style="display:inline;" data-destruct data-confirm="Rilasciare questa sticky session?">
+                <input type="hidden" name="session_id" value="<%= escapeAttr(s.session_id) %>">
+                <button type="submit" class="btn btn-danger btn-sm">Release</button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+  <div class="x-actions" style="margin-top:1rem;">
+    <form method="POST" action="/system/sessions/release" data-destruct data-confirm="Rilasciare TUTTE le sticky session?">
+      <button type="submit" class="btn btn-danger">Release tutti</button>
+    </form>
+  </div>
+</div>
+
+<h2>Azioni</h2>
+<div class="card" style="max-width:100%;">
+  <p>Ricarica la configurazione del gateway senza riavviare il processo.</p>
+  <form method="POST" action="/system/reload" data-confirm="Ricaricare la configurazione del gateway?">
+    <button type="submit" class="btn">Reload config</button>
+  </form>
+</div>
+
+<script src="/js/system-actions.js"></script>

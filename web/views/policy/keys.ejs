@@ -1,0 +1,119 @@
+<%
+const aliasEntries = Object.entries(aliases || {});
+const aliasKeyEntries = Object.entries(aliasKeysMasked || {});
+const clientKeyEntries = Object.entries(clientKeysMasked || {});
+%>
+<h1>Alias e client keys</h1>
+
+<div class="heading">
+  <p>Gestione alias (alias → modello), alias keys e client keys. Le chiavi sono sempre mascherate e ogni modifica imposta una nuova chiave.</p>
+</div>
+
+<section class="card">
+  <h2>Alias</h2>
+  <% if (aliasEntries.length === 0) { %>
+    <p>Nessun alias configurato.</p>
+  <% } else { %>
+    <table class="table" id="scw-aliases-table">
+      <thead>
+        <tr><th>Alias</th><th>Modello</th><th></th></tr>
+      </thead>
+      <tbody>
+        <% aliasEntries.forEach(([alias, modello]) => { %>
+          <tr data-alias="<%= escapeAttr(alias) %>" data-modello="<%= escapeAttr(modello) %>">
+            <td><code><%= alias %></code></td>
+            <td><%= modello %></td>
+            <td class="text-right">
+              <button type="button" class="btn btn-danger btn-sm scw-delete" data-kind="aliases" data-name="<%= escapeAttr(alias) %>">Elimina</button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+  <form class="scw-keys-form" data-kind="aliases" data-table="scw-aliases-table">
+    <div class="form-group">
+      <label for="scw-alias-name">Alias</label>
+      <input type="text" id="scw-alias-name" name="alias" placeholder="es. cam" required>
+    </div>
+    <div class="form-group">
+      <label for="scw-alias-model">Modello</label>
+      <input type="text" id="scw-alias-model" name="modello" placeholder="es. gpt-5" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Aggiungi / aggiorna alias</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Alias keys</h2>
+  <% if (aliasKeyEntries.length === 0) { %>
+    <p>Nessuna alias key configurata.</p>
+  <% } else { %>
+    <table class="table" id="scw-alias-keys-table">
+      <thead>
+        <tr><th>Alias</th><th>Key (mascherata)</th><th></th></tr>
+      </thead>
+      <tbody>
+        <% aliasKeyEntries.forEach(([alias, masked]) => { %>
+          <tr>
+            <td><code><%= alias %></code></td>
+            <td><code><%= masked %></code></td>
+            <td class="text-right">
+              <button type="button" class="btn btn-danger btn-sm scw-delete" data-kind="alias_key" data-name="<%= escapeAttr(alias) %>">Elimina</button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+  <form class="scw-keys-form" data-kind="alias_key">
+    <div class="form-group">
+      <label for="scw-aliaskey-alias">Alias</label>
+      <input type="text" id="scw-aliaskey-alias" name="alias" placeholder="es. cam" required>
+    </div>
+    <div class="form-group">
+      <label for="scw-aliaskey-key">Nuova / sostituisci key</label>
+      <input type="password" id="scw-aliaskey-key" name="key" placeholder="sk-…" autocomplete="new-password" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Imposta key</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Client keys</h2>
+  <% if (clientKeyEntries.length === 0) { %>
+    <p>Nessuna client key configurata.</p>
+  <% } else { %>
+    <table class="table" id="scw-client-keys-table">
+      <thead>
+        <tr><th>Profilo</th><th>Key (mascherata)</th><th></th></tr>
+      </thead>
+      <tbody>
+        <% clientKeyEntries.forEach(([profile, masked]) => { %>
+          <tr>
+            <td><code><%= profile %></code></td>
+            <td><code><%= masked %></code></td>
+            <td class="text-right">
+              <button type="button" class="btn btn-danger btn-sm scw-delete" data-kind="client_key" data-name="<%= escapeAttr(profile) %>">Elimina</button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+  <form class="scw-keys-form" data-kind="client_key">
+    <div class="form-group">
+      <label for="scw-clientkey-profile">Profilo</label>
+      <input type="text" id="scw-clientkey-profile" name="profile" placeholder="es. client-01" required>
+    </div>
+    <div class="form-group">
+      <label for="scw-clientkey-key">Nuova key</label>
+      <input type="password" id="scw-clientkey-key" name="key" placeholder="sk-…" autocomplete="new-password" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Imposta key</button>
+  </form>
+</section>
+
+<div id="scw-keys-flash" class="alert" style="display:none"></div>
+
+<script src="/js/policy-keys.js"></script>
