@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from collections import defaultdict
 
 log = logging.getLogger("nx.health")

@@ -271,9 +271,13 @@ class Router:
         seconds = max(1.0, float(seconds))
         self._cooldown[unique] = time.time() + seconds
         self._cooldown_since[unique] = time.time()
-        log.warning("[cooldown] %s inattivo per %ds (streak=%d, "
+        esc = ""
+        if seconds is not None and s.fail_streak > 1 \
+                and getattr(pol, "cooldown_mode", "linear") == "exponential":
+            esc = " escalation"
+        log.warning("[cooldown] %s inattivo per %ds%s (streak=%d, "
                     "fail_24h=%d)",
-                    unique, int(seconds), s.fail_streak, s.fail_count_24h)
+                    unique, int(seconds), esc, s.fail_streak, s.fail_count_24h)
         return seconds
 
     def mark_failed_double_residual(self, unique: str,
@@ -1257,6 +1261,8 @@ class Router:
         now = time.time()
         cooled = []
         for u in ladder:
+            if u == failed_unique:
+                continue
             if tried and u in tried:
                 continue
             if not self.is_cooled_down(u):

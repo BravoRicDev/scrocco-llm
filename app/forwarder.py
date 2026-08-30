@@ -282,11 +282,22 @@ def _retry_after_from(resp: httpx.Response, body: str | None) -> float | None:
     m = _RETRY_BODY_RE.search(body)
     if not m:
         return None
-    val = next((g for g in m.groups() if g), None)
-    try:
-        return max(1.0, min(float(val), _RETRY_BODY_CAP_S))
-    except (TypeError, ValueError):
-        return None
+    # I tre gruppi di cattura nell'ordine:
+    # 1) "retryDelay": "58s"               -> gruppo 1: (\d+(?:\.\d+)?)
+    # 2) {"seconds": 58}                   -> gruppo 2: (\d+)
+    # 3) "retry in 58.9s"                  -> gruppo 3: (\d+(?:\.\d+)?)
+    # Preferiamo il formato oggetto {"seconds": N} poiche' e' piu' strutturato,
+    # poi il formato stringa "retryDelay": "Ns", infine il formato testuale "retry in Ns".
+    groups = m.groups()
+    # Cerca il gruppo 2 (formato oggetto) per primo, poi gruppo 1 (stringa), poi gruppo 3 (testo)
+    for g in (groups[1], groups[0], groups[2]):
+        if g is not None:
+            try:
+                val = float(g)
+                return max(1.0, min(val, _RETRY_BODY_CAP_S))
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 # marker tipici di rifiuto MODALITÀ nei 400 provider-side (auto-learn caps)

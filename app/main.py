@@ -997,7 +997,8 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
     # FIX: cap difensivo anti-memoria. In condizioni normali si esce dopo
     # min_chars (40 char): il cap scatta SOLO su upstream patologici che
     # floodano stream reasoning-only senza contenuto di risposta.
-    MAX_PEEK_BUFFER_BYTES = 2 * 1024 * 1024      # 2MB prima di ruotare
+    # Valore predefinito generoso: 10MB, sovrapponibile da policy o chiamante.
+    MAX_PEEK_BUFFER_BYTES = 10 * 1024 * 1024  # 10MB prima di ruotare
 
     def _eof():
         # fine stream senza risposta.

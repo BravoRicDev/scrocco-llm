@@ -96,9 +96,14 @@ def test_defer_info_first_then_debug(router, caplog):
 
 def test_cooldown_escalation_visible(router, caplog):
     caplog.set_level(logging.WARNING, logger="nx.router")
+    # Forzarizza il mode escalation esponenziale per questo test
+    from app.policy import Policy
+    pol = Policy()
+    pol.cooldown_mode = "exponential"
+    router.policy = pol
     u = f"{BASE}-32k__m-t32__0"
-    router.mark_failed(u)                              # streak=1
-    router.mark_failed(u)                              # streak=2 -> escalation
+    router.mark_failed(u)                              # streak=1 -> 10s
+    router.mark_failed(u)                              # streak=2 -> escalation (esponenziale)
     warns = [r.message for r in caplog.records if "[cooldown]" in r.message]
     assert len(warns) == 2
     assert "escalation" not in warns[0]
