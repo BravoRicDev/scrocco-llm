@@ -129,7 +129,18 @@ def parse_renewal(raw: str, today: date) -> dict[str, Any]:
 
 
 def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
-    """Classificazione di una riga del CSV in metadati deployment."""
+    """Classificazione di una riga del CSV in metadati deployment.
+
+    La categoria determina il bucket di routing (free/priority/go/fallback/zen).
+    Le regole sono applicati nell'ordine seguente:
+      1. La colonna 'data' definisce la categoria base (priority/free/fallback/paid).
+      2. Se la categoria e' "future" (giorno rinnovo mese), si usa il provider/
+         modello per determinare se e' "zen" (modelli NVIDIA NIM) o "go".
+      3. Altrimenti, la categoria e' quella definita da 'data', oppure 'free'
+         se il modello contiene "free", altrimenti 'go'.
+    I token 'zen' nei provider nomi sono riconosciuti esplicitamente;
+    non sono presenti heuristiche "opencode-zen" obscure.
+    """
     modello = (row.get(MODEL_HEADER) or "").strip()
     provider = (row.get(PROVIDER_HEADER) or "").strip().lower()
     endpoint = ""
@@ -140,16 +151,31 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     ren = parse_renewal(row.get(DATA_HEADER) or "", today)
 
     category = ren["category"]
-    if category == "future" and "opencode-zen" in provider:
-        category = "zen"
-    if category not in ("priority", "fallback"):
-        p = provider
-        if "zen" in p or ("zen" in endpoint.lower() and "go" not in p):
+    # Se la renewal ha dato "future", risolviamo in base a provider/modello.
+    # Riconosciamo i provider zen (es. NVIDIA NIM integrate.api.nvidia.com)
+    # e i modelli espliciti "opencode-zen".
+    if category == "future":
+        # Provider NVIDIA NIM (endpoint integrate.api.nvidia.com)
+        if "integrate.api.nvidia.com" in endpoint:
             category = "zen"
-        elif "go" in p or p == "opencode-go":
-            category = "go"
+        # Modello/provider opencode-zen (heurtistica conservativa: solo se
+        # la colonna provider contiene esplicitamente "zen")
+        elif "zen" in provider:
+            category = "zen"
         else:
-            category = "free" if "free" in modello else "go"
+            category = "go"
+    # Se la renewal e' priority o fallback, mantieni quella categoria.
+    # Altrimenti (free o None), determina in base a provider/modello.
+    if category not in ("priority", "fallback"):
+        # Provider esplicito zen
+        if "zen" in provider:
+            category = "zen"
+        # Modello contiene "free" -> bucket free
+        elif "free" in modello:
+            category = "free"
+        # Altrimenti default a go
+        else:
+            category = "go"
 
     ctx_k = None
     raw_ctx = (row.get(CONTEXT_HEADER) or "").strip()

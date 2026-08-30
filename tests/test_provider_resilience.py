@@ -11,6 +11,7 @@ from app.router import Router
 POL = Policy()
 POL.cooldown_sec = 10
 POL.max_cooldown_sec = 100
+POL.cooldown_mode = "exponential"     # il test verifica l'escalation esponenziale
 
 
 def test_escalation_doubling_and_cap():

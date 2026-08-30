@@ -94,19 +94,35 @@ def endpoint_of(header: list[str], row: dict) -> str:
 
 
 def row_id(row: dict, endpoint: str) -> str:
-    """Id STABILE della riga: md10 di modello|endpoint|chiave."""
+    """Id STABILE della riga: md5 di modello|endpoint|chiave.
+
+    L'ID deve rimanere STABILE anche se vengono aggiunte colonne di metadati
+    al CSV (es. 'note', 'scadenza'). Per questo si includono SOLO i VALORI
+    delle colonne profilo (quelle che contengono la chiave API), NON i nomi
+    delle colonne: aggiungendo una colonna metadata con valore vuoto non si
+    altera l'ID.
+
+    Le colonne note (modello, provider, data, context, max_input, priority,
+    caps, endpoint) sono escluse. Tutto il resto con valore non-vuoto
+    (tipicamente le colonne profilo scrocco-llm-<profilo>) contribuisce
+    con il solo valore.
+    """
     basis = "|".join(((row.get(MODEL_HEADER) or "").strip(),
-                      (endpoint or "").strip(),
-                      (row.get("chiave") or "").strip()))
-    # la colonna chiave può avere nomi diversi: usa l'ULTIMA colonna non nota?
-    # no: nel CSV reale la colonna profilo CONTIENE la chiave; qui il fallback
-    # è usare tutte le colonne che non siano metadati noti.
+                       (endpoint or "").strip(),
+                       (row.get("chiave") or "").strip()))
     known = {MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, CONTEXT_HEADER,
              MAX_INPUT_HEADER, PRIORITY_HEADER, CAPS_HEADER} | ENDPOINT_HEADERS
-    extras = sorted((k, v.strip()) for k, v in row.items()
-                    if k not in known and v.strip())
-    if extras:
-        basis += "|" + "|".join(f"{k}={v}" for k, v in extras)
+    # Stabilita' su colonne: includi SOLO i valori (non i nomi), ordinati,
+    # in modo che aggiungere una colonna metadata non cambi l'ID.
+    extra_vals = sorted(v.strip() for v in row.values()
+                        if v and v.strip()
+                        and any(k not in known for k in row
+                                if row.get(k) and row.get(k).strip() == v))
+    # Più robusto: raccogli i valori di tutte le colonne non-note
+    extra_vals = sorted(v.strip() for k, v in row.items()
+                        if k not in known and v and v.strip())
+    if extra_vals:
+        basis += "|" + "|".join(extra_vals)
     digest = hashlib.md5(basis.encode()).hexdigest()[:10]
     return f"drow_{digest}"
 

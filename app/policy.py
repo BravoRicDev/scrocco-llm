@@ -301,15 +301,15 @@ class Policy:
             return self.profile_speed_qualify_pct[profile]
         return self.speed_qualify_pct
 
-    # ----------------------------------------------------------- capacità accessori
+    # ---------------------------------------------------------- ability accessors
     def routing_active(self) -> bool:
-        """True se il routing per capacità è attivo."""
+        """True se il routing consapevole del modalità input è abilitato."""
         return self.capability_routing_enabled
 
     def caps_for(self, model_name: str) -> frozenset[str]:
         """Risolve le capacità per un modello (match exact -> glob più lungo -> default)."""
-        import fnmatch
         from .capabilities import normalize_caps
+        import fnmatch
         # 1) exact
         if model_name in self.model_capabilities:
             return normalize_caps(self.model_capabilities[model_name], f"model_capabilities[{model_name}]")

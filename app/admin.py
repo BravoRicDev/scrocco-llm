@@ -35,6 +35,7 @@ from . import csv_store, journal, logview
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
 from .forwarder import UpstreamError
 from .router import estimate_tokens
+from .policy import Policy
 
 log = logging.getLogger("nx.admin")
 
@@ -43,8 +44,8 @@ admin_api = APIRouter(prefix="/admin", tags=["admin"])
 
 def _gw():
     """Accesso ai globali del servizio a runtime (evita import circolari)."""
-    from . import main as gw
-    return gw
+    from . import main as mod
+    return mod
 
 
 def _require_master(request: Request) -> JSONResponse | None:

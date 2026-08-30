@@ -16,8 +16,10 @@ try:
 
     from tui.observability import ObservabilityScreen
     _HAVE_TEXTUAL = True
+    _AppBase = App
 except Exception:  # pragma: no cover - textual assente
     _HAVE_TEXTUAL = False
+    _AppBase = object
 
 pytestmark = pytest.mark.skipif(
     not _HAVE_TEXTUAL, reason="textual non installato"
@@ -46,7 +48,7 @@ class _FakeClient:
              "probe_ms": None}]}
 
 
-class _TestApp(App):
+class _TestApp(_AppBase):
     """App minima di test: monta solo ObservabilityScreen via push_screen."""
 
     def __init__(self, client):
