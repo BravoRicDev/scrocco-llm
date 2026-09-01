@@ -301,31 +301,6 @@ class Policy:
             return self.profile_speed_qualify_pct[profile]
         return self.speed_qualify_pct
 
-    # ---------------------------------------------------------- ability accessors
-    def routing_active(self) -> bool:
-        """True se il routing consapevole del modalità input è abilitato."""
-        return self.capability_routing_enabled
-
-    def caps_for(self, model_name: str) -> frozenset[str]:
-        """Risolve le capacità per un modello (match exact -> glob più lungo -> default)."""
-        from .capabilities import normalize_caps
-        import fnmatch
-        # 1) exact
-        if model_name in self.model_capabilities:
-            return normalize_caps(self.model_capabilities[model_name], f"model_capabilities[{model_name}]")
-        # 2) glob - pattern più lungo vince
-        best_pat = None
-        best_len = -1
-        for pat, caps in self.model_capabilities.items():
-            if fnmatch.fnmatch(model_name, pat):
-                if len(pat) > best_len:
-                    best_len = len(pat)
-                    best_pat = pat
-        if best_pat is not None:
-            return normalize_caps(self.model_capabilities[best_pat], f"model_capabilities[{best_pat}]")
-        # 3) default
-        return self.capabilities_default
-
     def from_legacy(self, name: str) -> str:
         """Riscrive un nome con prefisso STORICO al prefisso corrente.
 
