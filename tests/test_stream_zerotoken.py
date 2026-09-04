@@ -39,7 +39,7 @@ def M():
 
 
 def _fake_stream_response(chunks, delay=0.0):
-    async def _stream_response(dep, payload):
+    async def _stream_response(dep, payload, **kwargs):
         async def _gen():
             for c in chunks:
                 if delay:
@@ -228,7 +228,7 @@ def test_e2e_empty_stream_no_alternative_returns_503(M, monkeypatch):
     _set(M, first_ms=2000)
     dep = _a_dep(M)
 
-    async def _empty(dep, payload):
+    async def _empty(dep, payload, **kwargs):
         async def _g():
             return
             yield b""
@@ -252,7 +252,7 @@ def test_e2e_length_empty_returns_503_no_chain_burn(M, monkeypatch):
     dep = _a_dep(M)
     seen = []
 
-    async def _len_empty(d, payload):
+    async def _len_empty(d, payload, **kwargs):
         seen.append(d["unique"])
         async def _g():
             yield (b'data: {"choices":[{"delta":{},'
@@ -278,7 +278,7 @@ def test_e2e_reasoning_then_finish_no_answer_returns_503(M, monkeypatch):
     M.router._cooldown.pop(dep["unique"], None)
     seen = []
 
-    async def _reason_only(d, payload):
+    async def _reason_only(d, payload, **kwargs):
         seen.append(d["unique"])
         async def _g():
             yield (b'data: {"choices":[{"delta":'
@@ -306,7 +306,7 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
     M.router._cooldown.pop(dep["unique"], None)
     seen = []
 
-    async def _trunc(d, payload):
+    async def _trunc(d, payload, **kwargs):
         seen.append(d["unique"])
         async def _g():
             yield (b'data: {"choices":[{"delta":'
@@ -354,7 +354,7 @@ def _mute_stream_response():
     """Upstream che NON produce contenuto entro il budget: _peek_stream ->
     timeout. Resta muto oltre il clamp minimo di fc_ms (2s), poi yielda un
     chunk non-answer (che non committa) e termina."""
-    async def _stream_response(dep, payload):
+    async def _stream_response(dep, payload, **kwargs):
         async def _gen():
             await asyncio.sleep(3.0)      # oltre fc_ms clamp (2s) -> timeout
             yield b"data: {}\n\n"          # non-answer, non committa

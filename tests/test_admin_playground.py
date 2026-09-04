@@ -53,7 +53,7 @@ def _install_forwarder(monkeypatch, m, responses):
     si ripete. (crumbs, record) -> list of unique chiamati."""
     calls = []
 
-    async def fake(dep, payload):
+    async def fake(dep, payload, **kwargs):
         calls.append(dep["unique"])
         item = responses[min(len(calls) - 1, len(responses) - 1)]
         if isinstance(item, BaseException):
@@ -184,7 +184,7 @@ def test_playground_profile_max_tokens(client, monkeypatch):
     c, m = client
     seen = {}
 
-    async def fake(dep, payload):
+    async def fake(dep, payload, **kwargs):
         seen["payload"] = payload
         return {"id": "chatcmpl-3",
                 "choices": [{"message": {"role": "assistant",
