@@ -48,6 +48,22 @@ def _gw():
     return mod
 
 
+def _client_ip_of(request: Request) -> str:
+    """IP del client per l'header x-opencode-session (rispetta X-Forwarded-For)."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else ""
+
+
+def _session_of(request: Request) -> str | None:
+    """Passthrough x-opencode-session dal client (prevale su ogni hash)."""
+    v = (request.headers.get("x-opencode-session") or "").strip()
+    return v or None
+
+
 def _require_master(request: Request) -> JSONResponse | None:
     gw = _gw()
     auth = gw.authn.authenticate(request.headers.get("authorization"))
@@ -1368,9 +1384,11 @@ def probe_results_view() -> dict:
 
 
 async def _probe_one(http: "httpx.AsyncClient", dep: dict,
-                     force: bool) -> dict:
+                     force: bool, *, client_ip: str = "",
+                     session: str | None = None) -> dict:
     """UNA chiamata di verifica (max_tokens=1). Niente note_result/mark_failed:
     il probe e' informativo e non deve avvelenare la rotazione adattiva."""
+    from .forwarder import _session_headers
     res_store = _load_probe_results()
     prev = res_store.get(dep["unique"])
     key_sig = csv_store.mask_key(dep["api_key"])
@@ -1392,7 +1410,9 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
             # (una GET, niente consumo quota). ok = (status 200).
             resp = await http.get(
                 f"{dep['api_base'].rstrip('/')}/models",
-                headers={"Authorization": f"Bearer {dep['api_key']}"},
+                headers={"Authorization": f"Bearer {dep['api_key']}",
+                         **_session_headers(dep, client_ip=client_ip,
+                                            session=session)},
                 timeout=_PROBE_TIMEOUT_S)
             ok = resp.status_code == 200
         else:
@@ -1401,7 +1421,9 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                 json={"model": dep["model"], "max_tokens": 1,
                       "messages": [{"role": "user",
                                     "content": "Reply with the single letter A"}]},
-                headers={"Authorization": f"Bearer {dep['api_key']}"},
+                headers={"Authorization": f"Bearer {dep['api_key']}",
+                         **_session_headers(dep, client_ip=client_ip,
+                                            session=session)},
                 timeout=_PROBE_TIMEOUT_S)
             ok = False
             try:
@@ -1489,7 +1511,9 @@ async def deployments_probe(request: Request):
                                  "(GET /admin/state) oppure id drow_ "
                                  "(GET /admin/deployments)"}})
     async with httpx.AsyncClient() as http:
-        out = await _probe_one(http, dep, bool(payload.get("force")))
+        out = await _probe_one(http, dep, bool(payload.get("force")),
+                               client_ip=_client_ip_of(request),
+                               session=_session_of(request))
     journal.record(gw.VAR_DIR, "probe", {"target": out.get("unique"),
                                          "ok": out.get("ok")})
     return out
@@ -1527,10 +1551,13 @@ async def deployments_probe_bulk(request: Request):
                    if d["group"].startswith(f"{prefix}{prof_base}-")
                    or d["group"] == f"{prefix}{prof_base}"]
     import asyncio as _aio
+    _cip = _client_ip_of(request)
+    _sess = _session_of(request)
 
     async def _run(dep):
         async with _aio.Semaphore(_PROBE_CONCURRENCY):
-            return await _probe_one(shared_http, dep, force)
+            return await _probe_one(shared_http, dep, force,
+                                    client_ip=_cip, session=_sess)
 
     async with httpx.AsyncClient() as shared_http:
         outs = await _aio.gather(*[_run(d) for d in targets])
@@ -1972,6 +1999,8 @@ async def admin_playground(request: Request):
     router = gw.router
     policy = gw.policy
     model = policy.canonicalize(model_raw)
+    _cip = _client_ip_of(request)
+    _sess = _session_of(request)
     # snapshot dello stato interno: il giro NON deve lasciare tracce
     saved = {k: dict(getattr(router, k)) for k in _PLAYGROUND_STATE_KEYS}
     trace: list[dict] = []
@@ -2033,7 +2062,8 @@ async def admin_playground(request: Request):
                           "reason": None, "verdict": "fail"})
             try:
                 data = await asyncio.wait_for(
-                    gw.forwarder.call(dep, up_payload),
+                    gw.forwarder.call(dep, up_payload,
+                                      client_ip=_cip, session=_sess),
                     timeout=_PLAYGROUND_TIMEOUT_S)
             except (UpstreamError, asyncio.TimeoutError) as err:
                 last_err = err

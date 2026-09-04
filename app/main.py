@@ -576,6 +576,23 @@ def _session_id(request: Request, payload: dict) -> str | None:
     return str(sid) if sid else None
 
 
+def _client_ip(request: Request) -> str:
+    """IP del client (rispetta X-Forwarded-For se dietro proxy)."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else ""
+
+
+def _opencode_session(request: Request) -> str | None:
+    """Header x-opencode-session in arrivo dal client (passthrough):
+    se presente, questo valore PREVALE su ogni hash calcolato al volo."""
+    v = (request.headers.get("x-opencode-session") or "").strip()
+    return v or None
+
+
 def _emit_summary(**f) -> None:
     """Riga [summary] JSON a fine richiesta (osservabilità per-request).
 
@@ -812,6 +829,10 @@ async def chat_completions(request: Request):
     # iniezione identità + modello univoco nel payload upstream
     inject_identity(payload, dep, router=router)
     t_req = time.monotonic()
+    # sessione OpenCode: passthrough se il client la invia, altrimenti header
+    # calcolato al volo nel forwarder (hash api_key+client_ip)
+    _sess = _opencode_session(request)
+    _cip = _client_ip(request)
 
     if stream:
         return await _stream_with_fallback(
@@ -819,7 +840,8 @@ async def chat_completions(request: Request):
             hook=_strike_hook(explicit_req, need),
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
-            ses=session_id, req=raw_model)
+            ses=session_id, req=raw_model,
+            session=_sess, client_ip=_cip)
 
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
@@ -831,7 +853,8 @@ async def chat_completions(request: Request):
             need=need,
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
-            attempts_box=attempts_box)
+            attempts_box=attempts_box,
+            session=_sess, client_ip=_cip)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
@@ -1170,7 +1193,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 hook=None, scope: str = "chain",
                                 ctx: int | None = None,
                                 ses: str | None = None,
-                                req: str | None = None):
+                                req: str | None = None,
+                                session: str | None = None,
+                                client_ip: str = ""):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
     tried = 0
@@ -1193,7 +1218,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         router.note_start(dep["unique"])
         try:
             t_att = time.monotonic()
-            gen = await forwarder.stream_response(dep, payload)
+            gen = await forwarder.stream_response(dep, payload,
+                                                  client_ip=client_ip,
+                                                  session=session)
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe
@@ -1613,6 +1640,9 @@ async def images_generations(request: Request):
     if custom_key:
         dep = {**dep, "api_key": custom_key}
 
+    _sess = _opencode_session(request)
+    _cip = _client_ip(request)
+
     profile = auth.profile or config.profile_of_base(model.split("__")[0]) \
         or config.profile_of_base(model)
 
@@ -1632,7 +1662,8 @@ async def images_generations(request: Request):
         router.note_start(cur)
         t0 = time.monotonic()
         try:
-            data = await forwarder.call_images(dep, payload)
+            data = await forwarder.call_images(dep, payload,
+                                           client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -1803,6 +1834,8 @@ async def audio_speech(request: Request):
     tried: set[str] = set()
     attempts: list[str] = []
     session_id = _session_id(request, payload)
+    _sess = _opencode_session(request)
+    _cip = _client_ip(request)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
@@ -1813,7 +1846,8 @@ async def audio_speech(request: Request):
         router.note_start(cur)
         t0 = time.monotonic()
         try:
-            content, ctype = await forwarder.call_speech(dep, payload)
+            content, ctype = await forwarder.call_speech(
+                dep, payload, client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -1926,6 +1960,8 @@ async def _audio_transcribe(request: Request, path: str):
 
     tried: set[str] = set()
     attempts: list[str] = []
+    _sess = _opencode_session(request)
+    _cip = _client_ip(request)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
@@ -1937,7 +1973,8 @@ async def _audio_transcribe(request: Request, path: str):
         t0 = time.monotonic()
         try:
             result = await forwarder.transcribe(dep, data_fields, file_bytes,
-                                                filename, fcontent, path=path)
+                                                filename, fcontent, path=path,
+                                                client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -2074,6 +2111,8 @@ async def videos_generations(request: Request):
 
     tried: set[str] = set()
     attempts: list[str] = []
+    _sess = _opencode_session(request)
+    _cip = _client_ip(request)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
@@ -2084,7 +2123,8 @@ async def videos_generations(request: Request):
         router.note_start(cur)
         t0 = time.monotonic()
         try:
-            envelope = await forwarder.submit_video(dep, payload)
+            envelope = await forwarder.submit_video(
+                dep, payload, client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -2092,7 +2132,8 @@ async def videos_generations(request: Request):
             job_id = str(envelope.get("id") or "")
             _videos_jobs[job_id] = {
                 "api_base": dep["api_base"], "api_key": dep["api_key"],
-                "group": dep["group"], "created": time.time()}
+                "group": dep["group"], "created": time.time(), "_sess": _sess,
+                "_cip": _cip}
             qm = f"?model={urllib.parse.quote(raw_model)}"
             out = dict(envelope)
             out["nx_deployment"] = cur
@@ -2114,7 +2155,10 @@ async def videos_generations(request: Request):
                 while time.time() < deadline:
                     await asyncio.sleep(5)
                     try:
-                        st = await forwarder.poll_video(dep, job_id)
+                        st = await forwarder.poll_video(
+                            dep, job_id,
+                            client_ip=_cip or _videos_jobs.get(job_id, {}).get("_cip", ""),
+                            session=_sess or _videos_jobs.get(job_id, {}).get("_sess"))
                         log.debug("[video-wait] job=%s t=%ds status=%s",
                                   job_id, wait_s - int(deadline - time.time()),
                                   st.get("status"))
@@ -2223,7 +2267,9 @@ async def videos_status(job_id: str, request: Request,
     if err:
         return err
     try:
-        status = await forwarder.poll_video_any(deps, job_id)
+        status = await forwarder.poll_video_any(deps, job_id,
+                                                client_ip=_client_ip(request),
+                                                session=_opencode_session(request))
     except UpstreamError as e:
         st = abs(e.status) if e.status and e.status > 0 else 502
         return JSONResponse(status_code=st if st >= 400 else 502,
@@ -2255,7 +2301,10 @@ async def videos_content(job_id: str, request: Request,
         return err
     try:
         t_dl = time.monotonic()
-        content, ctype = await forwarder.download_video_any(deps, job_id)
+        content, ctype = await forwarder.download_video_any(
+            deps, job_id,
+            client_ip=_client_ip(request),
+            session=_opencode_session(request))
         log.info("[video-content] job=%s bytes=%d ctype=%s dur=%.1fs",
                  job_id, len(content), ctype, time.monotonic() - t_dl)
     except UpstreamError as e:

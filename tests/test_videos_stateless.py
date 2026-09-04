@@ -58,7 +58,7 @@ def test_candidates_unknown_model_empty(router):
 def _fwd_with_polls(results):
     fwd = Forwarder.__new__(Forwarder)   # niente rete: monkeypatch di poll_video
 
-    async def fake_poll(dep, job_id):    # noqa: ANN001
+    async def fake_poll(dep, job_id, **kwargs):    # noqa: ANN001
         r = results.pop(0)
         if isinstance(r, Exception):
             raise r
@@ -87,7 +87,7 @@ def test_poll_any_raises_when_all_404(router):
 def test_download_any_skips_404():
     fwd = Forwarder.__new__(Forwarder)
 
-    async def fake_dl(dep, job_id):
+    async def fake_dl(dep, job_id, **kwargs):
         if dep["api_key"] == "sk-A":
             raise UpstreamError(-404, "nope")
         return b"MP4BYTES", "video/mp4"
