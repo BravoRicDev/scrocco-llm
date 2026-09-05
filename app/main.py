@@ -1219,6 +1219,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         try:
             t_att = time.monotonic()
             gen = await forwarder.stream_response(dep, payload,
+                                                  profile=profile or "",
                                                   client_ip=client_ip,
                                                   session=session)
             # la TTFB vera e' il tempo fino agli HEADER upstream
@@ -1663,6 +1664,7 @@ async def images_generations(request: Request):
         t0 = time.monotonic()
         try:
             data = await forwarder.call_images(dep, payload,
+                                           profile=profile or "",
                                            client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
@@ -1847,7 +1849,8 @@ async def audio_speech(request: Request):
         t0 = time.monotonic()
         try:
             content, ctype = await forwarder.call_speech(
-                dep, payload, client_ip=_cip, session=_sess)
+                dep, payload, profile=profile or "",
+                client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -1974,6 +1977,7 @@ async def _audio_transcribe(request: Request, path: str):
         try:
             result = await forwarder.transcribe(dep, data_fields, file_bytes,
                                                 filename, fcontent, path=path,
+                                                profile=profile or "",
                                                 client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
@@ -2113,6 +2117,8 @@ async def videos_generations(request: Request):
     attempts: list[str] = []
     _sess = _opencode_session(request)
     _cip = _client_ip(request)
+    _prof = auth.profile or config.profile_of_base(model.split("__")[0]) \
+        or config.profile_of_base(model)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
@@ -2124,7 +2130,8 @@ async def videos_generations(request: Request):
         t0 = time.monotonic()
         try:
             envelope = await forwarder.submit_video(
-                dep, payload, client_ip=_cip, session=_sess)
+                dep, payload, profile=_prof or "",
+                client_ip=_cip, session=_sess)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -2133,7 +2140,7 @@ async def videos_generations(request: Request):
             _videos_jobs[job_id] = {
                 "api_base": dep["api_base"], "api_key": dep["api_key"],
                 "group": dep["group"], "created": time.time(), "_sess": _sess,
-                "_cip": _cip}
+                "_cip": _cip, "_prof": _prof or ""}
             qm = f"?model={urllib.parse.quote(raw_model)}"
             out = dict(envelope)
             out["nx_deployment"] = cur
@@ -2157,6 +2164,7 @@ async def videos_generations(request: Request):
                     try:
                         st = await forwarder.poll_video(
                             dep, job_id,
+                            profile=_prof or _videos_jobs.get(job_id, {}).get("_prof", ""),
                             client_ip=_cip or _videos_jobs.get(job_id, {}).get("_cip", ""),
                             session=_sess or _videos_jobs.get(job_id, {}).get("_sess"))
                         log.debug("[video-wait] job=%s t=%ds status=%s",
@@ -2266,8 +2274,11 @@ async def videos_status(job_id: str, request: Request,
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
+    _prof = (model or request.query_params.get("model") or "")
+    _prof = config.profile_of_base(_prof.split("__")[0]) or ""
     try:
         status = await forwarder.poll_video_any(deps, job_id,
+                                                profile=_prof,
                                                 client_ip=_client_ip(request),
                                                 session=_opencode_session(request))
     except UpstreamError as e:
@@ -2299,10 +2310,13 @@ async def videos_content(job_id: str, request: Request,
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
+    _prof = (model or request.query_params.get("model") or "")
+    _prof = config.profile_of_base(_prof.split("__")[0]) or ""
     try:
         t_dl = time.monotonic()
         content, ctype = await forwarder.download_video_any(
             deps, job_id,
+            profile=_prof,
             client_ip=_client_ip(request),
             session=_opencode_session(request))
         log.info("[video-content] job=%s bytes=%d ctype=%s dur=%.1fs",

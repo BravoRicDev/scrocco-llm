@@ -229,20 +229,26 @@ def is_provider_error_body(detail: str) -> bool:
 
 
 # Header x-opencode-session (OpenCode Go / opencode-zen): la sessione viene
-# calcolata AL VOLO come hash deterministico di api_key + client_ip (o altro
-# identificativo), cosi' ogni chiave+client genera una sessione stabile e
-# distinguibile, senza mai esporre la chiave in chiaro. Se il client ha gia'
-# inviato l'header (passthrough), quel valore PREVALE su tutto: la richiesta
-# del client passa dritta com'e' arrivata.
-def _session_headers(dep: dict, *, client_ip: str = "",
+# calcolata AL VOLO come hash deterministico di api_key + client_ip + profilo,
+# cosi' ogni (chiave, client, profilo) genera una sessione stabile e
+# distinguibile, senza mai esporre la chiave in chiaro. Due profili che
+# condividono la stessa chiave dallo stesso IP hanno comunque sessioni
+# diverse. Se il client ha gia' inviato l'header (passthrough), quel valore
+# PREVALE su tutto: la richiesta del client passa dritta com'e' arrivata.
+#
+# Formato: 8 hex (es. "5f634ae1") come le sessioni native opencode: stesso
+# "aspetto" del provider, indistinguibili tra loro.
+def _session_headers(dep: dict, *, profile: str = "",
+                     client_ip: str = "",
                      session: str | None = None) -> dict[str, str]:
     """Header x-opencode-session per la richiesta upstream.
 
     Priorità:
       1. `session` (passthrough dal client) se presente -> esattamente quel
          valore;
-      2. altrimenti hash sha256 di `api_key + "|" + client_ip` (o del solo
-         api_key se non c'e' client_ip).
+      2. altrimenti hash sha256 di `api_key + "|" + client_ip + "|" + profilo`
+         troncato a 8 hex (i componenti vuoti restano vuoti, cosi' l'hash
+         cambia se cambia anche solo il profilo).
 
     Ritorna SEMPRE l'header: i provider opencode lo usano per il
     load-balancing/session; gli altri lo ignorano senza effetto.
@@ -250,8 +256,9 @@ def _session_headers(dep: dict, *, client_ip: str = "",
     if session:
         return {"x-opencode-session": session}
     key = (dep.get("api_key") or "").strip()
-    basis = f"{key}|{client_ip}" if client_ip else key
-    return {"x-opencode-session": hashlib.sha256(basis.encode()).hexdigest()}
+    basis = "|".join((key, client_ip, profile))
+    digest = hashlib.sha256(basis.encode()).hexdigest()
+    return {"x-opencode-session": digest[:8]}
 
 
 class UpstreamError(Exception):
@@ -349,7 +356,8 @@ class Forwarder:
 
     # ------------------------------------------------------------- request
     async def stream_response(self, dep: dict, payload: dict,
-                              *, client_ip: str = "",
+                              *, profile: str = "",
+                              client_ip: str = "",
                               session: str | None = None) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
@@ -371,7 +379,8 @@ class Forwarder:
         headers = {
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
-            **_session_headers(dep, client_ip=client_ip, session=session),
+            **_session_headers(dep, profile=profile, client_ip=client_ip,
+                                      session=session),
         }
         url = f"{dep['api_base']}/chat/completions"
         try:
@@ -440,6 +449,7 @@ class Forwarder:
         return gen()
 
     async def call(self, dep: dict, payload: dict, *,
+                   profile: str = "",
                    client_ip: str = "",
                    session: str | None = None) -> dict:
         """Richiesta NON streaming: risposta JSON completa."""
@@ -448,7 +458,8 @@ class Forwarder:
         headers = {
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
-            **_session_headers(dep, client_ip=client_ip, session=session),
+            **_session_headers(dep, profile=profile, client_ip=client_ip,
+                                      session=session),
         }
         url = f"{dep['api_base']}/chat/completions"
         try:
@@ -468,6 +479,7 @@ class Forwarder:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
 
     async def call_images(self, dep: dict, payload: dict, *,
+                          profile: str = "",
                           client_ip: str = "",
                           session: str | None = None) -> dict:
         """Generazione immagini: POST {api_base}/images/generations (non streaming).
@@ -481,7 +493,8 @@ class Forwarder:
         headers = {
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
-            **_session_headers(dep, client_ip=client_ip, session=session),
+            **_session_headers(dep, profile=profile, client_ip=client_ip,
+                                      session=session),
         }
         url = f"{dep['api_base']}/images/generations"
         try:
@@ -504,6 +517,7 @@ class Forwarder:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
 
     async def call_speech(self, dep: dict, payload: dict, *,
+                          profile: str = "",
                           client_ip: str = "",
                           session: str | None = None) -> tuple[bytes, str]:
         """TTS: POST {api_base}/audio/speech -> bytes audio (buffered).
@@ -515,7 +529,7 @@ class Forwarder:
         body = {k: v for k, v in payload.items() if k != "model"}
         body["model"] = dep["model"]
         headers = {"Authorization": f"Bearer {dep['api_key']}",
-                   **_session_headers(dep, client_ip=client_ip,
+                   **_session_headers(dep, profile=profile, client_ip=client_ip,
                                       session=session)}
         url = f"{dep['api_base']}/audio/speech"
         try:
@@ -540,7 +554,8 @@ class Forwarder:
     async def transcribe(self, dep: dict, data_fields: dict,
                          file_bytes: bytes, filename: str, content_type: str,
                          path: str = "transcriptions",
-                         *, client_ip: str = "",
+                         *, profile: str = "",
+                         client_ip: str = "",
                          session: str | None = None) -> dict | str:
         """STT: POST multipart {api_base}/audio/{path} (transcriptions|translations).
 
@@ -550,7 +565,7 @@ class Forwarder:
         data = {k: v for k, v in data_fields.items() if k != "model"}
         data["model"] = dep["model"]
         headers = {"Authorization": f"Bearer {dep['api_key']}",
-                   **_session_headers(dep, client_ip=client_ip,
+                   **_session_headers(dep, profile=profile, client_ip=client_ip,
                                       session=session)}
         url = f"{dep['api_base']}/audio/{path}"
         files = {"file": (filename or "audio.wav", file_bytes,
@@ -580,6 +595,7 @@ class Forwarder:
 
     # ------------------------------------------------------------ video async
     async def submit_video(self, dep: dict, payload: dict, *,
+                           profile: str = "",
                            client_ip: str = "",
                            session: str | None = None) -> dict:
         """Submit job video (API asincrona OR-style): POST {base}/videos.
@@ -587,7 +603,7 @@ class Forwarder:
         body = {k: v for k, v in payload.items() if k != "model"}
         body["model"] = dep["model"]
         headers = {"Authorization": f"Bearer {dep['api_key']}",
-                   **_session_headers(dep, client_ip=client_ip,
+                   **_session_headers(dep, profile=profile, client_ip=client_ip,
                                       session=session)}
         url = f"{dep['api_base']}/videos"
         try:
@@ -609,11 +625,12 @@ class Forwarder:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
 
     async def poll_video(self, dep: dict, job_id: str, *,
+                         profile: str = "",
                          client_ip: str = "",
                          session: str | None = None) -> dict:
         """Stato del job: GET {base}/videos/{job_id} -> JSON di stato."""
         headers = {"Authorization": f"Bearer {dep['api_key']}",
-                   **_session_headers(dep, client_ip=client_ip,
+                   **_session_headers(dep, profile=profile, client_ip=client_ip,
                                       session=session)}
         url = f"{dep['api_base']}/videos/{job_id}"
         try:
@@ -628,6 +645,7 @@ class Forwarder:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
 
     async def poll_video_any(self, deps: list[dict], job_id: str, *,
+                             profile: str = "",
                              client_ip: str = "",
                              session: str | None = None) -> dict:
         """Poll STATELESS: prova ogni candidato (chiavi diverse) finché uno
@@ -637,6 +655,7 @@ class Forwarder:
         for dep in deps:
             try:
                 return await self.poll_video(dep, job_id,
+                                             profile=profile,
                                              client_ip=client_ip,
                                              session=session)
             except UpstreamError as err:
@@ -648,6 +667,7 @@ class Forwarder:
                                           "nessun account video_gen")
 
     async def download_video_any(self, deps: list[dict], job_id: str, *,
+                                 profile: str = "",
                                  client_ip: str = "",
                                  session: str | None = None) -> tuple[bytes, str]:
         """Download stateless: stessa logica multi-chiave di poll_video_any."""
@@ -655,6 +675,7 @@ class Forwarder:
         for dep in deps:
             try:
                 return await self.download_video(dep, job_id,
+                                                 profile=profile,
                                                  client_ip=client_ip,
                                                  session=session)
             except UpstreamError as err:
@@ -666,11 +687,12 @@ class Forwarder:
                                           "su nessun account video_gen")
 
     async def download_video(self, dep: dict, job_id: str, *,
+                             profile: str = "",
                              client_ip: str = "",
                              session: str | None = None) -> tuple[bytes, str]:
         """Contenuto MP4 completato: GET {base}/videos/{job_id}/content."""
         headers = {"Authorization": f"Bearer {dep['api_key']}",
-                   **_session_headers(dep, client_ip=client_ip,
+                   **_session_headers(dep, profile=profile, client_ip=client_ip,
                                       session=session)}
         url = f"{dep['api_base']}/videos/{job_id}/content"
         try:
@@ -747,6 +769,7 @@ class Forwarder:
             t0 = time.monotonic()
             try:
                 data = await self.call(dep, payload,
+                               profile=profile or "",
                                client_ip=client_ip, session=session)
                 router.note_result(cur, (time.monotonic() - t0) * 1000)
                 if _was_dormant:
