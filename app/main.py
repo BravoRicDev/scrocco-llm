@@ -587,10 +587,73 @@ def _client_ip(request: Request) -> str:
 
 
 def _opencode_session(request: Request) -> str | None:
-    """Header x-opencode-session in arrivo dal client (passthrough):
-    se presente, questo valore PREVALE su ogni hash calcolato al volo."""
-    v = (request.headers.get("x-opencode-session") or "").strip()
-    return v or None
+    """Header di sessione in arrivo dal client (passthrough upstream).
+
+    Priorità:
+      1. `x-opencode-session`  — header legacy/esplicito (prevale su tutto);
+      2. `x-session-affinity`  — header NATIVO inviato da opencode client
+         (verificato via sniffing: opencode 1.18.x NON invia x-opencode-session,
+         ma invia x-session-affinity con lo stesso valore del session_id body);
+      3. `x-session-id`        — alias alternativo inviato da opencode.
+
+    Il valore è lo stesso che opencode usa per la propria sessione
+    (formato `ses_...`): propagandolo in upstream si replica il comportamento
+    nativo invece di generare un hash inventato non riconosciuto.
+    """
+    for name in ("x-opencode-session", "x-session-affinity", "x-session-id"):
+        v = (request.headers.get(name) or "").strip()
+        if v:
+            return v
+    return None
+
+
+# Header x-opencode-* di interesse per replicare il comportamento del client
+# opencode verso l'upstream. Utilizzati solo per lo sniffing diagnostico.
+_SNIFF_OPENCODE_HEADERS = (
+    "x-opencode-session",
+    "x-opencode-request",
+    "x-opencode-project",
+    "x-opencode-client",
+    "x-opencode-agent-name",
+    "x-opencode-agent-mode",
+    "x-session-affinity",
+    "x-session-id",
+    "user-agent",
+)
+
+
+def _sniff_headers(request: Request, *, logger, body_size: int = 0,
+                   session_id: str | None = None) -> None:
+    """Log diagnostico degli header in ingresso a /v1/chat/completions.
+
+    Attivo SOLO se l'env SNIFF_HEADERS e' truthy. Scopo: verificare se e con
+    quale formato il client opencode invia davvero l'header x-opencode-session
+    (e i correlati x-opencode-*), per replicarne il comportamento in
+    passthrough/fallback. L'Authorization e' sempre mascherata.
+    """
+    if not os.environ.get("SNIFF_HEADERS"):
+        return
+    try:
+        picked = {}
+        for name in _SNIFF_OPENCODE_HEADERS:
+            if name in request.headers:
+                picked[name] = request.headers[name]
+        auth = request.headers.get("authorization") or ""
+        picked["authorization"] = (
+            (auth[:8] + "***" + auth[-4:]) if len(auth) > 12 else "***"
+        )
+        # Tutti gli altri header (mascherando authorization), per non perdere
+        # header utili non ancora contemplati nella lista sopra.
+        picked["all_headers"] = {
+            k: (v[:8] + "***" + v[-4:] if k.lower() == "authorization" else v)
+            for k, v in request.headers.items()
+        }
+        logger.warning(
+            "[sniff] path=%s body_size=%s session_id=%s headers=%s",
+            request.url.path, body_size, session_id,
+            json.dumps(picked, ensure_ascii=False, default=str))
+    except Exception:
+        pass
 
 
 def _emit_summary(**f) -> None:
@@ -761,6 +824,9 @@ async def chat_completions(request: Request):
 
     # --- routing ---
     session_id = _session_id(request, payload)
+    _sniff_headers(request, logger=_api_log,
+                   body_size=len(request._body) if hasattr(request, "_body")
+                   else 0, session_id=session_id)
     ctx_est = estimate_tokens(messages, router.policy.estimate_divisor,
                               getattr(router.policy, "image_token_estimate", 0) or 0,
                               tools=payload.get("tools"))
@@ -829,9 +895,11 @@ async def chat_completions(request: Request):
     # iniezione identità + modello univoco nel payload upstream
     inject_identity(payload, dep, router=router)
     t_req = time.monotonic()
-    # sessione OpenCode: passthrough se il client la invia, altrimenti header
-    # calcolato al volo nel forwarder (hash api_key+client_ip)
-    _sess = _opencode_session(request)
+    # sessione OpenCode: passthrough se il client la invia (x-opencode-session
+    # oppure x-session-affinity/x-session-id nativi), altrimenti fallback alla
+    # sessione del body; se manca del tutto l'header viene calcolato nel
+    # forwarder (hash api_key+client_ip)
+    _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
 
     if stream:
@@ -1641,7 +1709,7 @@ async def images_generations(request: Request):
     if custom_key:
         dep = {**dep, "api_key": custom_key}
 
-    _sess = _opencode_session(request)
+    _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
 
     profile = auth.profile or config.profile_of_base(model.split("__")[0]) \
@@ -1836,7 +1904,7 @@ async def audio_speech(request: Request):
     tried: set[str] = set()
     attempts: list[str] = []
     session_id = _session_id(request, payload)
-    _sess = _opencode_session(request)
+    _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
@@ -1952,8 +2020,9 @@ async def _audio_transcribe(request: Request, path: str):
 
     need = frozenset({"stt"}) if router.policy.routing_active() else frozenset()
     scope = "group" if router.is_explicit(model) else "chain"
+    session_id = _session_id(request, {})
     dep, profile, err = _audio_route(auth.profile, model, raw_model,
-                                     _session_id(request, {}), need)
+                                     session_id, need)
     if err:
         return err
 
@@ -1963,7 +2032,7 @@ async def _audio_transcribe(request: Request, path: str):
 
     tried: set[str] = set()
     attempts: list[str] = []
-    _sess = _opencode_session(request)
+    _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
@@ -2115,7 +2184,7 @@ async def videos_generations(request: Request):
 
     tried: set[str] = set()
     attempts: list[str] = []
-    _sess = _opencode_session(request)
+    _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     _prof = auth.profile or config.profile_of_base(model.split("__")[0]) \
         or config.profile_of_base(model)

@@ -59,9 +59,19 @@ def _client_ip_of(request: Request) -> str:
 
 
 def _session_of(request: Request) -> str | None:
-    """Passthrough x-opencode-session dal client (prevale su ogni hash)."""
-    v = (request.headers.get("x-opencode-session") or "").strip()
-    return v or None
+    """Header di sessione in arrivo dal client (passthrough upstream).
+
+    Priorità: x-opencode-session > x-session-affinity > x-session-id.
+    opencode client (verificato via sniffing) NON invia x-opencode-session ma
+    invia x-session-affinity/x-session-id con lo stesso valore del session_id
+    del body: usandoli si replica il comportamento nativo invece di generare
+    un hash inventato.
+    """
+    for name in ("x-opencode-session", "x-session-affinity", "x-session-id"):
+        v = (request.headers.get(name) or "").strip()
+        if v:
+            return v
+    return None
 
 
 def _require_master(request: Request) -> JSONResponse | None:

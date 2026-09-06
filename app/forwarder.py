@@ -236,8 +236,31 @@ def is_provider_error_body(detail: str) -> bool:
 # diverse. Se il client ha gia' inviato l'header (passthrough), quel valore
 # PREVALE su tutto: la richiesta del client passa dritta com'e' arrivata.
 #
-# Formato: 8 hex (es. "5f634ae1") come le sessioni native opencode: stesso
-# "aspetto" del provider, indistinguibili tra loro.
+# Formato: identico alle sessioni native opencode (`ses_` + 12 hex + 14 base62,
+# es. "ses_fb5856a92ffekeJf366z10YP19", verificato sui log reali): OpenCode Go
+# usa l'header per session affinity/prompt caching e riconosce il valore solo
+# se "assomiglia" a un session ID valido.
+_B62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_B62_LEN = 14
+
+
+def _native_session_of(basis: str) -> str:
+    """Session ID nel formato nativo opencode, deterministico dal seed.
+
+    Formato: "ses_" + 12 hex lowercase + 14 base62 (26 char totali), come le
+    sessioni generate dal client opencode (es. ses_fb5856a92ffekeJf366z10YP19).
+    Stesso seed -> stesso valore; mai la chiave in chiaro.
+    """
+    digest = hashlib.sha256(basis.encode()).digest()      # 32 byte
+    hex12 = digest[:6].hex()                              # 6 byte -> 12 hex
+    n = int.from_bytes(digest[6:20], "big")               # 14 byte -> base62
+    out = []
+    for _ in range(_B62_LEN):
+        n, r = divmod(n, 62)
+        out.append(_B62_ALPHABET[r])
+    return f"ses_{hex12}{''.join(reversed(out))}"
+
+
 def _session_headers(dep: dict, *, profile: str = "",
                      client_ip: str = "",
                      session: str | None = None) -> dict[str, str]:
@@ -246,19 +269,26 @@ def _session_headers(dep: dict, *, profile: str = "",
     Priorità:
       1. `session` (passthrough dal client) se presente -> esattamente quel
          valore;
-      2. altrimenti hash sha256 di `api_key + "|" + client_ip + "|" + profilo`
-         troncato a 8 hex (i componenti vuoti restano vuoti, cosi' l'hash
-         cambia se cambia anche solo il profilo).
+      2. altrimenti session ID nel formato nativo opencode derivato da
+         `api_key + "|" + client_ip + "|" + profilo` (deterministico: stesso
+         input -> stesso valore; i componenti vuoti restano vuoti, cosi' il
+         valore cambia se cambia anche solo il profilo).
 
-    Ritorna SEMPRE l'header: i provider opencode lo usano per il
-    load-balancing/session; gli altri lo ignorano senza effetto.
+    Ritorna SEMPRE l'header: OpenCode Go lo richiede per session affinity e
+    prompt caching; gli altri provider lo ignorano senza effetto.
     """
     if session:
-        return {"x-opencode-session": session}
+        out = {"x-opencode-session": session}
+        if os.environ.get("SNIFF_HEADERS"):
+            log.warning("[sniff] upstream session=passthrough value=%s", session)
+        return out
     key = (dep.get("api_key") or "").strip()
     basis = "|".join((key, client_ip, profile))
-    digest = hashlib.sha256(basis.encode()).hexdigest()
-    return {"x-opencode-session": digest[:8]}
+    value = _native_session_of(basis)
+    if os.environ.get("SNIFF_HEADERS"):
+        log.warning("[sniff] upstream session=native value=%s basis=(%s,%s,%s)",
+                    value, bool(key), bool(client_ip), bool(profile))
+    return {"x-opencode-session": value}
 
 
 class UpstreamError(Exception):
