@@ -909,7 +909,7 @@ async def chat_completions(request: Request):
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
             ses=session_id, req=raw_model,
-            session=_sess, client_ip=_cip)
+            session=_sess, client_ip=_cip, request=request)
 
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
@@ -1263,7 +1263,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 ses: str | None = None,
                                 req: str | None = None,
                                 session: str | None = None,
-                                client_ip: str = ""):
+                                client_ip: str = "",
+                                request: "Request | None" = None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
     tried = 0
@@ -1575,7 +1576,45 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             return chunk
 
         gen_broken = False
+        aborted = False            # client disconnesso durante lo stream
+        monitor: asyncio.Task | None = None
+        # il task che sta eseguendo QUESTO generator (sse): e' lui che va
+        # cancellato per interrompere SUBITO l'attesa upstream. asyncio
+        # current_task() qui restituisce proprio il task della StreamingResponse.
+        _sse_task = asyncio.current_task()
+
+        async def _watch_disconnect() -> None:
+            """Se il client chiude la connessione, interrompe SUBITO il task di
+            sse() (CancelledError) invece di lasciare l'upstream generare fino a
+            fine stream: niente token sprecati sul provider e niente raffiche di
+            'socket.send() raised exception' verso una socket morta.
+
+            NB: cancellare il task di sse() chiude anche `gen` (il generator
+            upstream esegue il suo finally -> resp.aclose()); aclose() diretto
+            da un altro task NON interrompe un generator in pausa, quindi e'
+            il task a dover essere cancellato."""
+            nonlocal aborted
+            try:
+                while True:
+                    await asyncio.sleep(0.5)
+                    disconnected = False
+                    if request is not None:
+                        try:
+                            disconnected = await request.is_disconnected()
+                        except Exception:
+                            disconnected = False
+                    if disconnected:
+                        aborted = True
+                        if _sse_task is not None:
+                            _sse_task.cancel()
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
         try:
+            monitor = asyncio.create_task(_watch_disconnect())
             # (D2/B) ordine: prima il prebuffer gia' letto da _peek_stream, poi
             # l'eventuale lettura rimasta in volo (`pending`), poi il resto.
             for chunk in prebuf:
@@ -1592,10 +1631,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     yield _ingest(chunk)
                 finished = True             # StopAsyncIteration: stream chiuso
         except (GeneratorExit, asyncio.CancelledError):
+            # disconnessione client o aborted dal monitor: chiudi l'upstream e
+            # non punire il deployment (e' il client che e' andato via).
+            if not aborted:
+                await _discard_stream(gen, pending)
             raise                          # disconnessione client: non punire
         except Exception:
             gen_broken = True
         finally:
+            if monitor is not None:
+                monitor.cancel()
             dur_ms = int((time.monotonic() - t_req) * 1000)
             router.note_end(dep["unique"])
             # NB (fix): il watchdog NON inietta mai nulla nello stream verso il
@@ -1603,8 +1648,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # opencode & simili). L'unica reazione automatica e' il cooldown del
             # deployment, cosi' i retry del client / le richieste successive
             # evitano la chiave che ha scazzato.
-            if finished or gen_broken:
-                if chunks == 0:
+            if aborted or finished or gen_broken:
+                if aborted:
+                    # client disconnesso a meta' stream: NON e' colpa del
+                    # deployment -> nessun cooldown, solo log diagnostico.
+                    wd = "client-aborted"
+                    log.info("[watchdog] client disconnesso durante lo stream "
+                             "da %s (chunks=%d)", dep["unique"], chunks)
+                elif chunks == 0:
                     wd = "tier1-empty"
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "empty"))
                     log.warning("[watchdog] tier1 stream VUOTO da %s "

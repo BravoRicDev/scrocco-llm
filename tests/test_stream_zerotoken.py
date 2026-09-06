@@ -40,11 +40,21 @@ def M():
 
 def _fake_stream_response(chunks, delay=0.0):
     async def _stream_response(dep, payload, **kwargs):
+        state = {"closed": False}
+
         async def _gen():
-            for c in chunks:
-                if delay:
-                    await asyncio.sleep(delay)
-                yield c
+            try:
+                for c in chunks:
+                    if state["closed"]:
+                        return
+                    if delay:
+                        await asyncio.sleep(delay)
+                    yield c
+            finally:
+                # emula il finally del forwarder (resp.aclose()): si esegue
+                # quando il generator viene chiuso/abbandonato.
+                state["closed"] = True
+
         return _gen()
     return _stream_response
 
@@ -67,8 +77,11 @@ def _set(M, first_ms=20000, deadline_ms=90000, incl_reason=False,
 
 async def _drain(resp):
     out = b""
-    async for c in resp.body_iterator:
-        out += c
+    try:
+        async for c in resp.body_iterator:
+            out += c
+    except asyncio.CancelledError:
+        raise
     return out
 
 
@@ -435,3 +448,75 @@ def test_parachute_verdict_helper(M):
     assert M._parachute_verdict("empty_eof", pol.qc_json, dep_go, pol) == "empty_eof"
     pol.qc_json.stream_parachute_no_timeout = False
     assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "timeout"
+
+
+# ------------------------------------------------- client disconnesso durante lo stream
+class _FakeRequest:
+    """Minimo stub di Starlette Request: is_disconnected() True dopo un attimo."""
+
+    def __init__(self, disconnect_after=0.05):
+        self._t = disconnect_after
+        self._start = None
+
+    async def is_disconnected(self):
+        import time as _t
+        if self._start is None:
+            self._start = _t.monotonic()
+        return _t.monotonic() - self._start > self._t
+
+
+def test_client_disconnect_aborts_upstream_and_no_cooldown(M, monkeypatch):
+    """Se il client si disconnette a meta' stream, il task dello streaming
+    viene cancellato subito (niente token sprecati) e il deployment NON finisce
+    in cooldown (non e' colpa sua)."""
+    _set(M, first_ms=100)
+    dep = _a_dep(M)
+    M.router._cooldown.pop(dep["unique"], None)
+    # primo chunk grande (commit immediato, >= min_chars), poi 50 chunk lenti
+    big = b'data: {"choices":[{"delta":{"content":"' + b"x" * 80 + b'"}}]}\n\n'
+    chunks = [big] + [b'data: {"choices":[{"delta":{"content":"y%d"}}]}\n\n' % i
+                      for i in range(50)]
+    monkeypatch.setattr(M.forwarder, "stream_response",
+                        _fake_stream_response(chunks, delay=0.05))
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        req = _FakeRequest(disconnect_after=0.1)
+        resp = await M._stream_with_fallback(
+            "test", dep, payload, scope="chain", request=req)
+        assert isinstance(resp, StreamingResponse)
+        # il drain gira in un task figlio: quando il monitor rileva la
+        # disconnessione, cancella QUESTO task (come fa Starlette con la
+        # StreamingResponse) -> il drain si interrompe.
+        t0 = _monotonic()
+        consumed = []
+
+        async def _drain_child():
+            async for c in resp.body_iterator:
+                consumed.append(c)
+
+        task = asyncio.create_task(_drain_child())
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # termina MOLTO prima di consumare tutti i 51 chunk lenti (~2.5s)
+        assert _monotonic() - t0 < 1.5, f"drain troppo lento ({_monotonic()-t0:.2f}s)"
+        # non tutti i chunk lenti sono stati consumati -> upstream interrotto
+        out = b"".join(consumed)
+        assert b"y49" not in out, "l'upstream non e' stato interrotto"
+    asyncio.run(_run())
+    # il deployment NON deve essere punito (client-aborted, non colpa sua)
+    assert dep["unique"] not in M.router._cooldown
+
+
+def _monotonic():
+    import time as _t
+    return _t.monotonic()
