@@ -263,7 +263,8 @@ def _native_session_of(basis: str) -> str:
 
 def _session_headers(dep: dict, *, profile: str = "",
                      client_ip: str = "",
-                     session: str | None = None) -> dict[str, str]:
+                     session: str | None = None,
+                     attribution: dict | None = None) -> dict[str, str]:
     """Header x-opencode-session per la richiesta upstream.
 
     Priorità:
@@ -273,6 +274,12 @@ def _session_headers(dep: dict, *, profile: str = "",
          `api_key + "|" + client_ip + "|" + profilo` (deterministico: stesso
          input -> stesso valore; i componenti vuoti restano vuoti, cosi' il
          valore cambia se cambia anche solo il profilo).
+
+    `attribution`: header di attribuzione app INVIATI DAL CLIENT
+    (HTTP-Referer / X-Title / X-OpenRouter-Title). Se presenti, vincono sul
+    valore configurato (passthrough fedele: il client si presenta come
+    l'harness che e'); altrimenti si usa l'identita' di policy (default
+    opencode). Rilevante SOLO per upstream OpenRouter.
 
     Ritorna SEMPRE l'header: OpenCode Go lo richiede per session affinity e
     prompt caching; gli altri provider lo ignorano senza effetto.
@@ -294,20 +301,47 @@ def _session_headers(dep: dict, *, profile: str = "",
     # Attribuzione app OpenRouter: i modelli :free sono serviti SOLO agli
     # "agentic harness" riconosciuti (openrouter.ai/apps), identificati via
     # HTTP-Referer + X-Title. Senza questi header -> 403 (gate). Il referer
-    # è configurato in policy (default opencode, l'harness dietro il gateway).
-    out.update(_openrouter_attribution(dep))
+    # del CLIENT vince se presente (passthrough), altrimenti la policy
+    # (default opencode, l'harness dietro il gateway).
+    out.update(_openrouter_attribution(dep, client_headers=attribution))
     return out
 
 
-def _openrouter_attribution(dep: dict) -> dict[str, str]:
+def _client_attribution(request) -> dict[str, str]:
+    """Estrae dall'header del client l'attribuzione app che OpenRouter
+    pretende per i modelli :free (gate 'agentic harness').
+
+    Ritorna un dict con i SOLI header che il client ha inviato davvero:
+    HTTP-Referer, X-Title, X-OpenRouter-Title. Vuoto = il cliente non si
+    attribuisce -> si usa l'identita' di policy (default opencode).
+    """
+    out: dict[str, str] = {}
+    try:
+        headers = request.headers or {}
+    except Exception:
+        return out
+    for name in ("HTTP-Referer", "X-Title", "X-OpenRouter-Title"):
+        v = headers.get(name) or ""
+        if isinstance(v, str) and v.strip():
+            out[name] = v.strip()
+    return out
+
+
+def _openrouter_attribution(dep: dict,
+                            client_headers: dict | None = None) -> dict[str, str]:
     """Header di attribuzione app per upstream OpenRouter (:free harness gate).
 
     OpenRouter (2026) rifiuta i modelli `:free` con 403 "only available on
     agentic harnesses" se la richiesta non identifica un'app riconosciuta
     (lista su https://openrouter.ai/apps). L'identificazione avviene tramite
     gli header di app-attribution `HTTP-Referer` + `X-Title` (vedi
-    /docs/app-attribution). Il gateway è il tramite dell'harness opencode:
-    inviamo quindi il referer configurato (default https://opencode.ai).
+    /docs/app-attribution).
+
+    Precedenza:
+      1. header inviati DAL CLIENT (`client_headers`, passthrough fedele);
+      2. env OPENROUTER_APP_REFERER / OPENROUTER_APP_TITLE;
+      3. policy openrouter_app_referer / openrouter_app_title;
+      4. default https://opencode.ai / opencode (l'harness dietro il gateway).
 
     ATTENZIONE solo per api_base OpenRouter: gli altri provider non vogliono
     (o rifiutano) header estranei come HTTP-Referer.
@@ -315,28 +349,36 @@ def _openrouter_attribution(dep: dict) -> dict[str, str]:
     base = (dep.get("api_base") or "").lower()
     if "openrouter.ai" not in base:
         return {}
-    referer = os.environ.get("OPENROUTER_APP_REFERER") or ""
-    title = os.environ.get("OPENROUTER_APP_TITLE") or ""
-    if not referer or not title:
-        try:
-            from . import main as _gw
-            pol = getattr(_gw, "policy", None)
-            if pol is not None:
-                referer = referer or (getattr(pol, "openrouter_app_referer",
+    client = client_headers or {}
+    # 1) passthrough fedele: se il client si attribuisce, vince tutto.
+    ref = client.get("HTTP-Referer") or ""
+    title = (client.get("X-Title") or client.get("X-OpenRouter-Title") or "")
+    if not ref:
+        # 2) env, 3) policy, 4) default
+        ref = os.environ.get("OPENROUTER_APP_REFERER") or ""
+        title = title or os.environ.get("OPENROUTER_APP_TITLE") or ""
+        if not ref or not title:
+            try:
+                from . import main as _gw
+                pol = getattr(_gw, "policy", None)
+                if pol is not None:
+                    ref = ref or (getattr(pol, "openrouter_app_referer",
+                                          "") or "")
+                    title = title or (getattr(pol, "openrouter_app_title",
                                               "") or "")
-                title = title or (getattr(pol, "openrouter_app_title", "")
-                                  or "")
-        except Exception:                       # mai bloccare il routing
-            pass
+            except Exception:                   # mai bloccare il routing
+                pass
+        ref = ref or "https://opencode.ai"
+        title = title or "opencode"
     out: dict[str, str] = {}
-    if referer:
-        out["HTTP-Referer"] = referer
+    if ref:
+        out["HTTP-Referer"] = ref
     if title:
         out["X-Title"] = title
         out["X-OpenRouter-Title"] = title
     if os.environ.get("SNIFF_HEADERS"):
-        log.warning("[sniff] openrouter attribution: referer=%s title=%s",
-                    referer, title)
+        log.warning("[sniff] openrouter attribution: referer=%s title=%s "
+                    "(client=%s)", ref, title, bool(client))
     return out
 
 
@@ -437,7 +479,9 @@ class Forwarder:
     async def stream_response(self, dep: dict, payload: dict,
                               *, profile: str = "",
                               client_ip: str = "",
-                              session: str | None = None) -> AsyncIterator[bytes]:
+                              session: str | None = None,
+                              attribution: dict | None = None
+                              ) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
         Solleva UpstreamError per stati ritriabili PRIMA del primo byte inviato
@@ -459,7 +503,7 @@ class Forwarder:
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
             **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session),
+                               session=session, attribution=attribution),
         }
         url = f"{dep['api_base']}/chat/completions"
         try:
@@ -530,7 +574,8 @@ class Forwarder:
     async def call(self, dep: dict, payload: dict, *,
                    profile: str = "",
                    client_ip: str = "",
-                   session: str | None = None) -> dict:
+                   session: str | None = None,
+                   attribution: dict | None = None) -> dict:
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
@@ -538,7 +583,7 @@ class Forwarder:
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
             **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session),
+                               session=session, attribution=attribution),
         }
         url = f"{dep['api_base']}/chat/completions"
         try:
@@ -560,7 +605,8 @@ class Forwarder:
     async def call_images(self, dep: dict, payload: dict, *,
                           profile: str = "",
                           client_ip: str = "",
-                          session: str | None = None) -> dict:
+                          session: str | None = None,
+                          attribution: dict | None = None) -> dict:
         """Generazione immagini: POST {api_base}/images/generations (non streaming).
 
         Il body viene passato quasi intatto (solo il modello è riscritto col
@@ -573,7 +619,7 @@ class Forwarder:
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
             **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session),
+                               session=session, attribution=attribution),
         }
         url = f"{dep['api_base']}/images/generations"
         try:
@@ -598,7 +644,8 @@ class Forwarder:
     async def call_speech(self, dep: dict, payload: dict, *,
                           profile: str = "",
                           client_ip: str = "",
-                          session: str | None = None) -> tuple[bytes, str]:
+                          session: str | None = None,
+                          attribution: dict | None = None) -> tuple[bytes, str]:
         """TTS: POST {api_base}/audio/speech -> bytes audio (buffered).
 
         Body OpenAI {model, input, voice, response_format?, speed?} col model
@@ -609,7 +656,7 @@ class Forwarder:
         body["model"] = dep["model"]
         headers = {"Authorization": f"Bearer {dep['api_key']}",
                    **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session)}
+                                      session=session, attribution=attribution)}
         url = f"{dep['api_base']}/audio/speech"
         try:
             resp = await self.client.post(url, json=body, headers=headers,
@@ -635,7 +682,8 @@ class Forwarder:
                          path: str = "transcriptions",
                          *, profile: str = "",
                          client_ip: str = "",
-                         session: str | None = None) -> dict | str:
+                         session: str | None = None,
+                         attribution: dict | None = None) -> dict | str:
         """STT: POST multipart {api_base}/audio/{path} (transcriptions|translations).
 
         I campi form passano quasi intatti (model riscritto); il file va come
@@ -645,7 +693,7 @@ class Forwarder:
         data["model"] = dep["model"]
         headers = {"Authorization": f"Bearer {dep['api_key']}",
                    **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session)}
+                                      session=session, attribution=attribution)}
         url = f"{dep['api_base']}/audio/{path}"
         files = {"file": (filename or "audio.wav", file_bytes,
                           content_type or "audio/wav")}
@@ -676,14 +724,15 @@ class Forwarder:
     async def submit_video(self, dep: dict, payload: dict, *,
                            profile: str = "",
                            client_ip: str = "",
-                           session: str | None = None) -> dict:
+                           session: str | None = None,
+                           attribution: dict | None = None) -> dict:
         """Submit job video (API asincrona OR-style): POST {base}/videos.
         Ritorna l'envelope {id, status, polling_url,...}. Errori come call."""
         body = {k: v for k, v in payload.items() if k != "model"}
         body["model"] = dep["model"]
         headers = {"Authorization": f"Bearer {dep['api_key']}",
                    **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session)}
+                                      session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos"
         try:
             resp = await self.client.post(url, json=body, headers=headers,
@@ -706,11 +755,12 @@ class Forwarder:
     async def poll_video(self, dep: dict, job_id: str, *,
                          profile: str = "",
                          client_ip: str = "",
-                         session: str | None = None) -> dict:
+                         session: str | None = None,
+                         attribution: dict | None = None) -> dict:
         """Stato del job: GET {base}/videos/{job_id} -> JSON di stato."""
         headers = {"Authorization": f"Bearer {dep['api_key']}",
                    **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session)}
+                                      session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos/{job_id}"
         try:
             resp = await self.client.get(url, headers=headers)
@@ -726,7 +776,8 @@ class Forwarder:
     async def poll_video_any(self, deps: list[dict], job_id: str, *,
                              profile: str = "",
                              client_ip: str = "",
-                             session: str | None = None) -> dict:
+                             session: str | None = None,
+                             attribution: dict | None = None) -> dict:
         """Poll STATELESS: prova ogni candidato (chiavi diverse) finché uno
         riconosce il job. I job vivono sull'account di chi ha submitto, quindi
         le chiavi di altri account risponderanno 404 -> si prosegue."""
@@ -736,7 +787,8 @@ class Forwarder:
                 return await self.poll_video(dep, job_id,
                                              profile=profile,
                                              client_ip=client_ip,
-                                             session=session)
+                                             session=session,
+                                             attribution=attribution)
             except UpstreamError as err:
                 if err.status is not None and err.status == -404:
                     last = err
@@ -748,7 +800,8 @@ class Forwarder:
     async def download_video_any(self, deps: list[dict], job_id: str, *,
                                  profile: str = "",
                                  client_ip: str = "",
-                                 session: str | None = None) -> tuple[bytes, str]:
+                                 session: str | None = None,
+                                 attribution: dict | None = None) -> tuple[bytes, str]:
         """Download stateless: stessa logica multi-chiave di poll_video_any."""
         last: UpstreamError | None = None
         for dep in deps:
@@ -756,7 +809,8 @@ class Forwarder:
                 return await self.download_video(dep, job_id,
                                                  profile=profile,
                                                  client_ip=client_ip,
-                                                 session=session)
+                                                 session=session,
+                                                 attribution=attribution)
             except UpstreamError as err:
                 if err.status is not None and err.status == -404:
                     last = err
@@ -768,11 +822,12 @@ class Forwarder:
     async def download_video(self, dep: dict, job_id: str, *,
                              profile: str = "",
                              client_ip: str = "",
-                             session: str | None = None) -> tuple[bytes, str]:
+                             session: str | None = None,
+                             attribution: dict | None = None) -> tuple[bytes, str]:
         """Contenuto MP4 completato: GET {base}/videos/{job_id}/content."""
         headers = {"Authorization": f"Bearer {dep['api_key']}",
                    **_session_headers(dep, profile=profile, client_ip=client_ip,
-                                      session=session)}
+                                      session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos/{job_id}/content"
         try:
             resp = await self.client.get(url, headers=headers,
@@ -795,7 +850,8 @@ class Forwarder:
                                  ctx: int | None = None,
                                  attempts_box: list | None = None,
                                  session: str | None = None,
-                                 client_ip: str = ""
+                                 client_ip: str = "",
+                                 attribution: dict | None = None
                                  ) -> tuple[dict, dict] | tuple[dict, dict, list]:
         """Prova i deployment lungo la catena finché uno risponde.
 
@@ -849,7 +905,8 @@ class Forwarder:
             try:
                 data = await self.call(dep, payload,
                                profile=profile or "",
-                               client_ip=client_ip, session=session)
+                               client_ip=client_ip, session=session,
+                               attribution=attribution)
                 router.note_result(cur, (time.monotonic() - t0) * 1000)
                 if _was_dormant:
                     router.clear_cooldown(cur)

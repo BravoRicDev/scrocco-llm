@@ -105,6 +105,62 @@ def test_openrouter_attribution_env_override(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# PASSTHROUGH dell'attribuzione client: se il client si attribuisce
+# (HTTP-Referer/X-Title), quel valore vince sul default di policy.
+# ---------------------------------------------------------------------------
+class _FakeHeaders(dict):
+    def get(self, key, default=None):
+        return dict.get(self, key, default)
+
+
+class _FakeReq:
+    def __init__(self, headers):
+        self.headers = _FakeHeaders(headers)
+
+
+def test_client_attribution_extracts_headers():
+    from app.forwarder import _client_attribution
+    req = _FakeReq({
+        "HTTP-Referer": "https://claude.ai",
+        "X-Title": "Claude Code",
+        "X-OpenRouter-Title": "Claude Code alias",
+    })
+    got = _client_attribution(req)
+    assert got == {"HTTP-Referer": "https://claude.ai",
+                   "X-Title": "Claude Code",
+                   "X-OpenRouter-Title": "Claude Code alias"}
+
+
+def test_client_attribution_empty_without_headers():
+    from app.forwarder import _client_attribution
+    assert _client_attribution(_FakeReq({})) == {}
+
+
+def test_passthrough_client_referer_wins():
+    from app.forwarder import _client_attribution
+    req = _FakeReq({"HTTP-Referer": "https://claude.ai",
+                    "X-Title": "Claude Code"})
+    attr = _client_attribution(req)
+    got = _session_headers(_or_dep(), profile="p", client_ip="1.2.3.4",
+                           attribution=attr)
+    assert got["HTTP-Referer"] == "https://claude.ai"
+    assert got["X-Title"] == "Claude Code"
+    assert got["X-OpenRouter-Title"] == "Claude Code"
+    # il default (opencode) NON deve comparire
+    assert got["HTTP-Referer"] != "https://opencode.ai"
+
+
+def test_passthrough_only_title_keeps_default_referer():
+    from app.forwarder import _client_attribution
+    req = _FakeReq({"X-Title": "Solo Titolo"})
+    attr = _client_attribution(req)
+    got = _session_headers(_or_dep(), profile="p", client_ip="1.2.3.4",
+                           attribution=attr)
+    assert got["HTTP-Referer"] == "https://opencode.ai"   # referer resta default
+    assert got["X-Title"] == "Solo Titolo"                 # title del client vince
+
+
+# ---------------------------------------------------------------------------
 # _opencode_session (app/main.py): header di sessione in arrivo dal client.
 # Verificato via sniffing: opencode 1.18.x NON invia x-opencode-session ma
 # invia x-session-affinity / x-session-id con lo stesso valore del body.

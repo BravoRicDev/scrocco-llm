@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import csv_store, journal, logview
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
-from .forwarder import UpstreamError
+from .forwarder import UpstreamError, _client_attribution
 from .router import estimate_tokens
 from .policy import Policy
 
@@ -1395,7 +1395,8 @@ def probe_results_view() -> dict:
 
 async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                      force: bool, *, client_ip: str = "",
-                     session: str | None = None) -> dict:
+                     session: str | None = None,
+                     attribution: dict | None = None) -> dict:
     """UNA chiamata di verifica (max_tokens=1). Niente note_result/mark_failed:
     il probe e' informativo e non deve avvelenare la rotazione adattiva."""
     from .forwarder import _session_headers
@@ -1422,7 +1423,8 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                 f"{dep['api_base'].rstrip('/')}/models",
                 headers={"Authorization": f"Bearer {dep['api_key']}",
                          **_session_headers(dep, client_ip=client_ip,
-                                            session=session)},
+                                            session=session,
+                                            attribution=attribution)},
                 timeout=_PROBE_TIMEOUT_S)
             ok = resp.status_code == 200
         else:
@@ -1433,7 +1435,8 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                                     "content": "Reply with the single letter A"}]},
                 headers={"Authorization": f"Bearer {dep['api_key']}",
                          **_session_headers(dep, client_ip=client_ip,
-                                            session=session)},
+                                            session=session,
+                                            attribution=attribution)},
                 timeout=_PROBE_TIMEOUT_S)
             ok = False
             try:
@@ -1523,7 +1526,8 @@ async def deployments_probe(request: Request):
     async with httpx.AsyncClient() as http:
         out = await _probe_one(http, dep, bool(payload.get("force")),
                                client_ip=_client_ip_of(request),
-                               session=_session_of(request))
+                               session=_session_of(request),
+                               attribution=_client_attribution(request))
     journal.record(gw.VAR_DIR, "probe", {"target": out.get("unique"),
                                          "ok": out.get("ok")})
     return out
@@ -1563,11 +1567,13 @@ async def deployments_probe_bulk(request: Request):
     import asyncio as _aio
     _cip = _client_ip_of(request)
     _sess = _session_of(request)
+    _attr = _client_attribution(request)
 
     async def _run(dep):
         async with _aio.Semaphore(_PROBE_CONCURRENCY):
             return await _probe_one(shared_http, dep, force,
-                                    client_ip=_cip, session=_sess)
+                                    client_ip=_cip, session=_sess,
+                                    attribution=_attr)
 
     async with httpx.AsyncClient() as shared_http:
         outs = await _aio.gather(*[_run(d) for d in targets])
