@@ -113,6 +113,15 @@ class Policy:
     go_suffix: str = "-go"
     fallback_suffix: str = "-fallback"
 
+    # Attribuzione app verso OpenRouter (header HTTP-Referer + X-Title):
+    # OpenRouter serve i modelli :free SOLO se la richiesta arriva da un
+    # "agentic harness" riconosciuto (app elencata su openrouter.ai/apps),
+    # identificato tramite questi header. Il gateway è usato da opencode
+    # (harness riconosciuto): valore di default adeguato, sovrapponibile in
+    # gateway.yaml e/o via env OPENROUTER_APP_REFERER / OPENROUTER_APP_TITLE.
+    openrouter_app_referer: str = "https://opencode.ai"
+    openrouter_app_title: str = "opencode"
+
     # Prefissi STORICI riconosciuti come compatibili (OPZIONALI, default NESSUNO):
     # se valorizzati, le colonne del CSV che li usano vengono lette normalmente
     # e i nomi richiesti dai client vengono riscritti al prefisso corrente.
@@ -369,11 +378,13 @@ class Policy:
         for key, attr in (("proxy_prefix", "proxy_prefix"),
                           ("go_suffix", "go_suffix"),
                           ("fallback_suffix", "fallback_suffix"),
-                          ("service_name", "service_name")):
+                          ("service_name", "service_name"),
+                          ("openrouter_app_referer", "openrouter_app_referer"),
+                          ("openrouter_app_title", "openrouter_app_title")):
             if key in raw:
                 if not isinstance(raw[key], str) or not raw[key]:
                     raise ValueError(f"{key} deve essere una stringa non vuota")
-                setattr(p, attr, raw[key])
+                setattr(p, attr, raw[key].strip())
 
         if "legacy_prefixes" in raw:
             lp = raw["legacy_prefixes"]

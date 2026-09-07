@@ -277,18 +277,67 @@ def _session_headers(dep: dict, *, profile: str = "",
     Ritorna SEMPRE l'header: OpenCode Go lo richiede per session affinity e
     prompt caching; gli altri provider lo ignorano senza effetto.
     """
+    out: dict[str, str] = {}
     if session:
         out = {"x-opencode-session": session}
         if os.environ.get("SNIFF_HEADERS"):
             log.warning("[sniff] upstream session=passthrough value=%s", session)
-        return out
-    key = (dep.get("api_key") or "").strip()
-    basis = "|".join((key, client_ip, profile))
-    value = _native_session_of(basis)
+    else:
+        key = (dep.get("api_key") or "").strip()
+        basis = "|".join((key, client_ip, profile))
+        value = _native_session_of(basis)
+        if os.environ.get("SNIFF_HEADERS"):
+            log.warning("[sniff] upstream session=native value=%s "
+                        "basis=(%s,%s,%s)", value, bool(key),
+                        bool(client_ip), bool(profile))
+        out = {"x-opencode-session": value}
+    # Attribuzione app OpenRouter: i modelli :free sono serviti SOLO agli
+    # "agentic harness" riconosciuti (openrouter.ai/apps), identificati via
+    # HTTP-Referer + X-Title. Senza questi header -> 403 (gate). Il referer
+    # è configurato in policy (default opencode, l'harness dietro il gateway).
+    out.update(_openrouter_attribution(dep))
+    return out
+
+
+def _openrouter_attribution(dep: dict) -> dict[str, str]:
+    """Header di attribuzione app per upstream OpenRouter (:free harness gate).
+
+    OpenRouter (2026) rifiuta i modelli `:free` con 403 "only available on
+    agentic harnesses" se la richiesta non identifica un'app riconosciuta
+    (lista su https://openrouter.ai/apps). L'identificazione avviene tramite
+    gli header di app-attribution `HTTP-Referer` + `X-Title` (vedi
+    /docs/app-attribution). Il gateway è il tramite dell'harness opencode:
+    inviamo quindi il referer configurato (default https://opencode.ai).
+
+    ATTENZIONE solo per api_base OpenRouter: gli altri provider non vogliono
+    (o rifiutano) header estranei come HTTP-Referer.
+    """
+    base = (dep.get("api_base") or "").lower()
+    if "openrouter.ai" not in base:
+        return {}
+    referer = os.environ.get("OPENROUTER_APP_REFERER") or ""
+    title = os.environ.get("OPENROUTER_APP_TITLE") or ""
+    if not referer or not title:
+        try:
+            from . import main as _gw
+            pol = getattr(_gw, "policy", None)
+            if pol is not None:
+                referer = referer or (getattr(pol, "openrouter_app_referer",
+                                              "") or "")
+                title = title or (getattr(pol, "openrouter_app_title", "")
+                                  or "")
+        except Exception:                       # mai bloccare il routing
+            pass
+    out: dict[str, str] = {}
+    if referer:
+        out["HTTP-Referer"] = referer
+    if title:
+        out["X-Title"] = title
+        out["X-OpenRouter-Title"] = title
     if os.environ.get("SNIFF_HEADERS"):
-        log.warning("[sniff] upstream session=native value=%s basis=(%s,%s,%s)",
-                    value, bool(key), bool(client_ip), bool(profile))
-    return {"x-opencode-session": value}
+        log.warning("[sniff] openrouter attribution: referer=%s title=%s",
+                    referer, title)
+    return out
 
 
 class UpstreamError(Exception):

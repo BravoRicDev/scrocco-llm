@@ -72,6 +72,39 @@ def test_passthrough_session_wins():
 
 
 # ---------------------------------------------------------------------------
+# OpenRouter :free harness gate: i modelli :free sono concessi SOLO agli
+# "agentic harness" riconosciuti (openrouter.ai/apps), identificati tramite
+# HTTP-Referer + X-Title. Il gateway inoltra l'attribuzione configurata in
+# policy (default opencode) SOLO verso api_base openrouter.ai.
+# ---------------------------------------------------------------------------
+def _or_dep():
+    return {"api_key": "sk-key", "api_base": "https://openrouter.ai/api/v1"}
+
+
+def test_openrouter_attribution_headers_present():
+    got = _session_headers(_or_dep(), profile="p", client_ip="1.2.3.4")
+    assert got["HTTP-Referer"] == "https://opencode.ai"
+    assert got["X-Title"] == "opencode"
+    # alias moderno accettato da OpenRouter per il titolo
+    assert got.get("X-OpenRouter-Title") == "opencode"
+
+
+def test_openrouter_attribution_not_for_other_providers():
+    dep = {"api_key": "sk-key", "api_base": "https://api.mistral.ai/v1"}
+    got = _session_headers(dep, profile="p", client_ip="1.2.3.4")
+    assert "HTTP-Referer" not in got
+    assert "X-Title" not in got
+
+
+def test_openrouter_attribution_env_override(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_APP_REFERER", "https://myapp.example")
+    monkeypatch.setenv("OPENROUTER_APP_TITLE", "My App")
+    got = _session_headers(_or_dep(), profile="p", client_ip="1.2.3.4")
+    assert got["HTTP-Referer"] == "https://myapp.example"
+    assert got["X-Title"] == "My App"
+
+
+# ---------------------------------------------------------------------------
 # _opencode_session (app/main.py): header di sessione in arrivo dal client.
 # Verificato via sniffing: opencode 1.18.x NON invia x-opencode-session ma
 # invia x-session-affinity / x-session-id con lo stesso valore del body.
