@@ -229,6 +229,15 @@ class Policy:
     # max tentativi stale dims prima di passare a -fallback
     ladder_stale_max: int = 3
 
+    # SOGLIA "CRONICO": un deployment con questo numero di fallimenti nelle
+    # ultime 24h NON viene riesumato dagli step di ri-tentativo della scala
+    # (stantii e ULTIMA SPIAGGIA): è statisticamente rotto, ritentarlo ogni
+    # 5 minuti rallenta la catena senza utilità. Resta comunque provato come
+    # ultimo paracadute se non c'è più nulla. La finestra 24h si azzera al
+    # cambio giorno (fail_day_key) e clear_cooldown su successo lo azzera
+    # subito: un deployment "svegliato" che risponde torna pienamente vivo.
+    cooldown_retry_max_fail_24h: int = 10
+
     # Tetto ai tentativi di fallback interni per una singola richiesta (prima
     # di arrendersi con 503). Ogni tentativo = 1 chiamata upstream reale.
     max_fallback_tries: int = 128
@@ -666,6 +675,7 @@ class Policy:
         _set_int(p, raw, "cooldown_linear_mult_min", minimum=0)
         _set_int(p, raw, "ladder_skip_after", minimum=1)
         _set_int(p, raw, "ladder_stale_max", minimum=1)
+        _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
 
         # budget guard (dict con chiavi note; sconosciute ignorate)
         bg = raw.get("budget_guard")

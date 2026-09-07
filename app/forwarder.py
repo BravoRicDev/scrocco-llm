@@ -992,7 +992,9 @@ class Forwarder:
                                     "(%.80s): ritento sul successivo (cd corto)",
                                     cur, detail)
                         _fail_cur(
-                                           seconds=PROVIDER_TRANSIENT_COOLDOWN_S,
+                                           seconds=router.escalate_cooldown(
+                                               PROVIDER_TRANSIENT_COOLDOWN_S,
+                                               router.stats_for(cur).fail_count_24h),
                                            reason="provider_transient")
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried)
@@ -1110,7 +1112,9 @@ class Forwarder:
                                     "ritento sul successivo (cd corto)",
                                     cur, -err.status)
                         _fail_cur(
-                                           seconds=PROVIDER_TRANSIENT_COOLDOWN_S,
+                                           seconds=router.escalate_cooldown(
+                                               PROVIDER_TRANSIENT_COOLDOWN_S,
+                                               router.stats_for(cur).fail_count_24h),
                                            reason="empty_error_body")
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried)

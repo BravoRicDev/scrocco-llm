@@ -280,6 +280,33 @@ class Router:
                     unique, int(seconds), esc, s.fail_streak, s.fail_count_24h)
         return seconds
 
+    def escalate_cooldown(self, base_seconds: float,
+                          fail_count_24h: int) -> float:
+        """Escalation DOLCE del cooldown per fallimenti ricorrenti (24h).
+
+        - primo fallimento (~1): ritorna `base_seconds` invariato;
+        - fallimenti successivi: `base + 10%` del cooldown "potente" lineare
+          (cooldown_base_min + cooldown_linear_mult_min*(fail_24h-1) minuti,
+          cap max_cooldown_sec), così una chiave che fallisce in continuazione
+          (es. 18 volte/24h) viene esclusa per minuti/ore invece di essere
+          riesumata ogni 2 minuti.
+
+        Usata dai fallimenti SOFT/transitori (stream vuoto, 429, body vuoto):
+        non per gli errori duri (auth/modello assente) che hanno già cooldown
+        propri. `clear_cooldown` su successo resetta fail_count_24h, quindi
+        un deployment "svegliato" dalla catena e che risponde riparte dal
+        base appena riabilitato.
+        """
+        n = max(0, int(fail_count_24h or 0))
+        if n <= 1:
+            return float(base_seconds)
+        base_m = max(1, int(getattr(self.policy, "cooldown_base_min", 30) or 30))
+        mult_m = max(0, int(getattr(self.policy, "cooldown_linear_mult_min", 30) or 30))
+        potent = (base_m + mult_m * max(0, n - 1)) * 60.0
+        potent = min(potent, float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
+        return min(float(base_seconds) + 0.1 * potent,
+                   float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
+
     def mark_failed_double_residual(self, unique: str,
                                      reason: str | None = None) -> float:
         """Raddoppia il cooldown residuo quando un deployment dormiente fallisce
@@ -1218,6 +1245,22 @@ class Router:
         skip = max(1, int(getattr(pol, "ladder_skip_after", 4) or 4))
         stale_max = max(1, int(getattr(pol, "ladder_stale_max", 3) or 3))
         age = float(getattr(pol, "stale_cooldown_retry_sec", 300) or 300)
+        # Leva B: un deployment "cronico" (tanti fallimenti nelle ultime 24h)
+        # NON va riesumato dagli step di ri-tentativo (stantii/ultima spiaggia):
+        # è statisticamente rotto, riprovarlo ogni 5 minuti rallenta la catena
+        # senza utilità. Resta però provato come ULTIMO paracadute (step 5).
+        chronic_thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10)
+                                  or 10))
+
+        def _is_chronic(u: str) -> bool:
+            s = self.stats_for(u)
+            return s.fail_count_24h >= chronic_thr
+
+        def _chronic_filter(uniqs: list[str],
+                            exclude_chronic: bool) -> list[str]:
+            if not exclude_chronic:
+                return uniqs
+            return [u for u in uniqs if not _is_chronic(u)]
 
         # 1) dims vivi (max skip)
         nxt = self._walk_chain(dims, failed_unique, need, ctx,
@@ -1231,8 +1274,9 @@ class Router:
             log.info("[ladder] escalation a -go -> %s", nxt["unique"])
             return nxt
 
-        # 3) dims stantii (max stale_max)
-        nxt = self._walk_chain(dims, failed_unique, need, ctx,
+        # 3) dims stantii (max stale_max) — mai i cronici (Leva B)
+        nxt = self._walk_chain(_chronic_filter(dims, True), failed_unique,
+                               need, ctx,
                                min_cooldown_age=age, limit=stale_max,
                                tried=tried)
         if nxt is not None:
@@ -1240,8 +1284,9 @@ class Router:
                      int(age), nxt["unique"])
             return nxt
 
-        # 4) -go stantii
-        nxt = self._walk_chain(go, failed_unique, need, ctx,
+        # 4) -go stantii — mai i cronici (Leva B)
+        nxt = self._walk_chain(_chronic_filter(go, True), failed_unique,
+                               need, ctx,
                                min_cooldown_age=age, tried=tried)
         if nxt is not None:
             log.info("[ladder] go stantio (>%ds) -> %s",
@@ -1258,12 +1303,18 @@ class Router:
                 return nxt
 
         # 6) ULTIMA SPIAGGIA: tutti in cooldown, ordinati per residuo crescente
+        #    — MAI i cronici (Leva B): chi fallisce da decine di volte/24h
+        #    non va riesumato qui; la catena si esaurisce senza rovistare.
         now = time.time()
         cooled = []
         for u in ladder:
             if u == failed_unique:
                 continue
             if tried and u in tried:
+                continue
+            if _is_chronic(u):
+                log.debug("[ladder] %s cronico (fail_24h>=%d): saltato "
+                          "da ULTIMA SPIAGGIA", u, chronic_thr)
                 continue
             if not self.is_cooled_down(u):
                 continue

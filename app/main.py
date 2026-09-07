@@ -1184,11 +1184,22 @@ def _actionable_upstream_error(err) -> bool:
     return st in (-401, -402, -403)
 
 
-def _soft_cd() -> int:
+def _soft_cd(fail_24h: int = 0) -> int:
     """Secondi di cooldown per un fallimento SOFT dello streaming (vuoto/
-    troncato/zero-answer): fisso e breve, mai l'escalation."""
-    return int(getattr(router.policy.qc_json, "watchdog_cooldown_sec", 90)
+    troncato/zero-answer).
+
+    Escalation dolce sui fallimenti RECENTI (finestra 24h): il primo resta il
+    watchdog_cooldown_sec fisso (90s); i successivi aggiungono il 10% del
+    cooldown "potente" lineare (vedi Router.escalate_cooldown), cosi' un
+    deployment che fallisce in continuazione (es. 18 volte/24h) viene escluso
+    per minuti/ore invece di essere riesumato ogni 2 minuti. La finestra 24h
+    si azzera al cambio giorno (fail_day_key), quindi l'indomani la chiave
+    riparte dal cooldown base; e su successo (clear_cooldown) torna subito
+    disponibile.
+    """
+    base = int(getattr(router.policy.qc_json, "watchdog_cooldown_sec", 90)
                or 90)
+    return int(router.escalate_cooldown(base, fail_24h))
 
 
 async def _discard_stream(gen, pending=None) -> None:
@@ -1340,8 +1351,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if not no_rotate:
                 # fallimento SOFT (stream vuoto/troncato pre-contenuto): il
                 # modello ha risposto male, non e' morto -> cooldown CORTO
-                # fisso, non l'escalation che spegnerebbe il pool.
-                _fail(dep["unique"], seconds=_soft_cd())
+                # con escalation dolce sui fallimenti recenti (24h).
+                _fail(dep["unique"], seconds=_soft_cd(
+                    router.stats_for(dep["unique"]).fail_count_24h))
             over_deadline = ((time.monotonic() - t_req) * 1000 >
                              int(getattr(qcp, "stream_total_deadline_ms",
                                          90000) or 90000))
@@ -1442,7 +1454,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # model_missing (inesistente/non servito/giu'): 24h fissi.
             if not thought_sig:
                 if reason in ("provider_transient", "empty_error_body"):
-                    _cd = PROVIDER_TRANSIENT_COOLDOWN_S
+                    _cd = router.escalate_cooldown(
+                        PROVIDER_TRANSIENT_COOLDOWN_S,
+                        router.stats_for(dep["unique"]).fail_count_24h)
                 elif reason == "model_missing":
                     _cd = MODEL_MISSING_COOLDOWN_S
                 else:
@@ -1484,7 +1498,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 router.note_end(dep["unique"])
             except Exception:
                 pass
-            _fail(dep["unique"], seconds=_soft_cd())
+            _fail(dep["unique"], seconds=_soft_cd(
+                router.stats_for(dep["unique"]).fail_count_24h))
             nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
                                        tried=tried_set) \
                 if profile else None
@@ -1667,13 +1682,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "empty"))
                     log.warning("[watchdog] tier1 stream VUOTO da %s "
                                 "(chunks=0): cooldown", dep["unique"])
-                    _fail(dep["unique"], seconds=_soft_cd())
+                    _fail(dep["unique"], seconds=_soft_cd(
+                        router.stats_for(dep["unique"]).fail_count_24h))
                 elif seen_error:
                     wd = "tier1-error"
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "error"))
                     log.warning("[watchdog] tier1 evento error esplicito "
                                 "da %s (chunks=%d)", dep["unique"], chunks)
-                    _fail(dep["unique"], seconds=_soft_cd())
+                    _fail(dep["unique"], seconds=_soft_cd(
+                        router.stats_for(dep["unique"]).fail_count_24h))
                 elif gen_broken or (not seen_done and not saw_finish_reason):
                     # troncamento GENUINO: stream rotto a meta' oppure niente
                     # [DONE] E niente finish_reason -> il modello ha scazzato.
@@ -1683,7 +1700,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.warning("[watchdog] tier2 stream TRONCATO da %s "
                                 "(chunk=%d, finish_reason=%s): cooldown",
                                 dep["unique"], chunks, saw_finish_reason)
-                    _fail(dep["unique"], seconds=_soft_cd())
+                    _fail(dep["unique"], seconds=_soft_cd(
+                        router.stats_for(dep["unique"]).fail_count_24h))
                 elif not seen_done:
                     # c'e' un finish_reason ma manca [DONE]: risposta di fatto
                     # completa, il provider omette solo il sentinel. Solo log.
@@ -1703,7 +1721,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.warning("[watchdog] stream 0-answer da %s (input non "
                                 "vuoto, finish_len=%s): cooldown",
                                 dep["unique"], finish_len)
-                    _fail(dep["unique"], seconds=_soft_cd())
+                    _fail(dep["unique"], seconds=_soft_cd(
+                        router.stats_for(dep["unique"]).fail_count_24h))
             _summary(dur_ms)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
