@@ -100,11 +100,14 @@ def test_chronic_dep_excluded_from_stale_and_last_resort(router=None):
     r.mark_failed(go["unique"], seconds=600)
     r.mark_failed(fb["unique"], seconds=600)
     a = _dep(r, f"{BASE}-1000k", "K-A")
-    # Nessuna alternativa viva; i cronici saltati da stale e ultima spiaggia
-    # -> l'unico candidato resta il -fallback (step 5, paracadute).
+    # Nessuna alternativa viva; i cronici NON vengono riesumati da stale o
+    # ULTIMA SPIAGGIA ma dal PARACADUTE 4bis (PRIMA del -fallback a pagamento).
     nxt = r.fallback_next("test", a, None, "group", ctx=1000)
     assert nxt is not None
-    assert nxt["unique"] == fb["unique"]
+    # primo cronico (B: meno fallimenti? entrambi 25 -> ordine per cooldown,
+    # entrambi stantii; il 4bis li prova) -> NON il fallback a pagamento
+    assert nxt["group"] != f"{BASE}-fallback"
+    assert nxt["group"] == f"{BASE}-1000k"
     os.unlink(p)
 
 
@@ -135,3 +138,207 @@ def test_clear_cooldown_resets_chronic_counter():
     assert r.stats_for(d["unique"]).fail_count_24h == 0
     assert not r.is_cooled_down(d["unique"])
     os.unlink(p)
+
+
+# ------------------------------------------------- paracadute 4bis (cronici)
+def _make_4bis_router(max_fail=10, chronic_max=3):
+    r, p = _make_router(max_fail=max_fail)
+    r.policy.ladder_chronic_max = chronic_max
+    return r, p
+
+
+def test_4bis_retries_chronics_before_paid_fallback():
+    """Cronico (fail_24h>=soglia): provato nel paracadute 4bis PRIMA di
+    scomodare il -fallback a pagamento, anche se ancora in cooldown."""
+    r, p = _make_4bis_router(max_fail=10, chronic_max=3)
+    a = _dep(r, f"{BASE}-1000k", "K-A")
+    b = _dep(r, f"{BASE}-1000k", "K-B")
+    go = _dep(r, f"{BASE}-go", "K-GO")
+    fb = _dep(r, f"{BASE}-fallback", "K-FB")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    # A cronico in cooldown attivo; B non-cronico in cooldown; go/fb freschi
+    r.stats_for(a["unique"]).fail_count_24h = 18
+    r.stats_for(a["unique"]).fail_day_key = today
+    r.mark_failed(a["unique"], seconds=600)        # A in cooldown fresco
+    r.stats_for(b["unique"]).fail_count_24h = 2
+    r.mark_failed(b["unique"], seconds=600)
+    r.mark_failed(go["unique"], seconds=600)
+    r.mark_failed(fb["unique"], seconds=600)
+    # parte da B (ladder dims 1000k, contiene A) — B fallito punto di partenza
+    nxt = r.fallback_next("test", b, None, "group", ctx=1000)
+    # A (cronico, svegliato) viene provato PRIMA di fallback a pagamento
+    assert nxt is not None
+    assert nxt["unique"] == a["unique"]
+    os.unlink(p)
+
+
+def test_4bis_orders_less_failures_first():
+    """A parità di disponibilità: il cronico con MENO fallimenti/24h viene
+    prima di quello con più fallimenti (ordinamento primario). Test diretto
+    su _walk_ladder_resilient (failed_unique=None per non escludere A/B)."""
+    r, p = _make_4bis_router(max_fail=10, chronic_max=3)
+    a = _dep(r, f"{BASE}-1000k", "K-A")
+    b = _dep(r, f"{BASE}-1000k", "K-B")
+    go = _dep(r, f"{BASE}-go", "K-GO")
+    fb = _dep(r, f"{BASE}-fallback", "K-FB")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    r.stats_for(a["unique"]).fail_count_24h = 12     # meno fallimenti
+    r.stats_for(a["unique"]).fail_day_key = today
+    r.stats_for(b["unique"]).fail_count_24h = 25     # più fallimenti
+    r.stats_for(b["unique"]).fail_day_key = today
+    # A e B in cooldown; go e fallback pure (per non farli scegliere prima)
+    r.mark_failed(a["unique"], seconds=600)
+    r.mark_failed(b["unique"], seconds=600)
+    r.mark_failed(go["unique"], seconds=600)
+    r.mark_failed(fb["unique"], seconds=600)
+    ladder = r._text_ladder("test", start_dim=1000)  # A,B,go,fallback
+    dep = r._walk_ladder_resilient(ladder, None, None, 1000)
+    assert dep is not None
+    assert dep["unique"] == a["unique"]              # 12 < 25 -> A prima
+    os.unlink(p)
+
+
+def test_4bis_respects_cap_context_need():
+    """Il paracadute cronico NON propone un deployment senza la capacità o
+    senza contesto per la richiesta (need + _cap_fits)."""
+    r, p = _make_4bis_router(max_fail=10, chronic_max=3)
+    a = _dep(r, f"{BASE}-1000k", "K-A")
+    go = _dep(r, f"{BASE}-go", "K-GO")
+    fb = _dep(r, f"{BASE}-fallback", "K-FB")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    r.stats_for(a["unique"]).fail_count_24h = 18
+    r.stats_for(a["unique"]).fail_day_key = today
+    r.mark_failed(go["unique"], seconds=600)
+    r.mark_failed(fb["unique"], seconds=600)
+    # need VISION: A è solo text (mappa vuota) -> scartato, nessun cronico ok
+    nxt = r.fallback_next("test", go, frozenset({"vision"}), "group", ctx=1000)
+    # non deve MAI scegliere A (non supporta vision)
+    assert nxt is None or nxt["unique"] != a["unique"]
+    os.unlink(p)
+
+
+def test_4bis_chronic_max_limits_attempts():
+    """Con ladder_chronic_max=1, il secondo cronico NON è provato: si
+    esaurisce il paracadute gratis e si va al fallback (a parità cooldown
+    vince il meno fallimentare, quindi il primo è A)."""
+    r, p = _make_4bis_router(max_fail=10, chronic_max=1)
+    a = _dep(r, f"{BASE}-1000k", "K-A")
+    b = _dep(r, f"{BASE}-1000k", "K-B")
+    go = _dep(r, f"{BASE}-go", "K-GO")
+    fb = _dep(r, f"{BASE}-fallback", "K-FB")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    r.stats_for(a["unique"]).fail_count_24h = 12
+    r.stats_for(a["unique"]).fail_day_key = today
+    r.stats_for(b["unique"]).fail_count_24h = 14
+    r.stats_for(b["unique"]).fail_day_key = today
+    # A e B in cooldown; go e fallback pure (per non farli scegliere prima)
+    r.mark_failed(a["unique"], seconds=600)
+    r.mark_failed(b["unique"], seconds=600)
+    r.mark_failed(go["unique"], seconds=600)
+    r.mark_failed(fb["unique"], seconds=600)
+    ladder = r._text_ladder("test", start_dim=1000)
+    # primo giro: A provato (12 < 14, max=1)
+    dep1 = r._walk_ladder_resilient(ladder, None, None, 1000)
+    assert dep1 is not None and dep1["unique"] == a["unique"]
+    # A in tried -> il pool cronico si riduce; con max=1 il primo candidato
+    # diventa B (entro il max), quindi B viene provato.
+    dep2 = r._walk_ladder_resilient(ladder, None, None, 1000,
+                                    tried={a["unique"]})
+    assert dep2 is not None and dep2["unique"] == b["unique"]
+    os.unlink(p)
+
+
+# ------------------------------------------------ floor 2h per cronici
+def test_chronic_mark_failed_floor_2h():
+    r, p = _make_router(max_fail=10)
+    d = _dep(r, f"{BASE}-1000k", "K-A")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    r.stats_for(d["unique"]).fail_count_24h = 25     # cronico
+    r.stats_for(d["unique"]).fail_day_key = today
+    # un fallimento "soft" da 90s -> il floor cronico lo porta a >=2h
+    r.mark_failed(d["unique"], seconds=90)
+    cd = r._cooldown[d["unique"]] - time.time()
+    assert cd >= 7200 - 1
+    os.unlink(p)
+
+
+def test_chronic_mark_failed_double_residual_floor_2h():
+    r, p = _make_router(max_fail=10)
+    d = _dep(r, f"{BASE}-1000k", "K-A")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    r.stats_for(d["unique"]).fail_count_24h = 25
+    r.stats_for(d["unique"]).fail_day_key = today
+    r._cooldown[d["unique"]] = time.time() + 120
+    return_cd = r.mark_failed_double_residual(d["unique"])
+    assert return_cd >= 7200
+    assert r._cooldown[d["unique"]] - time.time() >= 7200 - 1
+    os.unlink(p)
+
+
+def test_non_chronic_not_affected_by_floor():
+    r, p = _make_router(max_fail=10)
+    d = _dep(r, f"{BASE}-1000k", "K-A")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    r.stats_for(d["unique"]).fail_count_24h = 3      # non cronico
+    r.stats_for(d["unique"]).fail_day_key = today
+    r.mark_failed(d["unique"], seconds=90)           # resta ~90s (escalation soft)
+    cd = r._cooldown[d["unique"]] - time.time()
+    assert cd < 7200
+    os.unlink(p)
+
+
+# -------------------------------- media defer nel paracadute cronico (Opzione A)
+def _make_media_router(chronic_max=3):
+    """Stesso CSV base, ma rende K-B 'vision' via model_capabilities della
+    policy (resta nel gruppo 1000k: è m/b1000, solo dichiarato vision)."""
+    r, p = _make_router(max_fail=10)
+    r.policy.ladder_chronic_max = chronic_max
+    b = _dep(r, f"{BASE}-1000k", "K-B")
+    r.policy.model_capabilities = {
+        b["model"]: ["text", "vision"],
+    }
+    return r, p, b
+
+
+def test_4bis_text_prefers_cronic_text_only_over_media():
+    """Opzione A: richiesta testo puro -> il paracadute cronico sceglie il
+    cronico text-only (K-A) PRIMA di quello vision (K-B), a parità cooldown."""
+    r, path, b = _make_media_router(chronic_max=3)
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    a = _dep(r, f"{BASE}-1000k", "K-A")          # text-only
+    go = _dep(r, f"{BASE}-go", "K-GO")
+    fb = _dep(r, f"{BASE}-fallback", "K-FB")
+    for u in (a["unique"], b["unique"]):
+        r.stats_for(u).fail_count_24h = 15
+        r.stats_for(u).fail_day_key = today
+        r.mark_failed(u, seconds=600)            # in cooldown attivo
+    r.mark_failed(go["unique"], seconds=600)     # go e fallback freschi
+    r.mark_failed(fb["unique"], seconds=600)
+    ladder = r._text_ladder("test", start_dim=1000)
+    dep = r._walk_ladder_resilient(ladder, None, frozenset({"text"}), 1000)
+    assert dep is not None
+    assert dep["unique"] == a["unique"]           # text-only prima di vision
+    os.unlink(path)
+
+
+def test_4bis_vision_uses_media_capable():
+    """Richiesta VISION: il paracadute cronico deve poter usare il cronico
+    vision (media defer non si applica alle richieste media)."""
+    r, path, b = _make_media_router(chronic_max=3)
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    a = _dep(r, f"{BASE}-1000k", "K-A")
+    go = _dep(r, f"{BASE}-go", "K-GO")
+    fb = _dep(r, f"{BASE}-fallback", "K-FB")
+    for u in (a["unique"], b["unique"]):
+        r.stats_for(u).fail_count_24h = 15
+        r.stats_for(u).fail_day_key = today
+        r.mark_failed(u, seconds=600)
+    r.mark_failed(go["unique"], seconds=600)
+    r.mark_failed(fb["unique"], seconds=600)
+    ladder = r._text_ladder("test", start_dim=1000)
+    # richiesta vision: text-only K-A non la supporta -> resta solo K-B vision
+    dep = r._walk_ladder_resilient(ladder, None, frozenset({"text", "vision"}),
+                                   1000)
+    assert dep is not None
+    assert dep["unique"] == b["unique"]
+    os.unlink(path)

@@ -238,6 +238,19 @@ class Policy:
     # subito: un deployment "svegliato" che risponde torna pienamente vivo.
     cooldown_retry_max_fail_24h: int = 10
 
+    # PARACADUTE CRONICI (step 4bis della ladder): quando dims/go vivi e
+    # stantii sono esauriti, PRIMA di spendere sul -fallback a pagamento si
+    # riprovano fino a `ladder_chronic_max` deployment cronici col cooldown
+    # SCADUTO (potenzialmente "svegli"), dal meno fallimentare al più
+    # fallimentare (a parità: cooldown residuo più breve). 0 = disattivo.
+    ladder_chronic_max: int = 3
+
+    # Se un cronico fallisce di nuovo (anche dopo essere stato "svegliato"
+    # dal paracadute), resta escluso per almeno questi secondi: non va
+    # martellato ogni pochi minuti. 2h = 7200s. clear_cooldown su successo
+    # lo azzera subito.
+    chronic_fail_cooldown_sec: int = 7200
+
     # Tetto ai tentativi di fallback interni per una singola richiesta (prima
     # di arrendersi con 503). Ogni tentativo = 1 chiamata upstream reale.
     max_fallback_tries: int = 128
@@ -676,6 +689,8 @@ class Policy:
         _set_int(p, raw, "ladder_skip_after", minimum=1)
         _set_int(p, raw, "ladder_stale_max", minimum=1)
         _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
+        _set_int(p, raw, "ladder_chronic_max", minimum=0)
+        _set_int(p, raw, "chronic_fail_cooldown_sec", minimum=0)
 
         # budget guard (dict con chiavi note; sconosciute ignorate)
         bg = raw.get("budget_guard")

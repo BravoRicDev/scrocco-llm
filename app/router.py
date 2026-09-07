@@ -269,6 +269,15 @@ class Router:
             else:
                 seconds = float(pol.cooldown_sec)
         seconds = max(1.0, float(seconds))
+        # Leva B: un deployment CRONICO (fail_24h >= soglia) che fallisce
+        # di nuovo va in pausa MINIMA longa (chronic_fail_cooldown_sec, 2h):
+        # dopo essere stato "svegliato" dal paracadute e aver fallito, non
+        # deve essere ritentato a breve. clear_cooldown su successo lo azzera.
+        thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10) or 10))
+        if s.fail_count_24h >= thr:
+            floor_cd = max(1.0, float(getattr(
+                pol, "chronic_fail_cooldown_sec", 7200) or 7200))
+            seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
         self._cooldown[unique] = time.time() + seconds
         self._cooldown_since[unique] = time.time()
         esc = ""
@@ -327,6 +336,16 @@ class Router:
         s.fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)
+        # Leva B: stessa pausa minima longa (2h) se il cronico fallisce
+        # di nuovo anche da dormiente (mark_failed_double_residual usa già
+        # il raddoppio del residuo; qui garantiamo almeno il floor).
+        thr = max(1, int(getattr(self.policy, "cooldown_retry_max_fail_24h", 10)
+                                    or 10))
+        if s.fail_count_24h >= thr:
+            floor_cd = max(1.0, float(getattr(
+                self.policy, "chronic_fail_cooldown_sec", 7200) or 7200))
+            new_cd = min(max(new_cd, floor_cd),
+                         float(self.policy.max_cooldown_sec))
         self._cooldown[unique] = now + new_cd
         self._cooldown_since[unique] = now
         log.warning("[cooldown] %s dormiente ri-fallito -> cooldown "
@@ -1220,8 +1239,12 @@ class Router:
           2) -go vivi
           3) dims stantii (cooldown > stale_cooldown_retry_sec) — max ladder_stale_max
           4) -go stantii (dormiente, potrebbe essersi svegliato)
+          4bis) PARACADUTE CRONICI (fail_24h >= soglia): riprovati qui, dal
+                meno fallimentare al più fallimentare (a parità: cooldown
+                residuo più breve), max ladder_chronic_max, PRIMA del -fallback
+                a pagamento. Fallendo di nuovo: pausa minima 2h.
           5) -fallback INTERO (ignore cooldown — deve sempre rispondere)
-          6) ULTIMA SPIAGGIA: tutti in cooldown, ordinati per residuo crescente
+          6) ULTIMA SPIAGGIA: non-cronici in cooldown, per residuo crescente
 
         Ritorna None solo se non esiste piu' niente."""
         if not ladder:
@@ -1246,11 +1269,16 @@ class Router:
         stale_max = max(1, int(getattr(pol, "ladder_stale_max", 3) or 3))
         age = float(getattr(pol, "stale_cooldown_retry_sec", 300) or 300)
         # Leva B: un deployment "cronico" (tanti fallimenti nelle ultime 24h)
-        # NON va riesumato dagli step di ri-tentativo (stantii/ultima spiaggia):
-        # è statisticamente rotto, riprovarlo ogni 5 minuti rallenta la catena
-        # senza utilità. Resta però provato come ULTIMO paracadute (step 5).
+        # NON va riesumato dagli step di ri-tentativo ordinari (stantii/ultima
+        # spiaggia): è statisticamente rotto, riprovarlo ogni 5 minuti rallenta
+        # la catena senza utilità. Viene però provato in un PARACADUTE dedicato
+        # (step 4bis) PRIMA del -fallback a pagamento, e se fallisce lì va in
+        # pausa minima chronic_fail_cooldown_sec (2h).
         chronic_thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10)
                                   or 10))
+        # max deployment cronici provati per richiesta nel paracadute gratuito
+        ladder_chronic_max = max(0, int(getattr(pol, "ladder_chronic_max", 3)
+                                        or 3))
 
         def _is_chronic(u: str) -> bool:
             s = self.stats_for(u)
@@ -1261,6 +1289,41 @@ class Router:
             if not exclude_chronic:
                 return uniqs
             return [u for u in uniqs if not _is_chronic(u)]
+
+        def _chronic_context(ccfg, uniqs: list[str],
+                             cneed, cctx) -> list[str]:
+            """Candidati cronici che possono PROPRIO gestire la richiesta:
+            capacità `cneed` e contesto/max_input compatibili (`_cap_fits`)."""
+            out = []
+            for u in uniqs:
+                d = ccfg.deployment_by_unique(u)
+                if not d or self.is_retired(u):
+                    continue
+                if cneed and not self._dep_supports(d, cneed):
+                    continue
+                if not self._cap_fits(d, cctx):
+                    continue
+                out.append(u)
+            return out
+
+        def _chronic_media_defer(ccfg, uniqs: list[str],
+                                 cneed, cctx) -> list[str]:
+            """Opzione A — MEDIA DEFER anche nel paracadute cronico: per
+            richieste PURE-TESTO, se nel pool cronico esiste almeno un
+            text-only (capace e cap-fits), i cronici media-capable vengono
+            rimandati (non si 'spreca' il paracadute su un modello vision/
+            audio se c'è un text-only che può rispondere). Richieste media e
+            pool tutto-multimediale restano invariati (coerente con
+            _defer_media)."""
+            if cneed and not cneed.isdisjoint(self.MEDIA_TOKENS):
+                return uniqs
+            deps = [d for d in (ccfg.deployment_by_unique(u) for u in uniqs)
+                    if d is not None]
+            text_only = [d for d in deps if not self._is_media_capable(d)]
+            if text_only and len(text_only) < len(deps):
+                kept = {d["unique"] for d in text_only}
+                return [u for u in uniqs if u in kept]
+            return uniqs
 
         # 1) dims vivi (max skip)
         nxt = self._walk_chain(dims, failed_unique, need, ctx,
@@ -1292,6 +1355,44 @@ class Router:
             log.info("[ladder] go stantio (>%ds) -> %s",
                      int(age), nxt["unique"])
             return nxt
+
+        # 4bis) PARACADUTE CRONICI (gratis, PRIMA del -fallback a pagamento):
+        # i deployment con molti fallimenti/24h NON provati ancora in questa
+        # richiesta vengono riprovati qui — sia in cooldown (svegliati) sia
+        # no — ordinati dal MENO fallimentare al più fallimentare; a parità
+        # vince il cooldown residuo più breve. Massimo `ladder_chronic_max`
+        # per richiesta. Se falliscono di nuovo vanno in pausa minima
+        # `chronic_fail_cooldown_sec` (2h, vedi mark_failed/
+        # mark_failed_double_residual).
+        if ladder_chronic_max > 0:
+            # Paracadute cronici: chi ha fallito molto/24h ma NON è ancora
+            # stato provato in questa richiesta. Sono quelli che i passi
+            # normali ignorano (vivi = pescati; in cooldown = esclusi perché
+            # cronici anche da stantii/ultima spiaggia): li riproviamo qui,
+            # PRIMA del -fallback a pagamento, dal meno fallimentare al più
+            # fallimentare (a parità: cooldown residuo più breve).
+            chronic_pool = [u for u in ladder
+                            if u != failed_unique
+                            and not (tried and u in tried)
+                            and _is_chronic(u)
+                            and not self.is_retired(u)]
+            # contesto/capacità compatibili e (Opzione A) testo puro -> text-only
+            chronic_pool = _chronic_context(cfg, chronic_pool, need, ctx)
+            chronic_pool = _chronic_media_defer(cfg, chronic_pool, need, ctx)
+            if chronic_pool:
+                chronic_pool.sort(
+                    key=lambda u: (self.stats_for(u).fail_count_24h,
+                                   self._cooldown.get(u, time.time())
+                                   - time.time()))
+                for u in chronic_pool[:ladder_chronic_max]:
+                    d = cfg.deployment_by_unique(u)
+                    if d is None:
+                        continue
+                    log.warning("[ladder] paracadute cronico (fail_24h=%d, "
+                                "in_cooldown=%s) -> %s",
+                                self.stats_for(u).fail_count_24h,
+                                self.is_cooled_down(u), u)
+                    return d
 
         # 5) -fallback INTERO: ignore cooldown, il servizio deve rispondere
         if fb:
