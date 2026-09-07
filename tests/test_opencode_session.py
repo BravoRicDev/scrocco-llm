@@ -81,6 +81,19 @@ def _or_dep():
     return {"api_key": "sk-key", "api_base": "https://openrouter.ai/api/v1"}
 
 
+def test_openrouter_attribution_applies_to_any_model():
+    """La regola vale per OGNI modello su openrouter.ai, non solo i :free:
+    pagati, :free e modelli futuri ricevono gli stessi header. Se OpenRouter
+    estenderà il gate 'agentic harness' a nuovi modelli è già coperto."""
+    for m in ("thinkingmachines/inkling-small:free", "openai/gpt-5.2",
+              "futuro/modello-nuovissimo:free"):
+        dep = {"api_key": "sk-key", "api_base": "https://openrouter.ai/api/v1",
+               "model": m}
+        got = _session_headers(dep, profile="p", client_ip="1.2.3.4")
+        assert got["HTTP-Referer"] == "https://opencode.ai"
+        assert got["X-Title"] == "opencode"
+
+
 def test_openrouter_attribution_headers_present():
     got = _session_headers(_or_dep(), profile="p", client_ip="1.2.3.4")
     assert got["HTTP-Referer"] == "https://opencode.ai"

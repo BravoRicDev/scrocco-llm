@@ -298,11 +298,12 @@ def _session_headers(dep: dict, *, profile: str = "",
                         "basis=(%s,%s,%s)", value, bool(key),
                         bool(client_ip), bool(profile))
         out = {"x-opencode-session": value}
-    # Attribuzione app OpenRouter: i modelli :free sono serviti SOLO agli
-    # "agentic harness" riconosciuti (openrouter.ai/apps), identificati via
-    # HTTP-Referer + X-Title. Senza questi header -> 403 (gate). Il referer
-    # del CLIENT vince se presente (passthrough), altrimenti la policy
-    # (default opencode, l'harness dietro il gateway).
+    # Attribuzione app OpenRouter: vale per OGNI upstream openrouter.ai
+    # (i modelli :free ora, ma il gate 'agentic harness' può estendersi):
+    # gli header HTTP-Referer + X-Title servono a identificare un'app
+    # riconosciuta (openrouter.ai/apps); il referer del CLIENT vince se
+    # presente (passthrough), altrimenti la policy (default opencode,
+    # l'harness dietro il gateway).
     out.update(_openrouter_attribution(dep, client_headers=attribution))
     return out
 
@@ -329,13 +330,19 @@ def _client_attribution(request) -> dict[str, str]:
 
 def _openrouter_attribution(dep: dict,
                             client_headers: dict | None = None) -> dict[str, str]:
-    """Header di attribuzione app per upstream OpenRouter (:free harness gate).
+    """Header di attribuzione app per upstream OpenRouter (harness gate).
 
-    OpenRouter (2026) rifiuta i modelli `:free` con 403 "only available on
-    agentic harnesses" se la richiesta non identifica un'app riconosciuta
-    (lista su https://openrouter.ai/apps). L'identificazione avviene tramite
-    gli header di app-attribution `HTTP-Referer` + `X-Title` (vedi
-    /docs/app-attribution).
+    OpenRouter (2026) applica un gate 'agentic harness' a diversi modelli
+    (es. i `:free`, limitati alle app riconosciute su openrouter.ai/apps) e
+    può estenderlo a nuovi modelli senza preavviso: la richiesta che non
+    identifica un'app riconosciuta viene rifiutata con 403 "only available
+    on agentic harnesses". L'identificazione avviene tramite gli header di
+    app-attribution `HTTP-Referer` + `X-Title` (vedi /docs/app-attribution).
+
+    La regola vale per OGNI deployment con api_base OpenRouter (a prescindere
+    dal modello: pagato o :free, esistente o futuro): gli header di
+    attribuzione non costano nulla sui modelli che non li richiedono e
+    mettono il gateway al sicuro se il requisito si estende.
 
     Precedenza:
       1. header inviati DAL CLIENT (`client_headers`, passthrough fedele);
