@@ -1273,7 +1273,8 @@ class Router:
             # 3) il contesto stimato sta nel suo max_input (usa _cap_fits
             #    che gestisce sia max_input_tokens che fallback ctx_k*1000)
             # 4) soddisfa le capacità richieste (vision, audio, ...)
-            if sd and not self.is_cooled_down(sticky_dep) \
+            if sd and sd.get("group") == group_name \
+                    and not self.is_cooled_down(sticky_dep) \
                     and self._cap_fits(sd, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",

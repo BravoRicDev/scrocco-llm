@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -850,6 +851,22 @@ async def chat_completions(request: Request):
                       "type": "invalid_request_error"}})
 
     explicit_req = router.is_explicit(model)
+    # Se il client chiama esplicitamente un gruppo diverso (es. -200k -> -1000k
+    # o -go), rilascia lo sticky per-deployment cosi' la richiesta esplicita
+    # atterra sul nuovo gruppo/key scelta dal routing, non resta incollata al
+    # vecchio deployment dello sticky precedente.
+    if explicit_req and session_id:
+        router.dep_sticky_release(session_id)
+        # Per richieste esplicite su un dim (-Nk): riàncora lo sticky di
+        # gruppo cosi' le successive NON-esplicite continuano nel contesto
+        # scelto dall'utente (crescita cache-preserving). Per -go/-fallback/
+        # unique: libera lo sticky di gruppo, altrimenti il traffico
+        # automatico verrebbe parcheggiato in un bucket a pagamento.
+        if re.search(r"-\d+k$", group_or_explicit):
+            router.sticky_set(session_id, group_or_explicit)
+        else:
+            router.sticky_release(session_id)
+
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
         # ESPLICITO: nessun filtro (la lettera della richiesta vince); il retry

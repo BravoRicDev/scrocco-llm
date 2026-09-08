@@ -301,3 +301,64 @@ def test_chat_sticky_end_to_end():
         keys.add(d["unique"])
     assert len(keys) == 1, (
         f"sticky free deve riutilizzare la stessa key, viste {keys}")
+
+
+# ------------------------------------------- esplicito: cambio dim rompe la sticky
+def test_explicit_dim_switch_breaks_sticky_and_reanchors():
+    """Chiamata esplicita a un altro dim (-32k -> -128k) DEVE rompere lo
+    sticky del gruppo vecchio e riàncorarsi al nuovo (altrimenti il cambio
+    del client non ha effetto)."""
+    r = _mk(CSV_DIMS)
+    try:
+        d32 = r.initial_pick("test", "scrocco-llm-test-32k",
+                             session_id="up")
+        assert d32["group"] == "scrocco-llm-test-32k"
+        assert r.dep_sticky_get("up") == d32["unique"]
+
+        # il client cambia ESPLICITAMENTE dim: main.py rilascia lo sticky,
+        # poi initial_pick pesca nel nuovo gruppo. Simuliamo il flusso.
+        r.dep_sticky_release("up")
+        d128 = r.initial_pick("test", "scrocco-llm-test-128k",
+                              session_id="up")
+        assert d128["group"] == "scrocco-llm-test-128k"
+        assert d128["unique"] != d32["unique"]
+        # lo sticky e' ora nel nuovo gruppo (riàncorato)
+        assert r.dep_sticky_get("up") == d128["unique"]
+    finally:
+        os.unlink(r._tmp_path)
+
+
+def test_sticky_never_follows_into_other_group():
+    """Difesa in profondita': anche SENZA release esplicito, initial_pick
+    su un gruppo diverso non deve mai riusare lo sticky di un altro gruppo
+    (ctx=None sugli espliciti aggirerebbe _cap_fits)."""
+    r = _mk(CSV_DIMS)
+    try:
+        d32 = r.initial_pick("test", "scrocco-llm-test-32k",
+                             session_id="up")
+        # nessuna release: sticky ancora su 32k
+        assert r.dep_sticky_get("up") == d32["unique"]
+        # pick nel 128k: la guardia group del router deve impedire il riuso
+        d128 = r.initial_pick("test", "scrocco-llm-test-128k",
+                              session_id="up")
+        assert d128["group"] == "scrocco-llm-test-128k"
+        assert d128["unique"] != d32["unique"]
+        assert r.dep_sticky_get("up") == d128["unique"]
+    finally:
+        os.unlink(r._tmp_path)
+
+
+def test_go_request_does_not_anchor_group_sticky():
+    """-go non scrive dep_sticky (gia' testato) e main.py per gli espliciti
+    non-dims chiama sticky_release: il traffico automatico non resta
+    parcheggiato nel bucket a pagamento."""
+    r = _mk(CSV_BUCKETS)
+    try:
+        # sessione prima su un dim (sticky di gruppo + dep)
+        r.sticky_set("s1", "scrocco-llm-test-128k")
+        # poi esplicito -go: release del gruppo (ramo else in main.py)
+        r.sticky_release("s1")
+        assert r.sticky_get("s1") is None
+        assert "s1" not in r._sticky_dep
+    finally:
+        os.unlink(r._tmp_path)
