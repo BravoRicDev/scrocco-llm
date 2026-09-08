@@ -79,6 +79,49 @@ _MODEL_MISSING_RE = re.compile(
 # 24h invece dell'escalation standard (che riparte da cooldown_sec).
 MODEL_MISSING_COOLDOWN_S = 86400
 
+# --- QUOTA ESAURITA (abbonamento flat a scadenza mensile/settimanale) ------
+# OpenCode Go e altri piani subscription rispondono con un envelope provider
+# di tipo "GoUsageLimitError" + message che include "Resets in N days" quando
+# il tetto mensile è esaurito. La chiave non tornerà disponibile prima del
+# reset: ruotarla e rimetterla in coda e' inutile (ogni tentativo spreca una
+# chiamata reale e allunga la catena). Cooldown = tempo al reset, clampato
+# [10 min, 7 giorni] per non bucare cooldown infiniti (provider bug).
+# Formato osservato:
+#   {"type":"error","error":{"type":"GoUsageLimitError","message":
+#     "Monthly usage limit reached. Resets in 9 days. ..."},
+#     "metadata":{"limitName":"monthly"}}
+_QUOTA_EXHAUSTED_RE = re.compile(
+    r"GoUsageLimitError"
+    r"|\"limitName\"\s*:\s*\"(monthly|weekly)\""
+    r"|usage limit reached"
+    r"|insufficient.quota",
+    re.IGNORECASE)
+# parses: "Resets in 9 days", "Resets in 4 hours", "Resets in 30 minutes"
+_QUOTA_RESET_RE = re.compile(
+    r"resets?\s+in\s+(\d+)\s+(day|hour|minute)s?",
+    re.IGNORECASE)
+
+QUOTA_MIN_COOLDOWN_S = 600.0        # 10 minuti (minimo)
+QUOTA_MAX_COOLDOWN_S = 7 * 86400.0  # 7 giorni (massimo: non bucare il reset)
+
+def parse_quota_reset_seconds(detail: str | None) -> float:
+    """Dal message del provider, calcola i secondi al reset.
+    Ritorna il cooldown clampato, o 0.0 se non riconosce niente."""
+    if not detail:
+        return 0.0
+    m = _QUOTA_RESET_RE.search(detail)
+    if not m:
+        return QUOTA_MIN_COOLDOWN_S   # riconosciuto esausto ma senza reset:
+                                       # minimo sicuro (riprova tra 10min)
+    n, unit = int(m.group(1)), m.group(2).lower()
+    if unit == "day":
+        secs = n * 86400.0
+    elif unit == "hour":
+        secs = n * 3600.0
+    else:  # minute
+        secs = n * 60.0
+    return max(QUOTA_MIN_COOLDOWN_S, min(QUOTA_MAX_COOLDOWN_S, secs))
+
 # Gemini 3: rimanda i functionCall di un turno precedente ESIGE il blob
 # opaco `thought_signature` che l'API nativa aveva emesso. Questo gateway e'
 # passthrough OpenAI puro: non traduce ne' persiste quella firma e il

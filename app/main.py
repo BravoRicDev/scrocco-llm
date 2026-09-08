@@ -49,7 +49,9 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
                         _PROVIDER_TRANSIENT_RE,
                         _THOUGHT_SIG_RE, is_provider_error_body,
-                        media_reject_signature, _client_attribution)
+                        media_reject_signature, _client_attribution,
+                        _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
+                        QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy
 from .qc import annotate_reasoning
@@ -855,7 +857,8 @@ async def chat_completions(request: Request):
         # initial_pick (dims per testo, cap-chain per -C).
         dep = router.initial_pick(auth.profile, group_or_explicit,
                                   None if explicit_req else need,
-                                  None if explicit_req else ctx_est)
+                                  None if explicit_req else ctx_est,
+                                  session_id=session_id)
     if dep is None:
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment disponibile"
@@ -1394,6 +1397,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if schema_sig:
                 thought_sig = True         # riusa tutta la logica no-cooldown
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
+            quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False
             transient = bool(_PROVIDER_TRANSIENT_RE.search(detail))
             openai_sig = ("bad_response_status_code" in detail
                           or "openai_error" in detail)
@@ -1409,6 +1413,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "payload_schema"
             elif thought_sig:
                 reason = "thought_signature"
+            elif quota_exhausted:
+                reason = "quota_exhausted"
             elif prov_err:
                 reason = "provider_error_body"
             elif transient:
@@ -1453,7 +1459,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # nel forwarder) — la key Gemini resta sana per il traffico non-tool.
             # model_missing (inesistente/non servito/giu'): 24h fissi.
             if not thought_sig:
-                if reason in ("provider_transient", "empty_error_body"):
+                if reason == "quota_exhausted":
+                    # Abbonamento flat esaurito: cooldown = tempo al reset
+                    # (es. "Resets in 9 days" -> ~9gg), non escalation.
+                    _cd = parse_quota_reset_seconds(detail)
+                    # Rilascia dep-sticky: questa key NON tornerà prima del
+                    # reset; la sessione deve ripartire su un'altra chiave.
+                    if session_id:
+                        cur = router.dep_sticky_get(session_id)
+                        if cur and cur == dep["unique"]:
+                            router.dep_sticky_release(session_id)
+                elif reason in ("provider_transient", "empty_error_body"):
                     _cd = router.escalate_cooldown(
                         PROVIDER_TRANSIENT_COOLDOWN_S,
                         router.stats_for(dep["unique"]).fail_count_24h)

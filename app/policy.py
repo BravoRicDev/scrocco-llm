@@ -181,6 +181,23 @@ class Policy:
     recency_halflife_sec: float = 20.0
     latency_ref_ms: float = 1500.0
 
+    # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
+    # API key; usare la STESSA key ripetutamente entro una sessione massimizza
+    # i cache-hit (prezzo cache << prezzo input pieno) e distribuisce il
+    # carico mensile tra tutti gli abbonamenti.
+    # go_recency_halflife_sec: halflife per i bucket -go e -fallback (dove i
+    # limiti SONO MENSILI in dollari-equivalenti); default 300s = le sessioni
+    # restano sulla stessa key per minuti (cache calda) e la distribuzione
+    # avviene a livello di sessione singola, non di singolo turn.
+    # deployment_sticky: nei bucket free (dims/-C primari) la stessa sessione
+    # resta INCOLLATA alla stessa chiave finché è viva (non in cooldown e
+    # contesto sufficiente); al primo fallimento il cooldown sposta e si
+    # ri-àncora. I bucket free hanno rate-limit AL MINUTO, non mensili: la
+    # cache è secondaria, e la distribuzione è gestita dallo sticky
+    # per-deployment, non dalla recency globale.
+    go_recency_halflife_sec: float = 300.0
+    deployment_sticky: bool = True
+
     # PROTEZIONE FREE-TIER: nei gruppi DIMS i modelli con input media
     # (vision/video/audio) sono ULTIMA SPIAGGIA per le richieste di testo
     # puro — non vengono scelti finché esiste almeno un text-only vivo nel
@@ -527,8 +544,12 @@ class Policy:
         ap = raw.get("adaptive_pick")
         if ap is not None:
             p.adaptive_pick = _coerce_bool(ap, "adaptive_pick")
+        ds = raw.get("deployment_sticky")
+        if ds is not None:
+            p.deployment_sticky = _coerce_bool(ds, "deployment_sticky")
         for num_key, attr in (("recency_halflife_sec", "recency_halflife_sec"),
-                              ("latency_ref_ms", "latency_ref_ms")):
+                              ("latency_ref_ms", "latency_ref_ms"),
+                              ("go_recency_halflife_sec", "go_recency_halflife_sec")):
             nv = raw.get(num_key)
             if nv is not None:
                 if isinstance(nv, bool) or not isinstance(nv, (int, float)) \

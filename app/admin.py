@@ -661,7 +661,9 @@ async def get_policy(request: Request):
                 "hotwords_window": pol.hotwords_window,
                 "response_model": pol.response_model,
                 "adaptive_pick": pol.adaptive_pick,
+                "deployment_sticky": pol.deployment_sticky,
                 "recency_halflife_sec": pol.recency_halflife_sec,
+                "go_recency_halflife_sec": pol.go_recency_halflife_sec,
                 "latency_ref_ms": pol.latency_ref_ms,
                 "qc_json": asdict(pol.qc_json),
                 "qc_sanity": asdict(pol.qc_sanity),
@@ -963,6 +965,8 @@ def _policy_effective_compact(pol) -> dict:
                                for k, v in pol.client_keys.items()},
         "speed_min_dim_k": pol.speed_min_dim_k,
         "adaptive_pick": pol.adaptive_pick,
+        "deployment_sticky": pol.deployment_sticky,
+        "go_recency_halflife_sec": pol.go_recency_halflife_sec,
         "capability_routing_enabled": pol.routing_active(),
     }
 

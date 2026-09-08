@@ -93,6 +93,23 @@ recency_halflife_sec: 20
 # latenza media osservata dagli altri deployment del pool).
 latency_ref_ms: 1500
 
+# STICKY PER-DEPLOYMENT nei bucket FREE (dims -Nk, cap groups primari): la
+# stessa sessione resta incollata alla STESSA API KEY finche' e' viva (non
+# in cooldown, contesto sufficiente). WHY: la cache prompt dei provider e'
+# per-key; ruotare ogni turn (recency 20s) la invalida e, sui piani flat a
+# budget mensile (Go/Zen), fa consumare i token come "input pieno" invece
+# che come "cache read" (30x+ piu' caro). Al fallimento il cooldown sposta
+# la sessione su un'altra key e li' si riàncora.
+deployment_sticky: true
+
+# Halflife "recency" DEDICATO ai bucket -go e -fallback (abbonamenti flat /
+# chiavi a pagamento): un valore grande (default 300s = 5min) fa restare la
+# sessione sulla stessa key per minuti (cache calda turn-to-turn), mentre la
+# distribuzione avviene a grana di sessione -> tutti gli abbonamenti si
+# consumano insieme, nessuno prima degli altri. Non usare valori piccoli
+# qui: ricrei il problema della cache (consumi 20x il budget mensile).
+go_recency_halflife_sec: 300
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ALIAS KEYS — chiavi custom per alias generici (MAI esposte via API)
 # ─────────────────────────────────────────────────────────────────────────────

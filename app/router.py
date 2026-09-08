@@ -199,6 +199,9 @@ class Router:
         self._defer_active: dict[str, bool] = {}
         # auto-learn capacità: "model|cap" -> {count, first, last, evidence}
         self._cap_strikes: dict[str, dict] = {}
+        # STICKY per-deployment (free buckets): session_id -> (unique, ts)
+        # mantiene la stessa key entro una conversazione (cache calda).
+        self._sticky_dep: dict[str, tuple[str, float]] = {}
 
     # -------------------------------------------------------------- sticky
     def sticky_get(self, session_id: str) -> str | None:
@@ -216,6 +219,30 @@ class Router:
 
     def sticky_release(self, session_id: str) -> None:
         self._sticky.pop(session_id, None)
+
+    # ---------------------------------------------------- deployment-sticky
+    def _is_renewal_bucket(self, group_name: str) -> bool:
+        """True se il gruppo è un bucket rinnovo/pagato (-go, -fallback)."""
+        go_suf = self.config.go_suffix or ""
+        fb_suf = self.config.fallback_suffix or ""
+        return (group_name.endswith(go_suf) or group_name.endswith(fb_suf))
+
+    def dep_sticky_get(self, session_id: str) -> str | None:
+        """Ritorna l'unique del deployment sticky per questa sessione."""
+        entry = self._sticky_dep.get(session_id)
+        if not entry:
+            return None
+        unique, ts = entry
+        if time.time() - ts > self.policy.sticky_ttl_sec:
+            self._sticky_dep.pop(session_id, None)
+            return None
+        return unique
+
+    def dep_sticky_set(self, session_id: str, unique: str) -> None:
+        self._sticky_dep[session_id] = (unique, time.time())
+
+    def dep_sticky_release(self, session_id: str) -> None:
+        self._sticky_dep.pop(session_id, None)
 
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
@@ -441,13 +468,19 @@ class Router:
                    if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_sg:
             self._session_group.pop(s, None)
+        # PURGE deployment-sticky: stessa TTL dello sticky di gruppo
+        dead_dep = [s for s, (_u, ts) in self._sticky_dep.items()
+                    if now - ts > self.policy.sticky_ttl_sec]
+        for s in dead_dep:
+            self._sticky_dep.pop(s, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
         for u in dead_cd:
             self._cooldown.pop(u, None)
             self._cooldown_since.pop(u, None)
-        if dead_sessions or dead_cd or dead_sg:
-            log.debug("[purge] sticky=%d cooldown=%d sessioni=%d",
-                      len(dead_sessions), len(dead_cd), len(dead_sg))
+        if dead_sessions or dead_cd or dead_sg or dead_dep:
+            log.debug("[purge] sticky=%d cooldown=%d sessioni=%d dep_sticky=%d",
+                      len(dead_sessions), len(dead_cd), len(dead_sg),
+                      len(dead_dep))
         return len(dead_sessions), len(dead_cd)
 
     # ------------------------------------------------------------- routing
@@ -685,9 +718,21 @@ class Router:
         priority = max(0, int(dep.get("priority", 0) or 0)) + 1
         if s is None:
             return float(priority)
+        # HALFLIFE PER-CATEGORIA: go/fallback usano un tempo più lungo
+        # (minuti) per preservare la cache prompt (le richieste turn-by-turn
+        # restano sulla stessa key, i 28 abbonamenti si consumano uniformemente
+        # a livello di sessione, non di singolo turn). Free/Priority usano il
+        # default più corto (20s) dove la distribuzione è anti-rate-limit al
+        # minuto. NOTA: per i free, deployment_sticky previene la rotazione
+        # alla fonte (stessa sessione = stessa key); questo halflife riguarda
+        # solo il primo pick o la ripresa dopo cooldown.
+        cat = (dep.get("meta") or {}).get("category")
+        if cat in ("go", "fallback"):
+            hl = pol.go_recency_halflife_sec
+        else:
+            hl = pol.recency_halflife_sec
         freshness = 1.0 if s.last_used <= 0 else max(
-            0.05, math.exp(-(now - s.last_used) / max(0.001,
-                                                      pol.recency_halflife_sec)))
+            0.05, math.exp(-(now - s.last_used) / max(0.001, hl)))
         speed = 1.0
         if s.ema_latency_ms and s.ema_latency_ms > 0:
             speed = min(2.0, max(0.4,
@@ -1204,13 +1249,53 @@ class Router:
 
     def initial_pick(self, profile: str | None, group_name: str,
                      need: frozenset[str] | None = None,
-                     ctx: int | None = None) -> dict | None:
+                     ctx: int | None = None,
+                     session_id: str | None = None) -> dict | None:
         """Prima selezione dentro un gruppo; nessun candidato vivo ->
         cammina la catena DEL MONDO del gruppo (cap-chain per -C, testo
-        per dims/-go/-fallback). Sostituisce pick+fallback_after in main."""
+        per dims/-go/-fallback). Sostituisce pick+fallback_after in main.
+
+        Con `session_id` e `deployment_sticky=True`: nei bucket FREE (dims
+        -Nk, cap groups primari) la sessione resta INCOLLATA alla stessa key
+        finché è viva (cache calda). Se la richiesta cresce e supera il
+        max_input dello sticky, si cerca lo STESSO modello+chiave nel nuovo
+        gruppo dim (crescita cache-preserving)."""
+        # --- STICKY per-deployment (SOLO FREE, mai renewal/paid) ---------
+        sticky_dep = (session_id
+                      and self.policy.deployment_sticky
+                      and not self._is_renewal_bucket(group_name)
+                      and self.dep_sticky_get(session_id))
+        if sticky_dep:
+            sd = self.config.deployment_by_unique(sticky_dep)
+            # Validità dello sticky:
+            # 1) esiste ancora nel CSV (hot-reload: deployment rimosso)
+            # 2) non è in cooldown (errore/429 -> release automatico)
+            # 3) il contesto stimato sta nel suo max_input (usa _cap_fits
+            #    che gestisce sia max_input_tokens che fallback ctx_k*1000)
+            # 4) soddisfa le capacità richieste (vision, audio, ...)
+            if sd and not self.is_cooled_down(sticky_dep) \
+                    and self._cap_fits(sd, ctx) \
+                    and (need is None or self._dep_supports(sd, need)):
+                log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
+                          session_id, sticky_dep, ctx or "?")
+                return sd
+            # Sticky non valido: release e pesca normale
+            self.dep_sticky_release(session_id)
+
+        # --- PESCA NORMALE (adaptive_pick + recency) ---------------------
         dep = self.pick_deployment(group_name, need=need, ctx=ctx)
+        # Se lo sticky era su un gruppo dim più piccolo e ora serve un gruppo
+        # più grande: stesso provider+modello nella stessa sessione (crescita
+        # cache-preserving). Il pick normale ha già scelto; se matcha
+        # modello+key dello sticky, riagganciamo lo sticky al nuovo gruppo.
         if dep is not None:
+            # --- SET STICKY: free bucket, sessione non anonima -------------
+            if session_id and self.policy.deployment_sticky \
+                    and not self._is_renewal_bucket(group_name):
+                self.dep_sticky_set(session_id, dep["unique"])
             return dep
+
+        # Nessuna pesca riuscita: catena/ladder come prima
         cap = self.config.group_caps.get(group_name)
         if cap is not None:
             chain = self.config.chains_cap.get(profile or "", {}).get(cap, [])
