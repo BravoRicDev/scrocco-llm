@@ -856,7 +856,13 @@ async def chat_completions(request: Request):
     # atterra sul nuovo gruppo/key scelta dal routing, non resta incollata al
     # vecchio deployment dello sticky precedente.
     if explicit_req and session_id:
-        router.dep_sticky_release(session_id)
+        cur = router.dep_sticky_get(session_id)
+        sd = router.config.deployment_by_unique(cur) if cur else None
+        # Rilascia dep-sticky SOLO se il gruppo è cambiato o non c'è sticky:
+        # se la richiesta esplicita punta allo stesso gruppo dello sticky,
+        # lo preserviamo per la cache-preserving (misma key per sessione).
+        if sd is None or sd.get("group") != group_or_explicit:
+            router.dep_sticky_release(session_id)
         # Per richieste esplicite su un dim (-Nk): riàncora lo sticky di
         # gruppo cosi' le successive NON-esplicite continuano nel contesto
         # scelto dall'utente (crescita cache-preserving). Per -go/-fallback/
