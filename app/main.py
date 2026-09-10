@@ -1488,10 +1488,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     _cd = parse_quota_reset_seconds(detail)
                     # Rilascia dep-sticky: questa key NON tornerà prima del
                     # reset; la sessione deve ripartire su un'altra chiave.
-                    if session_id:
-                        cur = router.dep_sticky_get(session_id)
+                    if ses:
+                        cur = router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
-                            router.dep_sticky_release(session_id)
+                            router.dep_sticky_release(ses)
                 elif reason in ("provider_transient", "empty_error_body"):
                     _cd = router.escalate_cooldown(
                         PROVIDER_TRANSIENT_COOLDOWN_S,

@@ -803,9 +803,10 @@ class Router:
             [primari dims >= start_dim ascendenti] + [-go] + [-fallback]
 
         Stateless (ricostruita dai gruppi esistenti). start_tier 'go'/
-        'fallback' taglia la parte sopra: -go esplicito non tocca i primari;
+        'fallback' taglia la parte sopra: -go esplicito non tocca i primari
+        (il paracadute dims a fine scala e' gestito da _walk_ladder_resilient);
         -fallback resta solo fallback. I bucket go/fallback compaiono UNA
-        volta sola in coda (sono la coda della dim massima)."""
+        volta sola in coda."""
         cfg = self.config
         base = f"{cfg.proxy_prefix}{pname}"
         chain: list[str] = []
