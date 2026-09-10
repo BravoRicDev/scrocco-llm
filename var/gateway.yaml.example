@@ -178,7 +178,7 @@ cooldown_mode: linear
 cooldown_base_min: 30            # esclusione iniziale in minuti
 cooldown_linear_mult_min: 30     # incremento per fallimento consecutivo
 # cooldown_escalation: true      # (solo se cooldown_mode=escalation)
-# max_cooldown_sec: 86400
+# max_cooldown_sec: 18000        # tetto cooldown (5h; default 18000)
 
 # TIMEOUT = DANNO REALE: un modello che "appende" senza rispondere (né errore
 # né contenuto) fa perdere tempo (fino a stream_first_content_ms per richiesta).

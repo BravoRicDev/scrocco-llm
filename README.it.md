@@ -7,126 +7,115 @@
 [![Docker](https://img.shields.io/badge/docker-compose%20up-blue.svg)](#in-cinque-comandi)
 [![Tests](https://img.shields.io/badge/tests-421%20passing-brightgreen.svg)](#test)
 
-**Un gateway LLM che ruota decine di chiavi free e a pagamento, sceglie il
-modello più piccolo che regge il contesto, e prova a non sprecare chiamate
-inutili.**
+**Un gateway LLM che mette in pool decine di chiavi free e a pagamento, sceglie
+il modello più piccolo che regge il contesto, e non spreca chiamate inutili.**
 
 Zero database, un container, porta `4001`. È compatibile con l'API OpenAI,
-quindi i client puntano al gateway senza dover cambiare nulla.
+quindi i client puntano al gateway senza cambiare nulla.
 
 ---
 
-## Il problema che provo a risolvere
+## Il problema che prova a risolvere
 
-Se ti registri su più provider free — Groq, Google AI Studio, Mistral,
-NVIDIA, OpenRouter — ti ritrovi con account diversi, finestre di contesto
-diverse e modi diversi di fallire. In pratica: un agente che gira da solo
-prima o poi trova un 429 nel momento sbagliato, oppure il modello scelto
-non regge il prompt e taglia la risposta senza dirlo chiaramente.
+Se ti registri su più provider free — Groq, Google AI Studio, Mistral, NVIDIA,
+OpenRouter, Cloudflare Workers AI — ti ritrovi con account diversi, finestre di
+contesto diverse e modi diversi di fallire. Un agente che gira da solo prima o
+poi trova un 429 nel momento sbagliato, oppure il modello scelto non regge il
+prompt e taglia la risposta senza dirlo chiaramente.
 
-Ho scritto scrocco-llm perché gestisco alcuni agenti che lavorano senza
-supervisione e questi due problemi mi capitavano abbastanza spesso da
-volerli automatizzare via.
+scrocco-llm nasce per gestire agenti che lavorano senza supervisione, dove
+questi due problemi capitano abbastanza spesso da volerli automatizzare via.
 
 ## Cosa fa, in tre punti
 
-**Sceglie il modello minimo che ci sta.** Stima i token del prompt e lo
-manda al gruppo di contesto più piccolo che basta (`-32k`, `-128k`,
-`-1000k`...), così non si spreca un modello grande su un prompt piccolo e
-non si scopre a risposta finita che quello piccolo ha tagliato.
+**Sceglie il modello minimo che ci sta.** Stima i token del prompt e lo manda
+al gruppo di contesto più piccolo che basta (`-24k`, `-128k`, `-1000k`...). Le
+"dim" non sono fisse: vengono lette dal CSV, quindi aggiungere un modello a
+256k crea da solo il gradino `-256k`. Una richiesta esplicita (`-200k`,
+`-1000k`) è una **soglia minima**: la rotazione sale, mai scende.
 
-**Ruota prima di rompersi, non solo dopo.** Un 429 mette la chiave in
-cooldown con backoff esponenziale, ma il gateway prova anche a imparare i
-limiti di ogni chiave dai 429 osservati e a deprioritizzare quelle vicine
-alla soglia, per ridurre quante volte si finisce contro il muro.
+**Ruota prima di rompersi, non solo dopo.** Un fallimento mette la chiave in
+cooldown con escalation **lineare** (30 minuti di base, +30 per ogni
+fallimento nelle ultime 24h, tetto a 5 ore). Un **timeout costa 10 volte
+tanto**: un upstream che "appende" fa perdere tempo vero, quindi viene punito
+molto più di un errore con codice. In più il budget guard impara i limiti dai
+429 osservati e declassa le chiavi vicine alla soglia.
 
 **Non confonde un fallback con un degrado silenzioso.** Una richiesta di
-vision non atterra su un modello text-only. Uno scarto di QC sul JSON
-consegna comunque l'ultimo tentativo, annotato, invece di un 500 secco. Lo
-streaming ha un watchdog che nota se l'upstream muore a metà.
+vision non atterra su un modello text-only. Se un gruppo di contesto è morto,
+la catena sale in modo resiliente — al massimo qualche tentativo per gradino,
+poi rianimazione dei cooldown stantii, un paracadute per le chiavi "croniche"
+e infine il `-fallback` a pagamento. Lo streaming ha un watchdog: parte verso
+il client solo quando arriva contenuto reale, e se un upstream si pianta ruota
+in modo trasparente.
 
-## Un principio che guida il design
+## Come funziona il routing (in breve)
 
-Alcuni free-tier contano le chiamate, non i token — e questo ha influenzato
-parecchie decisioni. Un probe che testa periodicamente la salute delle
-chiavi è comune, ma su questi provider rischia di bruciare quota gratuita
-senza mai usarla per davvero.
+1. **Risolvi** il modello/alias in un gruppo (`-vision`, `-200k`, ...).
+2. **Stima** i token e scegli il gradino giusto (il richiesto, o il più piccolo
+   che ci sta).
+3. **Pesca** un deployment nel gruppo (punteggio adattivo: latenza EMA,
+   recency, chiamate in volo, affinità di sessione; salta chiavi in cooldown o
+   ritirate).
+4. **Se fallisce**, marca il cooldown e cammina la scala: altri candidati del
+   gradino → dim successive (in salita) → `-go` → cooldown stantii → paracadute
+   cronici → `-fallback` → ultima spiaggia.
+5. **Se riesce**, registra un eventuale "escalation winner" (se ha servito in
+   salita) e scrive una riga `[summary]`.
 
-Per questo qui il probe fa **una chiamata reale per chiave, una volta
-sola**, e il risultato resta su disco. Una chiave sana non viene richiamata
-automaticamente; per riverificarla serve un `force=true` esplicito. Lo
-stesso principio vale per il budget guard: i limiti si imparano dai 429
-osservati, non si indovinano — finché non c'è evidenza, il gateway non
-tocca niente.
+### Escalation winner + ricampionamento
 
-## Alcune decisioni di design
+Quando una richiesta esce da un bucket morto e un gruppo più alto la serve, il
+gateway **ricorda quel winner per il bucket richiesto**. Alla richiesta dopo
+NON salta subito al winner: riprova una volta il bucket richiesto, poi sonda
+fino a **due gruppi intermedi scelti a caso** (solo candidati vivi) e solo
+allora va al winner ricordato. Così non rifà ogni volta la scala morta, ma
+nemmeno si incolla ciecamente alla scorciatoia: se un gradino intermedio è
+"guarito" nel frattempo, viene usato.
 
-Ogni modulo del codice parte con una docstring bilingue IT/EN che spiega
-cosa fa, come lo fa e perché è stato fatto in un certo modo — è la parte
-del progetto di cui vado più fiero, perché tende a invecchiare meglio dei
-commenti sparsi. Tre esempi:
+## Decisioni di design
 
-- **Cooldown massimo a 5 ore, non 24.** I free-tier tendono a rinnovarsi su
-  finestre brevi; tenere una chiave ferma un giorno intero sembrava più
-  spreco che prudenza.
+Ogni modulo del codice parte con una docstring bilingue IT/EN che spiega cosa
+fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
+
+- **Cooldown lineare, tetto a 5 ore.** I free-tier si rinnovano su finestre
+  brevi; tenere una chiave ferma un giorno intero era più spreco che prudenza.
+  I timeout, però, vengono moltiplicati per 10 perché bruciano tempo reale.
+- **Le dimensioni di contesto sono dinamiche.** Non c'è una lista fissa di
+  gradini: nascono dai valori `context` del CSV. Aggiungere un modello estende
+  la scala senza toccare il codice.
 - **I generatori (`*_gen`) sono separati dalla chat a livello strutturale.**
-  Una richiesta testo non deve atterrare su un endpoint immagini per
-  errore, e viceversa — è una regola nel routing, non un filtro a runtime
-  aggiunto dopo.
+  Una richiesta testo non deve atterrare su un endpoint immagini per errore, e
+  viceversa — è una regola nel routing, non un filtro aggiunto dopo.
 - **Le chiavi morte vengono ritirate, mai cancellate.** Dopo 7 giorni di
-  fallimenti escono dal routing ma restano nel CSV: se ricarichi i crediti,
-  un probe riuscito le riporta in vita da solo.
+  fallimenti escono dal routing ma restano nel CSV: se ricarichi i crediti, un
+  probe riuscito le riporta in vita da solo.
+- **Il probe costa una chiamata per chiave, una volta sola.** Sui free-tier che
+  contano le chiamate invece dei token, un probe periodico brucerebbe quota
+  inutilmente. Il risultato resta su disco e viene riverificato solo con un
+  `force=true` esplicito.
 
-## Bug reali che ho trovato mentre lo usavo
-
-Preferisco raccontare anche i problemi trovati per strada, non solo il
-percorso liscio — mi sembra più onesto e probabilmente più utile a chi
-valuta se usarlo.
-
-**Le chiavi Mistral e Cloudflare erano morte dal primo giorno.**
-L'inferenza dei prefissi provider aggiungeva `mistral/` e `cloudflare/` ai
-nomi dei modelli — formato corretto per litellm, sbagliato per le chiamate
-dirette via httpx che fa questo gateway. Per settimane quei deployment
-rispondevano 400 "No such model" senza che nessuno se ne accorgesse,
-perché la rotazione li aggirava semplicemente. L'ho trovato testando con
-curl lo stesso account e modello senza prefisso: funzionava.
-
-**Un errore "No such model" arrivava al client come se fosse colpa sua.**
-Cloudflare risponde 400 con un formato proprietario, senza le firme di
-errore standard. Un deployment rotto a fine catena passava l'errore grezzo
-all'agente invece di far ruotare la richiesta. Ora c'è una regex dedicata e
-la rotazione è uniforme su tutti i percorsi (chat, stream, immagini,
-tts/stt, video).
-
-**Un `max_tokens` troppo piccolo causava 5 tentativi sprecati e cooldown su
-chiavi sane.** Con i reasoning model, un budget piccolo finisce tutto nel
-ragionamento e il contenuto arriva vuoto; il gateway lo trattava come un
-deployment rotto, bruciando la catena di fallback e raffreddando per 10
-minuti chiavi perfettamente funzionanti. Ora riconosce
-`finish_reason=length` e consegna comunque la risposta.
-
-<a name="test"></a>421 test coprono queste regressioni: ognuno è nato da un
-bug reale, non sono test scritti per riempire una percentuale.
+<a name="test"></a>421 test coprono queste logiche: molti sono nati da bug
+reali, non sono test scritti per riempire una percentuale.
 
 ## Cosa non è
 
 Mi sembra corretto dirlo prima, non dopo:
 
-- **Non è un modo per non pagare.** È un modo per usare fino in fondo
-  quello che i free-tier offrono legalmente, e spendere il credito a
-  pagamento solo dove serve davvero.
+- **Non è un modo per non pagare.** È un modo per usare fino in fondo quello
+  che i free-tier offrono legalmente, e spendere il credito a pagamento solo
+  dove serve davvero.
 - **Non è plug-and-play a zero account.** Devi comunque registrarti sui
-  provider e creare le chiavi — quello nessun software può farlo al posto
-  tuo. Il playbook `GET /bootstrap` guida passo passo anche un agente AI in
-  questa fase, e la validazione costa una sola chiamata per chiave, cached.
-- **Non è pensato per essere esposto a internet senza pensarci.** Di
-  default ascolta su `127.0.0.1`. Prima di aprirlo verso l'esterno, cambia
-  la master key e mettici davanti un reverse proxy — il modello di
-  sicurezza è documentato nel [README inglese](README.md#security-model).
-- **Non è un router aziendale con SLA.** È software che scrivo e uso io
-  ogni giorno in produzione con i miei agenti. Se ti serve, prendilo e
-  adattalo pure; se cerchi garanzie contrattuali, non è lo strumento
-  giusto.
+  provider e creare le chiavi — quello nessun software può farlo al posto tuo.
+  Il playbook `GET /bootstrap` guida passo passo anche un agente AI in questa
+  fase, e la validazione costa una sola chiamata per chiave, cached.
+- **Non è pensato per essere esposto a internet senza pensarci.** Di default
+  ascolta su `127.0.0.1`. Prima di aprirlo verso l'esterno, cambia la master
+  key e mettici davanti un reverse proxy — il modello di sicurezza è
+  documentato nel [README inglese](README.md#security-model).
+- **Non è un router aziendale con SLA.** È software scritto per essere usato
+  ogni giorno con agenti reali. Se ti serve, prendilo e adattalo; se cerchi
+  garanzie contrattuali, non è lo strumento giusto.
 
 ## In cinque comandi
 
@@ -137,13 +126,13 @@ docker compose up -d
 curl -s localhost:4001/bootstrap        # playbook guidato, in inglese
 # ...registri le chiavi sui provider, le inserisci via API...
 curl -s localhost:4001/v1/chat/completions \
-  -H "Authorization: Bearer sk-miotteam" \
+  -H "Authorization: Bearer sk-myteam" \
   -H "Content-Type: application/json" \
-  -d '{"model":"scrocco-llm-miotteam","messages":[{"role":"user","content":"ciao"}]}'
+  -d '{"model":"scrocco-llm-myteam","messages":[{"role":"user","content":"ciao"}]}'
 ```
 
-Da lì in poi basta aggiungere una chiave nel CSV quando ne trovi una nuova:
-il gateway la carica a caldo in circa 5 secondi, senza restart.
+Da lì in poi basta aggiungere una chiave nel CSV quando ne trovi una nuova: il
+gateway la carica a caldo in circa 5 secondi, senza restart.
 
 ## Documentazione
 
@@ -151,20 +140,12 @@ il gateway la carica a caldo in circa 5 secondi, senza restart.
 |---|---|---|
 | [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) | EN | Setup zero-to-running, utile prima del primo avvio |
 | `GET /bootstrap` | EN | Lo stesso playbook, servito live dal gateway |
-| [docs/AGENT.md](docs/AGENT.md) | IT | Protocollo operativo day-2: admin API, ricette, log |
-| `GET /admin/guide` | IT | Lo stesso documento, live |
+| [docs/AGENT.md](docs/AGENT.md) | EN | Protocollo operativo day-2: admin API, ricette, log |
+| `GET /admin/guide` | EN | Lo stesso documento, live |
+| [var/gateway.yaml.example](var/gateway.yaml.example) | IT | Template commentato di tutte le policy |
 | Docstring dei moduli | IT+EN | Cosa / come / perché di ogni decisione |
 
 ## Licenza
 
-[Unlicense](LICENSE) — pubblico dominio. Usalo, modificalo, distribuiscilo
-come preferisci.
-
----
-
-<div align="center">
-
-Costruito e mantenuto mentre lo uso ogni giorno per i miei agenti —
-[riccardomurru.it](https://www.riccardomurru.it)
-
-</div>
+[Unlicense](LICENSE) — pubblico dominio. Usalo, modificalo, distribuiscilo come
+preferisci.
