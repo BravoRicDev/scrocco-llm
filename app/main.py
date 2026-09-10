@@ -114,7 +114,7 @@ def _install_file_logging() -> None:
     try:
         h = RotatingFileHandler(main_path, maxBytes=mb * 1024 * 1024,
                                 backupCount=bk, encoding="utf-8")
-        h.setFormatter(fmt)
+        h.setFormatter(logging.Formatter(fmt))
         h.setLevel(logging.INFO)
         logging.getLogger().addHandler(h)
     except OSError as exc:                       # noqa: BLE001
@@ -123,7 +123,7 @@ def _install_file_logging() -> None:
     try:
         ah = RotatingFileHandler(audit_path, maxBytes=mb * 1024 * 1024,
                                  backupCount=bk, encoding="utf-8")
-        ah.setFormatter(fmt)
+        ah.setFormatter(logging.Formatter(fmt))
         ah.setLevel(logging.INFO)
         eaudit = logging.getLogger("nx.erroraudit")
         eaudit.addHandler(ah)
@@ -953,7 +953,7 @@ async def chat_completions(request: Request):
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
             attempts_box=attempts_box,
-            session=_sess, client_ip=_cip, attribution=_attr)
+            session=_sess, ses=session_id, client_ip=_cip, attribution=_attr)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
@@ -962,10 +962,14 @@ async def chat_completions(request: Request):
             return JSONResponse(status_code=st if st >= 400 else 502,
                                 content={"error": {"message": err.detail,
                                                    "type": "upstream_error"}})
+        # grp/dep coerenti: l'ULTIMO deployment tentato (dopo un'eventuale
+        # escalation di gruppo), non quello iniziale.
+        _last_u = attempts_box[-1] if attempts_box else dep.get("unique")
+        _last_d = (router.config.deployment_by_unique(_last_u)
+                   if _last_u else None) or dep
         _emit_summary(ses=session_id or "-", req=raw_model,
-                      grp=dep.get("group"),
-                      dep=(attempts_box[-1] if attempts_box
-                           else dep.get("unique")),
+                      grp=_last_d.get("group"),
+                      dep=_last_u,
                       tries=max(1, len(attempts_box)),
                       fb=max(0, len(attempts_box) - 1),
                       dur_ms=int((time.monotonic() - t_req) * 1000),

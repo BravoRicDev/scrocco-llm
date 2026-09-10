@@ -467,3 +467,45 @@ def test_empty_error_body_rotates_not_passthrough():
     assert data["choices"][0]["message"]["content"] == "ok"
     assert used["unique"] == good["unique"]
     assert router.is_cooled_down(broken["unique"])      # cooldown corto applicato
+
+
+def test_quota_exhausted_nonstream_reset_cooldown_and_sticky_release():
+    """Non-stream: envelope GoUsageLimitError ("Resets in 9 days") -> cooldown
+    = tempo al reset (NON escalation generica) + rilascio dep-sticky, così la
+    sessione non resta incollata a una quota esausta. Parità con lo streaming.
+    """
+    from app.forwarder import QUOTA_MIN_COOLDOWN_S  # noqa: F401
+    router = _mk_router()
+    grp = "scrocco-llm-test-fallback"
+    broken = next(d for d in router.config.groups[grp] if d["api_key"] == "K1")
+    good = next(d for d in router.config.groups[grp] if d["api_key"] == "K2")
+
+    # sessione incollata al deployment che sta per esaurire la quota
+    router.dep_sticky_set("sess-q", broken["unique"])
+    assert router.dep_sticky_get("sess-q") == broken["unique"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if '"model":"broken"' in request.read().decode():
+            return httpx.Response(429, json={
+                "type": "error",
+                "error": {"type": "GoUsageLimitError",
+                          "message": "Monthly usage limit reached. "
+                                     "Resets in 9 days."},
+                "metadata": {"limitName": "monthly"}})
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    fwd = Forwarder(client=httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)))
+    payload = {"model": "x", "messages": [{"role": "user", "content": "ciao"}]}
+    router.fallback_next = lambda *a, **k: good
+    data, used = asyncio.run(fwd.call_with_fallback(
+        router, "test", broken, payload, ses="sess-q"))
+
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == good["unique"]
+    # cooldown ~9 giorni (al reset), non i ~600s dell'escalation generica
+    resid = router._cooldown[broken["unique"]] - time.time()
+    assert resid > 6 * 86400, resid   # ~9gg richiesti, clampati a 7gg max
+    # dep-sticky rilasciato: la sessione riparte altrove
+    assert router.dep_sticky_get("sess-q") is None

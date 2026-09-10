@@ -726,8 +726,15 @@ class Router:
         # minuto. NOTA: per i free, deployment_sticky previene la rotazione
         # alla fonte (stessa sessione = stessa key); questo halflife riguarda
         # solo il primo pick o la ripresa dopo cooldown.
-        cat = (dep.get("meta") or {}).get("category")
-        if cat in ("go", "fallback"):
+        # I deployment dict di config.groups NON portano "meta" (vedi
+        # _build_profile): la categoria go/fallback si deduce dal SUFFISSO del
+        # gruppo — vale sia per il mondo testo (-go/-fallback) sia per le terne
+        # capacità (…-C-go / …-C-fallback).
+        _grp = dep.get("group") or ""
+        _cfg = getattr(self, "config", None)
+        if _grp.endswith(getattr(_cfg, "go_suffix", "") or "-go") \
+                or _grp.endswith(getattr(_cfg, "fallback_suffix", "")
+                                 or "-fallback"):
             hl = pol.go_recency_halflife_sec
         else:
             hl = pol.recency_halflife_sec
@@ -1191,11 +1198,38 @@ class Router:
         if failed_unique and failed_unique in chain:
             start = chain.index(failed_unique) + 1
 
+        # "skip after N" REALE: quando `ladder_skip_after` membri di uno stesso
+        # gruppo sono già stati tentati in QUESTA richiesta, il resto del gruppo
+        # si salta — si sale di dim invece di rovistare decine di key free dello
+        # stesso bucket finché scade stream_total_deadline_ms (il pool gratuito
+        # di un profilo può avere >30 deployment per dim: senza questo taglio la
+        # scala non raggiunge mai -go/-fallback dentro la deadline).
+        # SOLO sul walk "vivo" (step 1 della ladder): gli step di riesumazione
+        # cooldown (min_cooldown_age / ignore_cooldown: stantii, ultima
+        # spiaggia, -fallback) NON sono gated — lì le key untried di un gruppo
+        # già battuto vanno comunque riprovate prima di sforare sul pagato.
+        # La soglia è fissa (`ladder_skip_after`), non il `limit` variabile
+        # del singolo step, per non escludere un gruppo a soglie incoerenti.
+        exhausted_groups: set[str] = set()
+        _live_walk = (min_cooldown_age is None and not ignore_cooldown)
+        if tried and limit > 0 and _live_walk:
+            _skip_after = max(1, int(getattr(self.policy,
+                                             "ladder_skip_after", 4) or 4))
+            _gc: dict[str, int] = {}
+            for _u in tried:
+                _d = self.config.deployment_by_unique(_u)
+                if _d:
+                    _g = _d.get("group", "")
+                    _gc[_g] = _gc.get(_g, 0) + 1
+            exhausted_groups = {g for g, n in _gc.items() if n >= _skip_after}
+
         def _eligible(u: str) -> dict | None:
             if tried and u in tried:
                 return None
             dep = self.config.deployment_by_unique(u)
             if not dep:
+                return None
+            if exhausted_groups and dep.get("group") in exhausted_groups:
                 return None
             if not ignore_cooldown and self.is_cooled_down(u):
                 if min_cooldown_age is None:

@@ -94,3 +94,64 @@ def test_returns_none_only_when_truly_nothing(router):
     # walk a chain che contiene SOLO il fallito
     assert router._walk_ladder_resilient([only["unique"]], only["unique"],
                                          None, None) is None
+
+
+# --------------------------------------------------------------------------
+# "skip after N" REALE: dopo ladder_skip_after key fallite dello STESSO gruppo
+# nella richiesta, il resto del gruppo si salta e la scala sale di dim (invece
+# di rovistare decine di key free finché scade stream_total_deadline_ms).
+CSV_BIGPOOL = (
+    "commento,modello,provider,endpoint,data,context,max_input,priority,"
+    "scrocco-llm-test,caps\n"
+    + "".join(
+        f"t,m/s{i},groq,https://api.groq.com/openai/v1,free,200,8000,5,K-S{i},\n"
+        for i in range(6)
+    )
+    + "t,m/big,groq,https://api.groq.com/openai/v1,free,1000,8000,5,K-BIG,\n"
+)
+
+
+def _router_bigpool():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_BIGPOOL)
+    pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}}})
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    os.unlink(path)
+    return Router(cfg, pol)
+
+
+def test_skip_after_n_climbs_dim_instead_of_grinding_pool():
+    r = _router_bigpool()
+    small = _uniques(r, f"{BASE}-200k")
+    big = _uniques(r, f"{BASE}-1000k")
+    assert len(small) == 6 and len(big) == 1
+    skip = int(r.policy.ladder_skip_after or 4)
+
+    # meno di `skip` key -200k fallite: la scala resta nel pool -200k
+    tried = set(small[:skip - 1])
+    nxt = r._walk_chain(small + big, small[skip - 2], tried=tried, limit=skip)
+    assert nxt["group"] == f"{BASE}-200k"
+
+    # raggiunto `skip`: il gruppo -200k è "esaurito" per questa richiesta ->
+    # si sale al -1000k anche se restano key -200k mai provate
+    tried = set(small[:skip])
+    nxt = r._walk_chain(small + big, small[skip - 1], tried=tried, limit=skip)
+    assert nxt is not None and nxt["group"] == f"{BASE}-1000k"
+
+
+def test_skip_after_n_not_applied_on_stale_retry_walk():
+    """Il gate vale SOLO sul walk vivo (step 1): lo step di riesumazione
+    cooldown (min_cooldown_age) deve ancora poter riprovare le key untried di
+    un gruppo già battuto, prima di sforare sul -fallback a pagamento."""
+    r = _router_bigpool()
+    small = _uniques(r, f"{BASE}-200k")
+    skip = int(r.policy.ladder_skip_after or 4)
+    tried = set(small[:skip])
+    # una key -200k mai provata, in cooldown STANTIO
+    victim = small[skip]
+    r.mark_failed(victim, seconds=600)
+    r._cooldown_since[victim] = time.time() - 9999
+    nxt = r._walk_chain(small, small[skip - 1], tried=tried,
+                        min_cooldown_age=300, limit=3)
+    assert nxt is not None and nxt["unique"] == victim

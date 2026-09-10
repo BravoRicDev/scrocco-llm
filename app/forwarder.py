@@ -900,6 +900,7 @@ class Forwarder:
                                  ctx: int | None = None,
                                  attempts_box: list | None = None,
                                  session: str | None = None,
+                                 ses: str | None = None,
                                  client_ip: str = "",
                                  attribution: dict | None = None
                                  ) -> tuple[dict, dict] | tuple[dict, dict, list]:
@@ -1017,6 +1018,32 @@ class Forwarder:
                 if getattr(err, "final", False):
                     raise                    # decisione definitiva: non ruotare
                 detail = err.detail or ""
+                # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
+                # "usage limit reached" / "Resets in N days"), a prescindere
+                # dallo status HTTP (429 o 4xx provider-side): la key NON torna
+                # prima del reset. Cooldown = tempo al reset (non escalation) +
+                # rilascio dep-sticky, così la sessione riparte su un'altra
+                # chiave e la catena non spreca tentativi su altre key soggette
+                # allo stesso limite. Parità col percorso streaming
+                # (main._stream_with_fallback).
+                if is_provider_error_body(detail) \
+                        and _QUOTA_EXHAUSTED_RE.search(detail):
+                    _qcd = (parse_quota_reset_seconds(detail)
+                            or QUOTA_MIN_COOLDOWN_S)
+                    metrics.inc("nx_upstream_calls_total",
+                                (cur, "quota_exhausted"))
+                    last_err = err
+                    if ses:
+                        _st = router.dep_sticky_get(ses)
+                        if _st and _st == cur:
+                            router.dep_sticky_release(ses)
+                    log.warning("[fallback] %s quota esaurita (%.90s): "
+                                "cooldown %.0fs al reset, ruoto",
+                                cur, detail, _qcd)
+                    _fail_cur(seconds=_qcd, reason="quota_exhausted")
+                    dep = router.fallback_next(profile, dep, need, scope,
+                                               ctx=ctx, tried=tried)
+                    continue
                 # 4xx pass-through SOLO se non deployment-side. Due casi
                 # RITRIABILI: (a) firma provider-side (openai_error /
                 # bad_response_status_code = errore del LORO upstream);
