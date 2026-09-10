@@ -31,7 +31,7 @@ step_up_pct: 100
 # profilo coincide con le colonne `scrocco-llm-<profilo>` in keys_rotation.csv.
 profiles:
   # Profilo di esempio. Rinomina/rimuovi per i tuoi profili reali.
-  test:
+  myteam:
     # Step-up percentuale specifico per questo profilo (qui: come il globale)
     step_up_pct: 100
 
@@ -262,10 +262,10 @@ qc_sanity:
 # ─────────────────────────────────────────────────────────────────────────────
 aliases:
   # "scrocco" = modello base del profilo (il router sceglie dimensione+velocità)
-  scrocco: scrocco-llm-collego
+  scrocco: scrocco-llm-myteam
   # Varianti di contesto esplicito:
-  scrocco-200k: scrocco-llm-collego-200k
-  scrocco-1000k: scrocco-llm-collego-1000k
+  scrocco-200k: scrocco-llm-myteam-200k
+  scrocco-1000k: scrocco-llm-myteam-1000k
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CAPACITÀ MODALITÀ — routing consapevole di immagini/video/audio/image_gen
