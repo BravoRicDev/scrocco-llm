@@ -127,6 +127,16 @@ go_recency_halflife_sec: 300
 escalation_pin: true
 escalation_pin_ttl_sec: 300
 
+# RICAMPIONAMENTO PRE-PIN: prima di usare la scorciatoia verso il winner
+# (tipicamente -go), la richiesta riprova 1 volta la dim richiesta e sonda fino
+# a `escalation_pin_probe_dims` dim INTERMEDIE (tra richiesta e winner, winner
+# escluso) scelte a caso. Se una è "guarita" la si usa; se sono tutte in
+# cooldown vengono saltate (costo zero) e si va al winner.
+#   escalation_pin_probe_dims: 0 = disabilita (salto diretto al winner)
+escalation_pin_probe_dims: 2
+escalation_pin_probe_retry: true    # 1 retry extra nella dim richiesta
+escalation_pin_probe_random: true   # scelta casuale delle dim intermedie
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ALIAS KEYS — chiavi custom per alias generici (MAI esposte via API)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +180,13 @@ cooldown_linear_mult_min: 30     # incremento per fallimento consecutivo
 # cooldown_escalation: true      # (solo se cooldown_mode=escalation)
 # max_cooldown_sec: 86400
 
+# TIMEOUT = DANNO REALE: un modello che "appende" senza rispondere (né errore
+# né contenuto) fa perdere tempo (fino a stream_first_content_ms per richiesta).
+# Il cooldown del SOLO fallimento-per-timeout è `timeout_cooldown_mult` volte
+# quello classico (con gli stessi moltiplicatori su fail_24h), poi clampato a
+# max_cooldown_sec. 1 = nessuna penalizzazione extra.
+timeout_cooldown_mult: 10
+
 # Dopo quanto (sec) un deployment in cooldown per "stale" può essere riprovato.
 stale_cooldown_retry_sec: 300
 
@@ -191,11 +208,12 @@ ladder_stale_max: 3
 # ─────────────────────────────────────────────────────────────────────────────
 qc_json:
   # Timeout in ms per il PRIMO byte di contenuto utile (prima si ruota).
-  # 90000 = 90s (dai log: il ttfb valido massimo osservato è ~75s, margine 90s)
-  stream_first_content_ms: 90000
+  # 240000 = 4 min: i modelli con contesto lungo (200k+) possono impiegare
+  # diversi minuti prima del primo token.
+  stream_first_content_ms: 240000
 
-  # Deadline totale in ms per l'INTERO stream (180000 = 3 minuti).
-  stream_total_deadline_ms: 180000
+  # Deadline totale in ms per l'INTERO stream (960000 = 16 minuti).
+  stream_total_deadline_ms: 960000
 
   # Caratteri di risposta minimi per "impegnare" lo stream (evita di
   # consegnare risposte troncate/vuote; 40 = buon compromesso).

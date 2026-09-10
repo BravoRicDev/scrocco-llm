@@ -564,6 +564,10 @@ class Forwarder:
             req = self.client.build_request("POST", url, json=body,
                                             headers=headers)
             resp = await self.client.send(req, stream=True)
+        except httpx.TimeoutException as exc:
+            # Headers mai arrivati entro il read-timeout: l'upstream ha
+            # APPESO -> danno reale, marker 'timeout' (cooldown lungo).
+            raise UpstreamError(None, f"upstream timeout: {exc}") from exc
         except httpx.HTTPError as exc:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
 
@@ -642,6 +646,11 @@ class Forwarder:
         url = f"{dep['api_base']}/chat/completions"
         try:
             resp = await self.client.post(url, json=body, headers=headers)
+        except httpx.TimeoutException as exc:
+            # L'upstream ha APPESO (read/connect timeout): danno reale (tempo
+            # perso) -> marker distinto, il fallback lo classifica "timeout"
+            # e applica il cooldown lungo.
+            raise UpstreamError(None, f"upstream timeout: {exc}") from exc
         except httpx.HTTPError as exc:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
 
@@ -906,7 +915,8 @@ class Forwarder:
                                  session: str | None = None,
                                  ses: str | None = None,
                                  client_ip: str = "",
-                                 attribution: dict | None = None
+                                 attribution: dict | None = None,
+                                 requested_group: str | None = None
                                  ) -> tuple[dict, dict] | tuple[dict, dict, list]:
         """Prova i deployment lungo la catena finché uno risponde.
 
@@ -930,7 +940,7 @@ class Forwarder:
         qc = router.policy.qc_json          # snapshot per questa chiamata
         san = router.policy.qc_sanity       # sanity generica (vuoto/trivial)
         dep = first_dep
-        requested_group = (first_dep or {}).get("group")   # pin escalation-winner
+        requested_group = requested_group or (first_dep or {}).get("group")
         last_err: UpstreamError | None = None
         tried: set[str] = set()
         qc_failed: list[tuple[str, str]] = []
@@ -1008,7 +1018,8 @@ class Forwarder:
                             log.warning("[qc] %s JSON non valido (%s): "
                                         "provo il successivo", cur, reason)
                             _fail_cur()
-                            dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried)
+                            dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                             continue        # finally chiude il TENTATIVO
                         # tentativi esauriti: consegna l'ultimo se ha contenuto,
                         # altrimenti errore RETRYABLE (mai un turno vuoto/finto).
@@ -1051,7 +1062,8 @@ class Forwarder:
                                 cur, detail, _qcd)
                     _fail_cur(seconds=_qcd, reason="quota_exhausted")
                     dep = router.fallback_next(profile, dep, need, scope,
-                                               ctx=ctx, tried=tried)
+                                               ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                     continue
                 # 4xx pass-through SOLO se non deployment-side. Due casi
                 # RITRIABILI: (a) firma provider-side (openai_error /
@@ -1076,7 +1088,8 @@ class Forwarder:
                                                router.stats_for(cur).fail_count_24h),
                                            reason="provider_transient")
                         dep = router.fallback_next(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried)
+                                                   ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     if -err.status == 404:
                         metrics.inc("nx_upstream_calls_total", (cur, "not_found"))
@@ -1084,7 +1097,8 @@ class Forwarder:
                                     "inesistente su questo provider): "
                                     "ritento sul successivo", cur)
                         _fail_cur( reason="not_found")
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried)
+                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     # alcuni provider (es. cloudflare) rispondono 400 con
                     # "No such model"/code propri invece di 404 e senza firme
@@ -1098,14 +1112,16 @@ class Forwarder:
                                     "successivo", cur, detail)
                         _fail_cur( seconds=MODEL_MISSING_COOLDOWN_S,
                                            reason="not_found")
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried)
+                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     if _THOUGHT_SIG_RE.search(detail):
                         metrics.inc("nx_upstream_calls_total",
                                     (cur, "provider_4xx"))
                         last_err = err        # per la consegna a catena esaurita
                         nxt = router.fallback_next(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried)
+                                                   ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         if nxt is not None and nxt["unique"] in tried:
                             nxt = None        # gruppo/catena tutto Gemini 3
                         if nxt is None:
@@ -1127,7 +1143,8 @@ class Forwarder:
                                     (cur, "provider_4xx"))
                         last_err = err        # consegna il 400 se catena esaurita
                         nxt = router.fallback_next(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried)
+                                                   ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         if nxt is not None and nxt["unique"] in tried:
                             nxt = None
                         if nxt is None:
@@ -1159,7 +1176,8 @@ class Forwarder:
                             cur,
                             reason="no_credits" if -err.status == 402
                             else "provider_400")
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried)
+                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     # ENVELOPE D'ERRORE PROVIDER: qualsiasi body {"type":"error",
                     # "error":{"type":"XxxError","message":...}} (AuthError
@@ -1176,7 +1194,8 @@ class Forwarder:
                                     "(%.100s): ritento sul successivo",
                                     cur, -err.status, detail)
                         _fail_cur( reason="provider_error")
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried)
+                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     # 4xx con body ASSENTE/illeggibile: nessun messaggio
                     # azionabile per il client -> infrastruttura, non colpa
@@ -1196,7 +1215,8 @@ class Forwarder:
                                                router.stats_for(cur).fail_count_24h),
                                            reason="empty_error_body")
                         dep = router.fallback_next(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried)
+                                                   ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     # 403 di qualsiasi tipo (permission denied, project banned,
                     # access denied, key disabled...): e' SEMPRE un errore di
@@ -1214,18 +1234,26 @@ class Forwarder:
                         _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
                                   reason="upstream_403")
                         dep = router.fallback_next(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried)
+                                                   ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
                         continue
                     raise
                 metrics.inc("nx_upstream_calls_total", (cur, "error"))
                 last_err = err
                 log.warning("[fallback] %s fallito (status=%s): provo il successivo",
                             cur, err.status or "connessione")
-                _reason = ("http_%s" % err.status
-                           if err.status and err.status > 0 else "network")
+                if err.status is None and "upstream timeout" in detail.lower():
+                    # TIMEOUT (upstream che appende): danno reale -> cooldown
+                    # lungo (timeout_cooldown_mult x classico).
+                    _reason = "timeout"
+                elif err.status and err.status > 0:
+                    _reason = "http_%s" % err.status
+                else:
+                    _reason = "network"
                 _fail_cur( seconds=err.retry_after,
                                    reason=_reason)
-                dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried)
+                dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
             finally:
                 router.note_end(cur)        # SEMPRE il tentativo corrente
         # catena finita dopo fallimenti QC: consegna l'ultimo broken (D3) SE ha

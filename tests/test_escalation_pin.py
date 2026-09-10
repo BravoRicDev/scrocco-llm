@@ -174,7 +174,10 @@ def test_fallback_next_uses_pin_shortcut(router):
     go = _dep(router, GGO, "K-GO")
     # pin: quando la -200k fallisce, atterra sul -go winner
     router.record_escalation_win(G200, go)
-    nxt = router.fallback_next("test", small, None, "chain", ctx=100)
+    # tried={small}: il bucket richiesto ha gia' fallito; senza dim intermedie
+    # (e senza altre key -200k) il probe non trova nulla -> winner.
+    nxt = router.fallback_next("test", small, None, "chain", ctx=100,
+                               tried={small["unique"]}, requested_group=G200)
     assert nxt is not None and nxt["unique"] == go["unique"]
 
 
@@ -225,3 +228,121 @@ def test_custom_ttl():
     r.record_escalation_win(G200, go)
     r._esc_win[G200] = (go["unique"], time.time() - 2)   # oltre il ttl=1
     assert r._try_esc_win(G200, None, ctx=100) is None
+
+
+# ================================================== RICAMPIONAMENTO PRE-PIN
+# CSV con dim intermedie 256k/1000k + una seconda key -200k. max_input: le
+# -200k piccole (100) per poterle escludere con un ctx grande nei test del
+# "bucket morto"; intermedie ampie (100000).
+CSV_MULTI = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
+t@x,m/small,groq,https://api.groq.com/openai/v1,free,200,100,5,K-SMALL,
+t@x,m/small2,groq,https://api.groq.com/openai/v1,free,200,100,5,K-SMALL2,
+t@x,m/mid,groq,https://api.groq.com/openai/v1,free,256,100000,5,K-MID,
+t@x,m/big,groq,https://api.groq.com/openai/v1,free,1000,100000,5,K-BIG,
+t@x,m/go,groq,https://api.groq.com/openai/v1,,0,0,5,K-GO,
+"""
+G256 = f"{BASE}-256k"
+G1000 = f"{BASE}-1000k"
+
+
+def _mkrouter_multi(**polkw):
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_MULTI)
+    pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}},
+                            **polkw})
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    r = Router(cfg, pol)
+    os.unlink(path)
+    return r
+
+
+def _cool(r, dep):
+    r._cooldown[dep["unique"]] = time.time() + 9999
+
+
+def test_pin_probe_retry_then_dims_then_winner():
+    r = _mkrouter_multi()
+    small = _dep(r, G200, "K-SMALL")
+    small2 = _dep(r, G200, "K-SMALL2")
+    go = _dep(r, GGO, "K-GO")
+    r.record_escalation_win(G200, go)
+    _cool(r, small)                      # come dopo un fallimento reale
+    tried = {small["unique"]}
+    # 1) retry nella dim richiesta -> l'altra key -200k
+    n1 = r.fallback_next("test", small, None, "chain", ctx=100,
+                         tried=tried, requested_group=G200)
+    assert n1 is not None and n1["group"] == G200
+    assert n1["unique"] == small2["unique"]
+    tried.add(n1["unique"])
+    # 2) prima dim intermedia (256 o 1000)
+    n2 = r.fallback_next("test", n1, None, "chain", ctx=100,
+                         tried=tried, requested_group=G200)
+    assert n2 is not None and n2["group"] in (G256, G1000)
+    tried.add(n2["unique"])
+    # 3) seconda dim intermedia, diversa dalla prima
+    n3 = r.fallback_next("test", n2, None, "chain", ctx=100,
+                         tried=tried, requested_group=G200)
+    assert n3 is not None and n3["group"] in (G256, G1000)
+    assert n3["group"] != n2["group"]
+    tried.add(n3["unique"])
+    # 4) esaurite le 2 intermedie -> winner
+    n4 = r.fallback_next("test", n3, None, "chain", ctx=100,
+                         tried=tried, requested_group=G200)
+    assert n4 is not None and n4["unique"] == go["unique"]
+
+
+def test_pin_probe_disabled_returns_winner():
+    r = _mkrouter_multi(escalation_pin_probe_dims=0)
+    small = _dep(r, G200, "K-SMALL")
+    go = _dep(r, GGO, "K-GO")
+    r.record_escalation_win(G200, go)
+    _cool(r, small)
+    nxt = r.fallback_next("test", small, None, "chain", ctx=100,
+                          tried={small["unique"]}, requested_group=G200)
+    assert nxt is not None and nxt["unique"] == go["unique"]
+
+
+def test_pin_probe_skips_cooled_intermediates():
+    r = _mkrouter_multi()
+    small = _dep(r, G200, "K-SMALL")
+    small2 = _dep(r, G200, "K-SMALL2")
+    go = _dep(r, GGO, "K-GO")
+    r.record_escalation_win(G200, go)
+    _cool(r, small)
+    _cool(r, small2)
+    for g in (G256, G1000):              # intermedie TUTTE in cooldown
+        for d in r.config.groups[g]:
+            _cool(r, d)
+    nxt = r.fallback_next("test", small2, None, "chain", ctx=100,
+                          tried={small["unique"], small2["unique"]},
+                          requested_group=G200)
+    assert nxt is not None and nxt["unique"] == go["unique"]
+
+
+def test_pin_probe_no_retry_after_two_nominal():
+    r = _mkrouter_multi()
+    small = _dep(r, G200, "K-SMALL")
+    small2 = _dep(r, G200, "K-SMALL2")
+    go = _dep(r, GGO, "K-GO")
+    r.record_escalation_win(G200, go)
+    _cool(r, small)
+    _cool(r, small2)
+    # gia' 2 tentativi nella dim richiesta -> niente terzo retry: si va
+    # direttamente alle intermedie / winner.
+    nxt = r.fallback_next("test", small2, None, "chain", ctx=100,
+                          tried={small["unique"], small2["unique"]},
+                          requested_group=G200)
+    assert nxt is not None and nxt["group"] in (G256, G1000)
+
+
+def test_initial_pick_dead_bucket_probes_intermediates():
+    r = _mkrouter_multi()
+    go = _dep(r, GGO, "K-GO")
+    r.record_escalation_win(G200, go)
+    # ctx 50000: il bucket -200k (max_input 100) NON e' candidabile -> pin;
+    # il probe deve partire da una dim intermedia VIVA (256/1000).
+    dep = r.initial_pick("test", G200, ctx=50000)
+    assert dep is not None and dep["group"] in (G256, G1000)
+    assert dep["unique"] != go["unique"]
+

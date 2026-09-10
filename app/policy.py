@@ -212,6 +212,16 @@ class Policy:
     escalation_pin: bool = True
     escalation_pin_ttl_sec: int = 300        # finestra scorrevole: si rinnova
                                              # a ogni salita buona
+    # RICAMPIONAMENTO PRE-PIN: prima di usare la scorciatoia verso il winner
+    # (tipicamente -go), si riprova la dim richiesta (1 tentativo) e si sonda
+    # fino a `escalation_pin_probe_dims` dim INTERMEDIE (tra richiesta e winner,
+    # escluso il winner) scegliendole a caso: se una e' "guarita" nel frattempo,
+    # la usiamo invece di saltare subito al winner. Solo candidate VIVI (una
+    # dim tutta in cooldown viene saltata, costo zero). 0 = disabilitato
+    # (comportamento storico: salto diretto al winner).
+    escalation_pin_probe_dims: int = 2
+    escalation_pin_probe_retry: bool = True   # 1 retry nella dim richiesta
+    escalation_pin_probe_random: bool = True  # scelta casuale delle intermedie
 
     # PROTEZIONE FREE-TIER: nei gruppi DIMS i modelli con input media
     # (vision/video/audio) sono ULTIMA SPIAGGIA per le richieste di testo
@@ -302,6 +312,14 @@ class Policy:
     # del muro, quindi il cooldown resta per i casi veramente rotti, non
     # per quota.
     max_cooldown_sec: int = 18000
+
+    # TIMEOUT = DANNO REALE: un modello che "appende" senza rispondere (ne'
+    # errore, ne' contenuto) fa perdere tempo vero (fino a stream_first_content_ms
+    # per richiesta). Il cooldown del solo fallimento-per-timeout e' quindi
+    # `timeout_cooldown_mult` volte il cooldown "classico" (linear/escalation,
+    # con gli stessi moltiplicatori su fail_24h), poi clampato a
+    # max_cooldown_sec. 1 = nessuna penalizzazione extra.
+    timeout_cooldown_mult: int = 10
 
     # Lifecycle chiavi (keyhealth): dopo N giorni consecutivi "dead_suspect"
     # la chiave viene marcata RETIRED ed esclusa dal routing. MAI cancellata
@@ -566,6 +584,15 @@ class Policy:
         if epp is not None:
             p.escalation_pin = _coerce_bool(epp, "escalation_pin")
         _set_int(p, raw, "escalation_pin_ttl_sec", minimum=1)
+        _set_int(p, raw, "escalation_pin_probe_dims", minimum=0)
+        _sret = raw.get("escalation_pin_probe_retry")
+        if _sret is not None:
+            p.escalation_pin_probe_retry = _coerce_bool(
+                _sret, "escalation_pin_probe_retry")
+        _srnd = raw.get("escalation_pin_probe_random")
+        if _srnd is not None:
+            p.escalation_pin_probe_random = _coerce_bool(
+                _srnd, "escalation_pin_probe_random")
         for num_key, attr in (("recency_halflife_sec", "recency_halflife_sec"),
                               ("latency_ref_ms", "latency_ref_ms"),
                               ("go_recency_halflife_sec", "go_recency_halflife_sec")):
@@ -614,9 +641,9 @@ class Policy:
             if "stream_first_content_ms" in qj:
                 v = qj["stream_first_content_ms"]
                 if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (2000 <= int(v) <= 120000):
+                        or not (2000 <= int(v) <= 900000):
                     raise ValueError("qc_json.stream_first_content_ms deve "
-                                     "essere 2000..120000")
+                                     "essere 2000..900000")
                 p.qc_json.stream_first_content_ms = int(v)
             if "stream_commit_min_chars" in qj:
                 v = qj["stream_commit_min_chars"]
@@ -628,9 +655,9 @@ class Policy:
             if "stream_total_deadline_ms" in qj:
                 v = qj["stream_total_deadline_ms"]
                 if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (5000 <= int(v) <= 600000):
+                        or not (5000 <= int(v) <= 3600000):
                     raise ValueError("qc_json.stream_total_deadline_ms deve "
-                                     "essere 5000..600000")
+                                     "essere 5000..3600000")
                 p.qc_json.stream_total_deadline_ms = int(v)
             if "stream_commit_include_reasoning" in qj:
                 p.qc_json.stream_commit_include_reasoning = _coerce_bool(
@@ -718,6 +745,7 @@ class Policy:
         if ce is not None:
             p.cooldown_escalation = _coerce_bool(ce, "cooldown_escalation")
         _set_int(p, raw, "max_cooldown_sec", minimum=10)
+        _set_int(p, raw, "timeout_cooldown_mult", minimum=1)
 
         cm = raw.get("cooldown_mode")
         if cm is not None:

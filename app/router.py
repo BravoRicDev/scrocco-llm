@@ -324,6 +324,79 @@ class Router:
                  group_name, unique, time.time() - ts)
         return dep
 
+    def _esc_pin_probe(self, req_grp: str | None, winner: dict | None,
+                       need: frozenset[str] | None = None,
+                       ctx: int | None = None,
+                       tried: set[str] | None = None,
+                       *, allow_retry: bool = True) -> dict | None:
+        """RICAMPIONAMENTO PRE-PIN.
+
+        Prima di usare la scorciatoia del pin (winner, tipicamente -go),
+        prova:
+          (a) 1 tentativo extra nella dim RICHIESTA (se `allow_retry`), poi
+          (b) fino a `escalation_pin_probe_dims` dim INTERMEDIE tra la dim
+              richiesta e il gruppo del winner (winner escluso), scelte a caso.
+
+        Solo candidate VIVI (non in cooldown, cap/ctx compatibili, non gia'
+        tentati): una dim interamente in cooldown viene SALTATA (costo zero).
+        Ritorna il candidato o None (campionamento esaurito / nessun vivo ->
+        il chiamante usa il winner). Non anticipa mai il bucket richiesto:
+        e' solo una deviazione del fallback."""
+        if not getattr(self.policy, "escalation_pin", True):
+            return None
+        if winner is None or not req_grp:
+            return None
+        n_dims = max(0, int(getattr(self.policy, "escalation_pin_probe_dims",
+                                     2) or 0))
+        if n_dims <= 0:
+            return None                       # probe disabilitato (anche retry)
+        m = self.DIM_SUFFIX_RE.search(req_grp)
+        if not m:
+            return None                       # -go/-fallback/cap: niente dim
+        req_dim = int(m.group(1))
+        pname = req_grp[:m.start()][len(self.config.proxy_prefix):]
+        base = f"{self.config.proxy_prefix}{pname}"
+        tried_set = tried or set()
+        tried_groups: dict[str, int] = {}
+        for u in tried_set:
+            d = self.config.deployment_by_unique(u)
+            if d:
+                g = d.get("group", "")
+                tried_groups[g] = tried_groups.get(g, 0) + 1
+
+        # (a) retry nella dim richiesta (1 tentativo extra, mai piu' di 2 in
+        #     tutto): il bucket nominale resta la prima scelta anche col pin.
+        if allow_retry and getattr(self.policy, "escalation_pin_probe_retry",
+                                   True):
+            if tried_groups.get(req_grp, 0) < 2:
+                cand = self.pick_deployment(req_grp, need=need, ctx=ctx,
+                                            live_only=True)
+                if cand is not None and cand["unique"] not in tried_set:
+                    log.info("[esc-pin-probe] %s: retry dim richiesta -> %s",
+                             req_grp, cand["unique"])
+                    return cand
+
+        # (b) dim intermedie (> dim richiesta, escluso il gruppo winner).
+        winner_group = winner.get("group")
+        inter = [d for d in self.config.profile_dims.get(pname, [])
+                 if d > req_dim and f"{base}-{d}k" != winner_group]
+        if not inter:
+            return None
+        already = [d for d in inter if f"{base}-{d}k" in tried_groups]
+        if len(already) >= n_dims:
+            return None                       # campionamento gia' esaurito
+        avail = [d for d in inter if f"{base}-{d}k" not in tried_groups]
+        if getattr(self.policy, "escalation_pin_probe_random", True):
+            random.shuffle(avail)
+        for d in avail:
+            g = f"{base}-{d}k"
+            cand = self.pick_deployment(g, need=need, ctx=ctx, live_only=True)
+            if cand is not None and cand["unique"] not in tried_set:
+                log.info("[esc-pin-probe] %s: sondo dim intermedia %s -> %s",
+                         req_grp, g, cand["unique"])
+                return cand
+        return None
+
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
                     reason: str | None = None) -> float:
@@ -382,6 +455,13 @@ class Router:
             else:
                 seconds = float(pol.cooldown_sec)
         seconds = max(1.0, float(seconds))
+        # TIMEOUT = danno reale (tempo perso senza rispondere ne' fallire con
+        # codice): il cooldown del timeout e' `timeout_cooldown_mult` volte
+        # quello "classico", con gli stessi moltiplicatori su fail_24h gia'
+        # applicati sopra. Poi si ri-applica il tetto max_cooldown_sec.
+        if reason == "timeout":
+            _tm = max(1, int(getattr(pol, "timeout_cooldown_mult", 10) or 10))
+            seconds = min(seconds * _tm, float(pol.max_cooldown_sec))
         # Leva B: un deployment CRONICO (fail_24h >= soglia) che fallisce
         # di nuovo va in pausa MINIMA longa (chronic_fail_cooldown_sec, 2h):
         # dopo essere stato "svegliato" dal paracadute e aver fallito, non
@@ -438,6 +518,10 @@ class Router:
         remaining = max(1.0, self._cooldown.get(unique, now) - now)
         new_cd = remaining * 2.0
         new_cd = min(new_cd, float(self.policy.max_cooldown_sec))
+        if reason == "timeout":
+            _tm = max(1, int(getattr(self.policy, "timeout_cooldown_mult", 10)
+                             or 10))
+            new_cd = min(new_cd * _tm, float(self.policy.max_cooldown_sec))
         s = self.stats_for(unique)
         # ESC-PIN: idem mark_failed (il winner fallito si sblocca).
         for _g, (_u, _ts) in list(self._esc().items()):
@@ -1202,7 +1286,8 @@ class Router:
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
                         ctx: int | None = None,
-                        restrict_model: str | None = None) -> dict | None:
+                        restrict_model: str | None = None,
+                        *, live_only: bool = False) -> dict | None:
         """Selezione pesata dentro un gruppo, saltando i cooled-down.
 
         Con policy.adaptive_pick (default True): punteggio dinamico che
@@ -1233,7 +1318,7 @@ class Router:
 
         deps = [d for d in self.config.groups.get(group_name, [])
                 if not self.is_cooled_down(d["unique"]) and _ok(d)]
-        if not deps:
+        if not deps and not live_only:
             # tutti in cooldown (o nessun capace) -> riprova ignorando il cooldown
             # (ultima spiaggia), rispettando exclude/need/guardia
             deps = [d for d in self.config.groups.get(group_name, []) if _ok(d)]
@@ -1435,10 +1520,18 @@ class Router:
         # winner fresco/sano/sufficiente per QUESTO contesto, saltaci diretto.
         _ew = self._try_esc_win(group_name, need, ctx)
         if _ew is not None:
+            # RICAMPIONAMENTO: se il bucket richiesto e' morto, NON saltare
+            # subito al winner: sonda prima le dim intermedie (solo quelle,
+            # niente retry del bucket morto). Se ne trovi una viva, parti da
+            # lì; il resto della scala (2a intermedia -> winner) lo gestisce
+            # fallback_next con requested_group.
+            _p = self._esc_pin_probe(group_name, _ew, need, ctx, tried=None,
+                                     allow_retry=False)
+            _use = _p if _p is not None else _ew
             if session_id and self.policy.deployment_sticky \
                     and not self._is_renewal_bucket(group_name):
-                self.dep_sticky_set(session_id, _ew["unique"])
-            return _ew
+                self.dep_sticky_set(session_id, _use["unique"])
+            return _use
         # Nessuna pesca riuscita: catena/ladder come prima
         cap = self.config.group_caps.get(group_name)
         if cap is not None:
@@ -1679,7 +1772,8 @@ class Router:
                       need: frozenset[str] | None = None,
                       scope: str = "chain",
                       ctx: int | None = None,
-                      tried: set[str] | None = None) -> dict | None:
+                      tried: set[str] | None = None,
+                      requested_group: str | None = None) -> dict | None:
         """Prossimo tentativo DOPO un fallimento, con regole di SCOPO:
 
         - scope="chain": catena DEL MONDO del deployment corrente — cap-group
@@ -1691,7 +1785,13 @@ class Router:
         - scope="group" (richieste ESPLICITE): rotazione SOLO nello stesso
           gruppo, senza filtro capacità né sconfinamenti; stessa priorità
           same-model nei gruppi gen/stt.
+
+        `requested_group`: gruppo ORIGINARIO della richiesta (es. -200k). Serve
+        al pin escalation-winner per continuare a valere anche dopo che la
+        richiesta e' salita su altre dim (cur_dep["group"] cambia). None =
+        usa cur_dep["group"] (comportamento storico).
         """
+        req_grp = requested_group or cur_dep["group"]
         if scope == "group":
             cap_cur = self.config.group_caps.get(cur_dep["group"])
             if cap_cur is None and self.policy.dims_ladder_floor:
@@ -1699,9 +1799,10 @@ class Router:
                 # con escalation graduale del rilassamento cooldown.
                 # Scorciatoia escalation-winner: il bucket richiesto ha gia'
                 # fallito (siamo qui), salta direttamente al winner ricordato.
-                _ew = self._try_esc_win(cur_dep["group"], need, ctx, tried=tried)
+                _ew = self._try_esc_win(req_grp, need, ctx, tried=tried)
                 if _ew is not None:
-                    return _ew
+                    _p = self._esc_pin_probe(req_grp, _ew, need, ctx, tried)
+                    return _p if _p is not None else _ew
                 nxt = self._walk_ladder_resilient(
                     self._ladder_for_group(cur_dep["group"]),
                     cur_dep["unique"], need, ctx, tried=tried)
@@ -1745,9 +1846,10 @@ class Router:
             # con escalation graduale del rilassamento cooldown.
             # Scorciatoia escalation-winner: bucket richiesto già fallito ->
             # salta al winner ricordato invece di rivisitare la scala morta.
-            _ew = self._try_esc_win(cur_dep["group"], need, ctx, tried=tried)
+            _ew = self._try_esc_win(req_grp, need, ctx, tried=tried)
             if _ew is not None:
-                return _ew
+                _p = self._esc_pin_probe(req_grp, _ew, need, ctx, tried)
+                return _p if _p is not None else _ew
             nxt = self._walk_ladder_resilient(
                 self._ladder_for_group(cur_dep["group"]),
                 cur_dep["unique"], need, ctx, tried=tried)

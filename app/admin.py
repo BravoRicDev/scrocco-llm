@@ -567,6 +567,9 @@ async def state(request: Request):
             "escalation_pin": {
                 "enabled": bool(getattr(pol, "escalation_pin", True)),
                 "ttl_sec": int(getattr(pol, "escalation_pin_ttl_sec", 300)),
+                "probe_dims": int(getattr(pol, "escalation_pin_probe_dims", 2)),
+                "probe_retry": bool(getattr(pol, "escalation_pin_probe_retry", True)),
+                "probe_random": bool(getattr(pol, "escalation_pin_probe_random", True)),
                 # bucket_chiesto -> {winner, eta_sec, modello, gruppo_reale}
                 "pins": {g: {"winner": u,
                              "eta_sec": round(max(0.0, time.time() - ts), 1),
@@ -2081,6 +2084,7 @@ async def admin_playground(request: Request):
         attempts = 0
         fallbacks = 0
         last_err: BaseException | None = None
+        requested_group = dep["group"] if dep else None
         while dep is not None and attempts < _PLAYGROUND_MAX_ATTEMPTS:
             cur = dep["unique"]
             if cur in tried:                 # catena che si ripete: fermo
@@ -2108,7 +2112,8 @@ async def admin_playground(request: Request):
                         trace[-1]["reason"] = "timeout+penalized"
                     except Exception:            # noqa: BLE001
                         pass
-                nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx)
+                nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
+                                           requested_group=requested_group)
                 if nxt is not None and nxt["unique"] not in tried:
                     dep, fallbacks = nxt, fallbacks + 1
                 else:
@@ -2117,7 +2122,8 @@ async def admin_playground(request: Request):
             except Exception as exc:         # noqa: BLE001 - mai rompere il trace
                 last_err = exc
                 trace[-1]["reason"] = _playground_reason(exc)
-                nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx)
+                nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
+                                           requested_group=requested_group)
                 if nxt is not None and nxt["unique"] not in tried:
                     dep, fallbacks = nxt, fallbacks + 1
                 else:

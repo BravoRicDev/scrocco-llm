@@ -36,6 +36,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import (JSONResponse, PlainTextResponse, Response,
                                StreamingResponse)
@@ -941,7 +942,7 @@ async def chat_completions(request: Request):
             ctx=ctx_est,
             ses=session_id, req=raw_model,
             session=_sess, client_ip=_cip, request=request,
-            attribution=_attr)
+            attribution=_attr, requested_group=group_or_explicit)
 
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
@@ -954,7 +955,8 @@ async def chat_completions(request: Request):
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
             attempts_box=attempts_box,
-            session=_sess, ses=session_id, client_ip=_cip, attribution=_attr)
+            session=_sess, ses=session_id, client_ip=_cip, attribution=_attr,
+            requested_group=group_or_explicit)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
@@ -1152,6 +1154,11 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
             chunk = task.result()
         except StopAsyncIteration:
             return _eof()
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            # TIMEOUT del TRASPORTO (l'upstream "appende" senza rispondere ne'
+            # fallire con codice): danno REALE, tempo perso -> verdict
+            # 'timeout' (cooldown lungo via reason=timeout), NON 'empty_eof'.
+            return "timeout", buffered, None, meta
         except Exception:
             return "empty_eof", buffered, None, meta
         buffered.append(chunk)
@@ -1317,10 +1324,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 session: str | None = None,
                                 client_ip: str = "",
                                 request: "Request | None" = None,
-                                attribution: dict | None = None):
+                                attribution: dict | None = None,
+                                requested_group: str | None = None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
-    requested_group = (first_dep or {}).get("group")   # pin escalation-winner
+    # Gruppo ORIGINARIO della richiesta (es. -200k): serve al pin
+    # escalation-winner per valere anche dopo la salita su altre dim.
+    requested_group = requested_group or (first_dep or {}).get("group")
     tried = 0
     tried_set: set[str] = set()
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
@@ -1390,17 +1400,22 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             no_rotate = (verdict == "empty_eof" and meta.get("no_rotate")
                          and not rot_len)
             if not no_rotate:
-                # fallimento SOFT (stream vuoto/troncato pre-contenuto): il
-                # modello ha risposto male, non e' morto -> cooldown CORTO
-                # con escalation dolce sui fallimenti recenti (24h).
-                _fail(dep["unique"], seconds=_soft_cd(
-                    router.stats_for(dep["unique"]).fail_count_24h))
+                # TIMEOUT (upstream che appende): danno REALE (tempo perso) ->
+                # cooldown lungo (timeout_cooldown_mult x classico). Vuoto/
+                # troncato: fallimento SOFT -> cooldown corto con escalation
+                # dolce sui fallimenti recenti (24h).
+                if verdict == "timeout":
+                    _fail(dep["unique"], reason="timeout")
+                else:
+                    _fail(dep["unique"], seconds=_soft_cd(
+                        router.stats_for(dep["unique"]).fail_count_24h))
             over_deadline = ((time.monotonic() - t_req) * 1000 >
                              int(getattr(qcp, "stream_total_deadline_ms",
                                          90000) or 90000))
             nxt = None if (no_rotate or over_deadline) else (
                 router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                     tried=tried_set)
+                                     tried=tried_set,
+                                     requested_group=requested_group)
                 if profile else None)
             log.warning("[fallback] stream %s pre-contenuto verdict=%s fr=%s "
                         "no_rotate=%s -> %s", dep["unique"], verdict, fr,
@@ -1472,6 +1487,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "upstream_403"
             elif err.status is not None and err.status < 0:
                 reason = "other_4xx"
+            elif err.status is None and "upstream timeout" in detail.lower():
+                # Upstream che APPENDE (read/connect timeout): danno reale ->
+                # cooldown lungo via reason=timeout (timeout_cooldown_mult x).
+                reason = "timeout"
             else:
                 reason = ("http_%s" % err.status if err.status
                           else "network")
@@ -1531,9 +1550,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             router.dep_sticky_release(ses)
                 else:
                     _cd = err.retry_after
-                _fail(dep["unique"], seconds=_cd)
+                # reason propagato solo per il TIMEOUT (mark_failed applica il
+                # moltiplicatore dedicato); per gli altri resta il comportamento
+                # storico (seconds esplicito / default).
+                _fail(dep["unique"], seconds=_cd,
+                      reason="timeout" if reason == "timeout" else None)
             nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                       tried=tried_set) \
+                                       tried=tried_set,
+                                       requested_group=requested_group) \
                 if profile else None
             if nxt is not None and thought_sig and nxt["unique"] in attempts:
                 nxt = None                 # gruppo/catena tutto Gemini 3
@@ -1571,7 +1595,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _fail(dep["unique"], seconds=_soft_cd(
                 router.stats_for(dep["unique"]).fail_count_24h))
             nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                       tried=tried_set) \
+                                       tried=tried_set,
+                                       requested_group=requested_group) \
                 if profile else None
             log.warning("[fallback] stream %s errore imprevisto %r -> %s",
                         dep["unique"], exc,

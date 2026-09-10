@@ -342,3 +342,49 @@ def test_4bis_vision_uses_media_capable():
     assert dep is not None
     assert dep["unique"] == b["unique"]
     os.unlink(path)
+
+
+# ------------------------------------------------ TIMEOUT = danno reale (10x)
+def test_timeout_cooldown_multiplied_vs_classic():
+    r, p = _make_router(max_fail=10)
+    # stesso deployment: fallimento classico (errore con codice) vs timeout
+    d = _dep(r, f"{BASE}-1000k", "K-A")
+    classic = r.mark_failed(d["unique"], reason="http_500")
+    # reset e rifai come timeout
+    r._cooldown.pop(d["unique"], None)
+    r.stats_for(d["unique"]).fail_count_24h = 0
+    r.stats_for(d["unique"]).fail_day_key = time.strftime("%Y-%m-%d",
+                                                          time.gmtime())
+    to = r.mark_failed(d["unique"], reason="timeout")
+    assert classic == 1800                              # linear primo fail
+    assert to == min(classic * 10, r.policy.max_cooldown_sec)
+    assert to >= 17990
+    os.unlink(p)
+
+
+def test_timeout_cooldown_mult_knob():
+    r, p = _make_router(max_fail=10)
+    r.policy.timeout_cooldown_mult = 1                  # nessuna penalità extra
+    d = _dep(r, f"{BASE}-1000k", "K-B")
+    classic = 1800
+    to = r.mark_failed(d["unique"], reason="timeout")
+    assert to == min(classic * 1, r.policy.max_cooldown_sec)
+    os.unlink(p)
+
+
+def test_timeout_double_residual_multiplied():
+    r, p = _make_router(max_fail=10)
+    d = _dep(r, f"{BASE}-1000k", "K-A")
+    r._cooldown[d["unique"]] = time.time() + 100     # residuo ~100s
+    cd = r.mark_failed_double_residual(d["unique"], reason="timeout")
+    # residuo x2 = ~200 -> x10 = ~2000 (sotto il cap 18000)
+    assert 1800 <= cd <= 2200
+    os.unlink(p)
+
+
+def test_non_timeout_reason_unaffected():
+    r, p = _make_router(max_fail=10)
+    d = _dep(r, f"{BASE}-1000k", "K-A")
+    classic = r.mark_failed(d["unique"], reason="http_429")
+    assert classic == 1800                              # nessun x10
+    os.unlink(p)
