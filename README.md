@@ -3,7 +3,7 @@
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-brightgreen.svg)](https://unlicense.org/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-compose%20up-blue.svg)](#quickstart)
-[![Tests](https://img.shields.io/badge/tests-176%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-421%20passing-brightgreen.svg)](#development)
 
 > 🇮🇹 **Leggi in italiano** — [README.it.md](README.it.md)
 
@@ -24,7 +24,7 @@ Zero database. One container. Port `4001`.
 A single free API key is fragile: tiny context windows, rate limits, models
 that disappear. scrocco-llm routes every request to the **minimum model
 that fits** the estimated context across *all* your keys, failing over with
-exponential cooldowns — so workloads survive individual account limits.
+escalating cooldowns — so workloads survive individual account limits.
 
 ## Features
 
@@ -34,7 +34,8 @@ exponential cooldowns — so workloads survive individual account limits.
   `-image_gen`, `-video_gen`; purpose-aware fallback never lands on a
   model lacking the requested modality
 - **Chained failover**: free -> renewal (`-go`) -> fallback buckets;
-  exponential cooldown (capped at 5h); same-model-first rotation for media
+  escalating linear cooldown (capped at 5h, timeouts penalised 10x);
+  same-model-first rotation for media
 - **Budget guard (no-waste)**: learns per-key limits from observed 429s and
   deprioritises exhausted keys BEFORE they burn more calls; probe results
   are cached forever (some free tiers count calls, not tokens)

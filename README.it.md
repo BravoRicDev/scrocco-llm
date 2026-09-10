@@ -5,7 +5,7 @@
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-brightgreen.svg)](https://unlicense.org/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-compose%20up-blue.svg)](#in-cinque-comandi)
-[![Tests](https://img.shields.io/badge/tests-176%20passing-brightgreen.svg)](#test)
+[![Tests](https://img.shields.io/badge/tests-421%20passing-brightgreen.svg)](#test)
 
 **Un gateway LLM che ruota decine di chiavi free e a pagamento, sceglie il
 modello più piccolo che regge il contesto, e prova a non sprecare chiamate
@@ -105,7 +105,7 @@ deployment rotto, bruciando la catena di fallback e raffreddando per 10
 minuti chiavi perfettamente funzionanti. Ora riconosce
 `finish_reason=length` e consegna comunque la risposta.
 
-<a name="test"></a>176 test coprono queste regressioni: ognuno è nato da un
+<a name="test"></a>421 test coprono queste regressioni: ognuno è nato da un
 bug reale, non sono test scritti per riempire una percentuale.
 
 ## Cosa non è
