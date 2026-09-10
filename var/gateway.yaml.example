@@ -111,6 +111,23 @@ deployment_sticky: true
 go_recency_halflife_sec: 300
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ESCALATION WINNER — scorciatoia SOLO-IN-SALITA, trasversale alla sessione
+# ─────────────────────────────────────────────────────────────────────────────
+# Problema: una richiesta partita da un bucket piccolo (es. -200k) che trova
+# quel bucket tutto in errore SALTA verso gruppi piu' alti (-1000k -> -go).
+# Una volta atterrato su un deployment che risponde, senza questa feature la
+# richiesta DOPO riparte da -200k e rifà tutta la scala di fallimenti (minuti).
+# Con escalation_pin=true: ricordiamo, PER IL BUCKET RICHIESTO, il deployment
+# vincente e lo usiamo come SCORCIATOIA DEL FALLBACK (mai del primo pick: il
+# bucket economico e' sempre tentato per primo). Il pin scade dopo N secondi
+# DALL'ULTIMA richiesta buona (finestra scorrevole), e si pulisce subito se il
+# bucket richiesto torna a servire da solo o se il winner fallisce. Solo in
+# salita, mai in discesa. Memoria RUNTIME: non viene persistita (il restart la
+# riapprende alla prima salita buona).
+escalation_pin: true
+escalation_pin_ttl_sec: 300
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ALIAS KEYS — chiavi custom per alias generici (MAI esposte via API)
 # ─────────────────────────────────────────────────────────────────────────────
 # Mappa chiave -> nome modello per consentire a un client di autenticarsi con

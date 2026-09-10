@@ -930,6 +930,7 @@ class Forwarder:
         qc = router.policy.qc_json          # snapshot per questa chiamata
         san = router.policy.qc_sanity       # sanity generica (vuoto/trivial)
         dep = first_dep
+        requested_group = (first_dep or {}).get("group")   # pin escalation-winner
         last_err: UpstreamError | None = None
         tried: set[str] = set()
         qc_failed: list[tuple[str, str]] = []
@@ -1014,8 +1015,12 @@ class Forwarder:
                         if _looks_empty(data):
                             raise UpstreamError(
                                 503, "catena esaurita, nessun output utile",
-                                final=True)
+                                 final=True)
                         return data, dep, qc_failed
+                # successo pulito: se siamo atterrati su un gruppo piu' alto
+                # rispetto a quello richiesto, ricorda il winner (scorciatoia
+                # per le prossime richieste su QUEL bucket richiesto).
+                router.record_escalation_win(requested_group, dep)
                 return (data, dep, qc_failed) if collect_qc_failures \
                     else (data, dep)
             except UpstreamError as err:

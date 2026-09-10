@@ -202,6 +202,25 @@ class Router:
         # STICKY per-deployment (free buckets): session_id -> (unique, ts)
         # mantiene la stessa key entro una conversazione (cache calda).
         self._sticky_dep: dict[str, tuple[str, float]] = {}
+        # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
+        # -> (unique_che_ha_servito_in_salita, ts_ultima_salita_buona).
+        # Scoreria del fallback: quando il bucket richiesto fallisce si salta
+        # direttamente al winner invece di rivisitare la scala morta. Solo-in-
+        # salita: non si popola quando il bucket economico serve da solo (anzi
+        # in quel caso si pulisce). In-memory, mai persistito.
+        # Lazy-init via _esc() per i Router "nudi" (test con Router.__new__).
+        self._esc_win: dict[str, tuple[str, float]] = {}
+
+    # ------------------------------------------------- escalation winner
+    def _esc(self) -> dict:
+        """Ritorna (e crea al volo se serve) il dict escalation-winner.
+        La lazy-init protegge i Router costruiti SENZA __init__ (pattern dei
+        test `Router.__new__(Router)` + set manuale degli attributi minimi)."""
+        d = getattr(self, "_esc_win", None)
+        if d is None:
+            d = {}
+            self._esc_win = d
+        return d
 
     # -------------------------------------------------------------- sticky
     def sticky_get(self, session_id: str) -> str | None:
@@ -244,6 +263,67 @@ class Router:
     def dep_sticky_release(self, session_id: str) -> None:
         self._sticky_dep.pop(session_id, None)
 
+    # ------------------------------------------------- escalation winner
+    def record_escalation_win(self, requested_group: str | None,
+                              served_dep: dict | None) -> None:
+        """Ricorda il deployment che ha SERVITO con successo una richiesta
+        PARTITA da `requested_group` ma atterrata su un gruppo PIU' ALTO
+        (salita della scala). Solo-in-salita: se invece il servizio e' nel
+        bucket richiesto, PULISCE il pin (il bucket economico e' guarito).
+
+        Chiamato dai siti di successo (non-streaming e streaming) con il
+        gruppo ORIGINARIO della richiesta e il deployment usato. In-memory."""
+        if not getattr(self.policy, "escalation_pin", True):
+            return
+        if not requested_group or not served_dep:
+            return
+        served_group = served_dep.get("group")
+        if served_group == requested_group:
+            # guarigione del bucket richiesto -> sblocca la scorciatoia
+            _ew = self._esc()
+            if requested_group in _ew:
+                _ew.pop(requested_group, None)
+            return
+        # salita buona: (ri)setta e SCIVOLA il ts (finestra scorrevole)
+        self._esc()[requested_group] = (served_dep["unique"], time.time())
+
+    def _try_esc_win(self, group_name: str,
+                     need: frozenset[str] | None = None,
+                     ctx: int | None = None,
+                     tried: set[str] | None = None) -> dict | None:
+        """Restituisce il deployment winner ricordato per `group_name` SOLO se
+        ancora spendibile: pin non scaduto, deployment ancora nel CSV, non in
+        cooldown, capacita' e contesto compatibili, non gia' tentato. Altrimenti
+        None (ed eventualmente scarta il pin stale). NON anticipa il pick del
+        bucket richiesto: e' solo una scorciatoia del fallback."""
+        if not getattr(self.policy, "escalation_pin", True):
+            return None
+        _ew = self._esc()
+        entry = _ew.get(group_name)
+        if not entry:
+            return None
+        unique, ts = entry
+        ttl = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec",
+                                 300) or 300))
+        if time.time() - ts > ttl:
+            _ew.pop(group_name, None)                     # scaduto
+            return None
+        if tried and unique in tried:
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:                                   # hot-reload: rimosso
+            _ew.pop(group_name, None)
+            return None
+        if self.is_cooled_down(unique):                   # non rimuove: revive
+            return None
+        if not self._cap_fits(dep, ctx):                  # NON regge il ctx
+            return None
+        if need and not self._dep_supports(dep, need):    # capacita' mancante
+            return None
+        log.info("[esc-pin] %s -> %s (eta=%.0fs): salto la scala",
+                 group_name, unique, time.time() - ts)
+        return dep
+
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
                     reason: str | None = None) -> float:
@@ -259,6 +339,12 @@ class Router:
         """
         pol = self.policy
         s = self.stats_for(unique)
+        # ESC-PIN: se questo deployment era il winner di qualche bucket, lo
+        # sblocchiamo subito (un winner che fallisce NON deve essere riattaccato
+        # alla richiesta dopo: si riapprende alla prossima salita buona).
+        for _g, (_u, _ts) in list(self._esc().items()):
+            if _u == unique:
+                self._esc().pop(_g, None)
         if reason:
             s.last_reason = reason
         # --- fail_count_24h: contatore giornaliero (mai azzerato da successi)
@@ -353,6 +439,10 @@ class Router:
         new_cd = remaining * 2.0
         new_cd = min(new_cd, float(self.policy.max_cooldown_sec))
         s = self.stats_for(unique)
+        # ESC-PIN: idem mark_failed (il winner fallito si sblocca).
+        for _g, (_u, _ts) in list(self._esc().items()):
+            if _u == unique:
+                self._esc().pop(_g, None)
         if reason:
             s.last_reason = reason
         today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -477,6 +567,15 @@ class Router:
         for u in dead_cd:
             self._cooldown.pop(u, None)
             self._cooldown_since.pop(u, None)
+        # PURGE escalation-winner: TTL a finestra scorrevole; gli entries
+        # vecchi di escalation_pin_ttl_sec vengono droppati.
+        _epp = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec",
+                                  300) or 300))
+        _ewd = self._esc()
+        dead_ew = [g for g, (_u, ts) in _ewd.items()
+                   if now - ts > _epp]
+        for g in dead_ew:
+            _ewd.pop(g, None)
         if dead_sessions or dead_cd or dead_sg or dead_dep:
             log.debug("[purge] sticky=%d cooldown=%d sessioni=%d dep_sticky=%d",
                       len(dead_sessions), len(dead_cd), len(dead_sg),
@@ -1331,6 +1430,15 @@ class Router:
                 self.dep_sticky_set(session_id, dep["unique"])
             return dep
 
+        # Nessuna pesca riuscita nel bucket richiesto: prima di rivisitare la
+        # scala (che puo' costare una catena lunghissima), se c'e' un escalation
+        # winner fresco/sano/sufficiente per QUESTO contesto, saltaci diretto.
+        _ew = self._try_esc_win(group_name, need, ctx)
+        if _ew is not None:
+            if session_id and self.policy.deployment_sticky \
+                    and not self._is_renewal_bucket(group_name):
+                self.dep_sticky_set(session_id, _ew["unique"])
+            return _ew
         # Nessuna pesca riuscita: catena/ladder come prima
         cap = self.config.group_caps.get(group_name)
         if cap is not None:
@@ -1589,6 +1697,11 @@ class Router:
             if cap_cur is None and self.policy.dims_ladder_floor:
                 # dims esplicito: SCALA (mai dim inferiori; coda -go/-fallback)
                 # con escalation graduale del rilassamento cooldown.
+                # Scorciatoia escalation-winner: il bucket richiesto ha gia'
+                # fallito (siamo qui), salta direttamente al winner ricordato.
+                _ew = self._try_esc_win(cur_dep["group"], need, ctx, tried=tried)
+                if _ew is not None:
+                    return _ew
                 nxt = self._walk_ladder_resilient(
                     self._ladder_for_group(cur_dep["group"]),
                     cur_dep["unique"], need, ctx, tried=tried)
@@ -1613,6 +1726,12 @@ class Router:
             return self.pick_deployment(cur_dep["group"], exclude=cur_dep["unique"])
         cap = self.config.group_caps.get(cur_dep["group"])
         if cap is not None:
+            # Scorciatoia escalation-winner anche per i cap-group (primario ->
+            # -go/-fallback): se il primario ha gia' fallito e c'e' un winner,
+            # salta lì invece di rivisitare la cap-chain.
+            _ew = self._try_esc_win(cur_dep["group"], need, ctx, tried=tried)
+            if _ew is not None:
+                return _ew
             chain = self.config.chains_cap.get(profile or "", {}).get(cap, [])
             prefer = cur_dep.get("model") \
                 if self._prefer_same_model(cap, cur_dep.get("model", "")) else None
@@ -1624,6 +1743,11 @@ class Router:
         if self.policy.dims_ladder_floor:
             # auto: stessa scala unica, partendo dalla dim corrente (mai giù),
             # con escalation graduale del rilassamento cooldown.
+            # Scorciatoia escalation-winner: bucket richiesto già fallito ->
+            # salta al winner ricordato invece di rivisitare la scala morta.
+            _ew = self._try_esc_win(cur_dep["group"], need, ctx, tried=tried)
+            if _ew is not None:
+                return _ew
             nxt = self._walk_ladder_resilient(
                 self._ladder_for_group(cur_dep["group"]),
                 cur_dep["unique"], need, ctx, tried=tried)

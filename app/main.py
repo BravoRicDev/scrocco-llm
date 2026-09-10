@@ -1320,6 +1320,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 attribution: dict | None = None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
+    requested_group = (first_dep or {}).get("group")   # pin escalation-winner
     tried = 0
     tried_set: set[str] = set()
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
@@ -1372,6 +1373,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # stream_parachute_no_timeout, default True).
             verdict = _parachute_verdict(verdict, qcp, dep, router.policy)
             if verdict == "content":
+                # risposta reale in arrivo: se questo deployment ha SERVITO in
+                # salita (gruppo != richiesto), ricorda il winner come
+                # scorciatoia per le prossime richieste di QUEL bucket.
+                router.record_escalation_win(requested_group, dep)
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)

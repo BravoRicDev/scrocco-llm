@@ -564,6 +564,16 @@ async def state(request: Request):
             "tracked": len(gw.router._stats),
             "recency_halflife_sec": pol.recency_halflife_sec,
             "latency_ref_ms": pol.latency_ref_ms,
+            "escalation_pin": {
+                "enabled": bool(getattr(pol, "escalation_pin", True)),
+                "ttl_sec": int(getattr(pol, "escalation_pin_ttl_sec", 300)),
+                # bucket_chiesto -> {winner, eta_sec, modello, gruppo_reale}
+                "pins": {g: {"winner": u,
+                             "eta_sec": round(max(0.0, time.time() - ts), 1),
+                             "model": (gw.config.deployment_by_unique(u) or {}).get("model"),
+                             "served_group": (gw.config.deployment_by_unique(u) or {}).get("group")}
+                         for g, (u, ts) in getattr(gw.router, "_esc_win", {}).items()},
+            },
         },
         "policy": {
             "step_up_pct": pol.step_up_pct,
@@ -1943,7 +1953,7 @@ _PLAYGROUND_MAX_ATTEMPTS = 128
 _PLAYGROUND_STATE_KEYS = (
     "_sticky", "_stats",
     "media_deferred", "gen_cross_model", "_gen_last_model",
-    "_session_group", "_defer_active", "_cap_strikes",
+    "_session_group", "_defer_active", "_cap_strikes", "_esc_win",
 )
 
 

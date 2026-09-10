@@ -198,6 +198,21 @@ class Policy:
     go_recency_halflife_sec: float = 300.0
     deployment_sticky: bool = True
 
+    # ESCALATION WINNER (SCORCIATOIA, solo-in-salita): quando una richiesta
+    # PARTITA da un bucket (es. -200k) fallisce e SALTA verso un gruppo piu'
+    # alto (-1000k/-go/-fallback) trovando un deployment che risponde BENE,
+    # lo ricordiamo PER QUEL BUCKET richiesto. Nelle richieste successive il
+    # bucket nominale viene SEMPRE tentato per primo (mai anticipato): il
+    # winner e' usato solo come SCORCIATOIA del fallback, cioe' quando il
+    # bucket richiesto fallisce si salta direttamente al winner invece di
+    # rivisitare tutta la scala morta (costava minuti ogni richiesta).
+    # Si PURISCE quando il bucket richiesto torna a servire da solo (guarigione)
+    # o quando il winner stesso fallisce (mark_failed). Mai persistito: e'
+    # memoria runtime, il restart la riapprende alla prima salita buona.
+    escalation_pin: bool = True
+    escalation_pin_ttl_sec: int = 300        # finestra scorrevole: si rinnova
+                                             # a ogni salita buona
+
     # PROTEZIONE FREE-TIER: nei gruppi DIMS i modelli con input media
     # (vision/video/audio) sono ULTIMA SPIAGGIA per le richieste di testo
     # puro — non vengono scelti finché esiste almeno un text-only vivo nel
@@ -547,6 +562,10 @@ class Policy:
         ds = raw.get("deployment_sticky")
         if ds is not None:
             p.deployment_sticky = _coerce_bool(ds, "deployment_sticky")
+        epp = raw.get("escalation_pin")
+        if epp is not None:
+            p.escalation_pin = _coerce_bool(epp, "escalation_pin")
+        _set_int(p, raw, "escalation_pin_ttl_sec", minimum=1)
         for num_key, attr in (("recency_halflife_sec", "recency_halflife_sec"),
                               ("latency_ref_ms", "latency_ref_ms"),
                               ("go_recency_halflife_sec", "go_recency_halflife_sec")):
