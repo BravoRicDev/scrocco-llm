@@ -46,6 +46,7 @@ from .auth import AuthManager, AuthResult
 from . import journal, metrics
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
+                        PERMISSION_DENIED_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
                         _PROVIDER_TRANSIENT_RE,
@@ -1203,15 +1204,20 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
 
 def _actionable_upstream_error(err) -> bool:
     """True se l'errore e' AZIONABILE dall'agente/utente (auth, credito,
-    permessi, modello inesistente, thought_signature) e va consegnato col suo
-    status vero. Il resto (rete, 5xx, 404 transitori, body d'errore provider)
-    -> risposta 'notice' non vuota, cosi' il loop dell'agente non si pianta."""
+    modello inesistente, thought_signature) e va consegnato col suo status
+    vero. Il resto (rete, 5xx, 404 transitori, body d'errore provider)
+    -> risposta 'notice' non vuota, cosi' il loop dell'agente non si pianta.
+
+    Il 403 NON e' mai azionabile dal client: un upstream che risponde 403
+    sta rifiutando la CHIAVE/deployment (project banned, key disabled,
+    permission denied...), non la richiesta. Il client non puo' farci nulla
+    -> si ruota; a catena esaurita si consegna un 503 retryable."""
     detail = getattr(err, "detail", "") or ""
     if (_THOUGHT_SIG_RE.search(detail) or _MODEL_MISSING_RE.search(detail)
             or _PAYLOAD_SCHEMA_RE.search(detail)):
         return True
     st = getattr(err, "status", None)
-    return st in (-401, -402, -403)
+    return st in (-401, -402)
 
 
 def _soft_cd(fail_24h: int = 0) -> int:
@@ -1426,6 +1432,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
             quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False
             transient = bool(_PROVIDER_TRANSIENT_RE.search(detail))
+            # 403 di qualsiasi tipo: chiave/progetto rifiutato dal provider ->
+            # deployment-side (mai colpa della richiesta), ruota (mai al client).
+            upstream403 = (err.status == -403)
             openai_sig = ("bad_response_status_code" in detail
                           or "openai_error" in detail)
             # 4xx con body d'errore ASSENTE/illeggibile (stream appeso ->
@@ -1454,6 +1463,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "http_402"
             elif empty_body:
                 reason = "empty_error_body"
+            elif upstream403:
+                reason = "upstream_403"
             elif err.status is not None and err.status < 0:
                 reason = "other_4xx"
             else:
@@ -1466,11 +1477,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     or thought_sig
                     or prov_err
                     or transient
+                    or upstream403
                     or empty_body
                     or err.status == -402)
-                # né thought_signature né il body d'errore provider sono
-                # rifiuti di modalita': non alimentano l'auto-learn (hook).
-                if provider_side and hook and not thought_sig and not prov_err:
+                # né thought_signature né il body d'errore provider né
+                # il 403 sono rifiuti di modalita': non alimentano l'auto-
+                # learn (hook).
+                if (provider_side and hook and not thought_sig
+                        and not prov_err and not upstream403):
                     try:
                         hook(dep["model"], detail)
                     except Exception:
@@ -1502,6 +1516,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         router.stats_for(dep["unique"]).fail_count_24h)
                 elif reason == "model_missing":
                     _cd = MODEL_MISSING_COOLDOWN_S
+                elif reason == "upstream_403":
+                    # Key/progetto rifiutato dal provider: cooldown lungo +
+                    # rilascia lo sticky, la sessione riparte su un'altra key.
+                    _cd = PERMISSION_DENIED_COOLDOWN_S
+                    if ses:
+                        cur = router.dep_sticky_get(ses)
+                        if cur and cur == dep["unique"]:
+                            router.dep_sticky_release(ses)
                 else:
                     _cd = err.retry_after
                 _fail(dep["unique"], seconds=_cd)

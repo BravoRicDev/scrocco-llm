@@ -176,6 +176,10 @@ _PROVIDER_TRANSIENT_RE = re.compile(
     re.IGNORECASE)
 PROVIDER_TRANSIENT_COOLDOWN_S = 120
 
+# 403 upstream (permission denied / project banned / key disabled...): la key
+# non torna presto -> cooldown lungo, poi si ruota sul successivo.
+PERMISSION_DENIED_COOLDOWN_S = 3600          # 1h
+
 
 def _sse(obj) -> bytes:
     return ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode()
@@ -1186,6 +1190,24 @@ class Forwarder:
                                                PROVIDER_TRANSIENT_COOLDOWN_S,
                                                router.stats_for(cur).fail_count_24h),
                                            reason="empty_error_body")
+                        dep = router.fallback_next(profile, dep, need, scope,
+                                                   ctx=ctx, tried=tried)
+                        continue
+                    # 403 di qualsiasi tipo (permission denied, project banned,
+                    # access denied, key disabled...): e' SEMPRE un errore di
+                    # deployment/chiave, NON della richiesta -> ruota con
+                    # cooldown lungo (la key non torna presto), mai al client
+                    # (a catena esaurita -> 503 retryable).
+                    if -err.status == 403:
+                        metrics.inc("nx_upstream_calls_total",
+                                    (cur, "upstream_403"))
+                        last_err = err
+                        log.warning("[fallback] %s 403 upstream: "
+                                    "key/progetto rifiutato, cd %.0fs: "
+                                    "ritento sul successivo",
+                                    cur, PERMISSION_DENIED_COOLDOWN_S)
+                        _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
+                                  reason="upstream_403")
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried)
                         continue
