@@ -1,6 +1,7 @@
 import pg from "pg";
 import config from "./config.js";
 import { logger } from "./services/logger.js";
+import { DB_MAX_RETRIES, DB_RETRY_BASE_DELAY, DB_RETRY_MAX_DELAY } from "./constants/limits.js";
 
 if (!config.databaseUrl) {
   throw new Error("DATABASE_URL non configurata");
@@ -57,9 +58,7 @@ const circuitBreaker = {
 /* Retry utility                                                        */
 /* ------------------------------------------------------------------ */
 
-const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY = 100;
-const RETRY_MAX_DELAY = 2000;
+// Constants imported from limits.js
 
 function isRetryableError(err) {
   if (!err) return false;
@@ -76,18 +75,18 @@ function isRetryableError(err) {
 
 async function withRetry(fn, context = "") {
   let lastError;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= DB_MAX_RETRIES; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastError = err;
-      if (!isRetryableError(err) || attempt === MAX_RETRIES) {
+      if (!isRetryableError(err) || attempt === DB_MAX_RETRIES) {
         throw err;
       }
-      const delay = Math.min(RETRY_BASE_DELAY * Math.pow(2, attempt - 1), RETRY_MAX_DELAY);
+      const delay = Math.min(DB_RETRY_BASE_DELAY * Math.pow(2, attempt - 1), DB_RETRY_MAX_DELAY);
       const jitter = Math.floor(Math.random() * 50);
       await new Promise((r) => setTimeout(r, delay + jitter));
-      logger.warn(`DB retry ${attempt}/${MAX_RETRIES}: ${context}`, {
+      logger.warn(`DB retry ${attempt}/${DB_MAX_RETRIES}: ${context}`, {
         error: err.code || err.message,
         retryInMs: delay + jitter,
       });

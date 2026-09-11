@@ -60,6 +60,7 @@ from .policy import Policy
 from .qc import annotate_reasoning
 from .router import Router, inject_identity, estimate_tokens
 from .capabilities import required_caps, count_image_parts
+from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
 
 # Logging strutturato: [auth] [route] [vigile] [identity] [fallback] [cooldown]
 # basicConfig è no-op se root ha già handler (es. sotto pytest/caplog).
@@ -297,6 +298,40 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title=policy.service_name, version="0.2.0", lifespan=lifespan)
 app.include_router(admin_api)
 app.include_router(bootstrap_api)
+
+# ------------------------------------------------------------------ Exception handlers (Blocco 1: Refactoring errori globali)
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError):
+    """Gestione centralizzata delle eccezioni AppError e sottoclassi."""
+    log.debug("[error-handler] %s %s -> %d %s: %s",
+              request.method, request.url.path,
+              exc.status, exc.error_type, exc.message)
+    return JSONResponse(
+        status_code=exc.status,
+        content={
+            "error": {
+                "message": exc.message,
+                "type": exc.error_type,
+                "code": exc.code
+            }
+        }
+    )
+
+@app.exception_handler(Exception)
+async def generic_error_handler(request: Request, exc: Exception):
+    """Gestione errori non catturati (fallback generico)."""
+    log.warning("[error-handler] Unhandled error %s %s: %s",
+                request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "message": "errore interno",
+                "type": "server_error",
+                "code": "500"
+            }
+        }
+    )
 
 
 def _unauthorized(detail: str) -> JSONResponse:

@@ -39,9 +39,10 @@ from .capabilities import required_caps, count_image_parts
 
 log = logging.getLogger("nx.router")
 
-CHARS_PER_TOKEN = 4
-STICKY_TTL_SECONDS = 3600
-COOLDOWN_SECONDS = 600
+# Constants imported from app/constants.py
+from app.constants import CHARS_PER_TOKEN as CHARS_PER_TOKEN
+from app.constants import STICKY_TTL_SECONDS as STICKY_TTL_SECONDS
+from app.constants import COOLDOWN_BASE_SECONDS as COOLDOWN_SECONDS
 
 
 @dataclass
@@ -632,6 +633,9 @@ class Router:
 
         Senza purge, con tanti session_id unici, i dict crescerebbero senza
         limite sugli uptime lunghi. Ritorna (sticky_rimosse, cooldown_rimossi).
+        
+        [Blocco 1] Ora include anche la pulizia di _stats (memory leak fix):
+        rimuove entry stale (>48h) per prevenire crescita infinita della memoria.
         """
         now = time.time()
         dead_sessions = [s for s, (_t, ts) in self._sticky.items()
@@ -660,10 +664,23 @@ class Router:
                    if now - ts > _epp]
         for g in dead_ew:
             _ewd.pop(g, None)
+        # [Blocco 1] Cleanup _stats: rimuovi entry vecchie di 48h (fix memoria)
+        stale_stats = [u for u, s in self._stats.items()
+                       if now - s.last_used > 172800]  # 48h
+        for u in stale_stats:
+            del self._stats[u]
+        # [Blocco 1] Cleanup _cap_strikes: rimuovi strike vecchi di 7gg
+        stale_strikes = [k for k, st in self._cap_strikes.items()
+                         if now - st.get("last", 0) > 604800]  # 7gg
+        for k in stale_strikes:
+            del self._cap_strikes[k]
         if dead_sessions or dead_cd or dead_sg or dead_dep:
             log.debug("[purge] sticky=%d cooldown=%d sessioni=%d dep_sticky=%d",
                       len(dead_sessions), len(dead_cd), len(dead_sg),
                       len(dead_dep))
+        if stale_stats or stale_strikes:
+            log.debug("[purge] stats=%d strikes=%d cleaned",
+                      len(stale_stats), len(stale_strikes))
         return len(dead_sessions), len(dead_cd)
 
     # ------------------------------------------------------------- routing

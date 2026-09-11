@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import config from "../config.js";
 import { logger } from "./logger.js";
+import { PEEK_BUFFER_MAX, TRUNCATE_LEN } from "../constants/limits.js";
 
 export class GatewayError extends Error {
   constructor(status, message) {
@@ -11,9 +12,9 @@ export class GatewayError extends Error {
   }
 }
 
-const truncate = (s, n = 300) => {
+const truncate = (s) => {
   if (typeof s !== "string") return "";
-  return s.length > n ? s.slice(0, n) : s;
+  return s.length > TRUNCATE_LEN ? s.slice(0, TRUNCATE_LEN) : s;
 };
 
 const deepClone = (o) => (o === undefined ? undefined : JSON.parse(JSON.stringify(o)));
@@ -630,7 +631,7 @@ async function networkRequest(method, path, opts = {}, { raw = false } = {}) {
       const parsed = text ? JSON.parse(text) : null;
       message = parsed?.error?.message || null;
     } catch { /* ignore */ }
-    throw new GatewayError(res.status, message || truncate(text, 300));
+    throw new GatewayError(res.status, message || truncate(text));
   }
   if (raw) return text;
   if (!text) return null;

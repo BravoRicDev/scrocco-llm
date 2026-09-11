@@ -9,6 +9,7 @@ import { logger } from "./services/logger.js";
 import { requestId } from "./middleware/request-id.js";
 import { csrfProtection } from "./middleware/csrf.js";
 import { translate } from "./services/i18n.js";
+import { MAX_REQUEST_BODY_SIZE } from "./constants/limits.js";
 import authRoutes from "./routes/auth.js";
 import healthRoutes from "./routes/health.js";
 import apiTokensRoutes from "./routes/api-tokens.js";
@@ -54,8 +55,8 @@ export async function createApp() {
   app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
   app.use(cookieParser());
   app.use(requestId);
-  app.use(express.urlencoded({ extended: false, limit: "50mb" }));
-  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ extended: false, limit: MAX_REQUEST_BODY_SIZE }));
+  app.use(express.json({ limit: MAX_REQUEST_BODY_SIZE }));
   app.use(csrfProtection);
 
   // bootstrap utente da cookie (best-effort; requireAuth resta l'autorita')
@@ -133,13 +134,13 @@ export async function createApp() {
   app.use(auditRoutes);        // GET /admin/audit (admin-only)
   app.use(agentDocRoutes);     // GET /agent-guide
 
-  // 404
+  // 404 handler
   app.use((req, res) => {
     if (req.path.startsWith("/api")) return res.status(404).json({ error: { message: "endpoint non trovato" } });
     return res.redirect("/login");
   });
 
-  // error handler finale
+  // error handler finale (Blocco 1: Refactoring errori globali)
   app.use((err, req, res, _next) => {
     // Log errors internally (never leak to clients)
     if (config.nodeEnv === "production") {
