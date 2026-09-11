@@ -45,6 +45,10 @@ from app.constants import STICKY_TTL_SECONDS as STICKY_TTL_SECONDS
 from app.constants import COOLDOWN_BASE_SECONDS as COOLDOWN_SECONDS
 from app.constants import SCORING_WEIGHTS as SW
 
+# Latency-based routing parameters (configurable via env vars / gateway.yaml)
+LATENCY_ROTATE_THRESHOLD_MS = 90000   # 90 seconds default threshold
+LATENCY_PENALTY_PER_SEC = 0.5         # 0.5 points per second over threshold
+
 
 @dataclass
 class DepStats:
@@ -673,6 +677,18 @@ class Router:
         prov = self._provider_scores.get(pk, 0.0)
         key = self._key_scores.get(self._api_key_str(dep), 0.0)
         log.debug("[rep] %s base=%.1f provider=%.1f key=%.1f total=%.1f", unique, base, prov, key, score)
+
+        # NEW: Latency penalty — annuls success advantage for slow deployments
+        # Uses _avg_latencies[unique] which is PER-DEPLOYMENT scoped,
+        # so other deployments sharing the same provider/key are NOT affected
+        ema = self._avg_latencies.get(unique, 0)
+        if ema > LATENCY_ROTATE_THRESHOLD_MS:
+            over_seconds = (ema - LATENCY_ROTATE_THRESHOLD_MS) / 1000.0
+            penalty = over_seconds * LATENCY_PENALTY_PER_SEC  # e.g., 0.5 per second
+            score += penalty
+            log.debug("[latency-penalty] %s ema=%.0fms threshold=%sms penalty=%.1f (over=%.1fs)",
+                      unique, ema, LATENCY_ROTATE_THRESHOLD_MS, penalty, over_seconds)
+
         return score
 
     def _get_avg_latency(self, unique: str) -> float | None:
