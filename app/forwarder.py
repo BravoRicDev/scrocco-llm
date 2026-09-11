@@ -265,6 +265,7 @@ def _inject_thought_signatures(body: dict) -> None:
                 continue
             g = ((tc.get("extra_content") or {}).get("google") or {})
             if isinstance(g, dict) and g.get("thought_signature"):
+                log.debug("[thought_sig] skipped tc_id=%s (already has extra_content)", tc["id"])
                 new_tcs.append(tc)          # il client l'ha gia': non tocco
                 continue
             sig = THOUGHT_SIGS.get(tc["id"])
@@ -279,6 +280,7 @@ def _inject_thought_signatures(body: dict) -> None:
             tc2["extra_content"] = ec
             new_tcs.append(tc2)
             msg_changed = True
+            log.info("[thought_sig] injected for tc_id=%s", tc["id"])
         if msg_changed:
             m2 = dict(m)
             m2["tool_calls"] = new_tcs
@@ -301,6 +303,7 @@ def _capture_sigs_from_obj(obj) -> None:
         sigs = extract_signatures(msg)
         if sigs:
             THOUGHT_SIGS.store_many(sigs)
+            log.debug("[thought_sig-capture] extracted sig for tc_id=%s from upstream", msg.get("tool_calls", [{}])[0].get("id", "unknown") if msg.get("tool_calls") else "unknown")
 
 
 def _capture_sigs_from_sse(data_bytes: bytes) -> None:
@@ -314,6 +317,7 @@ def _capture_sigs_from_sse(data_bytes: bytes) -> None:
             continue
         try:
             _capture_sigs_from_obj(json.loads(body))
+            log.debug("[thought_sig-capture] processed SSE chunk")
         except Exception:
             continue
 
@@ -621,6 +625,7 @@ class Forwarder:
         body["model"] = dep["model"]
         _google = is_google_base(dep.get("api_base", ""))
         if _google:
+            log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
         # senza include_usage i provider non mandano mai il chunk usage ->
         # il summary per-richiesta resta usage:null. Iniettato
@@ -730,6 +735,7 @@ class Forwarder:
         body["model"] = dep["model"]
         _google = is_google_base(dep.get("api_base", ""))
         if _google:
+            log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
         headers = {
             "Authorization": f"Bearer {dep['api_key']}",
@@ -760,6 +766,7 @@ class Forwarder:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
         if _google:
             _capture_sigs_from_obj(data)
+            log.debug("[thought_sig-capture] non-streaming capture, sigs_stored=%d", len(THOUGHT_SIGS))
         return data
 
     async def call_images(self, dep: dict, payload: dict, *,

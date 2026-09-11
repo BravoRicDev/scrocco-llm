@@ -621,6 +621,7 @@ class Router:
         # Incrementa punteggio chiave API per TUTTI i deployment tranne quello attuale
         ak = self._api_key_str(dep)
         self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["ATTEMPT_KEY"]
+        log.debug("[rep-attempt] %s provider+=%d key+=%d", unique, SW["ATTEMPT_PROVIDER"], SW["ATTEMPT_KEY"])
 
     def record_success(self, unique: str, latency_ms: float) -> None:
         """Registra un successo: decrementa i punteggi per deployment, provider, chiave."""
@@ -640,6 +641,7 @@ class Router:
             self._avg_latencies[unique] = latency_ms
         else:
             self._avg_latencies[unique] = (old_avg * 0.7 + latency_ms * 0.3)
+        log.debug("[rep-success] %s dep+=%d provider+=%d key+=%d ema=%.0fms", unique, SW["SUCCESS_DEPLOYMENT"], SW["SUCCESS_PROVIDER"], SW["SUCCESS_KEY"], latency_ms)
 
     def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:
         """Registra un fallimento: incrementa i punteggi per deployment, provider, chiave."""
@@ -657,6 +659,7 @@ class Router:
         else:
             self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["FAIL_PROVIDER"]
             self._key_scores[self._api_key_str(dep)] = self._key_scores.get(self._api_key_str(dep), 0) + SW["FAIL_KEY"]
+        log.debug("[rep-fail] %s dep+=%d provider+=%d key+=%d is_key=%s", unique, SW["FAIL_DEPLOYMENT"], SW["FAIL_PROVIDER"], SW["FAIL_KEY"], is_key_fail)
 
     def _reputation_score(self, unique: str, dep: dict) -> float:
         """Calcola il punteggio di reputazione per un deployment."""
@@ -666,6 +669,10 @@ class Router:
         pk = self._provider_key(dep)
         score += self._provider_scores.get(pk, 0.0)
         score += self._key_scores.get(self._api_key_str(dep), 0.0)
+        base = self._base_scores.get(unique, 0.0)
+        prov = self._provider_scores.get(pk, 0.0)
+        key = self._key_scores.get(self._api_key_str(dep), 0.0)
+        log.debug("[rep] %s base=%.1f provider=%.1f key=%.1f total=%.1f", unique, base, prov, key, score)
         return score
 
     def _get_avg_latency(self, unique: str) -> float | None:
@@ -1547,6 +1554,7 @@ class Router:
                 chosen = random.choices(tie, weights=weights, k=1)[0]
                 log.debug("[pick] %s rep=%.1f tie-break-legacy -> %s",
                           group_name, min_rep, chosen["unique"])
+                log.info("[pick-final] %s chosen=%s min_rep=%.1f (%d candidates)", group_name, chosen["unique"], min_rep, len(candidates))
                 return chosen
             log.debug("[pick] %s rep=%.1f", group_name, min_rep)
         else:
