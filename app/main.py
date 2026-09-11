@@ -1429,7 +1429,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 and dep["unique"] not in tried_set):
             _skip_budget -= 1
             tried_set.add(dep["unique"])   # così fallback_next non lo ripropone
-            nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
+            nxt = router.fallback_next(profile, dep, need,
+                                       "group" if _avoid_gemini else scope,
+                                       ctx=ctx,
                                        tried=tried_set,
                                        requested_group=requested_group) \
                 if profile else None
