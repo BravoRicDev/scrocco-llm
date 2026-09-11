@@ -240,11 +240,14 @@ class Router:
             return None
         target, ts = entry
         if time.time() - ts > self.policy.sticky_ttl_sec:
+            log.debug("[sticky] %s group_sticky TTL scaduto (%.0fs > %ds), rilasciato", session_id, time.time() - ts, self.policy.sticky_ttl_sec)
             self._sticky.pop(session_id, None)
             return None
+        log.debug("[sticky] %s group_sticky valido: %s", session_id, target)
         return target
 
     def sticky_set(self, session_id: str, target: str) -> None:
+        log.debug("[sticky] %s group_sticky impostato: %s", session_id, target)
         self._sticky[session_id] = (target, time.time())
 
     def sticky_release(self, session_id: str) -> None:
@@ -264,11 +267,14 @@ class Router:
             return None
         unique, ts = entry
         if time.time() - ts > self.policy.sticky_ttl_sec:
+            log.debug("[sticky] %s dep_sticky TTL scaduto (%.0fs > %ds), rilasciato", session_id, time.time() - ts, self.policy.sticky_ttl_sec)
             self._sticky_dep.pop(session_id, None)
             return None
+        log.debug("[sticky] %s dep_sticky valido: %s", session_id, unique)
         return unique
 
     def dep_sticky_set(self, session_id: str, unique: str) -> None:
+        log.debug("[sticky] %s dep_sticky impostato: %s", session_id, unique)
         self._sticky_dep[session_id] = (unique, time.time())
 
     def dep_sticky_release(self, session_id: str) -> None:
@@ -645,6 +651,11 @@ class Router:
             self._avg_latencies[unique] = latency_ms
         else:
             self._avg_latencies[unique] = (old_avg * 0.7 + latency_ms * 0.3)
+        ema_new = self._avg_latencies[unique]
+        if old_avg is None or (old_avg < LATENCY_ROTATE_THRESHOLD_MS and ema_new >= LATENCY_ROTATE_THRESHOLD_MS):
+            log.info("[latency-cross] %s ema superata soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg or 0, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
+        elif old_avg and old_avg >= LATENCY_ROTATE_THRESHOLD_MS and ema_new < LATENCY_ROTATE_THRESHOLD_MS:
+            log.info("[latency-cross] %s ema rientrata sotto soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
         log.debug("[rep-success] %s dep+=%d provider+=%d key+=%d ema=%.0fms", unique, SW["SUCCESS_DEPLOYMENT"], SW["SUCCESS_PROVIDER"], SW["SUCCESS_KEY"], latency_ms)
 
     def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:

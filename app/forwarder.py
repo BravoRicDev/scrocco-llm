@@ -288,6 +288,8 @@ def _inject_thought_signatures(body: dict) -> None:
             changed = True
         else:
             new_msgs.append(m)
+    if not changed:
+        log.debug("[thought_sig] no signatures to inject")
     if changed:
         body["messages"] = new_msgs
 
@@ -644,6 +646,7 @@ class Forwarder:
                                session=session, attribution=attribution),
         }
         url = f"{dep['api_base']}/chat/completions"
+        log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
             req = self.client.build_request("POST", url, json=body,
                                             headers=headers)
@@ -744,6 +747,7 @@ class Forwarder:
                                session=session, attribution=attribution),
         }
         url = f"{dep['api_base']}/chat/completions"
+        log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
             resp = await self.client.post(url, json=body, headers=headers)
         except httpx.TimeoutException as exc:
@@ -788,7 +792,8 @@ class Forwarder:
             **_session_headers(dep, profile=profile, client_ip=client_ip,
                                session=session, attribution=attribution),
         }
-        url = f"{dep['api_base']}/images/generations"
+        url = f"{dep['api_base']}/chat/completions"
+        log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
             resp = await self.client.post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
@@ -1059,6 +1064,7 @@ class Forwarder:
                and (not _deadline_ms
                     or (time.monotonic() - _t0) * 1000 < _deadline_ms)):
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
+            log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
             def _fail_cur(seconds=None, reason=None, status=None):
                 if _was_dormant:
@@ -1135,6 +1141,7 @@ class Forwarder:
                 # successo pulito: se siamo atterrati su un gruppo piu' alto
                 # rispetto a quello richiesto, ricorda il winner (scorciatoia
                 # per le prossime richieste su QUEL bucket richiesto).
+                log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", cur, len(tried), time.monotonic() - _t0)
                 router.record_escalation_win(requested_group, dep)
                 return (data, dep, qc_failed) if collect_qc_failures \
                     else (data, dep)
