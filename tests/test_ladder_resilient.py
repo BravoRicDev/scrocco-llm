@@ -96,6 +96,28 @@ def test_returns_none_only_when_truly_nothing(router):
                                          None, None) is None
 
 
+def test_cooldown_wakeup_stale_dim_before_live_go(router):
+    """Un dim STANTIO viene ri-provato PRIMA di un -go VIVO (evita di pagare).
+
+    Cooldown-wakeup: prima di saltare al -go, il ladder prova il free dim
+    raffreddato da più di stale_cooldown_retry_sec."""
+    b = _dep(router, f"{BASE}-1000k", "K-B")
+    router.mark_failed(b["unique"], seconds=600)
+    router._cooldown_since[b["unique"]] = time.time() - 600   # 10 min fa: stantio
+    a = _dep(router, f"{BASE}-1000k", "K-A")                  # -go resta vivo
+    nxt = router.fallback_next("test", a, None, "group", ctx=1000)
+    assert nxt["api_key"] == "K-B"          # stantio PRIMA del -go vivo
+
+
+def test_cooldown_wakeup_skips_fresh_dim(router):
+    """Un dim in cooldown FRESCO non viene svegliato prima del -go vivo."""
+    b = _dep(router, f"{BASE}-1000k", "K-B")
+    router.mark_failed(b["unique"], seconds=600)              # fresco
+    a = _dep(router, f"{BASE}-1000k", "K-A")
+    nxt = router.fallback_next("test", a, None, "group", ctx=1000)
+    assert nxt["group"] == f"{BASE}-go"     # dim fresco saltato, va al -go vivo
+
+
 # --------------------------------------------------------------------------
 # "skip after N" REALE: dopo ladder_skip_after key fallite dello STESSO gruppo
 # nella richiesta, il resto del gruppo si salta e la scala sale di dim (invece

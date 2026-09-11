@@ -1749,6 +1749,31 @@ class Router:
                 self.dep_sticky_set(session_id, dep["unique"])
             return dep
 
+        # Cooldown-wakeup: se pick_deployment non ha trovato nulla, prova il
+        # deployment RAFFREDDATO da più tempo (stantio) e con cooldown residuo
+        # minore nel dim corrente, PRIMA di escalationare a -go/fallback. Stessa
+        # soglia degli "stantii" della scala: un cooldown fresco non si tocca.
+        _chronic_thr = max(1, int(getattr(self.policy,
+                                          "cooldown_retry_max_fail_24h", 10)
+                                  or 10))
+        _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec",
+                                   300) or 300)
+        _cooled = [d for d in self.config.groups.get(group_name, [])
+                   if self.is_cooled_down(d["unique"])
+                   and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
+                   and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
+                   and (need is None or self._dep_supports(d, need))
+                   and self._cap_fits(d, ctx)]
+        if _cooled:
+            _now = time.time()
+            _cooled.sort(
+                key=lambda d: max(0, self._cooldown.get(d["unique"], 0) - _now))
+            _wake = _cooled[0]
+            _rem = max(0, int(self._cooldown.get(_wake["unique"], 0) - _now))
+            log.info("[cooldown-wakeup] %s: provo lo stantio meno raffreddato: "
+                     "%s (residuo %ds)", group_name, _wake["unique"], _rem)
+            return _wake
+
         # Nessuna pesca riuscita nel bucket richiesto: prima di rivisitare la
         # scala (che puo' costare una catena lunghissima), se c'e' un escalation
         # winner fresco/sano/sufficiente per QUESTO contesto, saltaci diretto.
@@ -1886,6 +1911,31 @@ class Router:
                                limit=skip, tried=tried)
         if nxt is not None:
             return nxt
+
+        # 1bis) dims cooldown-wakeup: prova il dim RAFFREDDATO da più tempo
+        # (stantio, cooldown_age >= stale_cooldown_retry_sec) e con cooldown
+        # residuo minore, PRIMA di saltare a -go (a pagamento). Stessa soglia
+        # degli "stantii" della scala, così non si martella un cooldown fresco.
+        _tried_set = tried or set()
+        _cooled_dims = []
+        for u in _chronic_filter(dims, True):
+            if u in _tried_set or not self.is_cooled_down(u):
+                continue
+            _cage = self.cooldown_age(u)
+            if _cage is None or _cage < age:
+                continue                       # cooldown fresco: non svegliare
+            _cooled_dims.append(u)
+        if _cooled_dims:
+            _now = time.time()
+            _cooled_dims.sort(
+                key=lambda u: max(0, self._cooldown.get(u, 0) - _now))
+            _wake_u = _cooled_dims[0]
+            _wake = cfg.deployment_by_unique(_wake_u)
+            if _wake is not None:
+                _rem = max(0, int(self._cooldown.get(_wake_u, 0) - _now))
+                log.info("[ladder] dims cooldown-wakeup: residuo %ds -> %s",
+                         _rem, _wake_u)
+                return _wake
 
         # 2) -go vivi
         nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
