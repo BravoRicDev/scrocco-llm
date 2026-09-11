@@ -43,6 +43,7 @@ log = logging.getLogger("nx.router")
 from app.constants import CHARS_PER_TOKEN as CHARS_PER_TOKEN
 from app.constants import STICKY_TTL_SECONDS as STICKY_TTL_SECONDS
 from app.constants import COOLDOWN_BASE_SECONDS as COOLDOWN_SECONDS
+from app.constants import SCORING_WEIGHTS as SW
 
 
 @dataclass
@@ -211,6 +212,11 @@ class Router:
         # in quel caso si pulisce). In-memory, mai persistito.
         # Lazy-init via _esc() per i Router "nudi" (test con Router.__new__).
         self._esc_win: dict[str, tuple[str, float]] = {}
+        # --- Reputation Scoring (Blocco 1) ---
+        self._base_scores: dict[str, float] = {}       # unique -> base score
+        self._provider_scores: dict[str, float] = {}   # provider_model -> group score
+        self._key_scores: dict[str, float] = {}        # api_key -> group score
+        self._avg_latencies: dict[str, float] = {}     # unique -> average latency
 
     # ------------------------------------------------- escalation winner
     def _esc(self) -> dict:
@@ -400,7 +406,7 @@ class Router:
 
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
-                    reason: str | None = None) -> float:
+                    reason: str | None = None, status: int | None = None) -> float:
         """Marca il deployment fallito con cooldown.
 
         - `seconds` esplicito vince SEMPRE (es. Retry-After su 429)
@@ -409,8 +415,12 @@ class Router:
           * "exponential": cooldown_sec * 2^(streak-1) (legacy)
         - `reason`: classificazione dell'errore (http_429, no_credits,
           not_found...). Un 429 alimenta il BUDGET GUARD.
+        - `status`: codice HTTP upstream per la classificazione key/provider.
         Ritorna i secondi applicati.
         """
+        # [Blocco 1] Aggiorna reputation scoring
+        self.record_failure(unique, reason, status)
+
         pol = self.policy
         s = self.stats_for(unique)
         # ESC-PIN: se questo deployment era il winner di qualche bucket, lo
@@ -511,10 +521,14 @@ class Router:
                    float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
 
     def mark_failed_double_residual(self, unique: str,
-                                     reason: str | None = None) -> float:
+                                     reason: str | None = None,
+                                     status: int | None = None) -> float:
         """Raddoppia il cooldown residuo quando un deployment dormiente fallisce
         di nuovo. Usato al posto di mark_failed per i retry di deployment
         in cooldown (stale/ultima spiaggia)."""
+        # [Blocco 1] Aggiorna reputation scoring
+        self.record_failure(unique, reason, status)
+
         now = time.time()
         remaining = max(1.0, self._cooldown.get(unique, now) - now)
         new_cd = remaining * 2.0
@@ -565,6 +579,100 @@ class Router:
         s.fail_count_24h = 0
         s.fail_day_key = ""
         log.info("[cooldown] %s riabilitato (successo da dormiente)", unique)
+
+    # --------------------------------------------------- Reputation scoring
+    def _init_scoring_if_needed(self) -> None:
+        """Initialize scoring dicts if not already initialized (for __new__ pattern)."""
+        if not hasattr(self, '_base_scores'):
+            self._base_scores: dict[str, float] = {}
+        if not hasattr(self, '_provider_scores'):
+            self._provider_scores: dict[str, float] = {}
+        if not hasattr(self, '_key_scores'):
+            self._key_scores: dict[str, float] = {}
+        if not hasattr(self, '_avg_latencies'):
+            self._avg_latencies: dict[str, float] = {}
+
+    def _provider_key(self, dep: dict) -> str:
+        """Restituisce la chiave provider/modello per il scoring di gruppo."""
+        self._init_scoring_if_needed()
+        if not hasattr(self, 'config') or self.config is None:
+            return "default|default"
+        prov = dep.get("api_base", "")
+        model = dep.get("model", "")
+        return f"{prov}|{model}"
+
+    def _api_key_str(self, dep: dict) -> str:
+        """Restituisce la chiave API per il scoring di gruppo."""
+        self._init_scoring_if_needed()
+        if not hasattr(self, 'config') or self.config is None:
+            return ""
+        return dep.get("api_key", "")
+
+    def record_attempt(self, unique: str) -> None:
+        """Registra un tentativo: incrementa il punteggio del provider e della chiave."""
+        if not hasattr(self, 'config') or self.config is None:
+            return
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return
+        # Incrementa punteggio provider/modello per TUTTI i deployment tranne quello attuale
+        pk = self._provider_key(dep)
+        self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["ATTEMPT_PROVIDER"]
+        # Incrementa punteggio chiave API per TUTTI i deployment tranne quello attuale
+        ak = self._api_key_str(dep)
+        self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["ATTEMPT_KEY"]
+
+    def record_success(self, unique: str, latency_ms: float) -> None:
+        """Registra un successo: decrementa i punteggi per deployment, provider, chiave."""
+        if not hasattr(self, 'config') or self.config is None:
+            return
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return
+        self._base_scores[unique] = self._base_scores.get(unique, 0) + SW["SUCCESS_DEPLOYMENT"]
+        pk = self._provider_key(dep)
+        self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["SUCCESS_PROVIDER"]
+        ak = self._api_key_str(dep)
+        self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["SUCCESS_KEY"]
+        # Aggiorna media latenza storica per il tie-breaker
+        old_avg = self._avg_latencies.get(unique)
+        if old_avg is None:
+            self._avg_latencies[unique] = latency_ms
+        else:
+            self._avg_latencies[unique] = (old_avg * 0.7 + latency_ms * 0.3)
+
+    def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:
+        """Registra un fallimento: incrementa i punteggi per deployment, provider, chiave."""
+        if not hasattr(self, 'config') or self.config is None:
+            return
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return
+        self._base_scores[unique] = self._base_scores.get(unique, 0) + SW["FAIL_DEPLOYMENT"]
+        pk = self._provider_key(dep)
+        # Classificazione: 401/403 = chiave, tutto il resto = provider
+        is_key_fail = status in (401, 403)
+        if is_key_fail:
+            self._key_scores[self._api_key_str(dep)] = self._key_scores.get(self._api_key_str(dep), 0) + SW["FAIL_KEY"]
+        else:
+            self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["FAIL_PROVIDER"]
+            self._key_scores[self._api_key_str(dep)] = self._key_scores.get(self._api_key_str(dep), 0) + SW["FAIL_KEY"]
+
+    def _reputation_score(self, unique: str, dep: dict) -> float:
+        """Calcola il punteggio di reputazione per un deployment."""
+        if not hasattr(self, 'config') or self.config is None:
+            return 0.0
+        score = self._base_scores.get(unique, 0.0)
+        pk = self._provider_key(dep)
+        score += self._provider_scores.get(pk, 0.0)
+        score += self._key_scores.get(self._api_key_str(dep), 0.0)
+        return score
+
+    def _get_avg_latency(self, unique: str) -> float | None:
+        """Restituisce la media storica della latenza per un deployment."""
+        if not hasattr(self, 'config') or self.config is None:
+            return None
+        return self._avg_latencies.get(unique)
 
     # --------------------------------------------------- auto-learn capacità
     _CAP_STRIKE_WINDOW_SEC = 7 * 86400   # strike più vecchi di 7gg si azzerano
@@ -674,6 +782,37 @@ class Router:
                          if now - st.get("last", 0) > 604800]  # 7gg
         for k in stale_strikes:
             del self._cap_strikes[k]
+        # [Blocco 1] Cleanup scoring: rimuovi punteggi dei deployment non più attivi.
+        # Difensivo: alcuni test usano Router.__new__ senza config né attributi
+        # di scoring inizializzati: in quel caso si salta la pulizia.
+        try:
+            self._init_scoring_if_needed()
+            active_uniques = (set(self.config.all_uniques())
+                              if hasattr(self.config, 'all_uniques') else set())
+            if not active_uniques:
+                # Fallback: raccogli tutti gli unique dai gruppi
+                for deps in self.config.groups.values():
+                    for d in deps:
+                        active_uniques.add(d["unique"])
+            stale_base = [u for u in self._base_scores if u not in active_uniques]
+            for u in stale_base:
+                self._base_scores.pop(u, None)
+                self._avg_latencies.pop(u, None)
+            # Cleanup provider/key scores vecchi: mantieni solo chiavi attive
+            active_providers = set()
+            active_keys = set()
+            for deps in self.config.groups.values():
+                for d in deps:
+                    active_providers.add(self._provider_key(d))
+                    active_keys.add(self._api_key_str(d))
+            stale_prov = [k for k in self._provider_scores if k not in active_providers]
+            for k in stale_prov:
+                self._provider_scores.pop(k, None)
+            stale_keys = [k for k in self._key_scores if k not in active_keys]
+            for k in stale_keys:
+                self._key_scores.pop(k, None)
+        except Exception as exc:               # noqa: BLE001
+            log.debug("[purge] scoring cleanup saltato (%s)", exc)
         if dead_sessions or dead_cd or dead_sg or dead_dep:
             log.debug("[purge] sticky=%d cooldown=%d sessioni=%d dep_sticky=%d",
                       len(dead_sessions), len(dead_cd), len(dead_sg),
@@ -809,7 +948,8 @@ class Router:
     def note_start(self, unique: str) -> None:
         """Richiesta inviata: tocca last_used (penalità anti rate-limit),
         incrementa inflight e le FINESTRE budget (minuto/giorno). Nei gruppi
-        gen/stt registra anche l'ultimo modello per la stickiness."""
+        gen/stt registra anche l'ultimo modello per la stickiness.
+        [Blocco 1] Registra anche il tentativo per il reputation scoring."""
         s = self.stats_for(unique)
         s.last_used = time.time()
         s.inflight += 1
@@ -830,17 +970,22 @@ class Router:
             if cap in self.SAME_MODEL_PRIORITY_CAPS \
                     and self.policy.gen_same_model_failover:
                 self._gen_last_model[dep["group"]] = dep["model"]
+        # [Blocco 1] Registra tentativo per reputation scoring
+        self.record_attempt(unique)
 
     def note_result(self, unique: str, latency_ms: float) -> None:
         """Risposta ricevuta: aggiorna l'EMA di latenza (non tocca inflight:
         per lo streaming chiude la nota_end al termine del flusso).
-        Resetta anche lo streak di fallimenti e aggiorna il tasso successo."""
+        Resetta anche lo streak di fallimenti e aggiorna il tasso successo.
+        [Blocco 1] Registra anche il successo per il reputation scoring."""
         s = self.stats_for(unique)
         s.ema_latency_ms = (latency_ms if s.ema_latency_ms is None
                             else s.ema_latency_ms * 0.7 + latency_ms * 0.3)
         s.fail_streak = 0
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = min(1.0, 0.8 * prev + 0.2)
+        # [Blocco 1] Registra successo per reputation scoring
+        self.record_success(unique, latency_ms)
 
     def note_end(self, unique: str) -> None:
         self.stats_for(unique).inflight = max(
@@ -849,6 +994,7 @@ class Router:
     # ------------------------------------------------ persistenza (F4)
     def dump_stats(self) -> dict:
         """Snapshot serializzabile: EMA+last_used e scadenze cooldown."""
+        self._init_scoring_if_needed()
         return {
             "stats": {u: {"ema_latency_ms": s.ema_latency_ms,
                           "last_used": s.last_used,
@@ -860,12 +1006,18 @@ class Router:
             "cooldown": dict(self._cooldown),
             "cap_strikes": [{"key": k, **v} for k, v in
                             self._cap_strikes.items()],
+            # [Blocco 1] Reputation scoring
+            "base_scores": dict(self._base_scores),
+            "provider_scores": dict(self._provider_scores),
+            "key_scores": dict(self._key_scores),
+            "avg_latencies": dict(self._avg_latencies),
             "saved_at": time.time(),
         }
 
     def load_stats(self, data: dict) -> None:
         """Ricarica lo snapshot dopo un restart. File corrotto/campi strani ->
         si riparte puliti (mai crash all'avvio). inflight NON si persiste."""
+        self._init_scoring_if_needed()
         try:
             for u, st in (data.get("stats") or {}).items():
                 if not isinstance(st, dict):
@@ -906,6 +1058,15 @@ class Router:
                     "last": float(st.get("last") or 0),
                     "evidence": str(st.get("evidence") or "")[:200],
                 }
+            # [Blocco 1] Load reputation scoring
+            for u, score in (data.get("base_scores") or {}).items():
+                self._base_scores[str(u)] = float(score)
+            for pk, score in (data.get("provider_scores") or {}).items():
+                self._provider_scores[str(pk)] = float(score)
+            for ak, score in (data.get("key_scores") or {}).items():
+                self._key_scores[str(ak)] = float(score)
+            for u, lat in (data.get("avg_latencies") or {}).items():
+                self._avg_latencies[str(u)] = float(lat)
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
@@ -1359,17 +1520,38 @@ class Router:
             return None
         now = time.time()
         if self.policy.adaptive_pick:
-            weights = [self._score(d, now) for d in deps]
-            if len(deps) <= 4:
-                order = sorted(
-                    ((w, d["unique"]) for w, d in zip(weights, deps)),
-                    reverse=True)
-                log.debug("[pick] %s top: %s", group_name,
-                          ", ".join(f"{u}={sw:.2f}"
-                                    for sw, u in order[:3]))
+            # [Blocco 1] Reputation scoring: calcola punteggio per ogni deployment
+            rep_scores = [(self._reputation_score(d["unique"], d), d) for d in deps]
+            # Trova il punteggio MINIMO (lower is better)
+            min_rep = min(s for s, _ in rep_scores)
+            # Filtra solo i candidati con punteggio minimo
+            candidates = [d for s, d in rep_scores if s == min_rep]
+            if len(candidates) == 1:
+                return candidates[0]
+            # Tie-breaker: media storica latenza (lower is better)
+            if len(candidates) > 1:
+                lat_sorted = sorted(candidates,
+                                    key=lambda d: self._get_avg_latency(d["unique"])
+                                    or float("inf"))
+                best_lat = lat_sorted[0]
+                best_lat_val = self._get_avg_latency(best_lat["unique"])
+                # Raggruppa quelli con la stessa latenza migliore
+                tie = [d for d in lat_sorted
+                       if self._get_avg_latency(d["unique"]) == best_lat_val]
+                if len(tie) == 1:
+                    log.debug("[pick] %s rep=%.1f tie-break-lat -> %s",
+                              group_name, min_rep, tie[0]["unique"])
+                    return tie[0]
+                # Ancora parità: usa legacy score come ultimo tie-breaker
+                weights = [self._score(d, now) for d in tie]
+                chosen = random.choices(tie, weights=weights, k=1)[0]
+                log.debug("[pick] %s rep=%.1f tie-break-legacy -> %s",
+                          group_name, min_rep, chosen["unique"])
+                return chosen
+            log.debug("[pick] %s rep=%.1f", group_name, min_rep)
         else:
             weights = [d.get("priority", 0) + 1 for d in deps]
-        return random.choices(deps, weights=weights, k=1)[0]
+            return random.choices(deps, weights=weights, k=1)[0]
 
     def _walk_chain(self, chain: list[str], failed_unique: str | None,
                     need: frozenset[str] | None = None,

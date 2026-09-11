@@ -1379,10 +1379,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])
         _was_dormant = router.is_cooled_down(dep["unique"])
-        def _fail(u, *, seconds=None, reason=None):
+        def _fail(u, *, seconds=None, reason=None, status=None):
             if _was_dormant:
-                return router.mark_failed_double_residual(u, reason=reason)
-            return router.mark_failed(u, seconds=seconds, reason=reason)
+                return router.mark_failed_double_residual(u, reason=reason, status=status)
+            return router.mark_failed(u, seconds=seconds, reason=reason, status=status)
         router.note_start(dep["unique"])
         try:
             t_att = time.monotonic()
@@ -2021,9 +2021,11 @@ async def images_generations(request: Request):
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80])
+                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
+                                                    status=abs(err.status) if err.status else None)
             else:
-                router.mark_failed(cur, seconds=err.retry_after)
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=abs(err.status) if err.status else None)
             metrics.inc("nx_images_total", (dep["group"], "retry"))
             nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
                 if profile else None
@@ -2166,9 +2168,11 @@ async def audio_speech(request: Request):
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80])
+                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
+                                                    status=abs(err.status) if err.status else None)
             else:
-                router.mark_failed(cur, seconds=err.retry_after)
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=abs(err.status) if err.status else None)
             metrics.inc("nx_tts_total", (dep["group"], "retry"))
             nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
                 if profile else None
@@ -2301,9 +2305,11 @@ async def _audio_transcribe(request: Request, path: str):
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80])
+                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
+                                                    status=abs(err.status) if err.status else None)
             else:
-                router.mark_failed(cur, seconds=err.retry_after)
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=abs(err.status) if err.status else None)
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
             nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
                 if profile else None
@@ -2500,9 +2506,11 @@ async def videos_generations(request: Request):
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80])
+                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
+                                                    status=abs(err.status) if err.status else None)
             else:
-                router.mark_failed(cur, seconds=err.retry_after)
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=abs(err.status) if err.status else None)
             metrics.inc("nx_videos_total", (dep["group"], "retry"))
             nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
                 if (profile := auth.profile or

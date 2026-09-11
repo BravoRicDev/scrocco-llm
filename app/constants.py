@@ -27,3 +27,16 @@ DB_CONNECTION_TIMEOUT = 5000  # ms
 DEFAULT_PORT = 3000
 DEFAULT_GATEWAY_URL = "http://scrocco-llm:4001"
 GATEWAY_TIMEOUT_MS = 10000
+
+# Scoring Weights (Reputation System)
+# Lower score is better. All values are configurable here.
+SCORING_WEIGHTS = {
+    "ATTEMPT_PROVIDER": 1,      # +1 per tentativo con stesso provider/modello (escluso sé stesso)
+    "ATTEMPT_KEY": 1,           # +1 per tentativo con stessa chiave (escluso sé stesso)
+    "FAIL_DEPLOYMENT": 5,       # +5 per fallimento specifico del deployment
+    "FAIL_PROVIDER": 2,         # +2 per fallimento del provider/modello (tutti i deployment)
+    "FAIL_KEY": 2,              # +2 per fallimento della chiave (tutti i deployment)
+    "SUCCESS_DEPLOYMENT": -10,  # -10 per successo del deployment specifico
+    "SUCCESS_PROVIDER": -2,     # -2 per successo del provider/modello (tutti i deployment)
+    "SUCCESS_KEY": -2,          # -2 per successo della chiave (tutti i deployment)
+}

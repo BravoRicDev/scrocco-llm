@@ -46,6 +46,7 @@ import httpx
 from . import metrics
 from .qc import check_response
 from .router import inject_identity
+from .thought_sig import THOUGHT_SIGS, extract_signatures, is_google_base
 
 log = logging.getLogger("nx.forwarder")
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
@@ -240,6 +241,81 @@ def _json_to_sse(raw: bytes):
         out.append(_sse(dict(base, choices=[], usage=obj["usage"])))
     out.append(b"data: [DONE]\n\n")
     return out
+
+
+def _inject_thought_signatures(body: dict) -> None:
+    """Re-inietta le firme note nei tool_calls di replay (solo se mancanti).
+    Ritorna una NUOVA lista messages, per non inquinare il payload originale
+    (un fallback su un provider non-Google non deve vedere extra_content)."""
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return
+    changed = False
+    new_msgs = []
+    for m in msgs:
+        if not (isinstance(m, dict) and m.get("role") == "assistant"
+                and m.get("tool_calls")):
+            new_msgs.append(m)
+            continue
+        new_tcs = []
+        msg_changed = False
+        for tc in m["tool_calls"]:
+            if not isinstance(tc, dict) or not tc.get("id"):
+                new_tcs.append(tc)
+                continue
+            g = ((tc.get("extra_content") or {}).get("google") or {})
+            if isinstance(g, dict) and g.get("thought_signature"):
+                new_tcs.append(tc)          # il client l'ha gia': non tocco
+                continue
+            sig = THOUGHT_SIGS.get(tc["id"])
+            if not sig:
+                new_tcs.append(tc)
+                continue
+            tc2 = dict(tc)
+            ec = dict(tc2.get("extra_content") or {})
+            g2 = dict(ec.get("google") or {})
+            g2["thought_signature"] = sig
+            ec["google"] = g2
+            tc2["extra_content"] = ec
+            new_tcs.append(tc2)
+            msg_changed = True
+        if msg_changed:
+            m2 = dict(m)
+            m2["tool_calls"] = new_tcs
+            new_msgs.append(m2)
+            changed = True
+        else:
+            new_msgs.append(m)
+    if changed:
+        body["messages"] = new_msgs
+
+
+def _capture_sigs_from_obj(obj) -> None:
+    """Cattura firme da un oggetto chat.completion/chunk OpenAI-style."""
+    if not isinstance(obj, dict):
+        return
+    for ch in (obj.get("choices") or []):
+        if not isinstance(ch, dict):
+            continue
+        msg = ch.get("delta") or ch.get("message") or {}
+        sigs = extract_signatures(msg)
+        if sigs:
+            THOUGHT_SIGS.store_many(sigs)
+
+
+def _capture_sigs_from_sse(data_bytes: bytes) -> None:
+    """Cattura firme da un blocco SSE (una o piu' righe 'data: {...}')."""
+    for line in data_bytes.split(b"\n"):
+        s = line.strip()
+        if not s.startswith(b"data:"):
+            continue
+        body = s[5:].strip()
+        if not body or body == b"[DONE]":
+            continue
+        try:
+            _capture_sigs_from_obj(json.loads(body))
+        except Exception:
+            continue
 
 
 def _looks_empty(data: dict) -> bool:
@@ -543,6 +619,9 @@ class Forwarder:
         """
         body = dict(payload)
         body["model"] = dep["model"]
+        _google = is_google_base(dep.get("api_base", ""))
+        if _google:
+            _inject_thought_signatures(body)
         # senza include_usage i provider non mandano mai il chunk usage ->
         # il summary per-richiesta resta usage:null. Iniettato
         # SOLO sui provider che lo supportano sicuramente (gli altri restano
@@ -618,11 +697,23 @@ class Forwarder:
                         yield b
                 log.info("[stream] %s ha ignorato stream:true -> risposta "
                          "JSON adattata a SSE", dep["unique"])
+                if _google:
+                    try:
+                        _capture_sigs_from_obj(json.loads(raw))
+                    except Exception:
+                        pass
                 return _adapted_gen()
 
         async def gen() -> AsyncIterator[bytes]:
+            buf = b""
             try:
                 async for chunk in resp.aiter_bytes():
+                    if _google:
+                        buf += chunk
+                        # processa solo righe complete
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            _capture_sigs_from_sse(line)
                     yield chunk
             finally:
                 await resp.aclose()
@@ -637,6 +728,9 @@ class Forwarder:
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
+        _google = is_google_base(dep.get("api_base", ""))
+        if _google:
+            _inject_thought_signatures(body)
         headers = {
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
@@ -661,9 +755,12 @@ class Forwarder:
                 resp.text[:500],
                 _retry_after_from(resp, resp.text) if resp.status_code == 429 else None)
         try:
-            return resp.json()
+            data = resp.json()
         except ValueError as exc:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
+        if _google:
+            _capture_sigs_from_obj(data)
+        return data
 
     async def call_images(self, dep: dict, payload: dict, *,
                           profile: str = "",
@@ -956,10 +1053,10 @@ class Forwarder:
                     or (time.monotonic() - _t0) * 1000 < _deadline_ms)):
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
             _was_dormant = router.is_cooled_down(cur)
-            def _fail_cur(seconds=None, reason=None):
+            def _fail_cur(seconds=None, reason=None, status=None):
                 if _was_dormant:
-                    return router.mark_failed_double_residual(cur, reason=reason)
-                return router.mark_failed(cur, seconds=seconds, reason=reason)
+                    return router.mark_failed_double_residual(cur, reason=reason, status=status)
+                return router.mark_failed(cur, seconds=seconds, reason=reason, status=status)
             tried.add(cur)                  # note_end deve riferirsi a QUESTO,
             if attempts_box is not None:
                 attempts_box.append(cur)    # osservabilità summary per-richiesta
@@ -1060,7 +1157,8 @@ class Forwarder:
                     log.warning("[fallback] %s quota esaurita (%.90s): "
                                 "cooldown %.0fs al reset, ruoto",
                                 cur, detail, _qcd)
-                    _fail_cur(seconds=_qcd, reason="quota_exhausted")
+                    _fail_cur(seconds=_qcd, reason="quota_exhausted",
+                              status=abs(err.status) if err.status else None)
                     dep = router.fallback_next(profile, dep, need, scope,
                                                ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
@@ -1083,10 +1181,11 @@ class Forwarder:
                                     "(%.80s): ritento sul successivo (cd corto)",
                                     cur, detail)
                         _fail_cur(
-                                           seconds=router.escalate_cooldown(
-                                               PROVIDER_TRANSIENT_COOLDOWN_S,
-                                               router.stats_for(cur).fail_count_24h),
-                                           reason="provider_transient")
+                                            seconds=router.escalate_cooldown(
+                                                PROVIDER_TRANSIENT_COOLDOWN_S,
+                                                router.stats_for(cur).fail_count_24h),
+                                            reason="provider_transient",
+                                            status=abs(err.status) if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
@@ -1096,7 +1195,8 @@ class Forwarder:
                         log.warning("[fallback] %s 404 upstream (modello "
                                     "inesistente su questo provider): "
                                     "ritento sul successivo", cur)
-                        _fail_cur( reason="not_found")
+                        _fail_cur(reason="not_found",
+                                  status=-err.status if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
@@ -1111,7 +1211,8 @@ class Forwarder:
                                     "provider (%.80s): fermo 24h, ritento sul "
                                     "successivo", cur, detail)
                         _fail_cur( seconds=MODEL_MISSING_COOLDOWN_S,
-                                           reason="not_found")
+                                           reason="not_found",
+                                           status=-err.status if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
@@ -1175,7 +1276,8 @@ class Forwarder:
                         router.mark_failed(
                             cur,
                             reason="no_credits" if -err.status == 402
-                            else "provider_400")
+                            else "provider_400",
+                            status=abs(err.status) if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
@@ -1193,7 +1295,8 @@ class Forwarder:
                         log.warning("[fallback] %s %s body errore provider "
                                     "(%.100s): ritento sul successivo",
                                     cur, -err.status, detail)
-                        _fail_cur( reason="provider_error")
+                        _fail_cur(reason="provider_error",
+                                  status=-err.status if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
@@ -1210,10 +1313,11 @@ class Forwarder:
                                     "ritento sul successivo (cd corto)",
                                     cur, -err.status)
                         _fail_cur(
-                                           seconds=router.escalate_cooldown(
-                                               PROVIDER_TRANSIENT_COOLDOWN_S,
-                                               router.stats_for(cur).fail_count_24h),
-                                           reason="empty_error_body")
+                                            seconds=router.escalate_cooldown(
+                                                PROVIDER_TRANSIENT_COOLDOWN_S,
+                                                router.stats_for(cur).fail_count_24h),
+                                            reason="empty_error_body",
+                                            status=-err.status if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
@@ -1232,7 +1336,8 @@ class Forwarder:
                                     "ritento sul successivo",
                                     cur, PERMISSION_DENIED_COOLDOWN_S)
                         _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
-                                  reason="upstream_403")
+                                   reason="upstream_403",
+                                   status=abs(err.status) if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
@@ -1251,7 +1356,8 @@ class Forwarder:
                 else:
                     _reason = "network"
                 _fail_cur( seconds=err.retry_after,
-                                   reason=_reason)
+                                    reason=_reason,
+                                    status=abs(err.status) if err.status else None)
                 dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
             finally:
