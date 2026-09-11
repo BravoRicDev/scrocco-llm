@@ -58,6 +58,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
 from .health import health_loop
 from .policy import Policy
 from .qc import annotate_reasoning
+from .thought_sig import has_unsigned_tool_calls, is_gemini_deployment
 from .router import Router, inject_identity, estimate_tokens
 from .capabilities import required_caps, count_image_parts
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
@@ -186,6 +187,47 @@ def _load_adaptive_stats() -> None:
         log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
 
+# --- thought_signature sidecar: persistenza firme Gemini 3 (tool calling) ----
+_thought_sigs_file = VAR_DIR / "thought_sigs.json"
+
+
+def _load_thought_sigs() -> None:
+    """All'avvio: ripristina le firme Gemini catturate (sopravvivono al restart)."""
+    if not PERSIST_STATS:
+        return
+    try:
+        if _thought_sigs_file.exists():
+            import json
+            from .thought_sig import THOUGHT_SIGS
+            THOUGHT_SIGS.load(json.loads(
+                _thought_sigs_file.read_text(encoding="utf-8")))
+            log.info("[thought_sig] ripristinate %d firme da %s",
+                     len(THOUGHT_SIGS), _thought_sigs_file.name)
+    except Exception as exc:                 # mai bloccare lo startup
+        log.warning("[thought_sig] load fallito (%s): riparto pulito", exc)
+
+
+def _maybe_save_thought_sigs(force: bool = False) -> None:
+    """Salvataggio atomico throttled (max ogni 60s) delle firme Gemini."""
+    global _last_stats_save
+    if not PERSIST_STATS:
+        return
+    now = time.time()
+    if not force and now - _last_stats_save < 60:
+        return
+    try:
+        import json
+        import tempfile
+        from .thought_sig import THOUGHT_SIGS
+        _thought_sigs_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(VAR_DIR), suffix=".tmp.json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(THOUGHT_SIGS.dump(), f)
+        os.replace(tmp_name, _thought_sigs_file)     # atomico
+    except Exception as exc:                 # best-effort, mai fatali
+        log.debug("[thought_sig] save fallito (%s)", exc)
+
+
 def _maybe_save_adaptive_stats(force: bool = False) -> None:
     """Salvataggio atomico throttled (max ogni 60s) delle stats adattive."""
     global _last_stats_save
@@ -219,6 +261,7 @@ async def _watcher(interval: float) -> None:
         try:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
             _maybe_save_adaptive_stats()
+            _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             LEDGER.flush()              # ledger usage: buffer -> jsonl
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
             # l'evidenza su disco (throttled dal tick stesso)
@@ -277,6 +320,7 @@ async def _watcher(interval: float) -> None:
 async def lifespan(_app: FastAPI):
     global _watch_task
     _load_adaptive_stats()                  # F4: ripristino EMA/cooldown
+    _load_thought_sigs()                    # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
     _health_task = asyncio.create_task(
@@ -292,6 +336,7 @@ async def lifespan(_app: FastAPI):
                 task.cancel()
         await forwarder.aclose()
         _maybe_save_adaptive_stats(force=True)   # F4: salva allo shutdown
+        _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
         LEDGER.flush()                           # ledger: nessuna riga persa
 
 
@@ -1374,7 +1419,27 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     t_req = time.monotonic()
     attempts: list[str] = []
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
+    # Gemini 3 tool replay: se la history ha tool_call senza firma (conversazione
+    # passata per altri modelli), Gemini risponderebbe 400 INVALID_ARGUMENT.
+    # Escludilo a monte e salta direttamente a un deployment non-Gemini.
+    _avoid_gemini = has_unsigned_tool_calls(payload.get("messages") or [])
+    _skip_budget = 64                   # sicurezza anti-loop
     while True:
+        if (_avoid_gemini and _skip_budget > 0 and is_gemini_deployment(dep)
+                and dep["unique"] not in tried_set):
+            _skip_budget -= 1
+            tried_set.add(dep["unique"])   # così fallback_next non lo ripropone
+            nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
+                                       tried=tried_set,
+                                       requested_group=requested_group) \
+                if profile else None
+            if nxt is not None:
+                log.warning("[thought_sig] replay senza firma: salto Gemini "
+                            "%s -> %s", dep["unique"], nxt["unique"])
+                dep = nxt
+                inject_identity(payload, dep, router=router)
+                continue
+            tried_set.discard(dep["unique"])   # nessuna alternativa: prova comunque
         tried += 1
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])

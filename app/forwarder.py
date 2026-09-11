@@ -46,7 +46,8 @@ import httpx
 from . import metrics
 from .qc import check_response
 from .router import inject_identity
-from .thought_sig import THOUGHT_SIGS, extract_signatures, is_google_base
+from .thought_sig import (THOUGHT_SIGS, extract_signatures, is_gemini_deployment,
+                          has_unsigned_tool_calls)
 
 log = logging.getLogger("nx.forwarder")
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
@@ -625,7 +626,7 @@ class Forwarder:
         """
         body = dict(payload)
         body["model"] = dep["model"]
-        _google = is_google_base(dep.get("api_base", ""))
+        _google = is_gemini_deployment(dep)
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
@@ -736,7 +737,7 @@ class Forwarder:
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
-        _google = is_google_base(dep.get("api_base", ""))
+        _google = is_gemini_deployment(dep)
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
@@ -1060,10 +1061,29 @@ class Forwarder:
         _deadline_ms = int(getattr(router.policy.qc_json,
                                    "stream_total_deadline_ms", 180000) or 0)
         _t0 = time.monotonic()
+        # Gemini 3 tool replay: se la history ha tool_call senza firma
+        # (conversazione passata per altri modelli), Gemini risponderebbe 400
+        # INVALID_ARGUMENT. Escludilo a monte e salta a un deployment non-Gemini.
+        _avoid_gemini = has_unsigned_tool_calls(
+            (payload or {}).get("messages") or [])
+        _skip_budget = 64                    # sicurezza anti-loop
         while (dep is not None and len(tried) < _max_tries
                and (not _deadline_ms
                     or (time.monotonic() - _t0) * 1000 < _deadline_ms)):
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
+            if (_avoid_gemini and _skip_budget > 0 and is_gemini_deployment(dep)
+                    and cur not in tried):
+                _skip_budget -= 1
+                tried.add(cur)              # così fallback_next non lo ripropone
+                nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
+                                           tried=tried,
+                                           requested_group=requested_group)
+                if nxt is not None:
+                    log.warning("[thought_sig] replay senza firma: salto "
+                                "Gemini %s -> %s", cur, nxt["unique"])
+                    dep = nxt
+                    continue
+                tried.discard(cur)          # nessuna alternativa: prova comunque
             log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
             def _fail_cur(seconds=None, reason=None, status=None):

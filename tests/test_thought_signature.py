@@ -335,3 +335,72 @@ def test_end_to_end_stream_captures_signature(fresh_cache):
 
     asyncio.run(_run())
     assert fresh_cache.get("call_1") == "SIG-S"
+
+
+# ---------------------------------------- has_unsigned_tool_calls (routing) ---
+
+def _asst(tool_calls):
+    return {"role": "assistant", "content": "", "tool_calls": tool_calls}
+
+
+def _tc(tcid, sig=None):
+    tc = {"id": tcid, "type": "function",
+          "function": {"name": "f", "arguments": "{}"}}
+    if sig:
+        tc["extra_content"] = {"google": {"thought_signature": sig}}
+    return tc
+
+
+def test_unsigned_no_tool_calls(fresh_cache, monkeypatch):
+    monkeypatch.setattr(thought_sig, "THOUGHT_SIGS", fresh_cache)
+    assert not thought_sig.has_unsigned_tool_calls([])
+    assert not thought_sig.has_unsigned_tool_calls(
+        [{"role": "user", "content": "hi"}])
+
+
+def test_unsigned_tool_call_without_signature(fresh_cache, monkeypatch):
+    monkeypatch.setattr(thought_sig, "THOUGHT_SIGS", fresh_cache)
+    msgs = [_asst([_tc("c1")])]
+    assert thought_sig.has_unsigned_tool_calls(msgs) is True
+
+
+def test_unsigned_resolved_from_cache(fresh_cache, monkeypatch):
+    monkeypatch.setattr(thought_sig, "THOUGHT_SIGS", fresh_cache)
+    msgs = [_asst([_tc("c1")])]
+    fresh_cache.store("c1", "SIG")
+    assert thought_sig.has_unsigned_tool_calls(msgs) is False
+
+
+def test_unsigned_inline_signature(fresh_cache, monkeypatch):
+    monkeypatch.setattr(thought_sig, "THOUGHT_SIGS", fresh_cache)
+    msgs = [_asst([_tc("c2", sig="X")])]
+    assert thought_sig.has_unsigned_tool_calls(msgs) is False
+
+
+def test_unsigned_mixed(fresh_cache, monkeypatch):
+    monkeypatch.setattr(thought_sig, "THOUGHT_SIGS", fresh_cache)
+    msgs = [_asst([_tc("c2", sig="X"), _tc("c9")])]
+    assert thought_sig.has_unsigned_tool_calls(msgs) is True
+
+
+# --------------------------------------- is_gemini_deployment (OpenRouter) ----
+
+def test_is_gemini_deployment_google_direct():
+    d = {"api_base": GOOGLE_BASE, "model": "models/gemini-3.5-flash"}
+    assert thought_sig.is_gemini_deployment(d)
+
+
+def test_is_gemini_deployment_openrouter_gemini():
+    d = {"api_base": "https://openrouter.ai/api/v1",
+         "model": "google/gemini-3.5-flash"}
+    assert thought_sig.is_gemini_deployment(d)
+
+
+def test_is_gemini_deployment_openrouter_non_gemini():
+    d = {"api_base": "https://openrouter.ai/api/v1", "model": "nvidia/nemotron"}
+    assert not thought_sig.is_gemini_deployment(d)
+
+
+def test_is_gemini_deployment_non_google_non_gemini():
+    d = {"api_base": "https://api.mistral.ai/v1", "model": "mistral-large"}
+    assert not thought_sig.is_gemini_deployment(d)
