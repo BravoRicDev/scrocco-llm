@@ -67,3 +67,4 @@ web/node_modules/
 web/.env
 web/var/
 web/backups/
+.opencode/

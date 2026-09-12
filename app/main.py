@@ -494,7 +494,9 @@ async def list_models(request: Request):
         Fonte di verità: MEMBERSHIP (dep["caps"]) quando presente;
         altrimenti la mappa advisory capability_routing.model_capabilities."""
         entry = {"id": name, "object": "model",
-                 "created": int(time.time()), "owned_by": policy.service_name}
+                 "created": int(time.time()), "owned_by": policy.service_name,
+                 "reasoning_effort": ["default", "low", "medium", "high"],
+                 "reasoning_effort_default": "default"}
         target = policy.aliases.get(name, name) if is_alias else name
 
         def _caps_of_dep(d: dict) -> frozenset:
@@ -553,7 +555,9 @@ def _visible_model_names(request: Request):
 
 def _model_obj(name: str) -> dict:
     return {"id": name, "object": "model", "created": int(time.time()),
-            "owned_by": policy.service_name}
+            "owned_by": policy.service_name,
+            "reasoning_effort": ["default", "low", "medium", "high"],
+            "reasoning_effort_default": "default"}
 
 
 def _ollama_entry(name: str) -> dict:
