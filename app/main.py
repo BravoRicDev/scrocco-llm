@@ -1568,6 +1568,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # 403 di qualsiasi tipo: chiave/progetto rifiutato dal provider ->
             # deployment-side (mai colpa della richiesta), ruota (mai al client).
             upstream403 = (err.status == -403)
+            # 401 upstream: la NOSTRA chiave e' rifiutata dal provider
+            # (assente/invalidata/revocata). E' SEMPRE deployment-side: il
+            # client si e' gia' autenticato da noi, quindi non e' colpa sua.
+            # Ruota come il 403, mai pass-through.
+            upstream401 = (err.status == -401)
             openai_sig = ("bad_response_status_code" in detail
                           or "openai_error" in detail)
             # 4xx con body d'errore ASSENTE/illeggibile (stream appeso ->
@@ -1598,6 +1603,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "empty_error_body"
             elif upstream403:
                 reason = "upstream_403"
+            elif upstream401:
+                reason = "upstream_401"
             elif err.status is not None and err.status < 0:
                 reason = "other_4xx"
             elif err.status is None and "upstream timeout" in detail.lower():
@@ -1615,13 +1622,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     or prov_err
                     or transient
                     or upstream403
+                    or upstream401
                     or empty_body
                     or err.status == -402)
                 # né thought_signature né il body d'errore provider né
                 # il 403 sono rifiuti di modalita': non alimentano l'auto-
                 # learn (hook).
                 if (provider_side and hook and not thought_sig
-                        and not prov_err and not upstream403):
+                        and not prov_err and not upstream403
+                        and not upstream401):
                     try:
                         hook(dep["model"], detail)
                     except Exception:
@@ -1656,6 +1665,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 elif reason == "upstream_403":
                     # Key/progetto rifiutato dal provider: cooldown lungo +
                     # rilascia lo sticky, la sessione riparte su un'altra key.
+                    _cd = PERMISSION_DENIED_COOLDOWN_S
+                    if ses:
+                        cur = router.dep_sticky_get(ses)
+                        if cur and cur == dep["unique"]:
+                            router.dep_sticky_release(ses)
+                elif reason == "upstream_401":
+                    # Chiave assente/invalidata/revocata: stessa gestione del
+                    # 403 (cooldown lungo + rilascio sticky).
                     _cd = PERMISSION_DENIED_COOLDOWN_S
                     if ses:
                         cur = router.dep_sticky_get(ses)

@@ -1415,8 +1415,25 @@ class Forwarder:
                         _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
                                    reason="upstream_403",
                                    status=abs(err.status) if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
+                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                                                          requested_group=requested_group)
+                        continue
+                    # 401 upstream: la NOSTRA chiave e' rifiutata dal provider
+                    # (assente/invalidata/revocata). SEMPRE deployment-side (il
+                    # client si e' gia' autenticato da noi) -> ruota come il
+                    # 403, mai pass-through.
+                    if -err.status == 401:
+                        metrics.inc("nx_upstream_calls_total",
+                                    (cur, "upstream_401"))
+                        last_err = err
+                        log.warning("[fallback] %s 401 upstream: "
+                                    "chiave rifiutata/assente, cd %.0fs: "
+                                    "ritento sul successivo",
+                                    cur, PERMISSION_DENIED_COOLDOWN_S)
+                        _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
+                                   reason="upstream_401",
+                                   status=abs(err.status) if err.status else None)
+                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     raise
