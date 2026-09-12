@@ -52,6 +52,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
                         _PROVIDER_TRANSIENT_RE,
                         _THOUGHT_SIG_RE, is_provider_error_body,
+                        is_provider_fault_body,
                         media_reject_signature, _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         QUOTA_MIN_COOLDOWN_S)
@@ -1682,6 +1683,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if schema_sig:
                 thought_sig = True         # riusa tutta la logica no-cooldown
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
+            prov_fault = is_provider_fault_body(detail)
             quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False
             transient = bool(_PROVIDER_TRANSIENT_RE.search(detail))
             # 403 di qualsiasi tipo: chiave/progetto rifiutato dal provider ->
@@ -1724,6 +1726,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "upstream_403"
             elif upstream401:
                 reason = "upstream_401"
+            elif prov_fault:
+                reason = "provider_fault"
             elif err.status is not None and err.status < 0:
                 reason = "other_4xx"
             elif err.status is None and "upstream timeout" in detail.lower():
@@ -1743,13 +1747,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     or upstream403
                     or upstream401
                     or empty_body
+                    or prov_fault
                     or err.status == -402)
                 # né thought_signature né il body d'errore provider né
                 # il 403 sono rifiuti di modalita': non alimentano l'auto-
                 # learn (hook).
                 if (provider_side and hook and not thought_sig
                         and not prov_err and not upstream403
-                        and not upstream401):
+                        and not upstream401 and not prov_fault):
                     try:
                         hook(dep["model"], detail)
                     except Exception:

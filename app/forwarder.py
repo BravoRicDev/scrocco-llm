@@ -424,6 +424,33 @@ def is_provider_error_body(detail: str) -> bool:
     return bool(detail) and _PROVIDER_ERR_ENVELOPE_RE.match(detail) is not None
 
 
+# Envelope OpenAI-style {"error":{...}}: alcuni provider (es. bynara) lo
+# usano per un fault LATO PROVIDER nel leggere/parsare la richiesta
+# ("Could not read the request body.", con request_id). Non e' un rifiuto del
+# CONTENUTO da parte del modello: un altro deployment accetta lo stesso
+# payload -> si RUOTA (cooldown corto), mai pass-through del 400 al client.
+_OPENAI_ERR_ENVELOPE_RE = re.compile(
+    r'\s*(?:data:\s*)?\{\s*"error"\s*:\s*\{', re.IGNORECASE)
+_PROVIDER_BODY_FAULT_RE = re.compile(
+    r"could not read the request body"
+    r"|unable to (read|parse) (the )?request( body)?"
+    r"|invalid request body|malformed request"
+    r"|cannot parse (the )?request|error parsing (the )?request"
+    r"|failed to (read|parse) (the )?request"
+    r"|error reading (the )?request",
+    re.IGNORECASE)
+
+
+def is_provider_fault_body(detail: str) -> bool:
+    """True se `detail` e' un envelope OpenAI `{"error":{...}}` che segnala un
+    fault del PROVIDER nel leggere/parsare la richiesta (deployment-side)."""
+    if not detail:
+        return False
+    if _OPENAI_ERR_ENVELOPE_RE.match(detail) is None:
+        return False
+    return _PROVIDER_BODY_FAULT_RE.search(detail) is not None
+
+
 # Header x-opencode-session (OpenCode Go / opencode-zen): la sessione viene
 # calcolata AL VOLO come hash deterministico di api_key + client_ip + profilo,
 # cosi' ogni (chiave, client, profilo) genera una sessione stabile e
@@ -1633,6 +1660,28 @@ class Forwarder:
                                    status=abs(err.status) if err.status else None)
                         dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
+                        continue
+                    if is_provider_fault_body(detail):
+                        # Il provider non e' riuscito a leggere/parsare la
+                        # richiesta (envelope OpenAI {"error":{...}}): non e'
+                        # un rifiuto del contenuto -> un altro deployment
+                        # accetta lo stesso payload. Ruota (cd corto), mai
+                        # pass-through del 400 al client.
+                        metrics.inc("nx_upstream_calls_total",
+                                    (cur, "provider_fault"))
+                        last_err = err
+                        log.warning("[fallback] %s %s body d'errore provider "
+                                    "(lettura richiesta): ritento sul "
+                                    "successivo", cur, -err.status)
+                        _fail_cur(
+                            seconds=router.escalate_cooldown(
+                                PROVIDER_TRANSIENT_COOLDOWN_S,
+                                router.stats_for(cur).fail_count_24h),
+                            reason="provider_fault",
+                            status=-err.status if err.status else None)
+                        dep = router.fallback_next(profile, dep, need, scope,
+                                                   ctx=ctx, tried=tried,
+                                                   requested_group=requested_group)
                         continue
                     raise
                 metrics.inc("nx_upstream_calls_total", (cur, "error"))
