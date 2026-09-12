@@ -199,6 +199,12 @@ class Policy:
     tool_repair_disable_for_google: bool = True
     tool_repair_max_args_size: int = 100000
     tool_repair_annotate_reasoning: bool = False
+    # FAKE_CALL: tool-call resi come testo -> escalation diretta -go/-fallback.
+    tool_repair_fake_call_enabled: bool = True
+    tool_repair_fake_call_patterns: tuple[str, ...] = ()
+    tool_repair_fake_call_max_escalations: int = 2
+    tool_repair_fake_call_hold_max_bytes: int = 4096
+    tool_repair_fake_call_hold_timeout_ms: int = 4000
 
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
@@ -670,6 +676,26 @@ class Policy:
             _tr_ar = _tr.get("annotate_reasoning")
             if _tr_ar is not None:
                 p.tool_repair_annotate_reasoning = _coerce_bool(_tr_ar, "tool_repair.annotate_reasoning")
+            _fc = _tr.get("fake_call")
+            if _fc is not None:
+                if not isinstance(_fc, dict):
+                    raise ValueError("tool_repair.fake_call deve essere una mappa")
+                if "enabled" in _fc:
+                    p.tool_repair_fake_call_enabled = _coerce_bool(
+                        _fc["enabled"], "tool_repair.fake_call.enabled")
+                _pat = _fc.get("patterns")
+                if _pat is not None:
+                    if not isinstance(_pat, (list, tuple)):
+                        raise ValueError("tool_repair.fake_call.patterns deve essere una lista")
+                    p.tool_repair_fake_call_patterns = tuple(str(x) for x in _pat)
+                for _k, _attr in (("max_escalations", "tool_repair_fake_call_max_escalations"),
+                                  ("stream_hold_max_bytes", "tool_repair_fake_call_hold_max_bytes"),
+                                  ("stream_hold_timeout_ms", "tool_repair_fake_call_hold_timeout_ms")):
+                    _v = _fc.get(_k)
+                    if _v is not None:
+                        if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                            raise ValueError(f"tool_repair.fake_call.{_k} deve essere un intero")
+                        setattr(p, _attr, int(_v))
 
         qj = raw.get("qc_json")
         if qj is not None:

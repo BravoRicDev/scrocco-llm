@@ -1193,6 +1193,20 @@ def _chunk_finish_reason(obj):
     return None
 
 
+def _buffered_answer_text(buffered) -> str:
+    """Testo di risposta (delta.content) accumulato nei chunk da _peek_stream."""
+    parts: list[str] = []
+    for chunk in buffered or []:
+        for obj in _sse_data_objs(chunk):
+            for ch in (obj.get("choices") or []):
+                d = (ch.get("delta") or ch.get("message") or {}) \
+                    if isinstance(ch, dict) else {}
+                c = d.get("content") if isinstance(d, dict) else None
+                if isinstance(c, str):
+                    parts.append(c)
+    return "".join(parts)
+
+
 async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
                        min_chars: int = 40):
     """Consuma `gen` finche' arriva CONTENUTO DI RISPOSTA sufficiente, oppure
@@ -1433,6 +1447,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                      or 128)
     # Tool repair config per streaming
     from .toolrepair import create_tool_repair_config
+    from .fakecall import (fake_config_from_policy, is_escalation_group,
+                           looks_like_fake_tool_call)
     _tr_cfg = create_tool_repair_config({
         "tool_repair": {
             "enabled": router.policy.tool_repair_enabled,
@@ -1441,6 +1457,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             "max_args_size": router.policy.tool_repair_max_args_size,
         },
     })
+    _fc = fake_config_from_policy(router.policy)
     t_req = time.monotonic()
     attempts: list[str] = []
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
@@ -1510,6 +1527,18 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # trasmette comunque quello che arriva (parametro opzionale
             # stream_parachute_no_timeout, default True).
             verdict = _parachute_verdict(verdict, qcp, dep, router.policy)
+            if (verdict == "content" and _fc.enabled and payload.get("tools")
+                    and not is_escalation_group(
+                        dep.get("group"), router.config.go_suffix,
+                        router.config.fallback_suffix)):
+                _pat = looks_like_fake_tool_call(
+                    _buffered_answer_text(prebuf), _fc)
+                if _pat:
+                    metrics.inc("nx_fake_toolcall_total", (dep["unique"], "detected"))
+                    log.warning("[fake-tool-call] stream %s: tool-call reso "
+                                "come testo (pattern=%s), escalation",
+                                dep["unique"], _pat)
+                    verdict = "fake_tool_call"
             if verdict == "content":
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
@@ -1534,17 +1563,24 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # dolce sui fallimenti recenti (24h).
                 if verdict == "timeout":
                     _fail(dep["unique"], reason="timeout")
+                elif verdict == "fake_tool_call":
+                    _fail(dep["unique"], reason="fake_tool_call")
                 else:
                     _fail(dep["unique"], seconds=_soft_cd(
                         router.stats_for(dep["unique"]).fail_count_24h))
             over_deadline = ((time.monotonic() - t_req) * 1000 >
                              int(getattr(qcp, "stream_total_deadline_ms",
                                          90000) or 90000))
-            nxt = None if (no_rotate or over_deadline) else (
-                router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                     tried=tried_set,
-                                     requested_group=requested_group)
-                if profile else None)
+            if verdict == "fake_tool_call":
+                nxt = router.force_escalation(dep, need, ctx,
+                                              tried=tried_set) \
+                    if profile else None
+            else:
+                nxt = None if (no_rotate or over_deadline) else (
+                    router.fallback_next(profile, dep, need, scope, ctx=ctx,
+                                         tried=tried_set,
+                                         requested_group=requested_group)
+                    if profile else None)
             log.warning("[fallback] stream %s pre-contenuto verdict=%s fr=%s "
                         "no_rotate=%s -> %s", dep["unique"], verdict, fr,
                         bool(no_rotate),

@@ -272,6 +272,18 @@ tool_repair:
   max_args_size: 100000
   # Annota il reasoning (D3) quando una risposta viene riparata.
   annotate_reasoning: false
+  # --- FAKE TOOL-CALL: tool-call resi come TESTO nel content ---------------
+  # Se la richiesta dichiara `tools` ma il modello scrive la chiamata come
+  # testo (<arg_key>, <bash>, antml:...), il deployment viene marcato fallito
+  # e si scala DIRETTAMENTE a -go/-fallback (niente scala dims). Sui gruppi
+  # -go/-fallback la detection e' disattivata (anti-loop). A catena esaurita:
+  # 503 retryable. Nessuna chiamata LLM di riparazione.
+  fake_call:
+    enabled: true
+    max_escalations: 2
+    stream_hold_max_bytes: 4096
+    stream_hold_timeout_ms: 4000
+    # patterns: ["<arg_key>", "<bash", "antml:"]   # override lista di default
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALIAS — mappatura nomi corti → modelli/gruppi reali (per comodità client)

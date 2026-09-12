@@ -2121,6 +2121,26 @@ class Router:
         return self._walk_ladder_resilient(self.config.chains.get(profile, []),
                                            failed_unique, need, ctx)
 
+    def force_escalation(self, cur_dep: dict,
+                         need: frozenset[str] | None = None,
+                         ctx: int | None = None,
+                         tried: set[str] | None = None) -> dict | None:
+        """Salta DIRETTAMENTE ai gradini -go/-fallback del ladder.
+
+        Usato dal rilevamento fake tool-call: niente scala dims, si va
+        subito ai bucket a pagamento. Ritorna None se non c'e' alcun
+        gradino di escalation disponibile.
+        """
+        cfg = self.config
+        ladder = self._ladder_for_group(cur_dep.get("group", ""))
+        esc = [g for g in ladder
+               if (cfg.go_suffix and g.endswith(cfg.go_suffix))
+               or (cfg.fallback_suffix and g.endswith(cfg.fallback_suffix))]
+        if not esc:
+            return None
+        return self._walk_ladder_resilient(esc, cur_dep["unique"], need,
+                                           ctx, tried=tried)
+
     def fallback_next(self, profile: str | None, cur_dep: dict,
                       need: frozenset[str] | None = None,
                       scope: str = "chain",

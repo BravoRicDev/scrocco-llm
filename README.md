@@ -77,6 +77,11 @@ individual account limits instead of dying on the first 429.
   streaming and non-streaming. Levels `safe`/`aggressive`, per-deployment via
   the `tool_repair` CSV column, Google/Gemini off by default. Never changes
   tool names or semantics.
+- **Fake tool-call fallback** (`tool_repair.fake_call`): when a request
+  declares `tools` but the model writes the call as text (`<arg_key>`,
+  `<bash`, `antml:` ...), the deployment is marked failed and the gateway
+  escalates straight to `-go`/`-fallback` (detection disabled there to avoid
+  loops); on exhaustion a retryable 503 is returned. No LLM repair call.
 - **Usage & cost insights**: persistent ledger + `GET /admin/insights`
   (per profile/model/day burn; provider-reported vs estimated costs).
 - **Three-tier auth**: master key / deterministic `sk-<profile>` client keys
@@ -210,6 +215,8 @@ template. The ones that matter most:
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `tool_repair.enabled` / `tool_repair.default_level` | true / `aggressive` | tool-call argument repair and default level (per-deployment CSV overrides) |
 | `tool_repair.disable_for_google` | true | Google/Gemini deployments opt out unless explicitly enabled in the CSV |
+| `tool_repair.fake_call.enabled` | true | detect tool-calls rendered as text and escalate directly to -go/-fallback |
+| `tool_repair.fake_call.max_escalations` | 2 | max direct escalations before a retryable 503 |
 
 ## Security model
 

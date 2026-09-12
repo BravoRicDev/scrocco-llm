@@ -51,6 +51,8 @@ from .thought_sig import (THOUGHT_SIGS, extract_signatures, is_gemini_deployment
 from .effort import get_effort, get_temperature_config
 from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          create_tool_repair_config, repair_tool_calls)
+from .fakecall import (fake_config_from_policy, is_escalation_group,
+                       message_fake_pattern)
 
 log = logging.getLogger("nx.forwarder")
 
@@ -1117,6 +1119,8 @@ class Forwarder:
                 "annotate_reasoning": router.policy.tool_repair_annotate_reasoning,
             },
         })
+        _fc = fake_config_from_policy(router.policy)
+        fake_escalations = 0
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
         last_err: UpstreamError | None = None
@@ -1231,6 +1235,29 @@ class Forwarder:
                                 503, "catena esaurita, nessun output utile",
                                  final=True)
                         return data, dep, qc_failed
+                # ---- FAKE TOOL-CALL: tool-call reso come testo ----
+                if (_fc.enabled and payload.get("tools")
+                        and not is_escalation_group(
+                            dep.get("group"), router.config.go_suffix,
+                            router.config.fallback_suffix)):
+                    _pat = message_fake_pattern(data, payload, _fc)
+                    if _pat:
+                        metrics.inc("nx_fake_toolcall_total", (cur, "detected"))
+                        log.warning("[fake-tool-call] %s: tool-call reso come "
+                                    "testo (pattern=%s), escalation", cur, _pat)
+                        _fail_cur(reason="fake_tool_call")
+                        last_broken = (data, dep)
+                        fake_escalations += 1
+                        if fake_escalations <= _fc.max_escalations:
+                            nxt = router.force_escalation(
+                                dep, need, ctx, tried=tried) \
+                                if profile else None
+                            if nxt is not None:
+                                dep = nxt
+                                continue
+                        raise UpstreamError(
+                            503, "fake tool-call: catena di escalation "
+                                 "esaurita", final=True)
                 # successo pulito: se siamo atterrati su un gruppo piu' alto
                 # rispetto a quello richiesto, ricorda il winner (scorciatoia
                 # per le prossime richieste su QUEL bucket richiesto).
