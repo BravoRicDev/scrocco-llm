@@ -137,6 +137,36 @@ escalation_pin_probe_dims: 2
 escalation_pin_probe_retry: true    # 1 retry extra nella dim richiesta
 escalation_pin_probe_random: true   # scelta casuale delle dim intermedie
 
+# ── L1/L2 intelligent defaults (modelli deboli) ────────────────────────────
+history_normalize:
+  enabled: true
+  tail_only: true            # cache-safe: tocca solo la coda (verificato)
+  drop_orphan_tool: true
+  drop_dangling_tool_calls: true
+  drop_empty_assistant: true
+  dedupe_system: true
+sampling_defaults:
+  enabled: true
+  allow_providers: ["*"]
+  provider_params:
+    "*":
+      top_p: 0.95            # solo se il client non lo invia (client vince)
+  loop:
+    enabled: true
+    ngram_size: 8
+    repeats: 3
+    toolcall_repeat: 2
+    min_tokens: 16
+corrective_retry:
+  enabled: true
+  max_attempts: 1            # 1 retry correttivo, solo non-streaming
+text_toolcall:
+  enabled: true
+  require_declared_name: true
+  max_bytes: 200000
+  hold_until_close: true
+  fallback_to_escalation: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ALIAS KEYS — chiavi custom per alias generici (MAI esposte via API)
 # ─────────────────────────────────────────────────────────────────────────────

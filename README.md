@@ -77,6 +77,11 @@ individual account limits instead of dying on the first 429.
   streaming and non-streaming. Levels `safe`/`aggressive`, per-deployment via
   the `tool_repair` CSV column, Google/Gemini off by default. Never changes
   tool names or semantics.
+- **History normalize** (`history_normalize`): structural, cache-safe tail cleanup of the outgoing message copy.
+- **Sampling defaults** (`sampling_defaults`) + **loop detector** (`loop`): low-risk provider defaults (client wins) and n-gram/tool-call loop escalation to the next dim.
+- **Corrective retry** (`corrective_retry`): one non-streaming retry on invalid/empty/JSON/schema content (no repair model).
+- **Structured output** (`qc_json.struct_out_*`): fence/prose cleanup, JSON-Schema subset validation, schema-driven repair, optional `response_format` injection.
+- **Text tool-call parser** (`text_toolcall`): recovers tool-calls written as text before the fake-call safety net.
 - **Fake tool-call fallback** (`tool_repair.fake_call`): when a request
   declares `tools` but the model writes the call as text (`<arg_key>`,
   `<bash`, `antml:` ...), the deployment is marked failed and the gateway

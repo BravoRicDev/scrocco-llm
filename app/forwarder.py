@@ -53,6 +53,27 @@ from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          create_tool_repair_config, repair_tool_calls)
 from .fakecall import (fake_config_from_policy, is_escalation_group,
                        message_fake_pattern)
+from .histnorm import hist_config_from_policy, normalize_messages
+from .sampling import (sampling_config_from_policy,
+                       apply_sampling_defaults, response_loop_reason)
+from .schemaout import (schemaout_config_from_policy, enforce_response,
+                        maybe_inject_response_format)
+from .texttoolparse import text_config_from_policy, apply_to_message
+
+
+def _corrective_note(kind: str) -> str:
+    """Nota di sistema per il retry correttivo (L1 #3)."""
+    if kind == "schema":
+        return ("La risposta precedente non rispettava lo schema JSON "
+                "richiesto. Rispondi di nuovo SOLO con JSON valido "
+                "conforme allo schema, senza testo attorno.")
+    if kind == "toolcall":
+        return ("La risposta precedente conteneva una chiamata a tool "
+                "non valida. Rispondi di nuovo usando il meccanismo "
+                "di tool-call previsto, senza scriverla come testo.")
+    return ("La risposta precedente non era JSON valido. Rispondi di "
+            "nuovo SOLO con un oggetto JSON valido, senza testo "
+            "attorno.")
 
 log = logging.getLogger("nx.forwarder")
 
@@ -1121,6 +1142,11 @@ class Forwarder:
         })
         _fc = fake_config_from_policy(router.policy)
         fake_escalations = 0
+        _hn = hist_config_from_policy(router.policy)
+        _sm = sampling_config_from_policy(router.policy)
+        _so = schemaout_config_from_policy(router.policy)
+        _tt = text_config_from_policy(router.policy)
+        _corrected: set[str] = set()
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
         last_err: UpstreamError | None = None
@@ -1133,6 +1159,19 @@ class Forwarder:
         _deadline_ms = int(getattr(router.policy.qc_json,
                                    "stream_total_deadline_ms", 180000) or 0)
         _t0 = time.monotonic()
+        # ---- L1 #1: normalizzazione STRUTTURALE della history (coda) ----
+        if _hn.enabled:
+            _new_msgs, _hn_rep = normalize_messages(
+                (payload or {}).get("messages"), _hn)
+            if _hn_rep.get("changed"):
+                payload["messages"] = _new_msgs
+                metrics.inc("nx_histnorm_total", ("changed",))
+                log.info("[histnorm] coda normalizzata: orphan=%d "
+                         "dangling=%d empty=%d dupsys=%d",
+                         _hn_rep.get("shown_orphan_tool", 0),
+                         _hn_rep.get("dangling_tool_calls", 0),
+                         _hn_rep.get("empty_assistant", 0),
+                         _hn_rep.get("dup_system", 0))
         # Gemini 3 tool replay: se la history ha tool_call senza firma
         # (conversazione passata per altri modelli), Gemini risponderebbe 400
         # INVALID_ARGUMENT. Escludilo a monte e salta a un deployment non-Gemini.
@@ -1171,6 +1210,16 @@ class Forwarder:
             router.note_start(cur)          # rotazione adattiva
             t0 = time.monotonic()
             try:
+                # ---- L1 #2A: default di sampling (client vince) ----
+                if _sm.enabled:
+                    _applied = apply_sampling_defaults(payload, dep, _sm)
+                    if _applied:
+                        log.debug("[sampling] %s: default %s",
+                                  cur, _applied)
+                    if (_so.enabled and maybe_inject_response_format(
+                            payload, dep, _so)):
+                        metrics.inc("nx_resp_format_injected_total",
+                                    (cur,))
                 data = await self.call(dep, payload,
                                profile=profile or "",
                                client_ip=client_ip, session=session,
@@ -1185,6 +1234,37 @@ class Forwarder:
                 tr_result = repair_tool_calls(data, payload, dep, tr_cfg)
                 if tr_result["repaired"]:
                     metrics.inc("nx_tool_repair_total", (cur, "ok"))
+
+                # ---- L2 #6: recupero tool-call resi come testo ----
+                _text_parsed = False
+                if _tt.enabled and payload.get("tools"):
+                    try:
+                        _tc_info = apply_to_message(
+                            ((data.get("choices") or [{}])[0].get(
+                                "message") or {}),
+                            payload.get("tools"), _tt)
+                    except Exception:
+                        _tc_info = None
+                    if _tc_info:
+                        _text_parsed = True
+                        metrics.inc("nx_text_toolcall_total",
+                                    (cur, "parsed"))
+                        log.info("[text-toolcall] %s: %d tool-call "
+                                 "recuperati dal testo", cur,
+                                 len(_tc_info))
+                # ---- L2 #5: output strutturato (A/B/D) ----
+                _so_rep = enforce_response(data, payload, _so) \
+                    if (_so.enabled and not _text_parsed) \
+                    else {"status": "skip"}
+                if _so_rep.get("status") in ("cleaned", "repaired"):
+                    metrics.inc("nx_struct_out_total",
+                                (cur, _so_rep.get("status")))
+                    log.info("[struct-out] %s: %s", cur,
+                             _so_rep.get("status"))
+                # ---- L1 #2B: loop detector ----
+                _loop_reason = None
+                if _sm.loop.enabled and not _text_parsed:
+                    _loop_reason = response_loop_reason(data, _sm)
 
                 # ---- QC del contenuto (solo percorso non-streaming) ----
                 if collect_qc_failures and (qc.enabled or san.enabled):
@@ -1217,6 +1297,21 @@ class Forwarder:
                                     503, "empty output (fr=%s) da %s"
                                          % (fr, cur), final=True)
                     if reason:
+                        if (getattr(router.policy,
+                                    "corrective_retry_enabled", True)
+                                and cur not in _corrected
+                                and not reason.lower().startswith(
+                                    "timeout")):
+                            _corrected.add(cur)
+                            payload.setdefault("messages", []).append(
+                                {"role": "system",
+                                 "content": _corrective_note("json")})
+                            metrics.inc("nx_corrective_retry_total",
+                                        (cur, "json"))
+                            log.warning("[retry] %s contenuto non "
+                                        "valido (%s): retry correttivo",
+                                        cur, reason)
+                            continue
                         qc_failed.append((cur, reason))
                         metrics.inc("nx_qc_discarded_total",
                                     (cur, reason.split(" ")[0]))
@@ -1235,8 +1330,54 @@ class Forwarder:
                                 503, "catena esaurita, nessun output utile",
                                  final=True)
                         return data, dep, qc_failed
+                # ---- L2 #5 non conforme: retry correttivo/rotazione ----
+                if _so_rep.get("status") == "invalid" \
+                        and not _text_parsed:
+                    _r5 = _so_rep.get("reason") or "schema"
+                    if (getattr(router.policy,
+                                "corrective_retry_enabled", True)
+                            and cur not in _corrected):
+                        _corrected.add(cur)
+                        payload.setdefault("messages", []).append(
+                            {"role": "system",
+                             "content": _corrective_note("schema")})
+                        metrics.inc("nx_corrective_retry_total",
+                                    (cur, "schema"))
+                        log.warning("[retry] %s contenuto non "
+                                    "conforme (%s): retry correttivo",
+                                    cur, _r5)
+                        continue
+                    metrics.inc("nx_struct_out_total", (cur, "invalid"))
+                    log.warning("[struct-out] %s non conforme (%s): "
+                                "ruoto", cur, _r5)
+                    _fail_cur()
+                    last_broken = (data, dep)
+                    qc_failed.append((cur, "schema"))
+                    dep = router.fallback_next(profile, dep, need, scope,
+                                               ctx=ctx, tried=tried,
+                                               requested_group=
+                                               requested_group)
+                    continue
+                # ---- L1 #2B loop rilevato: dim successiva ----
+                if _loop_reason:
+                    metrics.inc("nx_loop_detected_total",
+                                (cur, _loop_reason))
+                    log.warning("[loop] %s: %s -> dim successiva",
+                                cur, _loop_reason)
+                    _fail_cur(reason="loop")
+                    last_broken = (data, dep)
+                    nxt = router.fallback_next(profile, dep, need, scope,
+                                               ctx=ctx, tried=tried,
+                                               requested_group=
+                                               requested_group)
+                    if nxt is not None and len(tried) < _max_tries:
+                        dep = nxt
+                        continue
+                    raise UpstreamError(
+                        503, "loop rilevato, catena esaurita",
+                        final=True)
                 # ---- FAKE TOOL-CALL: tool-call reso come testo ----
-                if (_fc.enabled and payload.get("tools")
+                if (_fc.enabled and payload.get("tools") and not _text_parsed
                         and not is_escalation_group(
                             dep.get("group"), router.config.go_suffix,
                             router.config.fallback_suffix)):

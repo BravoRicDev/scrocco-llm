@@ -1017,6 +1017,33 @@ async def chat_completions(request: Request):
 
     # iniezione identità + modello univoco nel payload upstream
     inject_identity(payload, dep, router=router)
+
+    # ---- L1/L2 preprocessing (cache-safe: solo la coda) ----
+    from .histnorm import hist_config_from_policy, normalize_messages
+    from .sampling import (sampling_config_from_policy,
+                           apply_sampling_defaults)
+    from .schemaout import (schemaout_config_from_policy,
+                            maybe_inject_response_format)
+    _hn = hist_config_from_policy(router.policy)
+    _sm = sampling_config_from_policy(router.policy)
+    _so = schemaout_config_from_policy(router.policy)
+    if _hn.enabled:
+        _nm, _nr = normalize_messages(payload.get("messages"), _hn)
+        if _nr.get("changed"):
+            payload["messages"] = _nm
+            metrics.inc("nx_histnorm_total", ("changed",))
+            log.info("[histnorm] coda normalizzata: %s",
+                     {k: _nr.get(k) for k in (
+                         "shown_orphan_tool", "dangling_tool_calls",
+                         "empty_assistant", "dup_system")})
+    if stream and _sm.enabled:
+        _ap = apply_sampling_defaults(payload, dep, _sm)
+        if _ap:
+            log.debug("[sampling] %s: default %s",
+                      dep.get("unique"), _ap)
+        if maybe_inject_response_format(payload, dep, _so):
+            metrics.inc("nx_resp_format_injected_total",
+                        (dep.get("unique"),))
     t_req = time.monotonic()
     # sessione OpenCode: passthrough se il client la invia (x-opencode-session
     # oppure x-session-affinity/x-session-id nativi), altrimenti fallback alla
@@ -1191,6 +1218,30 @@ def _chunk_finish_reason(obj):
         if fr:
             return fr
     return None
+
+
+def _tool_calls_sse(tool_calls, model) -> list[bytes]:
+    """SSE OpenAI sintetico per consegnare tool_calls dal testo (#6)."""
+    import time as _time
+    import uuid as _uuid
+    cid = "chatcmpl-" + _uuid.uuid4().hex[:24]
+    created = int(_time.time())
+
+    def _chunk(delta, finish=None) -> bytes:
+        obj = {"id": cid, "object": "chat.completion.chunk",
+               "created": created, "model": model,
+               "choices": [{"index": 0, "delta": delta,
+                            "finish_reason": finish}]}
+        return ("data: " + json.dumps(obj, ensure_ascii=False) +
+                "\n\n").encode()
+
+    out = [_chunk({"role": "assistant", "tool_calls": [
+        {"index": i, "id": tc.get("id"), "type": "function",
+         "function": tc.get("function")}
+        for i, tc in enumerate(tool_calls)]})]
+    out.append(_chunk({}, "tool_calls"))
+    out.append(b"data: [DONE]\n\n")
+    return out
 
 
 def _buffered_answer_text(buffered) -> str:
@@ -1458,6 +1509,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         },
     })
     _fc = fake_config_from_policy(router.policy)
+    from .texttoolparse import (text_config_from_policy,
+                               parse_text_toolcalls)
+    _tt = text_config_from_policy(router.policy)
+    _synth: list[bytes] = []
     t_req = time.monotonic()
     attempts: list[str] = []
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
@@ -1527,6 +1582,19 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # trasmette comunque quello che arriva (parametro opzionale
             # stream_parachute_no_timeout, default True).
             verdict = _parachute_verdict(verdict, qcp, dep, router.policy)
+            if (verdict == "content" and _tt.enabled
+                    and payload.get("tools")):
+                _parsed = parse_text_toolcalls(
+                    _buffered_answer_text(prebuf), payload.get("tools"),
+                    _tt)
+                if _parsed:
+                    _synth.extend(
+                        _tool_calls_sse(_parsed, dep.get("model")))
+                    metrics.inc("nx_text_toolcall_total",
+                                (dep["unique"], "parsed"))
+                    log.warning("[text-toolcall] stream %s: %d "
+                                "tool-call recuperati dal testo",
+                                dep["unique"], len(_parsed))
             if (verdict == "content" and _fc.enabled and payload.get("tools")
                     and not is_escalation_group(
                         dep.get("group"), router.config.go_suffix,
@@ -1799,6 +1867,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         #   tier1 stream vuoto / evento "error" esplicito -> cooldown subito
         #   tier2 chiuso senza [DONE] -> solo log, cooldown se policy lo vuole
         # + (D2) ri-emissione del prebuffer e coda d'errore SSE finale (verdict C).
+        if _synth:
+            for _b in _synth:
+                yield _b
+            _emit_summary(ses=ses or "-", req=req or "-",
+                          grp=dep["group"], dep=dep["unique"],
+                          tries=len(attempts),
+                          fb=max(0, len(attempts) - 1),
+                          dur_ms=int((time.monotonic() - t_req) * 1000),
+                          stream=True, qc=False, wd="text-toolcall",
+                          ttfb_ms=ttfb_ms, usage=None)
+            return
         sent_first = False
         chunks = 0
         seen_done = False

@@ -103,6 +103,13 @@ class QcJson:
     # (si trasmette quel che arriva). False = comportamento legacy (timeout ->
     # rotazione/503), utile solo se le catene hanno molti account validi.
     stream_parachute_no_timeout: bool = True
+    # --- STRUCT-OUT (#5): enforcement output strutturato ---
+    struct_out_enabled: bool = True
+    rewrite_content: bool = True      # pulisci fence/prosa dal JSON consegnato
+    strict_schema: bool = False        # valida il content contro il JSON Schema
+    repair_content: bool = True        # ripara schema-driven (mosse tool_repair)
+    inject_response_format: bool = False  # inietta response_format (allow-list)
+    inject_allow_providers: tuple[str, ...] = ()
 
 
 @dataclass
@@ -205,6 +212,43 @@ class Policy:
     tool_repair_fake_call_max_escalations: int = 2
     tool_repair_fake_call_hold_max_bytes: int = 4096
     tool_repair_fake_call_hold_timeout_ms: int = 4000
+
+    # HISTORY_NORMALIZE (#1): compatibilita' STRUTTURALE della copia messages
+    # inviata all'upstream (orfani tool/tool_call_id, call pendenti, vuoti,
+    # system duplicati). Cache-safe: opera solo sulla coda.
+    history_normalize_enabled: bool = True
+    history_normalize_tail_only: bool = True
+    history_normalize_drop_orphan_tool: bool = True
+    history_normalize_drop_dangling_tool_calls: bool = True
+    history_normalize_drop_empty_assistant: bool = True
+    history_normalize_dedupe_system: bool = True
+
+    # SAMPLING_DEFAULTS (#2A): default a basso rischio, client vince sempre.
+    sampling_enabled: bool = True
+    sampling_allow_providers: tuple[str, ...] = ("*",)
+    sampling_provider_params: dict = field(
+        default_factory=lambda: {"*": {"top_p": 0.95}})
+    # LOOP_DETECTOR (#2B): loop testuale/tool-call -> deployment fallita,
+    # si prosegue sulla dim successiva del ladder.
+    loop_detector_enabled: bool = True
+    loop_ngram_size: int = 8
+    loop_repeats: int = 3
+    loop_toolcall_repeat: int = 2
+    loop_min_tokens: int = 16
+
+    # CORRECTIVE_RETRY (#3): 1 tentativo correttivo, solo non-streaming,
+    # su fallimenti di contenuto/formato (non timeout).
+    corrective_retry_enabled: bool = True
+    corrective_retry_max_attempts: int = 1
+
+    # TEXT_TOOLCALL (#6): parser dei tool-call resi come testo (davanti a
+    # fakecall). require_declared_name: il name deve combaciare con tools[].
+    text_toolcall_enabled: bool = True
+    text_toolcall_require_declared_name: bool = True
+    text_toolcall_allow_formats: tuple[str, ...] = ()
+    text_toolcall_max_bytes: int = 200000
+    text_toolcall_hold_until_close: bool = True
+    text_toolcall_fallback_to_escalation: bool = True
 
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
@@ -697,6 +741,158 @@ class Policy:
                             raise ValueError(f"tool_repair.fake_call.{_k} deve essere un intero")
                         setattr(p, _attr, int(_v))
 
+        # --- HISTORY_NORMALIZE (#1) ---
+        _hn = raw.get("history_normalize")
+        if _hn is not None:
+            if not isinstance(_hn, dict):
+                raise ValueError("history_normalize deve essere una mappa")
+            for _k, _attr in (
+                    ("enabled", "history_normalize_enabled"),
+                    ("tail_only", "history_normalize_tail_only"),
+                    ("drop_orphan_tool", "history_normalize_drop_orphan_tool"),
+                    ("drop_dangling_tool_calls",
+                     "history_normalize_drop_dangling_tool_calls"),
+                    ("drop_empty_assistant",
+                     "history_normalize_drop_empty_assistant"),
+                    ("dedupe_system", "history_normalize_dedupe_system")):
+                if _k in _hn:
+                    setattr(p, _attr, _coerce_bool(
+                        _hn[_k], f"history_normalize.{_k}"))
+
+        # --- SAMPLING_DEFAULTS (#2A) + LOOP_DETECTOR (#2B) ---
+        _sd = raw.get("sampling_defaults")
+        if _sd is not None:
+            if not isinstance(_sd, dict):
+                raise ValueError("sampling_defaults deve essere una mappa")
+            if "enabled" in _sd:
+                p.sampling_enabled = _coerce_bool(
+                    _sd["enabled"], "sampling_defaults.enabled")
+            _ap = _sd.get("allow_providers")
+            if _ap is not None:
+                if not isinstance(_ap, (list, tuple)):
+                    raise ValueError("sampling_defaults.allow_providers "
+                                     "deve essere una lista")
+                p.sampling_allow_providers = tuple(
+                    str(x).lower() for x in _ap)
+            _pp = _sd.get("provider_params")
+            if _pp is not None:
+                if not isinstance(_pp, dict):
+                    raise ValueError("sampling_defaults.provider_params "
+                                     "deve essere una mappa")
+                _allowed = {"top_p", "presence_penalty",
+                            "frequency_penalty", "repetition_penalty"}
+                _clean_pp: dict = {}
+                for _pk, _pv in _pp.items():
+                    if not isinstance(_pv, dict):
+                        raise ValueError("sampling_defaults.provider_params "
+                                         "valori devono essere mappe")
+                    _row: dict = {}
+                    for _k2, _v2 in _pv.items():
+                        if str(_k2) not in _allowed:
+                            raise ValueError("sampling_defaults.provider_params:"
+                                             f" chiave {_k2!r} non ammessa")
+                        if isinstance(_v2, bool) or not isinstance(
+                                _v2, (int, float)):
+                            raise ValueError(
+                                f"sampling_defaults.provider_params.{_k2}"
+                                " deve essere numerico")
+                        _row[str(_k2)] = float(_v2)
+                    _clean_pp[str(_pk).lower()] = _row
+                p.sampling_provider_params = _clean_pp
+            _lp = _sd.get("loop")
+            if _lp is not None:
+                if not isinstance(_lp, dict):
+                    raise ValueError("sampling_defaults.loop deve essere "
+                                     "una mappa")
+                for _k, _attr, _lo, _hi in (
+                        ("enabled", "loop_detector_enabled", None, None),
+                        ("ngram_size", "loop_ngram_size", 2, 64),
+                        ("repeats", "loop_repeats", 2, 16),
+                        ("toolcall_repeat", "loop_toolcall_repeat", 2, 16),
+                        ("min_tokens", "loop_min_tokens", 1, 2048)):
+                    _v = _lp.get(_k)
+                    if _v is None:
+                        continue
+                    if _lo is None:
+                        setattr(p, _attr, _coerce_bool(
+                            _v, f"sampling_defaults.loop.{_k}"))
+                        continue
+                    if isinstance(_v, bool) or not isinstance(
+                            _v, (int, float)) or not (_lo <= int(_v) <= _hi):
+                        raise ValueError(
+                            f"sampling_defaults.loop.{_k} deve essere "
+                            f"{_lo}..{_hi}")
+                    setattr(p, _attr, int(_v))
+        _ld = raw.get("loop_detector")
+        if _ld is not None:
+            if not isinstance(_ld, dict):
+                raise ValueError("loop_detector deve essere una mappa")
+            if "enabled" in _ld:
+                p.loop_detector_enabled = _coerce_bool(
+                    _ld["enabled"], "loop_detector.enabled")
+            for _k, _attr, _lo, _hi in (
+                    ("ngram_size", "loop_ngram_size", 2, 64),
+                    ("repeats", "loop_repeats", 2, 16),
+                    ("toolcall_repeat", "loop_toolcall_repeat", 2, 16),
+                    ("min_tokens", "loop_min_tokens", 1, 2048)):
+                _v = _ld.get(_k)
+                if _v is None:
+                    continue
+                if isinstance(_v, bool) or not isinstance(
+                        _v, (int, float)) or not (_lo <= int(_v) <= _hi):
+                    raise ValueError(
+                        f"loop_detector.{_k} deve essere {_lo}..{_hi}")
+                setattr(p, _attr, int(_v))
+
+        # --- CORRECTIVE_RETRY (#3) ---
+        _cr = raw.get("corrective_retry")
+        if _cr is not None:
+            if not isinstance(_cr, dict):
+                raise ValueError("corrective_retry deve essere una mappa")
+            if "enabled" in _cr:
+                p.corrective_retry_enabled = _coerce_bool(
+                    _cr["enabled"], "corrective_retry.enabled")
+            if "max_attempts" in _cr:
+                _v = _cr["max_attempts"]
+                if isinstance(_v, bool) or not isinstance(
+                        _v, (int, float)) or not (0 <= int(_v) <= 1):
+                    raise ValueError("corrective_retry.max_attempts "
+                                     "deve essere 0..1")
+                p.corrective_retry_max_attempts = int(_v)
+
+        # --- TEXT_TOOLCALL (#6) ---
+        _tt = raw.get("text_toolcall")
+        if _tt is not None:
+            if not isinstance(_tt, dict):
+                raise ValueError("text_toolcall deve essere una mappa")
+            if "enabled" in _tt:
+                p.text_toolcall_enabled = _coerce_bool(
+                    _tt["enabled"], "text_toolcall.enabled")
+            if "require_declared_name" in _tt:
+                p.text_toolcall_require_declared_name = _coerce_bool(
+                    _tt["require_declared_name"],
+                    "text_toolcall.require_declared_name")
+            _af = _tt.get("allow_formats")
+            if _af is not None:
+                if not isinstance(_af, (list, tuple)):
+                    raise ValueError("text_toolcall.allow_formats deve "
+                                     "essere una lista")
+                p.text_toolcall_allow_formats = tuple(str(x) for x in _af)
+            if "max_bytes" in _tt:
+                _v = _tt["max_bytes"]
+                if isinstance(_v, bool) or not isinstance(
+                        _v, (int, float)) or int(_v) < 1:
+                    raise ValueError("text_toolcall.max_bytes deve "
+                                     "essere >= 1")
+                p.text_toolcall_max_bytes = int(_v)
+            if "hold_until_close" in _tt:
+                p.text_toolcall_hold_until_close = _coerce_bool(
+                    _tt["hold_until_close"], "text_toolcall.hold_until_close")
+            if "fallback_to_escalation" in _tt:
+                p.text_toolcall_fallback_to_escalation = _coerce_bool(
+                    _tt["fallback_to_escalation"],
+                    "text_toolcall.fallback_to_escalation")
+
         qj = raw.get("qc_json")
         if qj is not None:
             if not isinstance(qj, dict):
@@ -760,6 +956,22 @@ class Policy:
                 p.qc_json.stream_parachute_no_timeout = _coerce_bool(
                     qj["stream_parachute_no_timeout"],
                     "qc_json.stream_parachute_no_timeout")
+            for _k, _attr in (("struct_out_enabled", "struct_out_enabled"),
+                              ("rewrite_content", "rewrite_content"),
+                              ("strict_schema", "strict_schema"),
+                              ("repair_content", "repair_content"),
+                              ("inject_response_format",
+                               "inject_response_format")):
+                if _k in qj:
+                    setattr(p.qc_json, _attr, _coerce_bool(
+                        qj[_k], f"qc_json.{_k}"))
+            _iap = qj.get("inject_allow_providers")
+            if _iap is not None:
+                if not isinstance(_iap, (list, tuple)):
+                    raise ValueError("qc_json.inject_allow_providers "
+                                     "deve essere una lista")
+                p.qc_json.inject_allow_providers = tuple(
+                    str(x).lower() for x in _iap)
             # stream_buffer_ms / stream_emit_error_tail / on_empty_response:
             # rimossi. Catena esaurita -> sempre 503 retryable, mai un turno
             # finto. Chiavi ignorate se presenti in un vecchio gateway.yaml.
