@@ -1431,6 +1431,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
                      or 128)
+    # Tool repair config per streaming
+    from .toolrepair import create_tool_repair_config
+    _tr_cfg = create_tool_repair_config({
+        "tool_repair": {
+            "enabled": router.policy.tool_repair_enabled,
+            "default_level": router.policy.tool_repair_default_level,
+            "disable_for_google": router.policy.tool_repair_disable_for_google,
+            "max_args_size": router.policy.tool_repair_max_args_size,
+        },
+    })
     t_req = time.monotonic()
     attempts: list[str] = []
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
@@ -1472,7 +1482,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                                   profile=profile or "",
                                                   client_ip=client_ip,
                                                   session=session,
-                                                  attribution=attribution)
+                                                  attribution=attribution,
+                                                  tool_repair_config=_tr_cfg)
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe

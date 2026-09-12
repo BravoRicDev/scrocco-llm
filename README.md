@@ -71,6 +71,12 @@ individual account limits instead of dying on the first 429.
 - **QC + watchdog**: broken-JSON retry with annotated last-response delivery,
   empty-content sanity, passive stream watchdog, length-truncation aware
   (reasoning tokens eating `max_tokens`).
+- **Tool-call repair** (`tool_repair`): normalises the *shape* of tool-call
+  arguments before the client validates them (JSON escaping, stringified
+  objects/arrays, scalar coercion, trailing commas, truncated JSON), in both
+  streaming and non-streaming. Levels `safe`/`aggressive`, per-deployment via
+  the `tool_repair` CSV column, Google/Gemini off by default. Never changes
+  tool names or semantics.
 - **Usage & cost insights**: persistent ledger + `GET /admin/insights`
   (per profile/model/day burn; provider-reported vs estimated costs).
 - **Three-tier auth**: master key / deterministic `sk-<profile>` client keys
@@ -178,6 +184,7 @@ HOW / WHY decisions were made. Read it before changing code.
 | `app/router.py` | adaptive pick, dims ladder, cooldown escalation, chronic parachute, sticky sessions, escalation-winner pin + pre-pin probe, budget guard scoring |
 | `app/forwarder.py` | all upstream HTTP; precise error taxonomy (incl. timeout) → correct rotation; probe with persistent cache |
 | `app/qc.py` | JSON QC / sanity / watchdog; D3 annotation in reasoning_content |
+| `app/toolrepair.py` | tool-call argument repair (safe/aggressive), streaming SSE filter |
 | `app/policy.py` | validated hot-reloadable behaviour knobs (`var/gateway.yaml`) |
 | `app/auth.py` | three-tier bearer auth |
 | `app/csv_store.py` | stable `drow_*` ids, validate-before-swap writes, key masking |
@@ -201,6 +208,8 @@ template. The ones that matter most:
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
+| `tool_repair.enabled` / `tool_repair.default_level` | true / `aggressive` | tool-call argument repair and default level (per-deployment CSV overrides) |
+| `tool_repair.disable_for_google` | true | Google/Gemini deployments opt out unless explicitly enabled in the CSV |
 
 ## Security model
 

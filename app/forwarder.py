@@ -49,6 +49,8 @@ from .router import inject_identity
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, is_gemini_deployment,
                           has_unsigned_tool_calls)
 from .effort import get_effort, get_temperature_config
+from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
+                         create_tool_repair_config, repair_tool_calls)
 
 log = logging.getLogger("nx.forwarder")
 
@@ -658,7 +660,8 @@ class Forwarder:
                               *, profile: str = "",
                               client_ip: str = "",
                               session: str | None = None,
-                              attribution: dict | None = None
+                              attribution: dict | None = None,
+                              tool_repair_config: ToolRepairConfig | None = None,
                               ) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
@@ -769,7 +772,20 @@ class Forwarder:
             finally:
                 await resp.aclose()
 
-        return gen()
+        raw_gen = gen()
+
+        # ---- TOOL REPAIR streaming ----
+        _tr_cfg = tool_repair_config or ToolRepairConfig()
+        _tr_filter = ToolRepairSSEFilter(_tr_cfg, dep)
+        if _tr_filter.level != "off" and payload.get("tools"):
+            async def _repaired_gen() -> AsyncIterator[bytes]:
+                async for chunk in raw_gen:
+                    for repaired in _tr_filter.feed(chunk):
+                        yield repaired
+                for repaired in _tr_filter.finalize():
+                    yield repaired
+            return _repaired_gen()
+        return raw_gen
 
     async def call(self, dep: dict, payload: dict, *,
                    profile: str = "",
@@ -1092,6 +1108,15 @@ class Forwarder:
         """
         qc = router.policy.qc_json          # snapshot per questa chiamata
         san = router.policy.qc_sanity       # sanity generica (vuoto/trivial)
+        tr_cfg = create_tool_repair_config({
+            "tool_repair": {
+                "enabled": router.policy.tool_repair_enabled,
+                "default_level": router.policy.tool_repair_default_level,
+                "disable_for_google": router.policy.tool_repair_disable_for_google,
+                "max_args_size": router.policy.tool_repair_max_args_size,
+                "annotate_reasoning": router.policy.tool_repair_annotate_reasoning,
+            },
+        })
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
         last_err: UpstreamError | None = None
@@ -1151,6 +1176,11 @@ class Forwarder:
                     router.clear_cooldown(cur)
                 metrics.observe_latency_ms(cur, (time.monotonic() - t0) * 1000)
                 metrics.inc("nx_upstream_calls_total", (cur, "ok"))
+
+                # ---- TOOL REPAIR (prima del QC) ----
+                tr_result = repair_tool_calls(data, payload, dep, tr_cfg)
+                if tr_result["repaired"]:
+                    metrics.inc("nx_tool_repair_total", (cur, "ok"))
 
                 # ---- QC del contenuto (solo percorso non-streaming) ----
                 if collect_qc_failures and (qc.enabled or san.enabled):

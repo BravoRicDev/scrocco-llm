@@ -43,6 +43,7 @@ PRIORITY_HEADER = "priority"
 CAPS_HEADER = "caps"
 EFFORT_CAPABLE_HEADER = "effort_capable"
 INTELLIGENCE_HEADER = "intelligence_score"
+TOOL_REPAIR_HEADER = "tool_repair"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -210,6 +211,11 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         intelligence = 5
     intelligence = max(1, min(10, intelligence))
 
+    # tool_repair: livello di riparazione tool-call (vuoto=aggressive, safe, off).
+    raw_tr = (row.get(TOOL_REPAIR_HEADER) or "").strip().lower()
+    if raw_tr not in ("", "off", "safe", "aggressive"):
+        raw_tr = ""
+
     return {
         "modello": modello,
         "provider": provider,
@@ -223,6 +229,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "caps": parse_caps(row.get(CAPS_HEADER)),
         "effort_capable": effort_capable,
         "intelligence": intelligence,
+        "tool_repair": raw_tr,
     }
 
 
@@ -462,6 +469,7 @@ class GatewayConfig:
                     "provider": meta.get("provider") or "",
                     "effort_capable": bool(meta.get("effort_capable")),
                     "intelligence": int(meta.get("intelligence") or 5),
+                    "tool_repair": meta.get("tool_repair", ""),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap

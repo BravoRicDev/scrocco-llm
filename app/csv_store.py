@@ -26,7 +26,8 @@ from pathlib import Path
 
 from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      DATA_HEADER, CONTEXT_HEADER, MAX_INPUT_HEADER,
-                     PRIORITY_HEADER, CAPS_HEADER, GatewayConfig)
+                     PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER,
+                     GatewayConfig)
 
 # campi gestiti dall'API (il resto delle colonne passa trasparente)
 PAYLOAD_FIELDS = {
@@ -37,6 +38,7 @@ PAYLOAD_FIELDS = {
     "max_input": MAX_INPUT_HEADER,
     "priority": PRIORITY_HEADER,
     "caps": CAPS_HEADER,
+    "tool_repair": TOOL_REPAIR_HEADER,
 }
 
 # token ammessi nella colonna caps (speculare a ROUTING_CAPS + text)
@@ -111,7 +113,7 @@ def row_id(row: dict, endpoint: str) -> str:
                        (endpoint or "").strip(),
                        (row.get("chiave") or "").strip()))
     known = {MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, CONTEXT_HEADER,
-             MAX_INPUT_HEADER, PRIORITY_HEADER, CAPS_HEADER} | ENDPOINT_HEADERS
+             MAX_INPUT_HEADER, PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER} | ENDPOINT_HEADERS
     # Stabilita' su colonne: includi SOLO i valori (non i nomi), ordinati,
     # in modo che aggiungere una colonna metadata non cambi l'ID.
     extra_vals = sorted(v.strip() for v in row.values()

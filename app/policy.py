@@ -192,6 +192,14 @@ class Policy:
         default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
     effort_intel_weight: float = 10.0
 
+    # TOOL_REPAIR: riparazione argomenti tool-call upstream.
+    # Default aggressive su tutti i deployment; Google/Gemini off di default.
+    tool_repair_enabled: bool = True
+    tool_repair_default_level: str = "aggressive"
+    tool_repair_disable_for_google: bool = True
+    tool_repair_max_args_size: int = 100000
+    tool_repair_annotate_reasoning: bool = False
+
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
     # i cache-hit (prezzo cache << prezzo input pieno) e distribuisce il
@@ -637,6 +645,31 @@ class Policy:
                         f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
                 clean[lk] = float(v)
             p.effort_temperature_overrides = clean
+
+        # --- TOOL_REPAIR ---
+        _tr = raw.get("tool_repair")
+        if _tr is not None:
+            if not isinstance(_tr, dict):
+                raise ValueError("tool_repair deve essere una mappa")
+            _tr_en = _tr.get("enabled")
+            if _tr_en is not None:
+                p.tool_repair_enabled = _coerce_bool(_tr_en, "tool_repair.enabled")
+            _tr_lvl = _tr.get("default_level")
+            if _tr_lvl is not None:
+                if str(_tr_lvl).strip().lower() not in ("off", "safe", "aggressive"):
+                    raise ValueError("tool_repair.default_level deve essere off|safe|aggressive")
+                p.tool_repair_default_level = str(_tr_lvl).strip().lower()
+            _tr_g = _tr.get("disable_for_google")
+            if _tr_g is not None:
+                p.tool_repair_disable_for_google = _coerce_bool(_tr_g, "tool_repair.disable_for_google")
+            _tr_sz = _tr.get("max_args_size")
+            if _tr_sz is not None:
+                if isinstance(_tr_sz, bool) or not isinstance(_tr_sz, (int, float)):
+                    raise ValueError("tool_repair.max_args_size deve essere un intero")
+                p.tool_repair_max_args_size = int(_tr_sz)
+            _tr_ar = _tr.get("annotate_reasoning")
+            if _tr_ar is not None:
+                p.tool_repair_annotate_reasoning = _coerce_bool(_tr_ar, "tool_repair.annotate_reasoning")
 
         qj = raw.get("qc_json")
         if qj is not None:

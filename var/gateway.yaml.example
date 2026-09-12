@@ -258,6 +258,22 @@ qc_sanity:
   min_chars: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TOOL REPAIR — normalizza la FORMA degli argomenti dei tool-call
+# ─────────────────────────────────────────────────────────────────────────────
+tool_repair:
+  # Interruttore globale.
+  enabled: true
+  # Livello di default quando la colonna CSV `tool_repair` e' vuota.
+  #   aggressive | safe | off
+  default_level: aggressive
+  # Google/Gemini gestiscono i tool a modo loro: off salvo override in CSV.
+  disable_for_google: true
+  # Limite dimensione (bytes) degli argomenti su cui tentare la riparazione.
+  max_args_size: 100000
+  # Annota il reasoning (D3) quando una risposta viene riparata.
+  annotate_reasoning: false
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ALIAS — mappatura nomi corti → modelli/gruppi reali (per comodità client)
 # ─────────────────────────────────────────────────────────────────────────────
 aliases:
