@@ -1934,6 +1934,66 @@ async def admin_insights_leaderboard(request: Request, window: str = "7d",
     return {"window_days": days, "count": len(out_rows), "rows": out_rows}
 
 
+# --------------------------------------------------- deployments/stats
+# Punteggi PERSISTITI per deployment (var/adaptive_stats.json): successi e
+# fallimenti cumulativi, latenza EMA, ultimo motivo, timestamp. Sopravvivono
+# al restart perche' ricaricati da router.load_stats() allo startup.
+@admin_api.get("/deployments/stats")
+async def admin_deployments_stats(request: Request, profile: str | None = None):
+    """Punteggi persistiti per provider/modello/chiave: ok/fail, latenza, reason."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    now = time.time()
+    cfg = gw.config
+    khd_obj = getattr(gw, "KEYHEALTH", None)
+    khd = khd_obj.data if khd_obj is not None else {}
+    rows = []
+    for unique, s in gw.router._stats.items():
+        dep = cfg.deployment_by_unique(unique) or {}
+        group = dep.get("group") or unique.rsplit("__", 2)[0]
+        model = dep.get("model") or ""
+        prof = None
+        if group.startswith(cfg.proxy_prefix):
+            rest = group[len(cfg.proxy_prefix):]
+            for p in cfg.profiles:
+                if rest.startswith(p + "-"):
+                    prof = p
+                    break
+        if profile and prof != profile:
+            continue
+        if "/" in model:
+            provider = model.split("/", 1)[0]
+        elif dep.get("tier"):
+            provider = dep["tier"]
+        else:
+            provider = ""
+        cool = gw.router._cooldown.get(unique, 0.0)
+        rows.append({
+            "dep": unique,
+            "profile": prof,
+            "group": group,
+            "provider": provider,
+            "model": model,
+            "ok": s.ok_count,
+            "fail": s.fail_count,
+            "calls": s.ok_count + s.fail_count,
+            "success_ema": s.success_ema,
+            "fail_streak": s.fail_streak,
+            "fail_count_24h": s.fail_count_24h,
+            "ema_latency_ms": s.ema_latency_ms,
+            "last_reason": s.last_reason,
+            "last_used": s.last_used or None,
+            "last_success_ts": s.last_success_ts or None,
+            "last_fail_ts": s.last_fail_ts or None,
+            "health": (khd.get(unique) or {}).get("state") or "healthy",
+            "cooldown_remaining_s": max(0, int(cool - now)) if cool else 0,
+        })
+    rows.sort(key=lambda r: r["fail"], reverse=True)
+    return {"count": len(rows), "rows": rows}
+
+
 # ------------------------------------------------------------------ playground
 # Simulatore di chat READ-ONLY: rigira UNA richiesta reale (canonicalize ->
 # resolve_group_for_request -> initial_pick -> loop fallback_next) e riporta il

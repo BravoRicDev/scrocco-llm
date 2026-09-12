@@ -73,6 +73,11 @@ class DepStats:
     # --- fail count 24h: cooldown lineare basato su fallimenti giornalieri ---
     fail_count_24h: int = 0
     fail_day_key: str = ""            # "YYYY-MM-DD" del giorno corrente
+    # --- contatori cumulativi + timestamp (persistiti in adaptive_stats) ---
+    ok_count: int = 0                 # successi cumulativi (mai azzerati)
+    fail_count: int = 0               # fallimenti cumulativi (mai azzerati)
+    last_success_ts: float = 0.0      # timestamp ultimo successo
+    last_fail_ts: float = 0.0         # timestamp ultimo fallimento
 
 HOT_WORDS: dict[str, str] = {
     r"pensaci\s+bene": "max",
@@ -447,6 +452,9 @@ class Router:
             s.fail_count_24h = 0
             s.fail_day_key = today
         s.fail_count_24h += 1
+        # contatore cumulativo + timestamp ultimo fallimento (persistiti)
+        s.fail_count += 1
+        s.last_fail_ts = time.time()
         # --- budget guard: apprendimento del limite dal 429 --------------
         bg_cfg = pol.budget_guard or {}
         if reason == "http_429" and bg_cfg.get("enabled"):
@@ -559,6 +567,8 @@ class Router:
             s.fail_count_24h = 0
             s.fail_day_key = today
         s.fail_count_24h += 1
+        s.fail_count += 1
+        s.last_fail_ts = now
         s.fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)
@@ -1018,6 +1028,9 @@ class Router:
         s.fail_streak = 0
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = min(1.0, 0.8 * prev + 0.2)
+        # contatore cumulativo + timestamp ultimo successo (persistiti)
+        s.ok_count += 1
+        s.last_success_ts = time.time()
         # [Blocco 1] Registra successo per reputation scoring
         self.record_success(unique, latency_ms)
 
@@ -1035,7 +1048,12 @@ class Router:
                           "fail_streak": s.fail_streak,
                           "success_ema": s.success_ema,
                           "fail_count_24h": s.fail_count_24h,
-                          "fail_day_key": s.fail_day_key}
+                          "fail_day_key": s.fail_day_key,
+                          "last_reason": s.last_reason,
+                          "ok_count": s.ok_count,
+                          "fail_count": s.fail_count,
+                          "last_success_ts": s.last_success_ts,
+                          "last_fail_ts": s.last_fail_ts}
                       for u, s in self._stats.items()},
             "cooldown": dict(self._cooldown),
             "cap_strikes": [{"key": k, **v} for k, v in
@@ -1075,6 +1093,17 @@ class Router:
                 try:
                     s.fail_count_24h = max(0, int(st.get("fail_count_24h") or 0))
                     s.fail_day_key = str(st.get("fail_day_key") or "")
+                except (TypeError, ValueError):
+                    pass
+                s.last_reason = st.get("last_reason") or None
+                try:
+                    s.ok_count = max(0, int(st.get("ok_count") or 0))
+                    s.fail_count = max(0, int(st.get("fail_count") or 0))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    s.last_success_ts = float(st.get("last_success_ts") or 0)
+                    s.last_fail_ts = float(st.get("last_fail_ts") or 0)
                 except (TypeError, ValueError):
                     pass
             for u, exp in (data.get("cooldown") or {}).items():
