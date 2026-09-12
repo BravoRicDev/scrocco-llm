@@ -231,8 +231,11 @@ template. The ones that matter most:
 | `cache_aware.prefer_last_success` | true | on failover prefer the session's last-success deployment (free buckets only) |
 | `cache_aware.holder_ttl_sec` | 3600 | how long the per-session cache holder is remembered |
 | `cache_aware.skip_probe_when_holder` | true | skip the escalation-pin probe when the pinned winner is the holder |
-| `cache_aware.context_truncation.enabled` | true | stub old tool outputs when the context does not fit |
+| `cache_aware.context_truncation.enabled` | true | stub old tool outputs (overflow / absolute / cache-cold switch triggers) |
 | `cache_aware.context_truncation.keep_turns` | 4 | number of most recent user turns kept intact |
+| `cache_aware.context_truncation.min_ctx_tokens` | 50000 | absolute context threshold that also triggers trimming |
+| `cache_aware.context_truncation.on_deployment_switch` | true | trigger trimming when the cache is cold (no holder / different deployment) |
+| `cache_aware.context_truncation.switch_min_tokens` | 8000 | minimum context to apply the deployment-switch trigger |
 
 ## Security model
 

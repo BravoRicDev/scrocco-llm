@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from app.ctxcompact import (CtxCompactConfig, compact_tool_outputs,
                             create_ctxcompact_config,
-                            ctxcompact_config_from_policy)
+                            ctxcompact_config_from_policy, should_compact)
 
 
 def _tool(content):
@@ -36,6 +36,9 @@ class TestConfig:
         assert c.keep_turns == 4
         assert c.min_saved_tokens == 500
         assert "{n}" in c.stub_text
+        assert c.min_ctx_tokens == 50000
+        assert c.on_deployment_switch is True
+        assert c.switch_min_tokens == 8000
 
     def test_from_dict(self):
         c = create_ctxcompact_config({"cache_aware": {"context_truncation": {
@@ -47,6 +50,14 @@ class TestConfig:
         assert c.min_saved_tokens == 10
         assert c.stub_text == "[cut {n}]"
 
+    def test_from_dict_triggers(self):
+        c = create_ctxcompact_config({"cache_aware": {"context_truncation": {
+            "min_ctx_tokens": 1234, "on_deployment_switch": False,
+            "switch_min_tokens": 99}}})
+        assert c.min_ctx_tokens == 1234
+        assert c.on_deployment_switch is False
+        assert c.switch_min_tokens == 99
+
     def test_from_policy(self):
         pol = SimpleNamespace(cache_ctx_truncation_enabled=True,
                               cache_ctx_keep_turns=2,
@@ -57,6 +68,65 @@ class TestConfig:
         assert c.keep_turns == 2
         assert c.max_tool_output_chars == 100
         assert c.stub_text == "[s {n}]"
+        # default dei nuovi inneschi
+        assert c.min_ctx_tokens == 50000
+        assert c.on_deployment_switch is True
+        assert c.switch_min_tokens == 8000
+
+
+class TestShouldCompact:
+    def test_disabled(self):
+        d = should_compact(CtxCompactConfig(enabled=False), 999999)
+        assert d["compact"] is False
+
+    def test_overflow(self):
+        d = should_compact(CtxCompactConfig(), 150000, max_in=100000)
+        assert d["compact"] is True
+        assert "overflow" in d["reason"]
+
+    def test_abs_threshold(self):
+        d = should_compact(CtxCompactConfig(), 60000, max_in=1000000)
+        assert d["compact"] is True
+        assert "abs" in d["reason"]
+
+    def test_below_all_thresholds(self):
+        d = should_compact(CtxCompactConfig(), 5000, max_in=1000000)
+        assert d["compact"] is False
+
+    def test_switch_cold(self):
+        d = should_compact(CtxCompactConfig(), 10000, max_in=1000000,
+                           holder=None, dep_unique="d1")
+        assert d["compact"] is True
+        assert "switch" in d["reason"]
+        assert d["cold"] is True
+
+    def test_switch_holder_differs(self):
+        d = should_compact(CtxCompactConfig(), 10000, max_in=1000000,
+                           holder="other", dep_unique="d1")
+        assert d["compact"] is True and "switch" in d["reason"]
+
+    def test_no_switch_when_hot(self):
+        d = should_compact(CtxCompactConfig(), 10000, max_in=1000000,
+                           holder="d1", dep_unique="d1")
+        assert d["compact"] is False
+        assert d["cold"] is False
+
+    def test_switch_below_min(self):
+        d = should_compact(CtxCompactConfig(), 4000, max_in=1000000,
+                           holder=None, dep_unique="d1")
+        assert d["compact"] is False
+
+    def test_switch_disabled(self):
+        cfg = CtxCompactConfig(on_deployment_switch=False)
+        d = should_compact(cfg, 10000, max_in=1000000, holder=None,
+                           dep_unique="d1")
+        assert d["compact"] is False
+
+    def test_sticky(self):
+        d = should_compact(CtxCompactConfig(), 1000, max_in=1000000,
+                           session_compact=True)
+        assert d["compact"] is True
+        assert "sticky" in d["reason"]
 
 
 class TestCompact:

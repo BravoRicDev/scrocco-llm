@@ -1059,27 +1059,29 @@ async def chat_completions(request: Request):
     # ---- cache-aware: detentore sessione + troncamento contesto ----
     from .router import set_current_session
     from .ctxcompact import (ctxcompact_config_from_policy,
-                             compact_tool_outputs)
+                             compact_tool_outputs, should_compact)
     set_current_session(session_id)
     _cc = ctxcompact_config_from_policy(router.policy)
     _holder = router.session_holder(session_id)
     _max_in = int(dep.get("max_input_tokens") or 0)
-    _overflow = _max_in > 0 and ctx_est > _max_in
-    if _overflow:
+    _dec = should_compact(
+        _cc, ctx_est, _max_in, _holder, dep.get("unique"),
+        bool(session_id and router.is_session_compact(session_id)))
+    _do_compact = _dec["compact"]
+    if _do_compact and session_id:
         router.mark_session_compact(session_id)
-    _do_compact = bool(_cc.enabled and (
-        _overflow or (session_id and router.is_session_compact(session_id))))
     if _do_compact:
         _cmsgs, _crep = compact_tool_outputs(payload.get("messages"), _cc)
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
             metrics.inc("nx_ctxcompact_total", ("stubbed",))
-            log.info("[ctxcompact] ses=%s stubbed=%d saved≈%dtok "
-                     "(overflow=%s)", session_id, _crep["stubbed"],
-                     _crep["saved_tokens_est"], _overflow)
-    log.info("[cache] ses=%s holder=%s compact=%s overflow=%s "
+            log.info("[ctxcompact] ses=%s stubbed=%d saved≈%dtok reason=%s",
+                     session_id, _crep["stubbed"],
+                     _crep["saved_tokens_est"], _dec["reason"])
+    log.info("[cache] ses=%s holder=%s compact=%s cold=%s reason=%s "
              "ctx≈%d max_in=%d", session_id, _holder or "-",
-             _do_compact, _overflow, ctx_est, _max_in)
+             _do_compact, _dec["cold"], _dec["reason"] or "-",
+             ctx_est, _max_in)
     if stream and _sm.enabled:
         _ap = apply_sampling_defaults(payload, dep, _sm)
         if _ap:

@@ -29,12 +29,18 @@ class CtxCompactConfig:
     def __init__(self, enabled: bool = True, keep_turns: int = 4,
                  max_tool_output_chars: int = 2000,
                  min_saved_tokens: int = 500,
-                 stub_text: str = DEFAULT_STUB):
+                 stub_text: str = DEFAULT_STUB,
+                 min_ctx_tokens: int = 50000,
+                 on_deployment_switch: bool = True,
+                 switch_min_tokens: int = 8000):
         self.enabled = bool(enabled)
         self.keep_turns = int(keep_turns)
         self.max_tool_output_chars = int(max_tool_output_chars)
         self.min_saved_tokens = int(min_saved_tokens)
         self.stub_text = stub_text or DEFAULT_STUB
+        self.min_ctx_tokens = int(min_ctx_tokens)
+        self.on_deployment_switch = bool(on_deployment_switch)
+        self.switch_min_tokens = int(switch_min_tokens)
 
 
 def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfig:
@@ -54,9 +60,13 @@ def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfi
         cfg.enabled = bool(ct["enabled"])
     for src, attr in (("keep_turns", "keep_turns"),
                       ("max_tool_output_chars", "max_tool_output_chars"),
-                      ("min_saved_tokens", "min_saved_tokens")):
+                      ("min_saved_tokens", "min_saved_tokens"),
+                      ("min_ctx_tokens", "min_ctx_tokens"),
+                      ("switch_min_tokens", "switch_min_tokens")):
         if ct.get(src) is not None:
             setattr(cfg, attr, int(ct[src]))
+    if "on_deployment_switch" in ct:
+        cfg.on_deployment_switch = bool(ct["on_deployment_switch"])
     if ct.get("stub_text"):
         cfg.stub_text = str(ct["stub_text"])
     return cfg
@@ -75,7 +85,46 @@ def ctxcompact_config_from_policy(policy) -> CtxCompactConfig:
             getattr(policy, "cache_ctx_min_saved_tokens", 500) or 500),
         stub_text=str(getattr(policy, "cache_ctx_stub_text", DEFAULT_STUB)
                       or DEFAULT_STUB),
+        min_ctx_tokens=int(
+            getattr(policy, "cache_ctx_min_ctx_tokens", 50000) or 0),
+        on_deployment_switch=bool(
+            getattr(policy, "cache_ctx_on_deployment_switch", True)),
+        switch_min_tokens=int(
+            getattr(policy, "cache_ctx_switch_min_tokens", 8000) or 0),
     )
+
+
+def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
+                   holder: str | None = None, dep_unique: str | None = None,
+                   session_compact: bool = False) -> dict:
+    """Decide se troncare e perche'. Ritorna un dict:
+    {compact, reason (str), cold (bool), overflow (bool)}.
+
+    Trigger (poi sticky a livello di sessione, gestito dal chiamante):
+      - overflow: ctx_est > max_input del deployment scelto (max_in>0);
+      - abs:      ctx_est >= min_ctx_tokens (soglia assoluta);
+      - switch:   cache FREDDA (nessun detentore o detentore != deployment)
+                  e ctx_est >= switch_min_tokens;
+      - sticky:   la sessione era gia' compatta.
+    """
+    if not cfg.enabled:
+        return {"compact": False, "reason": "", "cold": False,
+                "overflow": False}
+    cold = (holder is None) or (dep_unique is not None
+                                and holder != dep_unique)
+    overflow = max_in > 0 and ctx_est > max_in
+    reasons = []
+    if overflow:
+        reasons.append("overflow")
+    if cfg.min_ctx_tokens > 0 and ctx_est >= cfg.min_ctx_tokens:
+        reasons.append("abs")
+    if (cfg.on_deployment_switch and cold
+            and ctx_est >= cfg.switch_min_tokens):
+        reasons.append("switch")
+    if session_compact:
+        reasons.append("sticky")
+    return {"compact": bool(reasons), "reason": ",".join(reasons),
+            "cold": cold, "overflow": overflow}
 
 
 def _content_len(content) -> int:

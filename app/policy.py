@@ -259,6 +259,9 @@ class Policy:
     cache_ctx_max_tool_output_chars: int = 2000
     cache_ctx_min_saved_tokens: int = 500
     cache_ctx_stub_text: str = "[tool output omesso: {n} caratteri]"
+    cache_ctx_min_ctx_tokens: int = 50000
+    cache_ctx_on_deployment_switch: bool = True
+    cache_ctx_switch_min_tokens: int = 8000
 
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
@@ -926,12 +929,18 @@ class Policy:
                         ct["enabled"], "cache_aware.context_truncation.enabled")
                 for _k, _attr in (("keep_turns", "cache_ctx_keep_turns"),
                                   ("max_tool_output_chars", "cache_ctx_max_tool_output_chars"),
-                                  ("min_saved_tokens", "cache_ctx_min_saved_tokens")):
+                                  ("min_saved_tokens", "cache_ctx_min_saved_tokens"),
+                                  ("min_ctx_tokens", "cache_ctx_min_ctx_tokens"),
+                                  ("switch_min_tokens", "cache_ctx_switch_min_tokens")):
                     _v = ct.get(_k)
                     if _v is not None:
                         if isinstance(_v, bool) or not isinstance(_v, (int, float)):
                             raise ValueError(f"cache_aware.context_truncation.{_k} deve essere un intero")
                         setattr(p, _attr, int(_v))
+                if "on_deployment_switch" in ct:
+                    p.cache_ctx_on_deployment_switch = _coerce_bool(
+                        ct["on_deployment_switch"],
+                        "cache_aware.context_truncation.on_deployment_switch")
                 if ct.get("stub_text"):
                     p.cache_ctx_stub_text = str(ct["stub_text"])
         qj = raw.get("qc_json")
