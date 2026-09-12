@@ -380,3 +380,18 @@ pricing:
   groq/*:
     prompt_per_1m: 0.05       # $ per milione di token di input
     completion_per_1m: 0.1    # $ per milione di token di output
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
+# ─────────────────────────────────────────────────────────────────────────────
+cache_aware:
+  enabled: true
+  prefer_last_success: true
+  holder_ttl_sec: 3600
+  skip_probe_when_holder: true
+  context_truncation:
+    enabled: true
+    keep_turns: 4
+    max_tool_output_chars: 2000
+    min_saved_tokens: 500
+    stub_text: "[tool output omesso: {n} caratteri]"

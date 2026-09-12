@@ -249,6 +249,16 @@ class Policy:
     text_toolcall_max_bytes: int = 200000
     text_toolcall_hold_until_close: bool = True
     text_toolcall_fallback_to_escalation: bool = True
+    # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
+    cache_aware_enabled: bool = True
+    cache_prefer_last_success: bool = True
+    cache_holder_ttl_sec: int = 3600
+    cache_skip_probe_when_holder: bool = True
+    cache_ctx_truncation_enabled: bool = True
+    cache_ctx_keep_turns: int = 4
+    cache_ctx_max_tool_output_chars: int = 2000
+    cache_ctx_min_saved_tokens: int = 500
+    cache_ctx_stub_text: str = "[tool output omesso: {n} caratteri]"
 
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
@@ -893,6 +903,37 @@ class Policy:
                     _tt["fallback_to_escalation"],
                     "text_toolcall.fallback_to_escalation")
 
+        ca = raw.get("cache_aware")
+        if ca is not None:
+            if not isinstance(ca, dict):
+                raise ValueError("cache_aware deve essere una mappa")
+            if "enabled" in ca:
+                p.cache_aware_enabled = _coerce_bool(ca["enabled"], "cache_aware.enabled")
+            if "prefer_last_success" in ca:
+                p.cache_prefer_last_success = _coerce_bool(
+                    ca["prefer_last_success"], "cache_aware.prefer_last_success")
+            if ca.get("holder_ttl_sec") is not None:
+                p.cache_holder_ttl_sec = int(ca["holder_ttl_sec"])
+            if "skip_probe_when_holder" in ca:
+                p.cache_skip_probe_when_holder = _coerce_bool(
+                    ca["skip_probe_when_holder"], "cache_aware.skip_probe_when_holder")
+            ct = ca.get("context_truncation")
+            if ct is not None:
+                if not isinstance(ct, dict):
+                    raise ValueError("cache_aware.context_truncation deve essere una mappa")
+                if "enabled" in ct:
+                    p.cache_ctx_truncation_enabled = _coerce_bool(
+                        ct["enabled"], "cache_aware.context_truncation.enabled")
+                for _k, _attr in (("keep_turns", "cache_ctx_keep_turns"),
+                                  ("max_tool_output_chars", "cache_ctx_max_tool_output_chars"),
+                                  ("min_saved_tokens", "cache_ctx_min_saved_tokens")):
+                    _v = ct.get(_k)
+                    if _v is not None:
+                        if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                            raise ValueError(f"cache_aware.context_truncation.{_k} deve essere un intero")
+                        setattr(p, _attr, int(_v))
+                if ct.get("stub_text"):
+                    p.cache_ctx_stub_text = str(ct["stub_text"])
         qj = raw.get("qc_json")
         if qj is not None:
             if not isinstance(qj, dict):

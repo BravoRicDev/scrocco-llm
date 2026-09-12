@@ -1497,6 +1497,7 @@ class Forwarder:
                 # per le prossime richieste su QUEL bucket richiesto).
                 log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", cur, len(tried), time.monotonic() - _t0)
                 router.record_escalation_win(requested_group, dep)
+                router.note_session_success(ses, dep["unique"])
                 return (data, dep, qc_failed) if collect_qc_failures \
                     else (data, dep)
             except UpstreamError as err:

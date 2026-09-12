@@ -800,6 +800,19 @@ def _emit_summary(**f) -> None:
         pass
 
 
+def _cached_tokens_of(u: dict) -> int | None:
+    """Estrae i token di prompt serviti dalla cache (formati provider)."""
+    if not isinstance(u, dict):
+        return None
+    ptd = u.get("prompt_tokens_details")
+    if isinstance(ptd, dict) and ptd.get("cached_tokens") is not None:
+        return int(ptd["cached_tokens"])
+    for k in ("cached_tokens", "prompt_cache_hit_tokens"):
+        if u.get(k) is not None:
+            return int(u[k])
+    return None
+
+
 def _usage_of(data) -> dict | None:
     """Estrae usage/costo da una risposta upstream OpenAI-style (se presente)."""
     if not isinstance(data, dict):
@@ -809,6 +822,11 @@ def _usage_of(data) -> dict | None:
         return None
     out = {k: u.get(k) for k in ("prompt_tokens", "completion_tokens",
                                  "total_tokens") if u.get(k) is not None}
+    _cached = _cached_tokens_of(u)
+    if _cached is not None:
+        out["cached_tokens"] = _cached
+        if _cached > 0:
+            metrics.inc("nx_cache_hit_requests_total", ())
     cost = u.get("cost")
     if isinstance(cost, dict):
         out["cost"] = cost.get("total_cost")
@@ -1038,6 +1056,30 @@ async def chat_completions(request: Request):
                      {k: _nr.get(k) for k in (
                          "shown_orphan_tool", "dangling_tool_calls",
                          "empty_assistant", "dup_system")})
+    # ---- cache-aware: detentore sessione + troncamento contesto ----
+    from .router import set_current_session
+    from .ctxcompact import (ctxcompact_config_from_policy,
+                             compact_tool_outputs)
+    set_current_session(session_id)
+    _cc = ctxcompact_config_from_policy(router.policy)
+    _holder = router.session_holder(session_id)
+    _max_in = int(dep.get("max_input_tokens") or 0)
+    _overflow = _max_in > 0 and ctx_est > _max_in
+    if _overflow:
+        router.mark_session_compact(session_id)
+    _do_compact = bool(_cc.enabled and (
+        _overflow or (session_id and router.is_session_compact(session_id))))
+    if _do_compact:
+        _cmsgs, _crep = compact_tool_outputs(payload.get("messages"), _cc)
+        if _crep.get("changed"):
+            payload["messages"] = _cmsgs
+            metrics.inc("nx_ctxcompact_total", ("stubbed",))
+            log.info("[ctxcompact] ses=%s stubbed=%d saved≈%dtok "
+                     "(overflow=%s)", session_id, _crep["stubbed"],
+                     _crep["saved_tokens_est"], _overflow)
+    log.info("[cache] ses=%s holder=%s compact=%s overflow=%s "
+             "ctx≈%d max_in=%d", session_id, _holder or "-",
+             _do_compact, _overflow, ctx_est, _max_in)
     if stream and _sm.enabled:
         _ap = apply_sampling_defaults(payload, dep, _sm)
         if _ap:
@@ -1614,6 +1656,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # salita (gruppo != richiesto), ricorda il winner come
                 # scorciatoia per le prossime richieste di QUEL bucket.
                 router.record_escalation_win(requested_group, dep)
+                router.note_session_success(ses, dep["unique"])
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)
@@ -1934,6 +1977,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 k: u[k] for k in
                                 ("prompt_tokens", "completion_tokens",
                                  "total_tokens") if u.get(k) is not None}
+                            _cached = _cached_tokens_of(u)
+                            if _cached is not None:
+                                usage_final["cached_tokens"] = _cached
+                                if _cached > 0:
+                                    metrics.inc("nx_cache_hit_requests_total", ())
                             c = u.get("cost")
                             if isinstance(c, dict):
                                 usage_final["cost"] = c.get("total_cost")

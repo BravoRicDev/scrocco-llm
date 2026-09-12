@@ -87,6 +87,12 @@ individual account limits instead of dying on the first 429.
   `<bash`, `antml:` ...), the deployment is marked failed and the gateway
   escalates straight to `-go`/`-fallback` (detection disabled there to avoid
   loops); on exhaustion a retryable 503 is returned. No LLM repair call.
+- **Cache-aware routing & context trimming** (`cache_aware`): remembers
+  the last deployment that served a session successfully and prefers it
+  on failover (free buckets only, cache-preserving). Context is compacted
+  (old tool outputs stubbed) only when the request would not fit the
+  chosen deployment, and the session stays compacted so the provider
+  prefix remains cacheable.
 - **Usage & cost insights**: persistent ledger + `GET /admin/insights`
   (per profile/model/day burn; provider-reported vs estimated costs).
 - **Three-tier auth**: master key / deterministic `sk-<profile>` client keys
@@ -222,6 +228,11 @@ template. The ones that matter most:
 | `tool_repair.disable_for_google` | true | Google/Gemini deployments opt out unless explicitly enabled in the CSV |
 | `tool_repair.fake_call.enabled` | true | detect tool-calls rendered as text and escalate directly to -go/-fallback |
 | `tool_repair.fake_call.max_escalations` | 2 | max direct escalations before a retryable 503 |
+| `cache_aware.prefer_last_success` | true | on failover prefer the session's last-success deployment (free buckets only) |
+| `cache_aware.holder_ttl_sec` | 3600 | how long the per-session cache holder is remembered |
+| `cache_aware.skip_probe_when_holder` | true | skip the escalation-pin probe when the pinned winner is the holder |
+| `cache_aware.context_truncation.enabled` | true | stub old tool outputs when the context does not fit |
+| `cache_aware.context_truncation.keep_turns` | 4 | number of most recent user turns kept intact |
 
 ## Security model
 

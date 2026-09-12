@@ -24,6 +24,7 @@ multimodal last resort for pure text; explicit floors escalate upward.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import math
@@ -196,6 +197,19 @@ def inject_identity(data: dict, dep: dict, router=None) -> None:
              real, prov, extra)
 
 
+_SESSION_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "scrocco_session", default=None)
+
+
+def set_current_session(session_id: str | None) -> None:
+    """Imposta la sessione corrente per il task (async-safe)."""
+    _SESSION_CTX.set(session_id)
+
+
+def current_session() -> str | None:
+    return _SESSION_CTX.get()
+
+
 class Router:
     def __init__(self, config: GatewayConfig, policy: Policy | None = None):
         self.config = config
@@ -222,6 +236,10 @@ class Router:
         # STICKY per-deployment (free buckets): session_id -> (unique, ts)
         # mantiene la stessa key entro una conversazione (cache calda).
         self._sticky_dep: dict[str, tuple[str, float]] = {}
+        # ULTIMO SUCCESSO per-sessione (detentore cache): session -> (unique, ts)
+        self._session_last_ok: dict[str, tuple[str, float]] = {}
+        # Modalita' COMPATTA sticky per-sessione (troncamento cache-aware)
+        self._session_compact: dict[str, float] = {}
         # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
         # -> (unique_che_ha_servito_in_salita, ts_ultima_salita_buona).
         # Scoreria del fallback: quando il bucket richiesto fallisce si salta
@@ -293,6 +311,98 @@ class Router:
 
     def dep_sticky_release(self, session_id: str) -> None:
         self._sticky_dep.pop(session_id, None)
+
+    # --------------------------------------------- session cache holder
+    def _cache_ok(self) -> dict:
+        d = getattr(self, "_session_last_ok", None)
+        if d is None:
+            d = {}
+            self._session_last_ok = d
+        return d
+
+    def note_session_success(self, session_id: str | None,
+                             unique: str | None) -> None:
+        """Ricorda l'ultimo deployment che ha servito con SUCCESSO la
+        sessione (detentore cache). In-memory."""
+        if not session_id or not unique:
+            return
+        if not getattr(self.policy, "cache_aware_enabled", True):
+            return
+        d = self._cache_ok()
+        d[session_id] = (unique, time.time())
+        if len(d) > 4096:
+            _ttl = float(getattr(self.policy, "cache_holder_ttl_sec",
+                                 3600) or 3600)
+            _now = time.time()
+            for k, (_u, ts) in list(d.items()):
+                if _now - ts > _ttl:
+                    d.pop(k, None)
+
+    def session_holder(self, session_id: str | None = None) -> str | None:
+        sid = session_id or current_session()
+        if not sid:
+            return None
+        d = self._cache_ok()
+        ent = d.get(sid)
+        if not ent:
+            return None
+        unique, ts = ent
+        ttl = float(getattr(self.policy, "cache_holder_ttl_sec", 3600) or 3600)
+        if time.time() - ts > ttl:
+            d.pop(sid, None)
+            return None
+        return unique
+
+    def cache_holder(self, session_id: str | None = None,
+                     need: frozenset[str] | None = None,
+                     ctx: int | None = None) -> dict | None:
+        """Detentore cache per la sessione, se ancora valido."""
+        if not getattr(self.policy, "cache_aware_enabled", True):
+            return None
+        unique = self.session_holder(session_id)
+        if not unique:
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return None
+        if self.is_cooled_down(unique) or self.is_retired(unique):
+            return None
+        if not self._cap_fits(dep, ctx):
+            return None
+        if need and not self._dep_supports(dep, need):
+            return None
+        return dep
+
+    def _free_group(self, group_name: str) -> bool:
+        """True se il gruppo NON e' un bucket rinnovo/pagato."""
+        return bool(group_name) and not self._is_renewal_bucket(group_name)
+
+    # --------------------------------------- modalita' compatta (sticky)
+    def is_session_compact(self, session_id: str | None = None) -> bool:
+        sid = session_id or current_session()
+        if not sid:
+            return False
+        d = getattr(self, "_session_compact", None)
+        if d is None:
+            return False
+        ts = d.get(sid)
+        if ts is None:
+            return False
+        ttl = float(getattr(self.policy, "cache_holder_ttl_sec", 3600) or 3600)
+        if time.time() - ts > ttl:
+            d.pop(sid, None)
+            return False
+        return True
+
+    def mark_session_compact(self, session_id: str | None = None) -> None:
+        sid = session_id or current_session()
+        if not sid:
+            return
+        d = getattr(self, "_session_compact", None)
+        if d is None:
+            d = {}
+            self._session_compact = d
+        d[sid] = time.time()
 
     # ------------------------------------------------- escalation winner
     def record_escalation_win(self, requested_group: str | None,
@@ -377,6 +487,13 @@ class Router:
             return None
         if winner is None or not req_grp:
             return None
+        if (getattr(self.policy, "cache_aware_enabled", True)
+                and getattr(self.policy, "cache_skip_probe_when_holder",
+                            True)):
+            _hold = self.session_holder()
+            if _hold and winner.get("unique") == _hold:
+                log.info("[cache] winner==detentore %s: salto il probe", _hold)
+                return None
         n_dims = max(0, int(getattr(self.policy, "escalation_pin_probe_dims",
                                      2) or 0))
         if n_dims <= 0:
@@ -2165,6 +2282,18 @@ class Router:
         usa cur_dep["group"] (comportamento storico).
         """
         req_grp = requested_group or cur_dep["group"]
+        # --- CACHE HOLDER: failover cache-preserving (solo bucket FREE) --
+        if (getattr(self.policy, "cache_aware_enabled", True)
+                and getattr(self.policy, "cache_prefer_last_success", True)):
+            _holder = self.cache_holder(None, need, ctx)
+            if (_holder is not None
+                    and _holder["unique"] != cur_dep.get("unique")
+                    and (not tried or _holder["unique"] not in tried)
+                    and self._free_group(_holder.get("group", ""))
+                    and self._free_group(cur_dep.get("group", ""))):
+                log.info("[cache] fallback -> detentore %s (cache calda)",
+                         _holder["unique"])
+                return _holder
         if scope == "group":
             cap_cur = self.config.group_caps.get(cur_dep["group"])
             if cap_cur is None and self.policy.dims_ladder_floor:
