@@ -44,6 +44,7 @@ CAPS_HEADER = "caps"
 EFFORT_CAPABLE_HEADER = "effort_capable"
 INTELLIGENCE_HEADER = "intelligence_score"
 TOOL_REPAIR_HEADER = "tool_repair"
+MODEL_PREFERENCE_HEADER = "model_preference"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -211,6 +212,14 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         intelligence = 5
     intelligence = max(1, min(10, intelligence))
 
+    # model_preference: preferenza utente (intero, default 0 neutro).
+    # 0 = neutro, >0 = mi piace, <0 = non mi piace.
+    # Formula: score -= preference * abs(score) / 100
+    try:
+        model_preference = int((row.get(MODEL_PREFERENCE_HEADER) or "0").strip())
+    except ValueError:
+        model_preference = 0
+
     # tool_repair: livello di riparazione tool-call (vuoto=aggressive, safe, off).
     raw_tr = (row.get(TOOL_REPAIR_HEADER) or "").strip().lower()
     if raw_tr not in ("", "off", "safe", "aggressive"):
@@ -230,6 +239,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "effort_capable": effort_capable,
         "intelligence": intelligence,
         "tool_repair": raw_tr,
+        "model_preference": model_preference,
     }
 
 
@@ -470,6 +480,7 @@ class GatewayConfig:
                     "effort_capable": bool(meta.get("effort_capable")),
                     "intelligence": int(meta.get("intelligence") or 5),
                     "tool_repair": meta.get("tool_repair", ""),
+                    "model_preference": int(meta.get("model_preference") or 0),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap

@@ -865,6 +865,14 @@ class Router:
             log.debug("[effort-bias] %s effort=%s intel=%.0f factor=%.3f "
                       "totale=%.1f", unique, effort, intel, factor, score)
 
+        # Preferenza utente (ultimo giudice): regolazione percentuale del valore assoluto
+        # Formula: score -= preference * abs(score) / 100
+        # 0 = neutro, >0 = mi piace (migliora: score più negativo = meglio),
+        # <0 = non mi piace (peggiora: score meno negativo = peggio)
+        pref = dep.get("model_preference", 0)
+        score -= pref * abs(score) / 100.0
+        log.debug("[pref] %s pref=%d score=%.1f", unique, pref, score)
+
         return score
 
     def _get_avg_latency(self, unique: str) -> float | None:
