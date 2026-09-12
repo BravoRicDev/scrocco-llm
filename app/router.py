@@ -37,6 +37,7 @@ from .config import GatewayConfig, CAP_PRIORITY_ORDER
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
+from .thought_sig import is_gemini_deployment
 
 log = logging.getLogger("nx.router")
 
@@ -1569,6 +1570,8 @@ class Router:
         """
         def _ok(d: dict) -> bool:
             if d["unique"] == exclude:
+                return False
+            if is_gemini_deployment(d):
                 return False
             if self.is_retired(d["unique"]):
                 return False
