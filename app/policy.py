@@ -181,6 +181,16 @@ class Policy:
     recency_halflife_sec: float = 20.0
     latency_ref_ms: float = 1500.0
 
+    # EFFORT/reasoning: quando il client chiede un effort esplicito
+    # (`reasoning_effort`), il router bias-a la scelta verso l'intelligence
+    # (vedi router._reputation_score) e il forwarder inietta `reasoning_effort`
+    # SOLO sui deployment effort_capable. Qui l'override di temperatura,
+    # applicato SOLO se abilitato e SOLO se il client non ha inviato
+    # `temperature` (il client vince sempre).
+    enable_effort_temperature_override: bool = True
+    effort_temperature_overrides: dict[str, float] = field(
+        default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
+
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
     # i cache-hit (prezzo cache << prezzo input pieno) e distribuisce il
@@ -603,6 +613,29 @@ class Policy:
                     raise ValueError(f"{num_key} non valido: {nv!r} "
                                      "(numero > 0 richiesto)")
                 setattr(p, attr, float(nv))
+
+        _ee = raw.get("enable_effort_temperature_override")
+        if _ee is not None:
+            p.enable_effort_temperature_override = _coerce_bool(
+                _ee, "enable_effort_temperature_override")
+        _eto = raw.get("effort_temperature_overrides")
+        if _eto is not None:
+            if not isinstance(_eto, dict):
+                raise ValueError(
+                    "effort_temperature_overrides deve essere una mappa "
+                    "{low: t, medium: t, high: t}")
+            clean: dict[str, float] = {}
+            for k, v in _eto.items():
+                lk = str(k).strip().lower()
+                if lk not in ("low", "medium", "high"):
+                    raise ValueError(
+                        f"effort_temperature_overrides: chiave {k!r} non valida "
+                        "(ammesse: low|medium|high)")
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                    raise ValueError(
+                        f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
+                clean[lk] = float(v)
+            p.effort_temperature_overrides = clean
 
         qj = raw.get("qc_json")
         if qj is not None:

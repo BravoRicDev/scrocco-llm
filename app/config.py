@@ -41,6 +41,8 @@ CONTEXT_HEADER = "context"
 MAX_INPUT_HEADER = "max_input"
 PRIORITY_HEADER = "priority"
 CAPS_HEADER = "caps"
+EFFORT_CAPABLE_HEADER = "effort_capable"
+INTELLIGENCE_HEADER = "intelligence_score"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -197,6 +199,17 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     except ValueError:
         priority = 0
 
+    # effort_capable: il modello accetta `reasoning_effort` upstream.
+    raw_eff = (row.get(EFFORT_CAPABLE_HEADER) or "").strip().lower()
+    effort_capable = raw_eff in ("1", "true", "yes", "si", "sì", "y", "t")
+
+    # intelligence_score 1-10 (default 5 neutro).
+    try:
+        intelligence = int(float((row.get(INTELLIGENCE_HEADER) or "").strip()))
+    except ValueError:
+        intelligence = 5
+    intelligence = max(1, min(10, intelligence))
+
     return {
         "modello": modello,
         "provider": provider,
@@ -208,6 +221,8 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "max_input": max_input,
         "priority": priority,
         "caps": parse_caps(row.get(CAPS_HEADER)),
+        "effort_capable": effort_capable,
+        "intelligence": intelligence,
     }
 
 
@@ -444,6 +459,9 @@ class GatewayConfig:
                     "needs_openai_provider": needs_openai,
                     "priority": meta["priority"],
                     "caps": frozenset(meta.get("caps") or ()),
+                    "provider": meta.get("provider") or "",
+                    "effort_capable": bool(meta.get("effort_capable")),
+                    "intelligence": int(meta.get("intelligence") or 5),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap

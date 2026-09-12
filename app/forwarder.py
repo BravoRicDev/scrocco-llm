@@ -48,8 +48,49 @@ from .qc import check_response
 from .router import inject_identity
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, is_gemini_deployment,
                           has_unsigned_tool_calls)
+from .effort import get_effort, get_temperature_config
 
 log = logging.getLogger("nx.forwarder")
+
+# Provider che NON accettano `reasoning_effort` nel body (400 garantito):
+# il token va rimosso anche se il deployment e' dichiarato effort_capable.
+EFFORT_INCOMPATIBLE_HOSTS = ("api.groq.com",)
+
+
+def apply_effort_policy(body: dict, dep: dict) -> dict:
+    """Adatta il body all'effort richiesto per lo specifico deployment.
+
+    - effort=default: nessuna modifica.
+    - deployment effort_capable (e provider compatibile): garantisce
+      `reasoning_effort` (il valore del client vince sempre; se assente si usa
+      il livello richiesto).
+    - deployment NON capace o provider incompatibile: rimuove
+      `reasoning_effort` (evita un 400 upstream).
+    - override temperatura: applicato SOLO se la policy lo abilita e il client
+      NON ha inviato `temperature` (il client vince sempre).
+    """
+    effort = get_effort()
+    if effort == "default":
+        return body
+    host = (dep.get("api_base") or "").lower()
+    capable = bool(dep.get("effort_capable"))
+    incompatible = any(h in host for h in EFFORT_INCOMPATIBLE_HOSTS)
+    if capable and not incompatible:
+        body.setdefault("reasoning_effort", effort)
+    else:
+        body.pop("reasoning_effort", None)
+    enabled, overrides = get_temperature_config()
+    if enabled and "temperature" not in body and effort in overrides:
+        try:
+            body["temperature"] = float(overrides[effort])
+        except (TypeError, ValueError):
+            pass
+    log.info("[effort] %s effort=%s capable=%s reasoning=%s temp=%s",
+             dep.get("unique", "?"), effort, capable,
+             body.get("reasoning_effort"), body.get("temperature"))
+    return body
+
+
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
 # su file agganciato in main.py -> var/error-audit.log, solo locale). Serve a
 # rivedere a posteriori gli errori usciti che non dovevano.
@@ -626,6 +667,7 @@ class Forwarder:
         """
         body = dict(payload)
         body["model"] = dep["model"]
+        apply_effort_policy(body, dep)
         _google = is_gemini_deployment(dep)
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
@@ -737,6 +779,7 @@ class Forwarder:
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
+        apply_effort_policy(body, dep)
         _google = is_gemini_deployment(dep)
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")

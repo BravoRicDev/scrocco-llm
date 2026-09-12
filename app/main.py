@@ -61,6 +61,7 @@ from .qc import annotate_reasoning
 from .thought_sig import has_unsigned_tool_calls, is_gemini_deployment
 from .router import Router, inject_identity, estimate_tokens
 from .capabilities import required_caps, count_image_parts
+from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
 
 # Logging strutturato: [auth] [route] [vigile] [identity] [fallback] [cooldown]
@@ -879,6 +880,16 @@ async def chat_completions(request: Request):
         _api_log.warning("[api] invalid JSON body: %s", exc)
         return JSONResponse(status_code=400, content={
             "error": {"message": "invalid JSON body", "type": "invalid_request_error"}})
+
+    # EFFORT/reasoning: `reasoning_effort` (o alias `effort`) nel body, oppure
+    # header `x-effort`. Lo stato vive in una ContextVar legata al task della
+    # richiesta: il router lo usa per il bias di intelligence, il forwarder per
+    # iniettare/rimuovere reasoning_effort e per l'override di temperatura.
+    set_effort(
+        effort_from_request(payload, request.headers),
+        temp_enabled=policy.enable_effort_temperature_override,
+        temp_overrides=policy.effort_temperature_overrides,
+    )
 
     raw_model = payload.get("model") or ""
     messages = payload.get("messages") or []

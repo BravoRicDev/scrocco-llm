@@ -36,8 +36,18 @@ from typing import Any
 from .config import GatewayConfig, CAP_PRIORITY_ORDER
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
+from .effort import get_effort
 
 log = logging.getLogger("nx.router")
+
+# Peso del bias di intelligence nel pick in base all'effort richiesto.
+# Il punteggio di reputazione e' "lower is better": per effort=high i modelli
+# piu' intelligenti ricevono un bonus (score negativo), per effort=low un
+# malus; per medium si penalizza la distanza da 5 (intelligenza media).
+EFFORT_INTEL_WEIGHT = 1.0
+# Bonus per i deployment che sanno onorare `reasoning_effort` (solo se un
+# effort esplicito e' stato richiesto).
+EFFORT_CAPABLE_BONUS = 1.5
 
 # Constants imported from app/constants.py
 from app.constants import CHARS_PER_TOKEN as CHARS_PER_TOKEN
@@ -709,6 +719,23 @@ class Router:
             score += penalty
             log.debug("[latency-penalty] %s ema=%.0fms threshold=%sms penalty=%.1f (over=%.1fs)",
                       unique, ema, LATENCY_ROTATE_THRESHOLD_MS, penalty, over_seconds)
+
+        # Bias di EFFORT: se il client ha chiesto un effort esplicito, sposta la
+        # scelta verso l'intelligence desiderata e premia chi accetta
+        # `reasoning_effort`. In assenza di effort (default) nessun effetto.
+        effort = get_effort()
+        if effort != "default":
+            intel = float(dep.get("intelligence", 5) or 5)
+            if effort == "high":
+                score += -(intel - 5.0) * EFFORT_INTEL_WEIGHT
+            elif effort == "low":
+                score += (intel - 5.0) * EFFORT_INTEL_WEIGHT
+            else:  # medium: preferisci il centro della scala
+                score += abs(intel - 5.0) * EFFORT_INTEL_WEIGHT
+            if dep.get("effort_capable"):
+                score -= EFFORT_CAPABLE_BONUS
+            log.debug("[effort-bias] %s effort=%s intel=%.0f totale=%.1f",
+                      unique, effort, intel, score)
 
         return score
 
