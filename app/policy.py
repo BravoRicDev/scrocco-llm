@@ -190,6 +190,7 @@ class Policy:
     enable_effort_temperature_override: bool = True
     effort_temperature_overrides: dict[str, float] = field(
         default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
+    effort_intel_weight: float = 10.0
 
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza

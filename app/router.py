@@ -45,9 +45,7 @@ log = logging.getLogger("nx.router")
 # Il punteggio di reputazione e' "lower is better": per effort=high i modelli
 # piu' intelligenti ricevono un bonus (score negativo), per effort=low un
 # malus; per medium si penalizza la distanza da 5 (intelligenza media).
-EFFORT_INTEL_WEIGHT = 1.0
-# Bonus per i deployment che sanno onorare `reasoning_effort` (solo se un
-# effort esplicito e' stato richiesto).
+# Valore configurabile via gateway.yaml (policy.effort_intel_weight), default 10.
 EFFORT_CAPABLE_BONUS = 1.5
 
 # Constants imported from app/constants.py
@@ -724,15 +722,24 @@ class Router:
         # Bias di EFFORT: se il client ha chiesto un effort esplicito, sposta la
         # scelta verso l'intelligence desiderata e premia chi accetta
         # `reasoning_effort`. In assenza di effort (default) nessun effetto.
+        # Moltiplicazione proporzionale: il fattore scala il punteggio in base
+        # alla distanza dall'intelligenza neutra (5). Peso tratto da
+        # policy.effort_intel_weight (configurabile via gateway.yaml).
         effort = get_effort()
         if effort != "default":
             intel = float(dep.get("intelligence", 5) or 5)
+            weight = self.policy.effort_intel_weight
             if effort == "high":
-                score += -(intel - 5.0) * EFFORT_INTEL_WEIGHT
+                # Preferisci alta intelligenza: moltiplica per (1 - (intel-5)*w)
+                # intel=7 -> score *= (1-2w) (migliora), intel=3 -> score *= (1+2w) (peggiora)
+                score *= (1.0 - (intel - 5.0) * weight)
             elif effort == "low":
-                score += (intel - 5.0) * EFFORT_INTEL_WEIGHT
+                # Preferisci bassa intelligenza: moltiplica per (1 + (intel-5)*w)
+                # intel=7 -> score *= (1+2w) (peggiora), intel=3 -> score *= (1-2w) (migliora)
+                score *= (1.0 + (intel - 5.0) * weight)
             else:  # medium: preferisci il centro della scala
-                score += abs(intel - 5.0) * EFFORT_INTEL_WEIGHT
+                # Moltiplica per (1 + |intel-5|*w): penalizza gli estremi
+                score *= (1.0 + abs(intel - 5.0) * weight)
             if dep.get("effort_capable"):
                 score -= EFFORT_CAPABLE_BONUS
             log.debug("[effort-bias] %s effort=%s intel=%.0f totale=%.1f",

@@ -15,7 +15,7 @@ from app.effort import (normalize_effort, effort_from_request, set_effort,
                         reset_effort, get_effort)
 from app.forwarder import apply_effort_policy
 from app.policy import Policy
-from app.router import Router, EFFORT_CAPABLE_BONUS, EFFORT_INTEL_WEIGHT
+from app.router import Router, EFFORT_CAPABLE_BONUS
 
 
 @contextlib.contextmanager
@@ -150,7 +150,9 @@ def _router():
     r = Router.__new__(Router)
     r.policy = Policy()
     r.config = object()          # non-None: il bias deve essere calcolato
-    r._base_scores = {}
+    # base score non-zero per test moltiplicativo (score=0*moltiplicatore=0 sempre)
+    r._base_scores = {"s2": 100.0, "s5": 100.0, "s8": 100.0,
+                      "s1": 100.0, "s10": 100.0}
     r._provider_scores = {}
     r._key_scores = {}
     r._avg_latencies = {}
@@ -170,41 +172,50 @@ def _d(unique, intel, capable=False):
 def test_default_effort_no_intelligence_bias():
     r = _router()
     with effort_ctx("default"):
-        lo = _score(r, _d("lo", 2))
-        hi = _score(r, _d("hi", 10))
-    assert lo == hi == 0.0
+        lo = _score(r, _d("s2", 2))
+        hi = _score(r, _d("s8", 10))
+    # Nessun bias: score = base_score (uguale per entrambi)
+    assert lo == hi == 100.0
 
 
 def test_high_effort_prefers_high_intelligence():
     r = _router()
     with effort_ctx("high"):
-        hi = _score(r, _d("hi", 9))
-        lo = _score(r, _d("lo", 2))
+        hi = _score(r, _d("s8", 9))
+        lo = _score(r, _d("s2", 2))
+    # Moltiplicativo: s8=100*(1-4w), s2=100*(1+3w)
+    # s8 < s2 (high intel ha score piu' basso = meglio)
     assert hi < lo
 
 
 def test_low_effort_prefers_low_intelligence():
     r = _router()
     with effort_ctx("low"):
-        hi = _score(r, _d("hi", 9))
-        lo = _score(r, _d("lo", 2))
+        hi = _score(r, _d("s8", 9))
+        lo = _score(r, _d("s2", 2))
+    # Moltiplicativo: s8=100*(1+4w), s2=100*(1-3w)
+    # s2 < s8 (low intel ha score piu' basso = meglio)
     assert lo < hi
 
 
 def test_medium_effort_prefers_center():
     r = _router()
     with effort_ctx("medium"):
-        mid = _score(r, _d("mid", 5))
-        hi = _score(r, _d("hi", 10))
-        lo = _score(r, _d("lo", 1))
+        mid = _score(r, _d("s5", 5))
+        hi = _score(r, _d("s10", 10))
+        lo = _score(r, _d("s1", 1))
+    # Moltiplicativo: s5=100*(1+0)=100, s10=100*(1+5w), s1=100*(1+4w)
+    # mid < hi and mid < lo (centro ha score piu' basso = meglio)
     assert mid < hi and mid < lo
 
 
 def test_high_effort_bonus_for_capable():
     r = _router()
     with effort_ctx("high"):
-        cap = _score(r, _d("cap", 5, capable=True))
-        nocap = _score(r, _d("nocap", 5, capable=False))
+        cap = _score(r, _d("s5", 5, capable=True))
+        nocap = _score(r, _d("s5", 5, capable=False))
+    # Moltiplicativo: s5=100*(1+0)=100, poi -1.5 per capable
+    # cap = 100 - 1.5 = 98.5, nocap = 100
     assert cap == nocap - EFFORT_CAPABLE_BONUS
     assert cap < nocap
 
@@ -214,4 +225,20 @@ def test_bias_weight_scales():
     with effort_ctx("high"):
         s2 = _score(r, _d("s2", 2))
         s8 = _score(r, _d("s8", 8))
-    assert round(s2 - s8, 3) == round(6.0 * EFFORT_INTEL_WEIGHT, 3)
+    # Moltiplicativo: score *= (1 - (intel-5)*w)
+    # intel=2: score *= (1 + 3w), intel=8: score *= (1 - 3w)
+    # Con base=100: s2=100*(1+3w), s8=100*(1-3w)
+    # s2 - s8 = 100*(1+3w) - 100*(1-3w) = 600w
+    w = r.policy.effort_intel_weight
+    assert round(s2 - s8, 3) == round(600.0 * w, 3)
+
+
+def test_bias_weight_configurable():
+    # il peso e' configurabile via policy: un peso diverso cambia il bias
+    r = _router()
+    r.policy.effort_intel_weight = 0.05
+    with effort_ctx("high"):
+        s2 = _score(r, _d("s2", 2))
+        s8 = _score(r, _d("s8", 8))
+    # Con base=100, w=0.05: s2=100*1.15=115, s8=100*0.85=85
+    assert round(s2 - s8, 3) == round(30.0, 3)
