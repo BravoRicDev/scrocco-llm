@@ -53,6 +53,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         _PROVIDER_TRANSIENT_RE,
                         _THOUGHT_SIG_RE, is_provider_error_body,
                         is_provider_fault_body,
+                        is_embedded_provider_error,
                         media_reject_signature, _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         QUOTA_MIN_COOLDOWN_S)
@@ -1343,7 +1344,7 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
                 dd = (ch.get("delta") or ch.get("message") or {}) \
                     if isinstance(ch, dict) else {}
                 cc = dd.get("content") if isinstance(dd, dict) else None
-                if isinstance(cc, str) and is_provider_error_body(cc):
+                if isinstance(cc, str) and is_embedded_provider_error(cc):
                     return "error", buffered, None, meta
             answer_chars += _answer_chars(obj)
             for ch in (obj.get("choices") or []):

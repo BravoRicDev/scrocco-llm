@@ -441,14 +441,80 @@ _PROVIDER_BODY_FAULT_RE = re.compile(
     re.IGNORECASE)
 
 
+_MESSAGE_FIELD_RE = re.compile(
+    r'"message"\s*:\s*"((?:[^"\\]|\\.){0,400})"', re.IGNORECASE)
+
+
+def _provider_error_message(detail: str) -> str:
+    """Estrae SOLO il campo `message` dell'envelope d'errore del provider.
+
+    Non si guarda il resto del body: alcuni provider ci rimettono dentro la
+    richiesta (che puo' contenere codice con frasi d'errore, scritte da NOI o
+    generate dal modello) e non va MAI classificata come fault del provider.
+    """
+    s = (detail or "").lstrip()
+    if s[:5].lower() == "data:":
+        s = s[5:].lstrip()
+    if s[:1] == "{":
+        try:
+            obj = json.loads(s)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            err = obj.get("error")
+            if isinstance(err, dict) and isinstance(err.get("message"), str):
+                return err["message"]
+            if isinstance(err, str):
+                return err
+            if obj.get("type") == "error" and isinstance(obj.get("message"), str):
+                return obj["message"]
+            if isinstance(obj.get("message"), str):
+                return obj["message"]
+    # fallback (body eventualmente troncato): SOLO i valori di "message"
+    return "\n".join(m.group(1) for m in _MESSAGE_FIELD_RE.finditer(detail or ""))
+
+
 def is_provider_fault_body(detail: str) -> bool:
-    """True se `detail` e' un envelope OpenAI `{"error":{...}}` che segnala un
-    fault del PROVIDER nel leggere/parsare la richiesta (deployment-side)."""
-    if not detail:
+    """True se `detail` e' un envelope OpenAI `{"error":{...}}` il cui MESSAGE
+    (NON il resto del body) segnala un fault del PROVIDER nel leggere/parsare
+    la richiesta (deployment-side)."""
+    if not detail or _OPENAI_ERR_ENVELOPE_RE.match(detail) is None:
         return False
-    if _OPENAI_ERR_ENVELOPE_RE.match(detail) is None:
+    msg = _provider_error_message(detail)
+    return bool(msg) and _PROVIDER_BODY_FAULT_RE.search(msg) is not None
+
+
+def is_embedded_provider_error(text: str) -> bool:
+    """True SOLO se `text` e' INTERAMENTE un envelope d'errore provider
+    incollato nel content (bug di alcuni provider che lo mettono in
+    delta.content come testo).
+
+    Serve a NON scambiare per errore il CODICE/testo scritto dal modello:
+    richiede un oggetto JSON completo, senza prosa attorno, con le chiavi
+    tipiche di un envelope provider (`error`/`type:error` + message/
+    request_id/code). Una funzione, un frammento di codice o una frase non
+    matchano.
+    """
+    if not isinstance(text, str):
         return False
-    return _PROVIDER_BODY_FAULT_RE.search(detail) is not None
+    s = text.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return False
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("type") == "error":
+        return (isinstance(obj.get("error"), (dict, str))
+                or isinstance(obj.get("message"), str))
+    err = obj.get("error")
+    if isinstance(err, dict):
+        return bool(err.get("type") or err.get("code")) and bool(
+            err.get("message") or err.get("request_id")
+            or obj.get("request_id"))
+    return False
 
 
 # Header x-opencode-session (OpenCode Go / opencode-zen): la sessione viene
