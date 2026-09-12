@@ -220,25 +220,52 @@ def test_high_effort_bonus_for_capable():
     assert cap < nocap
 
 
-def test_bias_weight_scales():
+def test_high_effort_never_inverts_good_score():
+    # regressione: punteggio buono (negativo) + intel alto NON deve diventare
+    # positivo per via del bias (era il bug della moltiplicazione a segno variabile)
     r = _router()
+    r._base_scores = {"good": -20.0}
     with effort_ctx("high"):
-        s2 = _score(r, _d("s2", 2))
-        s8 = _score(r, _d("s8", 8))
-    # Moltiplicativo: score *= (1 - (intel-5)*w)
-    # intel=2: score *= (1 + 3w), intel=8: score *= (1 - 3w)
-    # Con base=100: s2=100*(1+3w), s8=100*(1-3w)
-    # s2 - s8 = 100*(1+3w) - 100*(1-3w) = 600w
+        s = _score(r, _d("good", 6))
+    assert s < 0 and s <= -20.0
+
+
+def test_high_effort_favors_intel_among_negative_scores():
+    r = _router()
+    r._base_scores = {"smart": -10.0, "dumb": -10.0}
+    with effort_ctx("high"):
+        smart = _score(r, _d("smart", 9))
+        dumb = _score(r, _d("dumb", 2))
+    assert smart < dumb < 0
+
+
+def test_low_effort_favors_low_intel_among_negative_scores():
+    r = _router()
+    r._base_scores = {"low": -10.0, "high": -10.0}
+    with effort_ctx("low"):
+        low = _score(r, _d("low", 2))
+        high = _score(r, _d("high", 9))
+    assert low < high < 0
+
+
+def test_medium_penalizes_extremes_even_with_negative_scores():
+    r = _router()
+    r._base_scores = {"mid": -10.0, "ext": -10.0}
+    with effort_ctx("medium"):
+        mid = _score(r, _d("mid", 5))
+        ext = _score(r, _d("ext", 10))
+    assert mid < ext
+
+
+def test_bias_weight_scales_gap():
+    r = _router()
     w = r.policy.effort_intel_weight
-    assert round(s2 - s8, 3) == round(600.0 * w, 3)
-
-
-def test_bias_weight_configurable():
-    # il peso e' configurabile via policy: un peso diverso cambia il bias
-    r = _router()
-    r.policy.effort_intel_weight = 0.05
     with effort_ctx("high"):
         s2 = _score(r, _d("s2", 2))
         s8 = _score(r, _d("s8", 8))
-    # Con base=100, w=0.05: s2=100*1.15=115, s8=100*0.85=85
-    assert round(s2 - s8, 3) == round(30.0, 3)
+    assert s8 < s2
+    r.policy.effort_intel_weight = w * 2
+    with effort_ctx("high"):
+        s2b = _score(r, _d("s2", 2))
+        s8b = _score(r, _d("s8", 8))
+    assert (s2b - s8b) > (s2 - s8)

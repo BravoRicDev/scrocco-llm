@@ -722,28 +722,31 @@ class Router:
         # Bias di EFFORT: se il client ha chiesto un effort esplicito, sposta la
         # scelta verso l'intelligence desiderata e premia chi accetta
         # `reasoning_effort`. In assenza di effort (default) nessun effetto.
-        # Moltiplicazione proporzionale: il fattore scala il punteggio in base
-        # alla distanza dall'intelligenza neutra (5). Peso tratto da
-        # policy.effort_intel_weight (configurabile via gateway.yaml).
+        # Il punteggio e' "lower is better" e puo' essere NEGATIVO: un fattore
+        # che cambia segno (es. 1-(intel-5)*w) ribalterebbe l'ordinamento. Qui
+        # il fattore e' SEMPRE POSITIVO e viene orientato dal segno del
+        # punteggio, cosi' il vantaggio (riduzione del punteggio) e' sempre
+        # negativo per il modello favorito. Peso da policy.effort_intel_weight.
         effort = get_effort()
         if effort != "default":
             intel = float(dep.get("intelligence", 5) or 5)
-            weight = self.policy.effort_intel_weight
+            weight = abs(float(self.policy.effort_intel_weight or 0)) / 100.0
+            g = intel - 5.0
             if effort == "high":
-                # Preferisci alta intelligenza: moltiplica per (1 - (intel-5)*w)
-                # intel=7 -> score *= (1-2w) (migliora), intel=3 -> score *= (1+2w) (peggiora)
-                score *= (1.0 - (intel - 5.0) * weight)
+                base = max(0.05, 1.0 + weight * g)
+                factor = (1.0 / base) if score > 0 else base
             elif effort == "low":
-                # Preferisci bassa intelligenza: moltiplica per (1 + (intel-5)*w)
-                # intel=7 -> score *= (1+2w) (peggiora), intel=3 -> score *= (1-2w) (migliora)
-                score *= (1.0 + (intel - 5.0) * weight)
-            else:  # medium: preferisci il centro della scala
-                # Moltiplica per (1 + |intel-5|*w): penalizza gli estremi
-                score *= (1.0 + abs(intel - 5.0) * weight)
+                base = max(0.05, 1.0 - weight * g)
+                factor = (1.0 / base) if score > 0 else base
+            else:  # medium: penalizza gli estremi (allontana dal centro)
+                base = 1.0 + weight * abs(g)
+                factor = base if score > 0 else (1.0 / base)
+            factor = max(0.05, min(20.0, factor))
+            score *= factor
             if dep.get("effort_capable"):
                 score -= EFFORT_CAPABLE_BONUS
-            log.debug("[effort-bias] %s effort=%s intel=%.0f totale=%.1f",
-                      unique, effort, intel, score)
+            log.debug("[effort-bias] %s effort=%s intel=%.0f factor=%.3f "
+                      "totale=%.1f", unique, effort, intel, factor, score)
 
         return score
 
