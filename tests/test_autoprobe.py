@@ -103,7 +103,85 @@ def test_per_dim_cap(router):
         _cool(router, _dep(router, DIM, k), remaining=3000.0 + (0 if k == "K-A" else 500))
     fwd = _Fwd(_Resp(200))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
-    assert len(fwd.cli.calls) == 2      # per_dim default 2
+    # 3/3 cooled = 100% > soglia crisis (0.30) -> per_dim 2x2=4 -> tutti e 3
+    assert len(fwd.cli.calls) == 3
+
+
+def test_crisis_doubles_per_dim(router):
+    """1/3 cooled = 33% < soglia 0.50 -> nessun boost: per_dim resta 1."""
+    router.policy.cooldown_autoprobe_crisis_ratio = 0.50
+    _cool(router, _dep(router, DIM, "K-A"), remaining=3000.0)
+    router.policy.cooldown_autoprobe_per_dim = 1
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1          # per_dim normale (1)
+
+
+def test_crisis_above_ratio_boosts(router):
+    """2/3 cooled = 67% > 0.50 -> per_dim 1x2=2 -> entrambi sondati."""
+    router.policy.cooldown_autoprobe_crisis_ratio = 0.50
+    for k in ("K-A", "K-B"):
+        _cool(router, _dep(router, DIM, k), remaining=3000.0)
+    router.policy.cooldown_autoprobe_per_dim = 1
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 2          # per_dim 1x2=2
+
+
+def test_crisis_disabled_no_boost(router):
+    router.policy.cooldown_autoprobe_crisis_enabled = False
+    for k in ("K-A", "K-B", "K-C"):
+        _cool(router, _dep(router, DIM, k), remaining=3000.0)
+    router.policy.cooldown_autoprobe_per_dim = 1
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1          # senza crisis resta per_dim 1
+
+
+def test_crisis_below_ratio_no_boost(router):
+    router.policy.cooldown_autoprobe_crisis_ratio = 0.9   # soglia altissima
+    _cool(router, _dep(router, DIM, "K-A"), remaining=3000.0)
+    router.policy.cooldown_autoprobe_per_dim = 1
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1          # 1/3 = 33% < 90% -> nessun boost
+
+
+def test_hotreload_probe_ok_warms(router):
+    """Probe su deployment nuovo (hot-reload): OK -> note_result (caldo)."""
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(200))
+    _drain_spawn(router, fwd, [d["unique"]])
+    assert len(fwd.cli.calls) == 1
+    s = router.stats_for(d["unique"])
+    assert s.ok_count == 1                   # successo registrato
+    assert s.fail_streak == 0
+
+
+def test_hotreload_probe_ko_cooldowns(router):
+    """Probe KO -> cooldown breve, deployment escluso dal traffico."""
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(503))
+    _drain_spawn(router, fwd, [d["unique"]])
+    assert len(fwd.cli.calls) == 1
+    assert router.is_cooled_down(d["unique"])
+
+
+def test_hotreload_probe_disabled(router):
+    router.policy.hotreload_probe_enabled = False
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(503))
+    _drain_spawn(router, fwd, [d["unique"]])
+    assert fwd.cli.calls == []               # nessun probe
+
+
+def _drain_spawn(router, fwd, uniques):
+    async def _go():
+        autoprobe.spawn_hotreload_probe(router, fwd, uniques)
+        while any(t is not asyncio.current_task()
+                  for t in asyncio.all_tasks()):
+            await asyncio.sleep(0.01)
+    asyncio.run(_go())
 
 
 def test_min_age_skips_fresh(router):

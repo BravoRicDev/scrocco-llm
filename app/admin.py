@@ -1694,7 +1694,24 @@ def _insights_aggregate(rows: list[dict], group_by: str) -> dict:
             key = "-"
         u = r.get("usage") or {}
         a = agg[key]
-        a["calls"] += 1
+        # righe SUMMARY (aggregato storico): `count` = numero di chiamate reali
+        # rappresentate; fb/qc/wd_fail sono conteggi, non flag 0/1.
+        if r.get("count"):
+            n_fb = int(r.get("fb") or 0)
+            n_qc = int(r.get("qc") or 0)
+            n_wd_fail = int(r.get("wd_fail") or 0)
+            a["calls"] += int(r["count"])
+            a["bad_calls"] += min(int(r["count"]), n_fb + n_qc + n_wd_fail)
+        else:
+            n_fb = 1 if bool((r.get("fb") or 0) and r["fb"] > 0) else 0
+            n_qc = 1 if bool(r.get("qc")) else 0
+            _wd = r.get("wd")
+            # wd=tier2-no-done = risposta completa, il provider omette solo
+            # [DONE] -> NON e' un fallimento; ogni altro wd non-vuoto lo e'.
+            n_wd_fail = 1 if (bool(_wd) and _wd != "tier2-no-done") else 0
+            a["calls"] += 1
+            if n_fb or n_qc or n_wd_fail:
+                a["bad_calls"] += 1
         a["prompt_tokens"] += int(u.get("prompt_tokens") or 0)
         a["completion_tokens"] += int(u.get("completion_tokens") or 0)
         a["total_tokens"] += int(u.get("total_tokens")
@@ -1703,20 +1720,9 @@ def _insights_aggregate(rows: list[dict], group_by: str) -> dict:
         a["cost_reported"] += float(u.get("cost") or 0)
         a["cost_est"] += float(u.get("cost_est") or 0)
         a["dur_ms_sum"] += int(r.get("dur_ms") or 0)
-        _fb = bool((r.get("fb") or 0) and r["fb"] > 0)
-        _qc = bool(r.get("qc"))
-        _wd = r.get("wd")
-        # wd=tier2-no-done = risposta completa, il provider omette solo [DONE]
-        # -> NON e' un fallimento; ogni altro wd non-vuoto lo e'.
-        _wd_fail = bool(_wd) and _wd != "tier2-no-done"
-        if _fb:
-            a["fb_calls"] += 1
-        if _qc:
-            a["qc_discards"] += 1
-        if _wd_fail:
-            a["wd_fail"] += 1
-        if _fb or _qc or _wd_fail:
-            a["bad_calls"] += 1
+        a["fb_calls"] += n_fb
+        a["qc_discards"] += n_qc
+        a["wd_fail"] += n_wd_fail
     out = {}
     for k in sorted(agg):
         a = agg[k]

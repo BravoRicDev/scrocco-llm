@@ -208,6 +208,19 @@ class Policy:
     cooldown_autoprobe_min_gap_sec: float = 60.0
     cooldown_autoprobe_max_total: int = 6
     cooldown_autoprobe_timeout_sec: float = 20.0
+    # CRISIS MODE autoprobe: se la quota di deployment dim in cooldown supera
+    # `cooldown_autoprobe_crisis_ratio`, il pass raddoppia `per_dim` e dimezza
+    # `min_gap` per risvegliare il pool piu' in fretta sotto pressione.
+    cooldown_autoprobe_crisis_enabled: bool = True
+    cooldown_autoprobe_crisis_ratio: float = 0.30
+    cooldown_autoprobe_crisis_mult: float = 2.0
+    # Probe immediato dei deployment APPENA AGGIUNTI via hot-reload CSV:
+    # fire-and-forget prima del traffico reale; OK -> deployment caldo
+    # (note_result), KO -> cooldown breve. `_max` limita i probe per reload.
+    hotreload_probe_enabled: bool = True
+    hotreload_probe_max: int = 20
+    hotreload_probe_timeout_sec: float = 15.0
+    hotreload_probe_cooldown_sec: float = 300.0
     # Inflight request coalescing (solo non-streaming): richieste identiche
     # (stesso payload+profilo) in volo condividono una sola chiamata upstream.
     request_coalescing_enabled: bool = True
@@ -303,8 +316,10 @@ class Policy:
     # Ambito: "hybrid" = breaker per-deployment sempre + per-chiave solo per
     # errori di chiave (401/402/403/429); "dep" = solo deployment; "key" = legacy.
     circuit_breaker_scope: str = "hybrid"
-    # Base che rende `model_preference` efficace anche a punteggio freddo
-    # (score≈0). 0 = comportamento storico (percentuale pura su |score|).
+    # COLD START reputation: il punteggio di partenza di un deployment senza
+    # cronologia e' `-(preferenza × model_preference_base)` (default 10 ->
+    # pref=100 parte a -1000, pref=-100 a +1000). La preferenza domina DA
+    # FREDDO; solo cooldown/retirement escludono davvero. 0 = nessun seed.
     model_preference_base: float = 10.0
 
     # THOUGHT_SIGNATURE (Gemini 3): Google pretende il blob `thought_signature`
@@ -538,7 +553,11 @@ class Policy:
         # successivo (limitatore PREDITIVO anti-burst). 0 = disabilitato.
         # count_inflight: conta anche le richieste gia' in volo (max con
         # minute_calls, che le include gia': serve al rollover di minuto).
-        "safety_ratio": 0.8, "count_inflight": True})
+        "safety_ratio": 0.8, "count_inflight": True,
+        # rate_hint_threshold: se X-RateLimit-Requests-Remaining del provider
+        # scende sotto questa soglia, il budget guard abbassa il cap appreso
+        # PRIMA del 429 (anticipo di 2-3 richieste).
+        "rate_hint_threshold": 3})
     # cap a 5 ORE: i free-tier si rinnovano su finestre giornaliere/orarie,
     # seppellire una chiave per un intero giorno la toglie dal giro anche
     # quando il limite era solo orario. Il budget_guard (router) dosa PRIMA
@@ -782,6 +801,25 @@ class Policy:
                 except (TypeError, ValueError):
                     raise ValueError(
                         f"{_fld} deve essere un numero >= 0") from None
+        if "cooldown_autoprobe_crisis_enabled" in raw:
+            p.cooldown_autoprobe_crisis_enabled = _coerce_bool(
+                raw["cooldown_autoprobe_crisis_enabled"],
+                "cooldown_autoprobe_crisis_enabled")
+        for _fld in ("cooldown_autoprobe_crisis_ratio",
+                     "cooldown_autoprobe_crisis_mult",
+                     "hotreload_probe_timeout_sec",
+                     "hotreload_probe_cooldown_sec"):
+            _val = raw.get(_fld)
+            if _val is not None:
+                try:
+                    setattr(p, _fld, max(0.0, float(_val)))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{_fld} deve essere un numero >= 0") from None
+        _set_int(p, raw, "hotreload_probe_max", minimum=0)
+        if "hotreload_probe_enabled" in raw:
+            p.hotreload_probe_enabled = _coerce_bool(
+                raw["hotreload_probe_enabled"], "hotreload_probe_enabled")
         if "request_coalescing_enabled" in raw:
             p.request_coalescing_enabled = _coerce_bool(
                 raw["request_coalescing_enabled"], "request_coalescing_enabled")
@@ -1548,6 +1586,17 @@ class Policy:
             if "count_inflight" in bg:
                 merged["count_inflight"] = _coerce_bool(
                     bg["count_inflight"], "budget_guard.count_inflight")
+            if "rate_hint_threshold" in bg:
+                try:
+                    v = int(bg["rate_hint_threshold"])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "budget_guard.rate_hint_threshold: intero richiesto") \
+                        from None
+                if v < 1:
+                    raise ValueError(
+                        "budget_guard.rate_hint_threshold: >= 1 richiesto")
+                merged["rate_hint_threshold"] = v
             p.budget_guard = merged
 
         # gruppi capacità strutturali

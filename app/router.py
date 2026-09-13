@@ -884,6 +884,32 @@ class Router:
 
         return seconds
 
+    def note_rate_limit(self, unique: str, rl: dict) -> None:
+        """Hint quota dagli header X-RateLimit-*: se le richieste rimanenti
+        sono poche (<= soglia), abbassa il cap appreso PRIMA che scatti il 429.
+        Il budget guard dosera' lo scoring (deprioritizzazione) senza bisogno
+        di un cooldown. Solo-riduzione: il cap puo' solo scendere con gli hint,
+        poi si ri-apprende dai 429 reali."""
+        bg = self.policy.budget_guard or {}
+        if not bg.get("enabled"):
+            return
+        rl = rl or {}
+        try:
+            remaining = float(rl.get("requests_remaining") or -1)
+        except (TypeError, ValueError):
+            return
+        if remaining < 0:
+            return
+        thr = max(1, int(bg.get("rate_hint_threshold", 3) or 3))
+        if remaining > thr:
+            return
+        s = self.stats_for(unique)
+        new_cap = max(1.0, remaining + 1.0)
+        if s.min_cap_learned <= 0 or new_cap < s.min_cap_learned:
+            s.min_cap_learned = new_cap
+            log.info("[budget] %s: hint rate-limit (remaining=%.0f<=%d) -> "
+                     "cap ~%.0f/min", unique, remaining, thr, new_cap)
+
     def _retire_permanent(self, unique: str, reason: str) -> None:
         """Ritira un deployment permanentemente rotto (chiave morta, modello
         rimosso). NON tocca il CSV: usa il lifecycle keyhealth (retired)."""
@@ -1298,6 +1324,19 @@ class Router:
         """Calcola il punteggio di reputazione per un deployment."""
         if not hasattr(self, 'config') or self.config is None:
             return 0.0
+        # COLD START: il deployment parte da -(preferenza × model_preference_base).
+        # Un modello preferito (pref>0) parte molto avanti (es. pref=100, base=10
+        # -> -1000); uno indesiderato (pref<0) parte in fondo (+1000). A
+        # differenza del vecchio aggiustamento dinamico (che scalava con |score|
+        # e premiava chi aveva gia' storia), qui la preferenza domina DA FREDDO:
+        # saranno i cooldown/retirement a escludere davvero i deployment rotti,
+        # non la mancanza di cronologia. Il seed e' PERSISTITO in _base_scores
+        # cosi' successi/fallimenti vi si sommano sopra (e sopravvive al restart).
+        if unique not in self._base_scores:
+            _pref0 = float(dep.get("model_preference", 0) or 0)
+            if _pref0:
+                self._base_scores[unique] = -_pref0 * float(
+                    getattr(self.policy, "model_preference_base", 10.0) or 0.0)
         score = self._base_scores.get(unique, 0.0)
         pk = self._provider_key(dep)
         ak = self._api_key_str(dep)
@@ -1382,19 +1421,6 @@ class Router:
                 score -= EFFORT_CAPABLE_BONUS
             log.debug("[effort-bias] %s effort=%s intel=%.0f factor=%.3f "
                       "totale=%.1f", unique, effort, intel, factor, score)
-
-        # Preferenza utente (ultimo giudice): regolazione del valore assoluto,
-        # con una BASE che la rende efficace anche a punteggio freddo (score≈0).
-        # Formula: score -= preference * (abs(score) + model_preference_base) / 100
-        # 0 = neutro, >0 = mi piace (score più negativo = meglio),
-        # <0 = non mi piace (score meno negativo = peggio).
-        pref = dep.get("model_preference", 0)
-        if pref:
-            _pref_base = float(getattr(self.policy, "model_preference_base", 10.0) or 0.0)
-            score -= pref * (abs(score) + _pref_base) / 100.0
-        log.debug("[pref] %s pref=%d base=%.0f score=%.1f", unique, pref,
-                  float(getattr(self.policy, "model_preference_base", 10.0) or 0.0),
-                  score)
 
         # --- Dynamic scoring: latency p95, error_rate, throughput ---
         # Pesi configurabili via policy (DYNAMIC_SCORING_DEFAULTS override)
@@ -1898,7 +1924,6 @@ class Router:
                           "last_fail_ts": s.last_fail_ts,
                           "probe_fail_streak": s.probe_fail_streak}
                       for u, s in self._stats.items()},
-            "cooldown": dict(self._cooldown),
             "cap_strikes": [{"key": k, **v} for k, v in
                             self._cap_strikes.items()],
             # [Blocco 1] Reputation scoring
@@ -1954,12 +1979,6 @@ class Router:
                         0, int(st.get("probe_fail_streak") or 0))
                 except (TypeError, ValueError):
                     pass
-            for u, exp in (data.get("cooldown") or {}).items():
-                self._cooldown[str(u)] = float(exp)
-                # dopo un restart non sappiamo quando fu messo: lo trattiamo
-                # come "appena impostato" (niente retry-stantio finche' non
-                # passa la soglia).
-                self._cooldown_since.setdefault(str(u), time.time())
             for st in (data.get("cap_strikes") or []):
                 if not isinstance(st, dict) or "|" not in str(st.get("key", "")):
                     continue
@@ -1980,6 +1999,62 @@ class Router:
                 self._avg_latencies[str(u)] = float(lat)
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
+
+    # -------------------------------------------------- cooldown su disco
+    def save_cooldowns(self) -> dict:
+        """Snapshot cooldown attivo per la persistenza dedicata
+        (var/cooldown_state.json): {unique: {expires, since, full}}. Solo le
+        entry NON scadute: lo stato muorto non va scritto ne' riletto."""
+        now = time.time()
+        out: dict = {}
+        for u, exp in list(self._cooldown.items()):
+            if exp <= now:
+                continue
+            out[str(u)] = {
+                "expires": float(exp),
+                "since": float(self._cooldown_since.get(u, now) or now),
+                "full": float(self._cooldown_full_map().get(u, 0.0) or 0.0),
+            }
+        return out
+
+    def load_cooldowns(self, data: dict) -> int:
+        """Ripristina SOLO i cooldown non ancora scaduti, ripristinando anche
+        `since` (eta' reali, niente retry-stantio) e `full` (durata totale per
+        il probe/decay). Ritorna il numero di cooldown riattivati. File
+        corrotto/campi strani -> si riparte puliti (mai crash all'avvio)."""
+        n = 0
+        if not isinstance(data, dict):
+            return 0
+        now = time.time()
+        try:
+            for u, c in data.items():
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    exp = float(c.get("expires") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if exp <= now:
+                    continue
+                self._cooldown[str(u)] = exp
+                try:
+                    since = float(c.get("since") or 0)
+                except (TypeError, ValueError):
+                    since = 0.0
+                self._cooldown_since[str(u)] = since if since > 0 else now
+                try:
+                    full = float(c.get("full") or 0)
+                except (TypeError, ValueError):
+                    full = 0.0
+                if full > 0:
+                    self._cooldown_full_map()[str(u)] = full
+                n += 1
+        except Exception as exc:             # noqa: BLE001
+            log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
+            return 0
+        if n:
+            log.info("[cooldown] ripristinati %d cooldown da disco", n)
+        return n
 
     def _score(self, dep: dict, now: float | None = None) -> float:
         """Punteggio adattivo: base priority × freschezza × velocità ÷ saturazione.

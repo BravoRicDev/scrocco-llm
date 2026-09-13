@@ -183,6 +183,11 @@ _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
 _stats_file = VAR_DIR / "adaptive_stats.json"
 _last_stats_save = 0.0
+# Persistenza DEDICATA dei cooldown (var/cooldown_state.json): a differenza
+# di adaptive_stats salva anche `since`/`full`, cosi' dopo un restart il
+# probe/decay ripartono con l'eta' reale e la durata totale.
+_cooldown_file = VAR_DIR / "cooldown_state.json"
+_last_cooldown_save = 0.0
 # job video asincroni (OR-style): job_id -> snapshot deployment per poll/content.
 # MAPPING IN MEMORIA con TTL: al restart i job in corso si perdono -> 404 con hint.
 _videos_jobs: dict[str, dict] = {}
@@ -316,6 +321,42 @@ def _maybe_save_adaptive_stats(force: bool = False) -> None:
         log.debug("[stats] save fallito")
 
 
+def _load_cooldowns() -> None:
+    """All'avvio: ripristina i cooldown NON scaduti dal file dedicato."""
+    if not PERSIST_STATS:
+        return
+    try:
+        data = _load_json(_cooldown_file, dict)
+        if data:
+            n = router.load_cooldowns(data)
+            log.info("[cooldown] ripristinati %d cooldown da %s", n,
+                     _cooldown_file.name)
+    except Exception as exc:                 # mai bloccare lo startup
+        log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
+
+
+def _maybe_save_cooldowns(force: bool = False) -> None:
+    """Salvataggio atomico throttled (max ogni 60s) dei cooldown attivi."""
+    global _last_cooldown_save
+    if not PERSIST_STATS:
+        return
+    now = time.time()
+    if not force and now - _last_cooldown_save < 60:
+        return
+    _last_cooldown_save = now
+    if not _save_json(_cooldown_file, router.save_cooldowns()):
+        log.debug("[cooldown] save fallito")
+
+
+def _all_uniques() -> set:
+    """Set degli unique attualmente configurati (per il diff hot-reload)."""
+    out: set = set()
+    for _lst in config.groups.values():
+        for _d in _lst:
+            out.add(_d.get("unique"))
+    return out
+
+
 async def _watcher(interval: float) -> None:
     """Ogni `interval` secondi controlla mtime di CSV (credenziali) e
     gateway.yaml (policy) e ricarica ciò che è cambiato.
@@ -324,10 +365,12 @@ async def _watcher(interval: float) -> None:
     """
     last_csv: int | None = None
     last_yaml: int | None = None
+    _prev_uniques = _all_uniques()
     while True:
         try:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
             _maybe_save_adaptive_stats()
+            _maybe_save_cooldowns()     # cooldown attivi su disco
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
@@ -359,7 +402,18 @@ async def _watcher(interval: float) -> None:
                 log.info("[config] CSV ricaricato: profili=%s deployment=%d",
                          ",".join(config.profiles),
                          sum(len(v) for v in config.groups.values()))
+                # Probe immediato dei deployment appena aggiunti: scoprono lo
+                # stato di salute PRIMA del traffico reale (vedi autoprobe).
+                _added = sorted(_all_uniques() - _prev_uniques)
+                _max_p = max(0, int(getattr(policy, "hotreload_probe_max", 20)
+                                    or 0))
+                if _added and _max_p:
+                    autoprobe.spawn_hotreload_probe(router, forwarder,
+                                                    _added[:_max_p])
+                    log.info("[hotreload] %d deployment nuovi: probe "
+                             "fire-and-forget", min(len(_added), _max_p))
             last_csv = new
+            _prev_uniques = _all_uniques()
 
             ym = csv_mtime_ns(POLICY_PATH)
             if ym is not None and last_yaml is not None and ym != last_yaml:
@@ -400,6 +454,7 @@ async def _watcher(interval: float) -> None:
 async def lifespan(_app: FastAPI):
     global _watch_task
     _load_adaptive_stats()                  # F4: ripristino EMA/cooldown
+    _load_cooldowns()                       # cooldown NON scaduti (since/full)
     _load_thought_sigs()                    # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
@@ -436,6 +491,7 @@ async def lifespan(_app: FastAPI):
             pass
         await forwarder.aclose()
         _maybe_save_adaptive_stats(force=True)   # F4: salva allo shutdown
+        _maybe_save_cooldowns(force=True)        # cooldown: salva allo shutdown
         _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
         _rows = LEDGER.flush_sync()              # ledger: nessuna riga persa
         log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
@@ -1824,7 +1880,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                                   attribution=attribution,
                                                   tool_repair_config=_tr_cfg,
                                                   truncation_config=_tct_cfg,
-                                                  truncation_hook=_trunc_hook)
+                                                  truncation_hook=_trunc_hook,
+                                                  rate_hook=lambda u, rl:
+                                                  router.note_rate_limit(u, rl))
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe

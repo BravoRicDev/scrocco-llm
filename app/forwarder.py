@@ -793,11 +793,23 @@ def _client_attribution(request) -> dict[str, str]:
         headers = request.headers or {}
     except Exception:
         return out
+
     for name in ("HTTP-Referer", "X-Title", "X-OpenRouter-Title"):
         v = headers.get(name) or ""
         if isinstance(v, str) and v.strip():
             out[name] = v.strip()
     return out
+
+
+def _emit_rate_hint(unique: str | None, rl: dict, hook) -> None:
+    """Consegna gli hint quota al router (budget guard proattivo). Best-effort:
+    un hook rotto non deve mai far fallire la richiesta upstream."""
+    if hook is None or not rl or not unique:
+        return
+    try:
+        hook(unique, rl)
+    except Exception:                        # noqa: BLE001
+        pass
 
 
 def _openrouter_attribution(dep: dict,
@@ -889,9 +901,13 @@ def classify_error(status: int | None, reason: str | None,
 
 class UpstreamError(Exception):
     def __init__(self, status: int | None, detail: str,
-                 retry_after: float | None = None, *, final: bool = False):
+                 retry_after: float | None = None, *, final: bool = False,
+                 rate_limits: dict | None = None):
         self.status = status
         self.detail = detail
+        # hint quota dagli header X-RateLimit-* del provider (remaining/limit/
+        # reset): utili per il budget guard proattivo PRIMA del 429.
+        self.rate_limits = rate_limits or {}
         # final=True: NON ritentare/ruotare — e' gia' la decisione definitiva
         # (es. catena esaurita, output vuoto). call_with_fallback la ri-alza
         # subito invece di trattarla come un errore upstream ritriabile.
@@ -917,6 +933,29 @@ def _retry_after_of(resp: httpx.Response) -> float | None:
         return max(1.0, float(v.strip()))
     except ValueError:
         return None
+
+
+def _rate_limits_from(resp: httpx.Response) -> dict:
+    """Header informativi quota: X-RateLimit-Requests-{Remaining,Limit,Reset}
+    e X-RateLimit-Tokens-{Remaining,Limit,Reset} (case-insensitive, usati da
+    Groq/OpenRouter/DeepInfra/Fireworks/...). Normalizzati in
+    `requests_remaining`, `requests_limit`, `requests_reset`,
+    `tokens_remaining`, `tokens_limit`, `tokens_reset`. `reset` puo' essere
+    un epoch (grande) o un delta-seconds (piccolo): la semantica la decide
+    il chiamante."""
+    out: dict = {}
+    h = {k.lower(): v.strip() for k, v in resp.headers.items()}
+    for base, tag in (("x-ratelimit-requests-", "requests_"),
+                      ("x-ratelimit-tokens-", "tokens_")):
+        for field in ("remaining", "limit", "reset"):
+            v = h.get(base + field)
+            if not v:
+                continue
+            try:
+                out[tag + field] = float(v)
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 # Google (generativelanguage) e altri mettono il ritardo consigliato NEL BODY
@@ -976,9 +1015,20 @@ def _apply_retry_floor(v: float, provider: str | None = None) -> float:
 
 def _retry_after_from(resp: httpx.Response, body: str | None,
                       provider: str | None = None) -> float | None:
-    """Retry-After: prima l'header, poi (fallback) il retryDelay dal body 429.
-    Cap a 300s: un rate-limit non deve mai valere un cooldown di ore.
-    In coda applichiamo il floor minimo anti-loop (per-provider se noto)."""
+    """Retry-After: prima il reset esatto X-RateLimit-*-Reset (epoch/delta,
+    piu' preciso del probe passivo), poi l'header Retry-After, infine (fallback)
+    il retryDelay dal body 429. Cap a 300s: un rate-limit non deve mai valere
+    un cooldown di ore. In coda applichiamo il floor minimo anti-loop
+    (per-provider se noto)."""
+    now = time.time()
+    for rk in ("requests_reset", "tokens_reset"):
+        rv = _rate_limits_from(resp).get(rk)
+        if not rv or rv <= 0:
+            continue
+        seconds = rv - now if rv > 1_000_000_000 else rv   # epoch vs delta
+        if seconds > 0:
+            return _apply_retry_floor(
+                max(1.0, min(seconds, _RETRY_BODY_CAP_S)), provider)
     hdr = _retry_after_of(resp)
     if hdr is not None:
         return _apply_retry_floor(hdr, provider)
@@ -1076,6 +1126,7 @@ class Forwarder:
                               tool_repair_config: ToolRepairConfig | None = None,
                               truncation_config: TruncationConfig | None = None,
                               truncation_hook=None,
+                              rate_hook=None,
                               ) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
@@ -1130,11 +1181,14 @@ class Forwarder:
                 await resp.aclose()
             except Exception:
                 pass
+            rl = _rate_limits_from(resp)
+            _emit_rate_hint(dep.get("unique"), rl, rate_hook)
             raise UpstreamError(resp.status_code, raw or "upstream %s (body "
                                 "non leggibile)" % resp.status_code,
                                 _retry_after_from(resp, raw,
                                                   dep.get("provider", ""))
-                                if resp.status_code == 429 else None)
+                                if resp.status_code == 429 else None,
+                                rate_limits=rl)
 
         if resp.status_code >= 400:
             # errore non ritriabile: lo restituiamo al client così com'è
@@ -1143,11 +1197,16 @@ class Forwarder:
                 await resp.aclose()
             except Exception:
                 pass
+            rl = _rate_limits_from(resp)
+            _emit_rate_hint(dep.get("unique"), rl, rate_hook)
             raise UpstreamError(-resp.status_code,
                                 raw.decode(errors="replace") or
                                 "upstream %s (body non leggibile)"
                                 % resp.status_code,
-                                _retry_after_of(resp))
+                                _retry_after_of(resp),
+                                rate_limits=rl)
+
+        _emit_rate_hint(dep.get("unique"), _rate_limits_from(resp), rate_hook)
 
         # upstream che IGNORA stream:true e risponde JSON intero: invece di
         # scartare un deployment FUNZIONANTE, ADATTIAMO la risposta a SSE
@@ -1236,7 +1295,8 @@ class Forwarder:
                    profile: str = "",
                    client_ip: str = "",
                    session: str | None = None,
-                   attribution: dict | None = None) -> dict:
+                   attribution: dict | None = None,
+                   rate_hook=None) -> dict:
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
@@ -1271,12 +1331,16 @@ class Forwarder:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
 
         if resp.status_code >= 400:
+            rl = _rate_limits_from(resp)
+            _emit_rate_hint(dep.get("unique"), rl, rate_hook)
             raise UpstreamError(
                 -resp.status_code if resp.status_code not in RETRYABLE_STATUS
                 else resp.status_code,
                 resp.text[:500],
                 _retry_after_from(resp, resp.text, dep.get("provider", ""))
-                if resp.status_code == 429 else None)
+                if resp.status_code == 429 else None,
+                rate_limits=rl)
+        _emit_rate_hint(dep.get("unique"), _rate_limits_from(resp), rate_hook)
         try:
             data = resp.json()
         except ValueError as exc:
@@ -1655,7 +1719,9 @@ class Forwarder:
                 data = await self.call(dep, payload,
                                profile=profile or "",
                                client_ip=client_ip, session=session,
-                               attribution=attribution)
+                               attribution=attribution,
+                               rate_hook=lambda u, rl: router.note_rate_limit(
+                                   u, rl))
                 if _was_dormant:
                     router.clear_cooldown(cur)
                     metrics.observe_latency_ms(cur, (time.monotonic() - t0) * 1000)

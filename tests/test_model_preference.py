@@ -66,6 +66,41 @@ def test_tiebreak_pref_before_latency(router):
     assert d["model"] == "m-a"
 
 
+def test_cold_start_is_preference_times_base(router):
+    """Cold start = -(pref × model_preference_base): pref 100 -> -1000,
+    pref 50 -> -500, pref -50 -> +500. La preferenza domina da freddo."""
+    a, b, c = (_dep(router, m) for m in ("m-a", "m-b", "m-c"))
+    assert router._reputation_score(a["unique"], a) == -1000.0
+    assert router._reputation_score(b["unique"], b) == -500.0
+    assert router._reputation_score(c["unique"], c) == 500.0
+
+
+def test_cold_start_persists_and_accumulates(router):
+    """Il seed e' persistito in _base_scores: successi/fallimenti si sommano
+    sopra, non resettano la partenza."""
+    a = _dep(router, "m-a")
+    u = a["unique"]
+    assert router._reputation_score(u, a) == -1000.0
+    router.record_success(u, 100.0)
+    # -10 dep + key/prov condivisi (log-norm) -> leggermente sotto -1010
+    assert router._reputation_score(u, a) == pytest.approx(-1015.8, abs=1.0)
+    router.record_failure(u, "http_429", 429)
+    # +5 dep; key/prov si compensano (-2+2) -> torna a -1005 esatto
+    assert router._reputation_score(u, a) == -1005.0
+
+
+def test_cold_start_survives_restart(router):
+    """Il seed finisce in dump_stats (base_scores): dopo un restart il
+    deployment preferito riparte ancora da -1000, non da 0."""
+    a = _dep(router, "m-a")
+    u = a["unique"]
+    router._reputation_score(u, a)
+    dump = router.dump_stats()
+    r2 = Router(router.config, router.policy)
+    r2.load_stats(dump)
+    assert r2._reputation_score(u, a) == -1000.0
+
+
 def test_parsing_model_preference_base():
     assert Policy.from_dict({}).model_preference_base == 10.0
     assert Policy.from_dict({"model_preference_base": 0}).model_preference_base == 0.0
