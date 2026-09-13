@@ -42,7 +42,8 @@ individual account limits instead of dying on the first 429.
   failure in the last 24h, capped at 5h). **Timeouts are penalised 10×**
   because a hung upstream costs real wall-clock time.
 - **Resilient ladder**: at most `ladder_skip_after` attempts per context
-  group before climbing, stale-cooldown revival, a *chronic parachute* for
+  group before climbing, up to `ladder_cooldown_wakeups` stale-cooldown
+  revivals (tried *before* jumping to `-go`), a *chronic parachute* for
   high-failure keys before spending on the paid `-fallback`, and a final
   last-resort pass. A dead bucket never blocks the whole chain for minutes.
 - **Escalation winner + pre-pin probe**: when a request climbs out of a dead
@@ -132,7 +133,9 @@ individual account limits instead of dying on the first 429.
   canonicalized to a family id (e.g. `meta-llama/llama-3-8b-instruct` ==
   `llama3-8b`). When failover crosses providers but stays on the same family,
   the context-compaction `switch` trigger is suppressed (`same_family`) so the
-  prompt cache stays warm.
+  prompt cache stays warm. On a same-family failover the sticky session is also
+  **handed off** to the new deployment (`sticky_handoff_same_family`) so the
+  next turn pins directly to the warm cache holder (`[sticky-handoff]`).
 - **Reputation time-decay & adaptive upstream timeout**: success/failure
   reputation scores (`_base_scores`/`_provider_scores`/`_key_scores`) decay
   toward zero with a half-life (`reputation_decay_halflife_sec`, default 36h)
@@ -287,7 +290,7 @@ template. The ones that matter most:
 | `cooldown_mode` / `cooldown_base_min` / `cooldown_linear_mult_min` | `linear` / 30 / 30 | linear cooldown: 30 min + 30 min per failure/24h |
 | `max_cooldown_sec` | 18000 | cooldown ceiling (5 h) |
 | `timeout_cooldown_mult` | 10 | multiplier applied to a *timeout* failure |
-| `ladder_skip_after` / `ladder_stale_max` | 4 / 3 | attempts per dim before climbing / stale revivals |
+| `ladder_skip_after` / `ladder_stale_max` / `ladder_cooldown_wakeups` | 10 / 3 / 3 | attempts per dim before climbing / stale revivals / cooled-dim wakeup probes per request before `-go` |
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
 | `cooldown_streak_halflife_sec` / `probe_retire_after` / `cooldown_jitter_ratio` | 1800 / 5 / 0.12 | streak decay while idle; auto-retire after N failed probes; cooldown jitter (±12%) |

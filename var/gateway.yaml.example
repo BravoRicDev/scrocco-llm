@@ -49,6 +49,10 @@ estimate_divisor: 3
 #   3600 = 1 ora ; 0 = sticky disabilitato
 sticky_ttl_sec: 3600
 
+# Al failover verso un deployment della STESSA FAMIGLIA, sposta lo sticky sul
+# nuovo deployment (prompt cache calda preservata).
+sticky_handoff_same_family: true
+
 # Sessioni anonime (client che non inviano alcun id di sessione, es. Hermes):
 # il gateway deriva un id deterministico `fq_<hash>` dal prefisso della
 # conversazione (system + primo messaggio user + user-agent) per abilitare
@@ -383,10 +387,14 @@ max_fallback_tries: 128
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Dopo quanti fallimenti nel livello corrente si salta al gradino successivo.
-ladder_skip_after: 4
+ladder_skip_after: 10
 
 # Soglia di deployment "stale" oltre la quale il ladder scatta.
 ladder_stale_max: 3
+
+# Quanti risvegli di dim in cooldown provare (nell'ordine dal meno raffreddato)
+# PRIMA di salire a -go (0 = nessuno, come prima).
+ladder_cooldown_wakeups: 3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUALITY CONTROL JSON + RETRY + WATCHDOG STREAMING

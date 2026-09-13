@@ -207,6 +207,7 @@ class Policy:
     # 0 = usa tutto il system prompt.
     anon_session_fp_system_chars: int = 768
     sticky_ttl_sec: int = 3600
+    sticky_handoff_same_family: bool = True
     cooldown_sec: int = 600
     hotwords_window: int = 3
     hotwords: list[str] = field(default_factory=lambda: list(DEFAULT_HOTWORDS))
@@ -469,6 +470,9 @@ class Policy:
     ladder_skip_after: int = 4
     # max tentativi stale dims prima di passare a -fallback
     ladder_stale_max: int = 3
+    # Numero di risvegli di dim in cooldown (stantii) tentati PRIMA di
+    # escalare a -go (oltre a quello del dim sticky/esplicito). 0 = nessuno.
+    ladder_cooldown_wakeups: int = 3
 
     # SOGLIA "CRONICO": un deployment con questo numero di fallimenti nelle
     # ultime 24h NON viene riesumato dagli step di ri-tentativo della scala
@@ -743,6 +747,9 @@ class Policy:
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")
         _set_int(p, raw, "anon_session_fp_system_chars", minimum=0)
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
+        if "sticky_handoff_same_family" in raw:
+            p.sticky_handoff_same_family = _coerce_bool(
+                raw["sticky_handoff_same_family"], "sticky_handoff_same_family")
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)
         _set_int(p, raw, "max_fallback_tries", minimum=1)
@@ -1440,6 +1447,7 @@ class Policy:
         _set_int(p, raw, "cooldown_linear_mult_min", minimum=0)
         _set_int(p, raw, "ladder_skip_after", minimum=1)
         _set_int(p, raw, "ladder_stale_max", minimum=1)
+        _set_int(p, raw, "ladder_cooldown_wakeups", minimum=0)
         _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
         _set_int(p, raw, "ladder_chronic_max", minimum=0)
         _set_int(p, raw, "chronic_fail_cooldown_sec", minimum=0)

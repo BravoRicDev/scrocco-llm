@@ -1567,6 +1567,15 @@ class Forwarder:
         _deadline_ms = int(getattr(router.policy.qc_json,
                                    "stream_total_deadline_ms", 180000) or 0)
         _t0 = time.monotonic()
+
+        def _pick(*a, **k):
+            # Fallback + warm sticky handoff: se il prossimo deployment e' della
+            # stessa famiglia dello sticky corrente, sposta lo sticky su di lui
+            # (la sessione riparte warm invece che fredda).
+            _n = router.fallback_next(*a, **k)
+            if _n is not None:
+                router.sticky_handoff(ses, _n)
+            return _n
         # ---- L1 #1: normalizzazione STRUTTURALE della history (coda) ----
         if _hn.enabled:
             _new_msgs, _hn_rep = normalize_messages(
@@ -1683,7 +1692,7 @@ class Forwarder:
                                         "%ds)", cur, _cd)
                             _fail_cur(seconds=_cd, reason="truncated_toolcall")
                             last_broken = (data, dep)
-                            dep = router.fallback_next(
+                            dep = _pick(
                                 profile, dep, need, scope, ctx=ctx,
                                 tried=tried, requested_group=requested_group)
                             continue
@@ -1755,7 +1764,7 @@ class Forwarder:
                             log.warning("[qc] %s JSON non valido (%s): "
                                         "provo il successivo", cur, reason)
                             _fail_cur()
-                            dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                            dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                             continue        # finally chiude il TENTATIVO
                         # tentativi esauriti: consegna l'ultimo se ha contenuto,
@@ -1788,7 +1797,7 @@ class Forwarder:
                     _fail_cur()
                     last_broken = (data, dep)
                     qc_failed.append((cur, "schema"))
-                    dep = router.fallback_next(profile, dep, need, scope,
+                    dep = _pick(profile, dep, need, scope,
                                                ctx=ctx, tried=tried,
                                                requested_group=
                                                requested_group)
@@ -1801,7 +1810,7 @@ class Forwarder:
                                 cur, _loop_reason)
                     _fail_cur(reason="loop")
                     last_broken = (data, dep)
-                    nxt = router.fallback_next(profile, dep, need, scope,
+                    nxt = _pick(profile, dep, need, scope,
                                                ctx=ctx, tried=tried,
                                                requested_group=
                                                requested_group)
@@ -1870,7 +1879,7 @@ class Forwarder:
                                 cur, detail, _qcd)
                     _fail_cur(seconds=_qcd, reason="quota_exhausted",
                               status=abs(err.status) if err.status else None)
-                    dep = router.fallback_next(profile, dep, need, scope,
+                    dep = _pick(profile, dep, need, scope,
                                                ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                     continue
@@ -1897,7 +1906,7 @@ class Forwarder:
                                                 router.stats_for(cur).fail_count_24h),
                                             reason="provider_transient",
                                             status=abs(err.status) if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope,
+                        dep = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
@@ -1908,7 +1917,7 @@ class Forwarder:
                                     "ritento sul successivo", cur)
                         _fail_cur(reason="not_found",
                                   status=-err.status if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     # alcuni provider (es. cloudflare) rispondono 400 con
@@ -1924,14 +1933,14 @@ class Forwarder:
                         _fail_cur( seconds=MODEL_MISSING_COOLDOWN_S,
                                            reason="not_found",
                                            status=-err.status if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     if _THOUGHT_SIG_RE.search(detail):
                         metrics.inc("nx_upstream_calls_total",
                                     (cur, "provider_4xx"))
                         last_err = err        # per la consegna a catena esaurita
-                        nxt = router.fallback_next(profile, dep, need, scope,
+                        nxt = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         if nxt is not None and nxt["unique"] in tried:
@@ -1954,7 +1963,7 @@ class Forwarder:
                         metrics.inc("nx_upstream_calls_total",
                                     (cur, "provider_4xx"))
                         last_err = err        # consegna il 400 se catena esaurita
-                        nxt = router.fallback_next(profile, dep, need, scope,
+                        nxt = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         if nxt is not None and nxt["unique"] in tried:
@@ -1989,7 +1998,7 @@ class Forwarder:
                             reason="no_credits" if -err.status == 402
                             else "provider_400",
                             status=abs(err.status) if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     # ENVELOPE D'ERRORE PROVIDER: qualsiasi body {"type":"error",
@@ -2008,7 +2017,7 @@ class Forwarder:
                                     cur, -err.status, detail)
                         _fail_cur(reason="provider_error",
                                   status=-err.status if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     # 4xx con body ASSENTE/illeggibile: nessun messaggio
@@ -2029,7 +2038,7 @@ class Forwarder:
                                                 router.stats_for(cur).fail_count_24h),
                                             reason="empty_error_body",
                                             status=-err.status if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope,
+                        dep = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
@@ -2049,7 +2058,7 @@ class Forwarder:
                         _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
                                    reason="upstream_403",
                                    status=abs(err.status) if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     # 401 upstream: la NOSTRA chiave e' rifiutata dal provider
@@ -2067,7 +2076,7 @@ class Forwarder:
                         _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
                                    reason="upstream_401",
                                    status=abs(err.status) if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                         continue
                     if is_provider_fault_body(detail):
@@ -2088,7 +2097,7 @@ class Forwarder:
                                 router.stats_for(cur).fail_count_24h),
                             reason="provider_fault",
                             status=-err.status if err.status else None)
-                        dep = router.fallback_next(profile, dep, need, scope,
+                        dep = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                    requested_group=requested_group)
                         continue
@@ -2105,7 +2114,7 @@ class Forwarder:
                                 media_strike_hook(dep["model"], detail)
                             except Exception as exc:
                                 log.debug("[strike] hook error: %s", exc)
-                        nxt = router.fallback_next(profile, dep, need, scope,
+                        nxt = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                    requested_group=requested_group)
                         if nxt is None:
@@ -2133,7 +2142,7 @@ class Forwarder:
                 _fail_cur( seconds=err.retry_after,
                                     reason=_reason,
                                     status=abs(err.status) if err.status else None)
-                dep = router.fallback_next(profile, dep, need, scope, ctx=ctx, tried=tried,
+                dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
             finally:
                 router.note_end(cur)        # SEMPRE il tentativo corrente

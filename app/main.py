@@ -2044,6 +2044,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
                 return _exhausted(len(attempts), err.detail)
+            if ses:
+                router.sticky_handoff(ses, nxt)
             dep = nxt
             inject_identity(payload, dep, router=router)
         except (GeneratorExit, asyncio.CancelledError):
@@ -2074,6 +2076,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
                 return _exhausted(len(attempts), repr(exc)[:160])
+            if ses:
+                router.sticky_handoff(ses, nxt)
             dep = nxt
             inject_identity(payload, dep, router=router)
 

@@ -450,6 +450,40 @@ class Router:
     def dep_sticky_release(self, session_id: str) -> None:
         self._sticky_dep.pop(session_id, None)
 
+    def sticky_handoff(self, session_id: str | None,
+                       nxt: dict | None) -> bool:
+        """Warm handoff dello sticky quando un failover atterra su `nxt`.
+
+        Se la sessione era sticky su un deployment della STESSA famiglia di
+        `nxt`, sposta lo sticky su `nxt`: la richiesta successiva riparte gia'
+        warm (stessa cache key/prefix del provider) invece di ripartire da un
+        deployment freddo scelto a caso. Ritorna True se lo sticky e' stato
+        spostato."""
+        if not session_id or not nxt:
+            return False
+        if not getattr(self.policy, "sticky_handoff_same_family", True):
+            return False
+        target = nxt.get("unique")
+        if not target:
+            return False
+        try:
+            old = self.dep_sticky_get(session_id)
+        except Exception:                       # mai bloccare il failover
+            return False
+        if not old or old == target:
+            return False
+        try:
+            old_dep = self.config.deployment_by_unique(old)
+        except Exception:
+            old_dep = None
+        fam = nxt.get("family")
+        if old_dep and fam and old_dep.get("family") == fam:
+            self.dep_sticky_set(session_id, target)
+            log.info("[sticky-handoff] %s -> %s (stessa famiglia %s)",
+                     old, target, fam)
+            return True
+        return False
+
     # --- Sticky per-capability (deployment_sticky_per_capability) ---
     def _cap_sticky_key(self, session_id: str, need: frozenset[str] | None) -> str:
         """Chiave per lo sticky per-capability: session_id + sorted caps."""
@@ -2736,19 +2770,33 @@ class Router:
         if nxt is not None:
             return nxt
 
-        # 1bis) dims cooldown-wakeup: prova il dim RAFFREDDATO da più tempo
-        # (stantio, cooldown_age >= stale_cooldown_retry_sec) e con cooldown
-        # residuo minore, PRIMA di saltare a -go (a pagamento). Stessa soglia
-        # degli "stantii" della scala, così non si martella un cooldown fresco.
+        # 1bis) dims cooldown-wakeup: prova i dim RAFFREDDATI da più tempo
+        # (stantii, cooldown_age >= stale_cooldown_retry_sec) e con cooldown
+        # residuo minore, PRIMA di saltare a -go (a pagamento). Fino a
+        # `ladder_cooldown_wakeups` risvegli per richiesta (oltre a quello del
+        # dim esplicito in initial_pick): così anche gli step intermedi provano
+        # a risvegliare un cooldown invece di andare subito a -go. Stessa soglia
+        # degli "stantii" della scala, per non martellare un cooldown fresco.
         _tried_set = tried or set()
+        _dims_set = set(dims)
+        _max_wake = max(0, int(getattr(pol, "ladder_cooldown_wakeups", 3) or 0))
+        _woken = 0
+        if _max_wake > 0:
+            for u in _tried_set:
+                if u not in _dims_set or not self.is_cooled_down(u):
+                    continue
+                _cage = self.cooldown_age(u)
+                if _cage is not None and _cage >= age:
+                    _woken += 1
         _cooled_dims = []
-        for u in _chronic_filter(dims, True):
-            if u in _tried_set or not self.is_cooled_down(u):
-                continue
-            _cage = self.cooldown_age(u)
-            if _cage is None or _cage < age:
-                continue                       # cooldown fresco: non svegliare
-            _cooled_dims.append(u)
+        if _woken < _max_wake:
+            for u in _chronic_filter(dims, True):
+                if u in _tried_set or not self.is_cooled_down(u):
+                    continue
+                _cage = self.cooldown_age(u)
+                if _cage is None or _cage < age:
+                    continue                       # cooldown fresco: non svegliare
+                _cooled_dims.append(u)
         if _cooled_dims:
             _now = time.time()
             _cooled_dims.sort(
@@ -2757,8 +2805,8 @@ class Router:
             _wake = cfg.deployment_by_unique(_wake_u)
             if _wake is not None:
                 _rem = max(0, int(self._cooldown.get(_wake_u, 0) - _now))
-                log.info("[ladder] dims cooldown-wakeup: residuo %ds -> %s",
-                         _rem, _wake_u)
+                log.info("[ladder] dims cooldown-wakeup (%d/%d): residuo %ds "
+                         "-> %s", _woken + 1, _max_wake, _rem, _wake_u)
                 return _wake
 
         # 2) -go vivi
