@@ -2044,6 +2044,55 @@ class Router:
         normalmente il suo model_preference."""
         return should_avoid_gemini() and is_gemini_deployment(dep)
 
+    # ------------------------------------------- budget guard predittivo
+    def _virtually_saturated(self, dep: dict, safety: float,
+                             count_inflight: bool) -> bool:
+        """True se il deployment ha raggiunto >= safety * cap appreso.
+
+        Il cap esiste SOLO dopo un 429 reale (min/day_cap_learned): finche'
+        non c'e' evidenza non si indovina nessun limite. Le chiamate del
+        minuto corrente (minute_calls) includono gia' quelle in volo; l'inflight
+        viene preso col max per coprire il rollover di minuto (quando
+        minute_calls riparte da 0 ma esistono ancora richieste in volo).
+        """
+        s = self.stats_for(dep["unique"])
+        minute_used = s.minute_calls
+        if count_inflight:
+            minute_used = max(minute_used, s.inflight)
+        for used, cap in ((minute_used, s.min_cap_learned),
+                          (s.day_calls, s.day_cap_learned)):
+            if cap and cap > 0 and used >= safety * cap:
+                return True
+        return False
+
+    def _apply_inflight_guard(self, deps: list[dict]) -> list[dict]:
+        """Limitatore predittivo anti-burst.
+
+        Se un cap e' stato appreso e una parte dei deployment e' oltre la
+        soglia di sicurezza, li salta a favore di quelli ancora sotto soglia
+        PRIMA che l'upstream risponda 429. Ritorna la lista invariata quando
+        non ci sono alternative sane (l'ultima spiaggia resta il soft-score).
+        """
+        bg = self.policy.budget_guard or {}
+        if not bg.get("enabled"):
+            return deps
+        try:
+            safety = float(bg.get("safety_ratio", 0.8))
+        except (TypeError, ValueError):
+            safety = 0.8
+        if safety <= 0:
+            return deps
+        count_inflight = bool(bg.get("count_inflight", True))
+        alive = [d for d in deps
+                 if not self._virtually_saturated(d, safety, count_inflight)]
+        if not alive:
+            return deps
+        if len(alive) < len(deps):
+            log.info("[budget] inflight-guard: %d/%d deployment oltre la "
+                     "soglia di sicurezza (%.0f%%), devio sui restanti",
+                     len(deps) - len(alive), len(deps), safety * 100)
+        return alive
+
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
                         ctx: int | None = None,
@@ -2088,6 +2137,9 @@ class Router:
             # (ultima spiaggia), rispettando exclude/need/guardia
             deps = [d for d in self.config.groups.get(group_name, []) if _ok(d)]
         deps, _ = self._defer_media(group_name, need, deps)
+        # INFLIGHT-GUARD (budget predittivo): salta chi ha superato l'80%
+        # (configurabile) del cap appreso PRIMA del 429, deviando sul fratello.
+        deps = self._apply_inflight_guard(deps)
         # TIER esplicito (colonna `order`): nei gruppi TESTO dims si prova
         # prima il tier col valore minimo tra i vivi; se e' tutto in cooldown
         # si scende automaticamente al tier successivo. Dentro il tier resta

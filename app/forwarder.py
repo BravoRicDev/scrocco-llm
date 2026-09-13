@@ -235,7 +235,22 @@ _PAYLOAD_SCHEMA_RE = re.compile(
     r"|required properties at '/messages/\d+' are"
     r"|(reasoning_content|reasoning)['\" ]* is unsupported"
     r"|for 'role:assistant'[^\]]*reasoning[^\]]*unsupported"
-    r"|property 'reasoning[_a-z]*' is unsupported",
+    r"|property 'reasoning[_a-z]*' is unsupported"
+    # CATENA TOOL ROTTA (orfano inverso): un assistant con tool_calls senza il
+    # corrispondente messaggio `tool`. I provider severi rispondono 400
+    # bloccante; un altro deployment tollerante accetta lo stesso payload ->
+    # ruota senza cooldown, mai raw al client. La history viene comunque
+    # bonificata a monte da histnorm.
+    r"|assistant message with ['\"]?tool_calls['\"]? must be followed by"
+    r"|must be a response to a preceding message with ['\"]?tool_calls"
+    r"|messages? with role ['\"]?tool['\"]? must be a response"
+    r"|unknown tool_call_id|invalid tool_call id"
+    r"|tool_call_id['\"]?\s*(?:of\s+)?[^ ,;]{0,64}\s*(?:not found|does not exist|is invalid)"
+    r"|tool_(?:use|call)_id[^,;]{0,64}(?:not found|no corresponding|without)"
+    r"|unexpected .{0,16}tool_(?:result|use)_id"
+    r"|must have a corresponding .{0,24}tool_(?:result|use)"
+    r"|does not have a corresponding tool (?:result|message)"
+    r"|missing (?:corresponding )?tool (?:result|response|output)",
     re.IGNORECASE)
 
 # Errore TRANSITORIO del provider/router a monte (non del client, non del

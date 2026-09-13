@@ -1750,7 +1750,7 @@ async def admin_insights(request: Request, days: int = 7,
                         "none"):
         return _err(400, f"group_by '{group_by}' non valido")
     cutoff = time.time() - days * 86400
-    rows = [r for r in gw.LEDGER.iter_rows()
+    rows = [r for r in await gw.LEDGER.iter_rows_async()
             if (r.get("ts") or 0) >= cutoff]
     total = {"calls": len(rows), "days": days}
     if group_by == "none":
@@ -1777,7 +1777,7 @@ async def admin_insights_summary(request: Request):
         return denied
     gw = _gw()
     cutoff = time.time() - 86400
-    rows = [r for r in gw.LEDGER.iter_rows() if (r.get("ts") or 0) >= cutoff]
+    rows = [r for r in await gw.LEDGER.iter_rows_async() if (r.get("ts") or 0) >= cutoff]
     by_kind = _insights_aggregate(rows, "kind")
     tot_tok = sum(v["total_tokens"] for v in by_kind.values())
     tot_cost_r = sum(v["cost_reported_usd"] for v in by_kind.values())
@@ -1907,7 +1907,7 @@ async def admin_insights_leaderboard(request: Request, window: str = "7d",
     gw = _gw()
     days = _parse_window_days(window)
     cutoff = time.time() - days * 86400.0
-    rows = [r for r in gw.LEDGER.iter_rows()
+    rows = [r for r in await gw.LEDGER.iter_rows_async()
             if r.get("dep") and (r.get("ts") or 0) >= cutoff]
     if profile:
         rows = [r for r in rows if r.get("profile") == profile]

@@ -446,7 +446,13 @@ class Policy:
     # dura (quella resta il cooldown); a quota esaurita peso residuo 5%.
     budget_guard: dict = field(default_factory=lambda: {
         "enabled": True, "soft_factor": 0.8,
-        "min_per_min": 10, "min_per_day": 200})
+        "min_per_min": 10, "min_per_day": 200,
+        # safety_ratio: frazione del cap appreso oltre la quale il deployment
+        # e' considerato "virtualmente saturo" e viene saltato a favore del
+        # successivo (limitatore PREDITIVO anti-burst). 0 = disabilitato.
+        # count_inflight: conta anche le richieste gia' in volo (max con
+        # minute_calls, che le include gia': serve al rollover di minuto).
+        "safety_ratio": 0.8, "count_inflight": True})
     # cap a 5 ORE: i free-tier si rinnovano su finestre giornaliere/orarie,
     # seppellire una chiave per un intero giorno la toglie dal giro anche
     # quando il limite era solo orario. Il budget_guard (router) dosa PRIMA
@@ -1307,6 +1313,19 @@ class Policy:
                     if v <= 0:
                         raise ValueError(f"budget_guard.{k}: > 0 richiesto")
                     merged[k] = v
+            if "safety_ratio" in bg:
+                try:
+                    v = float(bg["safety_ratio"])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "budget_guard.safety_ratio: numero richiesto") from None
+                if v < 0:
+                    raise ValueError(
+                        "budget_guard.safety_ratio: >= 0 richiesto")
+                merged["safety_ratio"] = v
+            if "count_inflight" in bg:
+                merged["count_inflight"] = _coerce_bool(
+                    bg["count_inflight"], "budget_guard.count_inflight")
             p.budget_guard = merged
 
         # gruppi capacità strutturali

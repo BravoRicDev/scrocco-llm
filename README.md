@@ -77,7 +77,7 @@ individual account limits instead of dying on the first 429.
   streaming and non-streaming. Levels `safe`/`aggressive`, per-deployment via
   the `tool_repair` CSV column, Google/Gemini off by default. Never changes
   tool names or semantics.
-- **History normalize** (`history_normalize`): structural, cache-safe tail cleanup of the outgoing message copy.
+- **History normalize** (`history_normalize`): structural, cache-safe tail cleanup of the outgoing message copy. Handles both orphan `tool` results and **inverse orphans**: an `assistant` with `tool_calls` missing the matching `tool` result (even only for some ids) has the dangling calls stripped (content preserved), so strict providers never reject the chain. No synthesized results.
 - **Sampling defaults** (`sampling_defaults`) + **loop detector** (`loop`): low-risk provider defaults (client wins) and n-gram/tool-call loop escalation to the next dim.
 - **Corrective retry** (`corrective_retry`): one non-streaming retry on invalid/empty/JSON/schema content (no repair model).
 - **Structured output** (`qc_json.struct_out_*`): fence/prose cleanup, JSON-Schema subset validation, schema-driven repair, optional `response_format` injection.
@@ -93,6 +93,14 @@ individual account limits instead of dying on the first 429.
   (old tool outputs stubbed) only when the request would not fit the
   chosen deployment, and the session stays compacted so the provider
   prefix remains cacheable.
+- **Predictive budget guard** (`budget_guard`): once a per-key cap is
+  *learned from a real 429*, `safety_ratio` (default `0.8`) marks a
+  deployment as virtually saturated — counting in-flight requests too
+  (`count_inflight`) — and `pick_deployment` diverts new requests to a
+  sibling still under threshold *before* the upstream answers 429. No
+  learned cap means no throttling. `retry_after_min_sec` (default `10`)
+  floors tiny/absent `Retry-After` so a burst of near-simultaneous 429s
+  cannot loop.
 - **Usage & cost insights**: persistent ledger + `GET /admin/insights`
   (per profile/model/day burn; provider-reported vs estimated costs).
 - **Three-tier auth**: master key / deterministic `sk-<profile>` client keys

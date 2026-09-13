@@ -28,6 +28,7 @@ import logging
 import os
 import threading
 import time
+import asyncio
 
 log = logging.getLogger("nx.ledger")
 
@@ -58,12 +59,25 @@ class Ledger:
             entry["ts"] = int(time.time())
             with self._lock:
                 self._buf.append(entry)
-                if len(self._buf) >= 200:       # safety net anti-ram
-                    self.flush()
+                need_flush = len(self._buf) >= 200       # safety net anti-ram
+            if need_flush:
+                # FUORI dal lock: flush() riacquisisce self._lock (non
+                # rientrante) -> dentro il with sarebbe stato un deadlock.
+                self.flush()
         except Exception:                       # mai bloccare la risposta
             log.debug("[ledger] record error", exc_info=True)
 
     # -------------------------------------------------------------- flush --
+    async def flush_async(self) -> int:
+        """Variante non bloccante: esegue il flush su un thread separato così
+        l'I/O su disco (append/rotazione) non ferma mai l'event loop di
+        FastAPI. Usata dal watcher periodico."""
+        try:
+            return await asyncio.to_thread(self.flush)
+        except Exception:                       # noqa: BLE001 - best effort
+            log.debug("[ledger] flush_async error", exc_info=True)
+            return 0
+
     def flush(self) -> int:
         """Scrive il buffer su disco (append); ritorna le righe scritte."""
         with self._lock:
@@ -123,6 +137,11 @@ class Ledger:
             except OSError:
                 continue
         return out
+
+    async def iter_rows_async(self) -> "list[dict]":
+        """Variante non bloccante di `iter_rows` (I/O su thread separato):
+        evita di fermare l'event loop durante la lettura dei segmenti."""
+        return await asyncio.to_thread(self.iter_rows)
 
 
 def _estimate_cost(usage: dict, pricing: dict, model: str) -> float | None:

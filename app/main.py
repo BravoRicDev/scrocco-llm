@@ -258,7 +258,7 @@ async def _watcher(interval: float) -> None:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
             _maybe_save_adaptive_stats()
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
-            LEDGER.flush()              # ledger usage: buffer -> jsonl
+            await LEDGER.flush_async()  # ledger usage: offload su thread
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
             # l'evidenza su disco (throttled dal tick stesso)
             try:

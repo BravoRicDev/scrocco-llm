@@ -106,6 +106,7 @@ def normalize_messages(messages, cfg: HistNormConfig | None = None):
     head = msgs[:tail_start]
     tail = msgs[tail_start:]
     report = {"shown_orphan_tool": 0, "dangling_tool_calls": 0,
+              "dropped_tool_calls": 0,
               "empty_assistant": 0, "dup_system": 0,
               "tail_start": tail_start, "changed": False}
 
@@ -122,18 +123,33 @@ def normalize_messages(messages, cfg: HistNormConfig | None = None):
         tail = new_tail
 
     if cfg.drop_dangling_tool_calls:
+        # ORFANO INVERSO (anche PARZIALE): un assistant dichiara tool_calls ma
+        # manca il messaggio `tool` col risultato per uno o piu' id (history
+        # troncata/rilavorata). I provider severi (OpenAI/Anthropic recenti)
+        # rispondono 400 bloccante e la richiesta muore. Qui togliamo SOLO le
+        # call senza risultato (quelle con risultato restano), cosi' la catena
+        # torna strutturalmente valida; se non resta nessuna call si conserva
+        # il content (o si scarta l'assistant se vuoto). Nessuna sintesi di
+        # risultati: nessuna mossa semantica.
+        result_ids = {m.get("tool_call_id") for m in msgs
+                      if isinstance(m, dict) and m.get("role") == "tool"
+                      and m.get("tool_call_id")}
         new_tail = []
-        for idx, m in enumerate(tail):
+        for m in tail:
             if (isinstance(m, dict) and m.get("role") == "assistant"
                     and m.get("tool_calls")):
-                ids = [tc.get("id") for tc in m["tool_calls"]
-                       if isinstance(tc, dict)]
-                has_result = any(
-                    isinstance(rest, dict) and rest.get("role") == "tool"
-                    and rest.get("tool_call_id") in ids
-                    for rest in tail[idx + 1:])
-                if not has_result:
+                calls = [tc for tc in m["tool_calls"]
+                         if isinstance(tc, dict)]
+                kept = [tc for tc in calls if tc.get("id") in result_ids]
+                missing = len(calls) - len(kept)
+                if missing:
                     report["dangling_tool_calls"] += 1
+                    report["dropped_tool_calls"] += missing
+                    if kept:
+                        m = dict(m)
+                        m["tool_calls"] = kept
+                        new_tail.append(m)
+                        continue
                     if _text_of(m.get("content")).strip():
                         m = dict(m)
                         m.pop("tool_calls", None)
