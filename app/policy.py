@@ -152,6 +152,11 @@ class Policy:
     # indica un Retry-After troppo piccolo/assente: evita loop di 429
     # ravvicinati. 0 = nessun floor (si usa il valore del provider).
     retry_after_min_sec: float = 10.0
+    # Floor Retry-After specifici per provider (provider -> secondi), es.
+    # {groq: 5, google: 30, openrouter: 15}. Se un provider non e' in mappa
+    # vale retry_after_min_sec.
+    retry_after_floor_by_provider: dict[str, float] = field(
+        default_factory=dict)
     # Watchdog inter-chunk dello streaming (secondi): se l'upstream non manda
     # alcun byte per N secondi a stream avviato -> StreamStallError -> failover
     # (pre-byte) / cooldown (post-byte). 0 = disabilitato.
@@ -183,6 +188,11 @@ class Policy:
     # conversazione, cosi' anche client come Hermes ottengono sticky/cache.
     # False = lascia la sessione anonima (comportamento storico).
     anon_session_fingerprint: bool = True
+    # Il fingerprint anonimo hasha solo i PRIMI N caratteri del system prompt:
+    # molti agenti (Hermes) accodano timestamp/contesto variabile che
+    # cambierebbe l'hash ad ogni turno. Troncare mantiene la sticky calda.
+    # 0 = usa tutto il system prompt.
+    anon_session_fp_system_chars: int = 768
     sticky_ttl_sec: int = 3600
     cooldown_sec: int = 600
     hotwords_window: int = 3
@@ -636,6 +646,22 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "retry_after_min_sec deve essere un numero >= 0") from None
+        _rafp = raw.get("retry_after_floor_by_provider")
+        if _rafp is not None:
+            if not isinstance(_rafp, dict):
+                raise ValueError(
+                    "retry_after_floor_by_provider deve essere una mappa "
+                    "provider -> secondi") from None
+            _tbl: dict[str, float] = {}
+            for _k, _v in _rafp.items():
+                try:
+                    _fv = max(0.0, float(_v))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"retry_after_floor_by_provider[{_k}] non numerico"
+                    ) from None
+                _tbl[str(_k).strip().lower()] = _fv
+            p.retry_after_floor_by_provider = _tbl
         _sds = raw.get("shutdown_drain_sec")
         if _sds is not None:
             try:
@@ -681,6 +707,7 @@ class Policy:
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")
+        _set_int(p, raw, "anon_session_fp_system_chars", minimum=0)
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)

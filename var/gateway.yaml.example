@@ -55,9 +55,22 @@ sticky_ttl_sec: 3600
 # sticky e cache-aware. false = lascia la sessione anonima (storico).
 anon_session_fingerprint: true
 
+# Il fingerprint anonimo considera solo i primi N caratteri del system prompt
+# (0 = tutto il prompt): evita che timestamp/dati di contesto accodati ad ogni
+# turno cambino l'id sessione, mantenendo sticky e prompt-cache calde.
+anon_session_fp_system_chars: 768
+
 # Cooldown base in secondi per chiavi/modelli che falliscono (600 = 10 minuti).
 # Vedere anche `cooldown_mode` più sotto per l'escalation.
 cooldown_sec: 600
+
+# Floor minimo del cooldown applicato sui 429 (anti-loop): il valore del
+# provider viene ignorato se piu' piccolo. Override per-provider opzionale.
+# retry_after_min_sec: 10
+# retry_after_floor_by_provider:
+#   groq: 5
+#   google: 30
+#   openrouter: 15
 
 # Probe passivo delle chiavi dormienti: quando NON ci sono chiavi vive, un
 # deployment in cooldown da >= cooldown_probe_after_ratio del suo tempo viene

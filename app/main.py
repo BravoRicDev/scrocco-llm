@@ -58,7 +58,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         is_embedded_provider_error,
                         media_reject_signature, _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
-                        set_retry_after_floor,
+                        set_retry_after_floors,
                         set_stream_stall_sec,
                         set_schemaout_config,
                         QUOTA_MIN_COOLDOWN_S)
@@ -163,7 +163,8 @@ router = Router(config, policy)
 # provider callable: l'hot-reload della policy aggiorna anche le chiavi client
 authn = AuthManager(config, client_keys_provider=lambda: policy.client_keys)
 forwarder = Forwarder()
-set_retry_after_floor(policy.retry_after_min_sec)
+set_retry_after_floors(policy.retry_after_min_sec,
+                       policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 set_schemaout_config(_so_cfg_from_policy(policy))
@@ -306,7 +307,8 @@ async def _watcher(interval: float) -> None:
                 else:
                     router.policy = fresh          # swap atomico dei riferimenti
                     globals()["policy"] = fresh
-                    set_retry_after_floor(fresh.retry_after_min_sec)
+                    set_retry_after_floors(fresh.retry_after_min_sec,
+                                           fresh.retry_after_floor_by_provider)
                     set_stream_stall_sec(fresh.stream_stall_sec)
                     set_schemaout_config(
                         _so_cfg_from_policy(fresh))
@@ -742,8 +744,14 @@ def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
             usr_txt = _text_of(m.get("content"))
         if sys_txt and usr_txt:
             break
+    # Tronchiamo il system prompt ai primi N char: molti agenti accodano
+    # timestamp/contesto variabile che cambierebbe l'hash ad ogni turno.
+    _sys_cap = int(getattr(policy, "anon_session_fp_system_chars", 768) or 0)
+    sys_part = sys_txt.strip()
+    if _sys_cap > 0:
+        sys_part = sys_part[:_sys_cap]
     ua = (request.headers.get("user-agent") or "").strip()
-    basis = "\x1f".join((sys_txt.strip()[:4096], usr_txt.strip()[:4096], ua))
+    basis = "\x1f".join((sys_part, usr_txt.strip()[:4096], ua))
     if len(basis.replace("\x1f", "").strip()) < _ANON_FP_MIN_CHARS:
         return None
     digest = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:16]

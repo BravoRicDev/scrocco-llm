@@ -42,6 +42,7 @@ import time
 from typing import AsyncIterator
 
 import httpx
+from urllib.parse import urlsplit
 
 from . import metrics
 from .qc import check_response
@@ -128,6 +129,11 @@ errlog = logging.getLogger("nx.erroraudit")
 RETRYABLE_STATUS = {408, 409, 429} | set(range(500, 600))
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0,
                                  pool=10.0)
+# Pool connessioni generoso: con centinaia di deployment su molti provider
+# vogliamo riusare TCP/TLS (keep-alive) per host:port il piu' possibile.
+UPSTREAM_LIMITS = httpx.Limits(max_keepalive_connections=30,
+                               max_connections=100,
+                               keepalive_expiry=120.0)
 
 # ANTI-STALL (mid-stream): se dopo l'avvio dello stream l'upstream non manda
 # NULLA per N secondi (free-tier/reverse-proxy che si "congelano" senza
@@ -835,6 +841,10 @@ _RETRY_BODY_CAP_S = 300.0                                     # un 429 non chied
 # entra in un loop di 429 ravvicinati. Override da policy
 # (`retry_after_min_sec`); <=0 disabilita il floor.
 RETRY_AFTER_MIN_SEC = 10.0
+# Floor specifici per provider (provider -> secondi). Se assente vale
+# RETRY_AFTER_MIN_SEC. Un free-tier lento (quota giornaliera) merita un
+# floor piu' alto di uno veloce (es. groq).
+_RETRY_FLOOR_BY_PROVIDER: dict[str, float] = {}
 
 
 def set_retry_after_floor(sec) -> None:
@@ -847,17 +857,38 @@ def set_retry_after_floor(sec) -> None:
     RETRY_AFTER_MIN_SEC = max(0.0, v)
 
 
-def _apply_retry_floor(v: float) -> float:
-    return max(RETRY_AFTER_MIN_SEC, v) if RETRY_AFTER_MIN_SEC > 0 else v
+def set_retry_after_floors(default, by_provider=None) -> None:
+    """Floor di default + tabella per-provider (provider -> secondi >= 0)."""
+    set_retry_after_floor(default)
+    global _RETRY_FLOOR_BY_PROVIDER
+    table: dict[str, float] = {}
+    if isinstance(by_provider, dict):
+        for k, v in by_provider.items():
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv >= 0:
+                table[str(k).strip().lower()] = fv
+    _RETRY_FLOOR_BY_PROVIDER = table
 
 
-def _retry_after_from(resp: httpx.Response, body: str | None) -> float | None:
+def _apply_retry_floor(v: float, provider: str | None = None) -> float:
+    floor = RETRY_AFTER_MIN_SEC
+    if provider:
+        floor = _RETRY_FLOOR_BY_PROVIDER.get(str(provider).strip().lower(),
+                                             floor)
+    return max(floor, v) if floor > 0 else v
+
+
+def _retry_after_from(resp: httpx.Response, body: str | None,
+                      provider: str | None = None) -> float | None:
     """Retry-After: prima l'header, poi (fallback) il retryDelay dal body 429.
     Cap a 300s: un rate-limit non deve mai valere un cooldown di ore.
-    In coda applichiamo il floor minimo anti-loop (RETRY_AFTER_MIN_SEC)."""
+    In coda applichiamo il floor minimo anti-loop (per-provider se noto)."""
     hdr = _retry_after_of(resp)
     if hdr is not None:
-        return _apply_retry_floor(hdr)
+        return _apply_retry_floor(hdr, provider)
     if not body:
         return None
     m = _RETRY_BODY_RE.search(body)
@@ -875,7 +906,8 @@ def _retry_after_from(resp: httpx.Response, body: str | None) -> float | None:
         if g is not None:
             try:
                 val = float(g)
-                return _apply_retry_floor(max(1.0, min(val, _RETRY_BODY_CAP_S)))
+                return _apply_retry_floor(
+                    max(1.0, min(val, _RETRY_BODY_CAP_S)), provider)
             except (TypeError, ValueError):
                 continue
     return None
@@ -895,11 +927,52 @@ def media_reject_signature(detail: str) -> bool:
 
 class Forwarder:
     def __init__(self, client: httpx.AsyncClient | None = None):
-        # client iniettabile per i test (httpx.MockTransport)
-        self.client = client or httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
+        # client iniettabile per i test (httpx.MockTransport); se assente
+        # usiamo un pool di client persistenti PER-ORIGINE (riuso TCP/TLS).
+        self.client = client
+        self._injected = client
+        self._clients: dict[str, httpx.AsyncClient] = {}
+
+    def _client_for(self, url: str) -> httpx.AsyncClient:
+        """Client persistente per host:port, creato lazy e riusato.
+
+        Un client httpx poola per-origin; tenerne uno dedicato per origine
+        con limiti ampi garantisce keep-alive attivo tra chiamate allo stesso
+        provider anche in raffica (niente TLS handshake ripetuti).
+        """
+        if self._injected is not None:
+            return self._injected
+        try:
+            _u = urlsplit(url)
+            origin = f"{_u.scheme}://{_u.netloc}"
+        except ValueError:
+            origin = url
+        cli = self._clients.get(origin)
+        if cli is None:
+            cli = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT,
+                                    limits=UPSTREAM_LIMITS)
+            self._clients[origin] = cli
+            log.info("[http-pool] client persistente per %s "
+                     "(keepalive=%d, max=%d, expiry=%.0fs)", origin,
+                     UPSTREAM_LIMITS.max_keepalive_connections,
+                     UPSTREAM_LIMITS.max_connections,
+                     UPSTREAM_LIMITS.keepalive_expiry or 0.0)
+        return cli
 
     async def aclose(self) -> None:
-        await self.client.aclose()
+        seen: set[int] = set()
+        clients = list(self._clients.values())
+        if self._injected is not None:
+            clients.append(self._injected)
+        for cli in clients:
+            if cli is None or id(cli) in seen:
+                continue
+            seen.add(id(cli))
+            try:
+                await cli.aclose()
+            except Exception:
+                pass
+        self._clients.clear()
 
     # ------------------------------------------------------------- request
     async def stream_response(self, dep: dict, payload: dict,
@@ -947,9 +1020,9 @@ class Forwarder:
         url = f"{dep['api_base']}/chat/completions"
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            req = self.client.build_request("POST", url, json=body,
-                                            headers=headers)
-            resp = await self.client.send(req, stream=True)
+            _cli = self._client_for(url)
+            req = _cli.build_request("POST", url, json=body, headers=headers)
+            resp = await _cli.send(req, stream=True)
         except httpx.TimeoutException as exc:
             # Headers mai arrivati entro il read-timeout: l'upstream ha
             # APPESO -> danno reale, marker 'timeout' (cooldown lungo).
@@ -965,7 +1038,9 @@ class Forwarder:
                 pass
             raise UpstreamError(resp.status_code, raw or "upstream %s (body "
                                 "non leggibile)" % resp.status_code,
-                                _retry_after_from(resp, raw) if resp.status_code == 429 else None)
+                                _retry_after_from(resp, raw,
+                                                  dep.get("provider", ""))
+                                if resp.status_code == 429 else None)
 
         if resp.status_code >= 400:
             # errore non ritriabile: lo restituiamo al client così com'è
@@ -1090,7 +1165,7 @@ class Forwarder:
         url = f"{dep['api_base']}/chat/completions"
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            resp = await self.client.post(url, json=body, headers=headers)
+            resp = await self._client_for(url).post(url, json=body, headers=headers)
         except httpx.TimeoutException as exc:
             # L'upstream ha APPESO (read/connect timeout): danno reale (tempo
             # perso) -> marker distinto, il fallback lo classifica "timeout"
@@ -1104,7 +1179,8 @@ class Forwarder:
                 -resp.status_code if resp.status_code not in RETRYABLE_STATUS
                 else resp.status_code,
                 resp.text[:500],
-                _retry_after_from(resp, resp.text) if resp.status_code == 429 else None)
+                _retry_after_from(resp, resp.text, dep.get("provider", ""))
+                if resp.status_code == 429 else None)
         try:
             data = resp.json()
         except ValueError as exc:
@@ -1134,9 +1210,10 @@ class Forwarder:
                                session=session, attribution=attribution),
         }
         url = f"{dep['api_base']}/chat/completions"
+        _google = is_gemini_deployment(dep)
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            resp = await self.client.post(url, json=body, headers=headers,
+            resp = await self._client_for(url).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=300.0,
                                                                 write=60.0,
@@ -1148,7 +1225,8 @@ class Forwarder:
                 -resp.status_code if resp.status_code not in RETRYABLE_STATUS
                 else resp.status_code,
                 resp.text[:500],
-                _retry_after_from(resp, resp.text) if resp.status_code == 429 else None)
+                _retry_after_from(resp, resp.text, dep.get("provider", ""))
+                if resp.status_code == 429 else None)
         try:
             return resp.json()
         except ValueError as exc:
@@ -1172,7 +1250,7 @@ class Forwarder:
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/audio/speech"
         try:
-            resp = await self.client.post(url, json=body, headers=headers,
+            resp = await self._client_for(url).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=300.0,
                                                                 write=60.0,
@@ -1184,7 +1262,8 @@ class Forwarder:
                 -resp.status_code if resp.status_code not in RETRYABLE_STATUS
                 else resp.status_code,
                 resp.text[:500],
-                _retry_after_from(resp, resp.text) if resp.status_code == 429 else None)
+                _retry_after_from(resp, resp.text, dep.get("provider", ""))
+                if resp.status_code == 429 else None)
         content = resp.content
         if not content:
             raise UpstreamError(None, "upstream audio/speech risposta vuota")
@@ -1211,7 +1290,7 @@ class Forwarder:
         files = {"file": (filename or "audio.wav", file_bytes,
                           content_type or "audio/wav")}
         try:
-            resp = await self.client.post(url, data=data, files=files,
+            resp = await self._client_for(url).post(url, data=data, files=files,
                                           headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=300.0,
@@ -1224,7 +1303,8 @@ class Forwarder:
                 -resp.status_code if resp.status_code not in RETRYABLE_STATUS
                 else resp.status_code,
                 resp.text[:500],
-                _retry_after_from(resp, resp.text) if resp.status_code == 429 else None)
+                _retry_after_from(resp, resp.text, dep.get("provider", ""))
+                if resp.status_code == 429 else None)
         ctype = (resp.headers.get("content-type") or "").lower()
         if "json" in ctype:
             try:
@@ -1248,7 +1328,7 @@ class Forwarder:
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos"
         try:
-            resp = await self.client.post(url, json=body, headers=headers,
+            resp = await self._client_for(url).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=120.0,
                                                                 write=120.0,
@@ -1276,7 +1356,7 @@ class Forwarder:
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos/{job_id}"
         try:
-            resp = await self.client.get(url, headers=headers)
+            resp = await self._client_for(url).get(url, headers=headers)
         except httpx.HTTPError as exc:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
         if resp.status_code >= 400:
@@ -1343,7 +1423,7 @@ class Forwarder:
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos/{job_id}/content"
         try:
-            resp = await self.client.get(url, headers=headers,
+            resp = await self._client_for(url).get(url, headers=headers,
                                          follow_redirects=True,
                                          timeout=httpx.Timeout(600.0,
                                                                connect=15.0))

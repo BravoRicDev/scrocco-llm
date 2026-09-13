@@ -100,7 +100,13 @@ individual account limits instead of dying on the first 429.
   sibling still under threshold *before* the upstream answers 429. No
   learned cap means no throttling. `retry_after_min_sec` (default `10`)
   floors tiny/absent `Retry-After` so a burst of near-simultaneous 429s
-  cannot loop.
+  cannot loop; `retry_after_floor_by_provider` overrides the floor per
+  provider (e.g. `{groq: 5, google: 30, openrouter: 15}`) so recovery is
+  proportional to how fast each provider refills quota.
+- **Persistent per-host HTTP pool**: the forwarder keeps one `httpx`
+  client per origin (`keepalive=30`, `max=100`, `keepalive_expiry=120s`)
+  so TCP/TLS connections are reused across the hundreds of deployments
+  sharing a provider, cutting TLS handshakes and TTFB on bursts.
 - **Anti-stall watchdog** (`stream_stall_sec`, default `8`): after a stream
   has started, if the upstream sends no chunk for N seconds (free-tier /
   reverse-proxy "hang" without closing), a `StreamStallError` aborts it
@@ -279,7 +285,9 @@ template. The ones that matter most:
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |
+| `retry_after_floor_by_provider` | `{}` | per-provider Retry-After floor (provider -> seconds), overrides `retry_after_min_sec` |
 | `anon_session_fingerprint` | true | derive a deterministic `fq_<hash>` session id for anonymous clients (system + first user + user-agent) so sticky/cache apply (e.g. Hermes); false = stay anonymous |
+| `anon_session_fp_system_chars` | 768 | anonymous fingerprint hashes only the first N chars of the system prompt (0 = whole prompt), tolerating per-turn appended context |
 | `provider_models_ttl_sec` | 300 | in-memory TTL for the once-per-endpoint `GET /models` cache (0 = no cache) |
 | `estimate_adaptive_enabled` / `estimate_adaptive_shadow` | false / true | adaptive token estimate (per-block density); shadow computes+logs both but keeps the legacy value |
 | `tool_repair.enabled` / `tool_repair.default_level` | true / `aggressive` | tool-call argument repair and default level (per-deployment CSV overrides) |
