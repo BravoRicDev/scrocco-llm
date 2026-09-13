@@ -295,6 +295,12 @@ class Policy:
     circuit_breaker_threshold: int = 5          # fallimenti consecutivi per aprire
     circuit_breaker_timeout: float = 60.0       # secondi prima di half-open
     circuit_breaker_half_open_requests: int = 3  # successi in half-open per chiudere
+    # Ambito: "hybrid" = breaker per-deployment sempre + per-chiave solo per
+    # errori di chiave (401/402/403/429); "dep" = solo deployment; "key" = legacy.
+    circuit_breaker_scope: str = "hybrid"
+    # Base che rende `model_preference` efficace anche a punteggio freddo
+    # (score≈0). 0 = comportamento storico (percentuale pura su |score|).
+    model_preference_base: float = 10.0
 
     # THOUGHT_SIGNATURE (Gemini 3): Google pretende il blob `thought_signature`
     # sui functionCall del turno CORRENTE. Se la history arriva da un altro
@@ -1009,6 +1015,19 @@ class Policy:
                 if isinstance(_cho, bool) or not isinstance(_cho, (int, float)) or _cho < 1:
                     raise ValueError("circuit_breaker.half_open_requests deve essere intero >= 1")
                 p.circuit_breaker_half_open_requests = int(_cho)
+            _cs = _cb.get("scope")
+            if _cs is not None:
+                _csl = str(_cs).lower()
+                if _csl not in ("hybrid", "dep", "key"):
+                    raise ValueError(
+                        "circuit_breaker.scope deve essere hybrid|dep|key")
+                p.circuit_breaker_scope = _csl
+
+        _mpb = raw.get("model_preference_base")
+        if _mpb is not None:
+            if isinstance(_mpb, bool) or not isinstance(_mpb, (int, float)) or _mpb < 0:
+                raise ValueError("model_preference_base deve essere numero >= 0")
+            p.model_preference_base = float(_mpb)
 
         # --- THOUGHT_SIGNATURE (Gemini 3 dummy fill) ---
         _tsf = raw.get("thought_sig_dummy_fill")

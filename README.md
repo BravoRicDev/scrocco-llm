@@ -146,6 +146,13 @@ individual account limits instead of dying on the first 429.
   prompt cache stays warm. On a same-family failover the sticky session is also
   **handed off** to the new deployment (`sticky_handoff_same_family`) so the
   next turn pins directly to the warm cache holder (`[sticky-handoff]`).
+- **Two-level circuit breaker** (`circuit_breaker_scope`, default `hybrid`): a
+  model/provider failure trips only that deployment's breaker, while a
+  *key-level* signal (401/402/403/429) trips the shared-key breaker — so a bad
+  model never silences the sibling models that share the same API key.
+  `dep`/`key` force a single level. `model_preference_base` (default 10) adds a
+  floor to the reputation magnitude so `model_preference` still decides routing
+  on a cold score: a favourite model wins on the first call, not only when warm.
 - **Reputation time-decay & adaptive upstream timeout**: success/failure
   reputation scores (`_base_scores`/`_provider_scores`/`_key_scores`) decay
   toward zero with a half-life (`reputation_decay_halflife_sec`, default 36h)

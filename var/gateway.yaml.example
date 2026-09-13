@@ -228,11 +228,19 @@ dynamic_scoring:
 # threshold: fallimenti consecutivi per aprire (default 5)
 # timeout: secondi prima di passare a half-open (default 60)
 # half_open_requests: successi richiesti in half-open per chiudere (default 3)
+# scope: hybrid = breaker per-deployment (errori modello/provider) + breaker
+#        per-chiave solo per segnali di chiave (401/402/403/429);
+#        "dep" | "key" forzano un solo livello.
 circuit_breaker:
   enabled: true
   threshold: 5
   timeout: 60
   half_open_requests: 3
+  scope: hybrid
+
+# Base aggiunta a |score| cosi' model_preference conta anche a freddo
+# (0 = solo moltiplicativa storica; default 10).
+model_preference_base: 10.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEPLOYMENT STICKY PER CAPABILITY — sticky separato per capability richiesta

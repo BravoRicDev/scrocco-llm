@@ -62,6 +62,9 @@ def _mk_router():
     r._circuit_breaker_threshold = 5
     r._circuit_breaker_timeout = 60.0
     r._circuit_breaker_half_open_requests = 3
+    # Questa suite testa la semantica legacy PER-CHIAVE: fissa lo scope, cosi'
+    # il nuovo default "hybrid" (dep+key) non la rende ambigua.
+    r.policy.circuit_breaker_scope = "key"
     r._gen_last_model = {}
     r._session_last_ok = {}
     r._session_compact = {}
