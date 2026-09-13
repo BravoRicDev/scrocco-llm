@@ -106,6 +106,16 @@ individual account limits instead of dying on the first 429.
   reverse-proxy "hang" without closing), a `StreamStallError` aborts it
   immediately → standard failover/cooldown instead of blocking the client
   indefinitely. `0` disables.
+- **Debug sniff memory guard**: with `debug.sniff` on, input payloads and
+  responses are scanned before logging; huge base64/binary blobs (image data
+  URIs, Anthropic base64 sources, byte arrays) become a synthetic placeholder
+  (`[IMAGE_BASE64_TRUNCATED_BY_SNIFFER: 1.2MB]`) and the streamed SSE is capped,
+  so a multimodal request can't blow up disk/RAM. Prompt text is preserved.
+- **Stale-cooldown decay & passive probe** (`cooldown_probe_*`): a cooled-down
+  deployment's latency/success penalty decays linearly as its cooldown elapses;
+  when no live key remains, a "ripe" deployment (>= `cooldown_probe_after_ratio`,
+  default 50%) is retried as a single passive probe — success clears the
+  cooldown instantly, failure doubles it, without affecting other requests.
 - **Model families** (`canonical_family`): provider-specific model names are
   canonicalized to a family id (e.g. `meta-llama/llama-3-8b-instruct` ==
   `llama3-8b`). When failover crosses providers but stays on the same family,
@@ -254,6 +264,7 @@ template. The ones that matter most:
 | `timeout_cooldown_mult` | 10 | multiplier applied to a *timeout* failure |
 | `ladder_skip_after` / `ladder_stale_max` | 4 / 3 | attempts per dim before climbing / stale revivals |
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
+| `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |

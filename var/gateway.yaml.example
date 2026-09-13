@@ -59,6 +59,15 @@ anon_session_fingerprint: true
 # Vedere anche `cooldown_mode` più sotto per l'escalation.
 cooldown_sec: 600
 
+# Probe passivo delle chiavi dormienti: quando NON ci sono chiavi vive, un
+# deployment in cooldown da >= cooldown_probe_after_ratio del suo tempo viene
+# ritentato come "probe". Successo -> cooldown azzerato subito; fallimento ->
+# cooldown raddoppiato (senza toccare le altre richieste). `decay` fa decadere
+# linearmente la penalita' (EMA latenza/successo) col passare del tempo.
+cooldown_probe_enabled: true
+cooldown_probe_after_ratio: 0.5
+cooldown_probe_decay: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HOTWORDS — rilevamento intent "deep think" per routing preferenziale
 # ─────────────────────────────────────────────────────────────────────────────

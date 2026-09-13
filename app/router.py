@@ -342,6 +342,7 @@ class Router:
         self._sticky: dict[str, tuple[str, float]] = {}
         self._cooldown: dict[str, float] = {}   # unique -> expiry epoch
         self._cooldown_since: dict[str, float] = {}  # unique -> quando fu messo
+        self._cooldown_full: dict[str, float] = {}   # unique -> durata totale (probe/decay)
         self._stats: dict[str, DepStats] = {}   # unique -> statistiche runtime
         # conteggio pick deviati dalla regola multimodal_last_resort
         self.media_deferred: dict[str, int] = {}
@@ -797,6 +798,7 @@ class Router:
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
         self._cooldown[unique] = time.time() + seconds
         self._cooldown_since[unique] = time.time()
+        self._cooldown_full_map()[unique] = float(seconds)
         esc = ""
         if seconds is not None and s.fail_streak > 1 \
                 and getattr(pol, "cooldown_mode", "linear") == "exponential":
@@ -970,6 +972,7 @@ class Router:
                          float(self.policy.max_cooldown_sec))
         self._cooldown[unique] = now + new_cd
         self._cooldown_since[unique] = now
+        self._cooldown_full_map()[unique] = float(new_cd)
         log.warning("[cooldown] %s dormiente ri-fallito -> cooldown "
                     "raddoppiato a %ds (residuo era %ds, fail_24h=%d)",
                     unique, int(new_cd), int(remaining), s.fail_count_24h)
@@ -980,6 +983,7 @@ class Router:
         risposto con successo dopo essere stato in cooldown."""
         self._cooldown.pop(unique, None)
         self._cooldown_since.pop(unique, None)
+        self._cooldown_full_map().pop(unique, None)
         s = self.stats_for(unique)
         s.fail_streak = 0
         s.fail_count_24h = 0
@@ -1131,6 +1135,9 @@ class Router:
         if ema > LATENCY_ROTATE_THRESHOLD_MS:
             over_seconds = (ema - LATENCY_ROTATE_THRESHOLD_MS) / 1000.0
             penalty = over_seconds * LATENCY_PENALTY_PER_SEC  # e.g., 0.5 per second
+            _dcy = self._cooldown_decay(unique)
+            if _dcy < 1.0:
+                penalty *= _dcy        # penalita' che decade col cooldown
             score += penalty
             log.debug("[latency-penalty] %s ema=%.0fms threshold=%sms penalty=%.1f (over=%.1fs)",
                       unique, ema, LATENCY_ROTATE_THRESHOLD_MS, penalty, over_seconds)
@@ -1264,6 +1271,50 @@ class Router:
         since = self._cooldown_since.get(unique)
         return (time.time() - since) if since is not None else None
 
+    def cooldown_progress(self, unique: str) -> float | None:
+        """Frazione di cooldown TRASCORSA (0..1); None se non in cooldown o se
+        la durata totale non e' nota."""
+        exp = self._cooldown.get(unique)
+        if exp is None:
+            return None
+        now = time.time()
+        if now >= exp:
+            return 1.0
+        total = self._cooldown_full_map().get(unique) or 0.0
+        if total <= 0:
+            return None
+        return max(0.0, min(1.0, 1.0 - (exp - now) / total))
+
+    def _cooldown_full_map(self) -> dict:
+        """Mappa unique -> durata totale del cooldown (lazy: alcuni test
+        costruiscono il Router via __new__ senza inizializzarla)."""
+        m = getattr(self, "_cooldown_full", None)
+        if m is None:
+            m = {}
+            self._cooldown_full = m
+        return m
+
+    def probe_ready(self, unique: str) -> bool:
+        """True se un deployment dormiente e' maturo per un probe passivo
+        (>= cooldown_probe_after_ratio del cooldown trascorso)."""
+        if not getattr(self.policy, "cooldown_probe_enabled", True):
+            return False
+        ratio = float(getattr(self.policy, "cooldown_probe_after_ratio",
+                              0.5) or 0.0)
+        pr = self.cooldown_progress(unique)
+        return pr is not None and pr >= ratio
+
+    def _cooldown_decay(self, unique: str) -> float:
+        """Fattore di DECADIMENTO della penalita' durante il cooldown:
+        1.0 = penalita' piena (appena messo), 0.0 = neutra (cooldown finito).
+        Con `cooldown_probe_decay` off ritorna sempre 1.0."""
+        if not getattr(self.policy, "cooldown_probe_decay", True):
+            return 1.0
+        pr = self.cooldown_progress(unique)
+        if pr is None:
+            return 1.0
+        return max(0.0, 1.0 - pr)
+
     def is_retired(self, unique: str) -> bool:
         """Chiave RETIRED (lifecycle keyhealth): esclusa dal routing.
 
@@ -1304,6 +1355,7 @@ class Router:
         for u in dead_cd:
             self._cooldown.pop(u, None)
             self._cooldown_since.pop(u, None)
+            self._cooldown_full_map().pop(u, None)
         # PURGE escalation-winner: TTL a finestra scorrevole; gli entries
         # vecchi di escalation_pin_ttl_sec vengono droppati.
         _epp = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec",
@@ -1684,6 +1736,13 @@ class Router:
         rel = 1.0
         if s.success_ema is not None:
             rel = 0.25 + 0.75 * max(0.0, min(1.0, s.success_ema))
+        # DECAY del cooldown: un deployment dormiente maturo torna gradualmente
+        # neutro (speed/rel -> 1.0) man mano che il cooldown trascorre, cosi' il
+        # probe passivo non parte da una penalita' piena e stantia.
+        _dcy = self._cooldown_decay(dep["unique"])
+        if _dcy < 1.0:
+            speed = speed * _dcy + (1.0 - _dcy)
+            rel = rel * _dcy + (1.0 - _dcy)
         # --- BUDGET GUARD (Feature no-spreco): dosa PRIMA del muro 429 ----
         # Semantica: la penalita' scatta SOLO con un cap APPRESO da almeno
         # un 429 reale di quel deployment (min_cap_learned/day_cap_learned).
@@ -2138,9 +2197,24 @@ class Router:
         deps = [d for d in self.config.groups.get(group_name, [])
                 if not self.is_cooled_down(d["unique"]) and _ok(d)]
         if not deps and not live_only:
-            # tutti in cooldown (o nessun capace) -> riprova ignorando il cooldown
-            # (ultima spiaggia), rispettando exclude/need/guardia
-            deps = [d for d in self.config.groups.get(group_name, []) if _ok(d)]
+            # Nessun vivo: ULTIMA SPIAGGIA con PROBE PASSIVO. Se esistono
+            # dormienti "maturi" (>= cooldown_probe_after_ratio del cooldown
+            # trascorso) si provano SOLO quelli: se rispondono clear_cooldown
+            # li resuscita; se falliscono il cooldown raddoppia (forwarder ->
+            # mark_failed_double_residual). Senza probe maturi resta la vecchia
+            # ultima spiaggia (ignora il cooldown), rispettando exclude/need.
+            _cand = [d for d in self.config.groups.get(group_name, [])
+                     if _ok(d)]
+            _ripe = [d for d in _cand if self.probe_ready(d["unique"])]
+            if _ripe:
+                log.info("[probe] %s: %d dormienti maturi (>=%.0f%% del "
+                         "cooldown) -> probe passivo", group_name, len(_ripe),
+                         float(getattr(self.policy,
+                                       "cooldown_probe_after_ratio", 0.5)
+                               or 0.5) * 100)
+                deps = _ripe
+            else:
+                deps = _cand
         deps, _ = self._defer_media(group_name, need, deps)
         # INFLIGHT-GUARD (budget predittivo): salta chi ha superato l'80%
         # (configurabile) del cap appreso PRIMA del 429, deviando sul fratello.

@@ -155,6 +155,14 @@ class Policy:
     # Graceful shutdown: attesa massima (secondi) del drain delle richieste in
     # volo prima del flush finale del ledger. 0 = non attendere.
     shutdown_drain_sec: float = 10.0
+    # Probe passivo dei deployment dormienti: quando non ci sono chiavi vive,
+    # un deployment in cooldown da >= cooldown_probe_after_ratio del suo tempo
+    # viene ritentato come "probe": il successo lo riabilita subito, il
+    # fallimento raddoppia il cooldown. `cooldown_probe_decay` fa decadere
+    # linearmente la penalita' (EMA latenza/successo) col passare del tempo.
+    cooldown_probe_enabled: bool = True
+    cooldown_probe_after_ratio: float = 0.5
+    cooldown_probe_decay: bool = True
     # Sessioni anonime: se il client non invia alcun id di sessione ne'
     # `user`/`metadata.session_id`, il gateway deriva un id deterministico
     # `fq_<sha1(system+primo user+user-agent)>` dal prefisso della
@@ -628,6 +636,19 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "stream_stall_sec deve essere un numero >= 0") from None
+        if "cooldown_probe_enabled" in raw:
+            p.cooldown_probe_enabled = _coerce_bool(
+                raw["cooldown_probe_enabled"], "cooldown_probe_enabled")
+        _cpar = raw.get("cooldown_probe_after_ratio")
+        if _cpar is not None:
+            try:
+                p.cooldown_probe_after_ratio = min(1.0, max(0.0, float(_cpar)))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "cooldown_probe_after_ratio deve essere tra 0 e 1") from None
+        if "cooldown_probe_decay" in raw:
+            p.cooldown_probe_decay = _coerce_bool(
+                raw["cooldown_probe_decay"], "cooldown_probe_decay")
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")

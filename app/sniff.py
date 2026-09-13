@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from logging.handlers import TimedRotatingFileHandler
@@ -30,6 +31,17 @@ from logging.handlers import TimedRotatingFileHandler
 _logger: logging.Logger | None = None
 _index_logger: logging.Logger | None = None
 _lock = threading.Lock()
+
+# --- Memory Bloat Guard -----------------------------------------------------
+# I payload multimodali possono contenere immagini/PDF in base64 da molti MB:
+# scriverli interi riempie il disco e fa esplodere la RAM durante la
+# serializzazione JSON. Prima di loggare, ogni stringa "binaria" viene
+# sostituita da un placeholder sintetico, preservando il testo del prompt.
+_MAX_B64_CHARS = 2048          # oltre questa soglia una stringa base64 e' sospetta
+_MAX_STR_CHARS = 20000         # cap di sicurezza per stringhe di testo enormi
+_MAX_SSE_BYTES = 1_500_000     # cap sul totale dei byte SSE accumulati
+_B64_RE = re.compile(r"^[A-Za-z0-9+/\r\n=]+$")
+_DATA_RE = re.compile(r"^data:([\w.+-]+/[\w.+-]+)?;base64,", re.I)
 
 # Stato del rollup orario (protetto da _lock).
 _rollup: dict = {}
@@ -180,6 +192,48 @@ def _record_index(rid: str, meta: dict, extra: dict | None, t0: float,
         _emit_locked(_index_logger, rec)
 
 
+def _human(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024 or unit == "GB":
+            return f"{int(v)}B" if unit == "B" else f"{v:.1f}{unit}"
+        v /= 1024.0
+    return f"{v:.1f}GB"
+
+
+def _shrink_str(s: str) -> str:
+    """Sostituisce base64/data-URI enormi con un placeholder leggibile."""
+    if not isinstance(s, str) or len(s) <= _MAX_B64_CHARS:
+        return s
+    m = _DATA_RE.match(s.lstrip()[:64])
+    body = s.strip()
+    if m or (len(body) > _MAX_B64_CHARS and _B64_RE.match(body)):
+        media = (m.group(1) or "") if m else ""
+        label = "IMAGE_BASE64" if media.lower().startswith("image/") \
+            else "BASE64"
+        return f"[{label}_TRUNCATED_BY_SNIFFER: {_human(len(s))}]"
+    if len(s) > _MAX_STR_CHARS:
+        return s[:_MAX_STR_CHARS] + \
+            f"...[STRING_TRUNCATED_BY_SNIFFER: {_human(len(s))} total]"
+    return s
+
+
+def _shrink(obj, _depth: int = 0):
+    """Copia il payload sostituendo i dati binari/base64 con placeholder."""
+    if _depth > 12:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _shrink(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        if len(obj) > _MAX_B64_CHARS and all(
+                isinstance(x, int) and 0 <= x <= 255 for x in obj[:64]):
+            return [f"[BYTE_ARRAY_TRUNCATED_BY_SNIFFER: {len(obj)} elements]"]
+        return [_shrink(v, _depth + 1) for v in obj]
+    if isinstance(obj, str):
+        return _shrink_str(obj)
+    return obj
+
+
 class Sniffer:
     """Cattura di UNA richiesta/risposta (streaming o JSON)."""
 
@@ -188,22 +242,36 @@ class Sniffer:
         self.meta = meta
         self._chunks: list[bytes] = []
         self._t0 = time.time()
+        self._stored = 0
+        self._dropped = 0
 
     def feed(self, chunk: bytes) -> None:
-        """Accoda un chunk SSE inviato al client (osservazione pura)."""
+        """Accoda un chunk SSE inviato al client (osservazione pura).
+
+        Oltre il cap di memoria i byte non vengono piu' accumulati (solo
+        contati): uno stream con immagini base64 non puo' far esplodere la RAM.
+        """
         try:
-            self._chunks.append(
-                chunk if isinstance(chunk, bytes) else bytes(chunk))
+            b = chunk if isinstance(chunk, bytes) else bytes(chunk)
         except Exception:                          # noqa: BLE001
-            pass
+            return
+        if self._stored >= _MAX_SSE_BYTES:
+            self._dropped += len(b)
+            return
+        self._chunks.append(b)
+        self._stored += len(b)
 
     def finish_stream(self, extra: dict | None = None) -> None:
         raw = b"".join(self._chunks)
+        sse = raw.decode("utf-8", "replace")
+        if self._dropped:
+            sse += ("\n[SSE_TRUNCATED_BY_SNIFFER: "
+                    f"{_human(self._dropped)} scartati]")
         rec = {
             "dir": "out", "rid": self.rid, "ts": time.time(),
             "stream": True, "meta": self.meta,
-            "sse_bytes": len(raw),
-            "sse": raw.decode("utf-8", "replace"),
+            "sse_bytes": len(raw) + self._dropped,
+            "sse": sse,
         }
         rec.update(extra or {})
         _write(rec)
@@ -213,7 +281,7 @@ class Sniffer:
         rec = {
             "dir": "out", "rid": self.rid, "ts": time.time(),
             "stream": False, "meta": self.meta,
-            "response": data,
+            "response": _shrink(data),
         }
         rec.update(extra or {})
         _write(rec)
@@ -223,5 +291,5 @@ class Sniffer:
 def begin(rid: str, meta: dict, payload) -> Sniffer:
     """Registra l'INPUT e ritorna lo Sniffer per la risposta."""
     _write({"dir": "in", "rid": rid, "ts": time.time(),
-            "meta": meta, "payload": payload})
+            "meta": meta, "payload": _shrink(payload)})
     return Sniffer(rid, meta)
