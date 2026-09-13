@@ -99,9 +99,11 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
         method = request.method
         path = request.url.path
 
-        if self.log_requests:
-            log.info(
-                "request_start",
+        if self.log_requests and path not in ("/healthz", "/metrics"):
+            log.debug(
+                "[http] -> %s %s da %s",
+                method, path,
+                request.client.host if request.client else "-",
                 extra={
                     "trace_id": trace_id,
                     "method": method,
@@ -116,9 +118,11 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
 
             response.headers[self.header_name] = trace_id
 
-            if self.log_requests:
+            if self.log_requests and path not in ("/healthz", "/metrics"):
+                _mark = "OK" if response.status_code < 400 else "KO"
                 log.info(
-                    "request_end",
+                    "[http] %s %s %s -> %d in %.0fms",
+                    _mark, method, path, response.status_code, duration_ms,
                     extra={
                         "trace_id": trace_id,
                         "method": method,
@@ -136,7 +140,8 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
             duration_ms = (time.time() - start) * 1000.0
             if self.log_requests:
                 log.exception(
-                    "request_error",
+                    "[http] ERRORE %s %s dopo %.0fms: %s",
+                    method, path, duration_ms, e,
                     extra={
                         "trace_id": trace_id,
                         "method": method,
