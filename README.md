@@ -146,6 +146,12 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
 - `context`: kilo-units (128 = 128k window); drives the dims ladder
 - `max_input`: soft prompt-token guard for that deployment (0 = no guard)
 - `caps`: comma-separated subset of `text,vision,image_gen,video_gen,tts,stt`
+- `order`: optional explicit per-deployment ordering (integer). Lower value =
+  earlier; deployments sharing the same value form a "tier" (you can aggregate
+  providers by giving the same value to their deployments, e.g. to prefer a
+  set of fast free providers before a slower but reliable one). Empty/absent =
+  neutral, appended last. Text groups order by tier then context; within a
+  tier the adaptive pick is unchanged. `-go`/`-fallback` stay last.
 
 Clients call it like OpenAI:
 

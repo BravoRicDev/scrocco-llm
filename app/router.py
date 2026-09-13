@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import GatewayConfig, CAP_PRIORITY_ORDER
+from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_LAST
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
@@ -1640,11 +1640,17 @@ class Router:
         base = f"{cfg.proxy_prefix}{pname}"
         chain: list[str] = []
         if start_tier == "primary":
+            dim_deps: list[dict] = []
             for d in sorted(cfg.profile_dims.get(pname, [])):
                 if d < (start_dim or 0):
                     continue
-                for u in cfg.groups.get(f"{base}-{d}k", []):
-                    chain.append(u["unique"])
+                dim_deps.extend(cfg.groups.get(f"{base}-{d}k", []))
+            # tier (colonna `order`) primario, poi dim crescente: i dims sono
+            # raccolti in ordine dim-ascendente, quindi uno stable sort per
+            # `order` mantiene l'ordine interno del gruppo dentro (order, dim).
+            dim_deps.sort(key=lambda dep: int(dep.get("order", ORDER_LAST)))
+            for dep in dim_deps:
+                chain.append(dep["unique"])
         if start_tier in ("primary", "go"):
             for u in cfg.groups.get(f"{base}{cfg.go_suffix}", []):
                 chain.append(u["unique"])
@@ -1975,6 +1981,16 @@ class Router:
             # (ultima spiaggia), rispettando exclude/need/guardia
             deps = [d for d in self.config.groups.get(group_name, []) if _ok(d)]
         deps, _ = self._defer_media(group_name, need, deps)
+        # TIER esplicito (colonna `order`): nei gruppi TESTO dims si prova
+        # prima il tier col valore minimo tra i vivi; se e' tutto in cooldown
+        # si scende automaticamente al tier successivo. Dentro il tier resta
+        # il pick adattivo (reputation/latenza/priority). Solo mondo testo:
+        # le catene capacita' (-vision, -audio, ...) non sono toccate.
+        if deps and self.config.group_caps.get(group_name) is None \
+                and self.DIM_SUFFIX_RE.search(group_name):
+            min_order = min(int(d.get("order", ORDER_LAST)) for d in deps)
+            deps = [d for d in deps
+                    if int(d.get("order", ORDER_LAST)) == min_order]
         # STICKINESS gen/stt: attacca le richieste consecutive allo stesso
         # modello upstream (voce/stile coerenti); le chiavi gemelle continuano
         # a ruotare per recency/EMA dentro il sottoinsieme. Nessuno vivo ->

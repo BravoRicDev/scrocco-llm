@@ -49,6 +49,11 @@ MODEL_PREFERENCE_HEADER = "model_preference"
 # multimodal_last_resort nelle richieste di testo puro: resta eleggibile nelle
 # chat senza dover svuotare la colonna `caps` (capacità reali intatte).
 MEDIA_DEFER_HEADER = "media_defer"
+# order: chiave di ordinamento esplicita per deployment. Valore PIU' BASSO =
+# prima; deployment con lo stesso valore formano un "tier" (aggregabile anche
+# tra provider diversi). Vuoto/assente = ORDER_LAST (neutro, in coda).
+ORDER_HEADER = "order"
+ORDER_LAST = 1_000_000_000
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -234,6 +239,17 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     raw_md = (row.get(MEDIA_DEFER_HEADER) or "").strip().lower()
     media_defer = raw_md not in ("0", "false", "no", "n", "off")
 
+    # order: chiave di ordinamento esplicita (tier). Piu' basso = prima;
+    # vuoto/assente/non numerico = ORDER_LAST (neutro, in coda).
+    raw_order = (row.get(ORDER_HEADER) or "").strip()
+    if raw_order:
+        try:
+            order = int(float(raw_order))
+        except ValueError:
+            order = ORDER_LAST
+    else:
+        order = ORDER_LAST
+
     return {
         "modello": modello,
         "provider": provider,
@@ -250,6 +266,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "tool_repair": raw_tr,
         "model_preference": model_preference,
         "media_defer": media_defer,
+        "order": order,
     }
 
 
@@ -467,6 +484,9 @@ class GatewayConfig:
         chains_cap = {cap: [] for cap in cap_world}
 
         flat_uniques: list[str] = []
+        dims_ranked: list[tuple[int, str]] = []
+        tail_go: list[str] = []
+        tail_fb: list[str] = []
         for gname, gdeps, cap in built:
             lst = []
             for idx, d in enumerate(gdeps):
@@ -492,14 +512,30 @@ class GatewayConfig:
                     "tool_repair": meta.get("tool_repair", ""),
                     "model_preference": int(meta.get("model_preference") or 0),
                     "media_defer": bool(meta.get("media_defer", True)),
+                    "order": int(meta.get("order", ORDER_LAST)),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap
             if cap is None:
-                flat_uniques.extend(d["unique"] for d in lst)
+                # Mondo testo: i dims vanno ordinati per tier (colonna
+                # `order`) e poi per dim crescente; -go/-fallback restano in
+                # coda nell'ordine di costruzione (invariati).
+                if gname.endswith(self.fallback_suffix):
+                    tail_fb.extend(dep["unique"] for dep in lst)
+                elif gname.endswith(self.go_suffix):
+                    tail_go.extend(dep["unique"] for dep in lst)
+                else:
+                    dims_ranked.extend(
+                        (int(dep.get("order", ORDER_LAST)), dep["unique"])
+                        for dep in lst)
             else:
                 chains_cap[cap].extend(d["unique"] for d in lst)
 
+        # tier (`order`) primario, poi dim crescente: i dims sono raccolti in
+        # ordine dim-ascendente, quindi uno stable sort per `order` produce
+        # esattamente (order, dim) mantenendo l'ordine interno del gruppo.
+        dims_ranked.sort(key=lambda t: t[0])
+        flat_uniques = [u for _, u in dims_ranked] + tail_go + tail_fb
         self.chains[pname] = flat_uniques
         self.chains_cap[pname] = chains_cap
         self.cap_counts[pname] = cap_counts
