@@ -57,6 +57,23 @@ from app.constants import SCORING_WEIGHTS as SW
 
 # Latency-based routing parameters (configurable via env vars / gateway.yaml)
 LATENCY_ROTATE_THRESHOLD_MS = 90000   # 90 seconds default threshold
+
+
+class ErrorKind:
+    """Classificazione centralizzata degli errori upstream (strategia di
+    recupero diversa per categoria).
+
+    - TRANSIENT:      errore di rete/timeout/5xx -> cooldown breve, riprova.
+    - QUOTA_RESET:    quota esaurita con reset temporale noto -> cooldown
+                      ESATTO al reset, senza escalation.
+    - PERMANENT_DEAD: chiave morta / modello rimosso -> niente cooldown,
+                      si ritira il deployment (CSV intatto).
+    - GENERIC_4XX:    altro 4xx -> escalation attuale.
+    """
+    TRANSIENT = "transient"
+    QUOTA_RESET = "quota_reset"
+    PERMANENT_DEAD = "permanent_dead"
+    GENERIC_4XX = "generic_4xx"
 LATENCY_PENALTY_PER_SEC = 0.5         # 0.5 points per second over threshold
 
 # Dynamic scoring defaults (override via gateway.yaml -> policy)
@@ -758,7 +775,8 @@ class Router:
 
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
-                    reason: str | None = None, status: int | None = None) -> float:
+                    reason: str | None = None, status: int | None = None,
+                    kind: str | None = None) -> float:
         """Marca il deployment fallito con cooldown.
 
         - `seconds` esplicito vince SEMPRE (es. Retry-After su 429)
@@ -793,6 +811,15 @@ class Router:
         s.fail_count += 1
         s.fail_streak = self._decay_streak(s.fail_streak, s.last_fail_ts)
         s.last_fail_ts = time.time()
+        if kind == ErrorKind.PERMANENT_DEAD:
+            # Chiave morta / modello rimosso: il cooldown e' inutile (non
+            # tornera'), si ritira il deployment (CSV intatto) e si smette di
+            # sprecare tentativi, log e metriche.
+            self._update_circuit_breaker_on_failure(unique, key_level=True)
+            self._retire_permanent(unique, reason or "permanent_dead")
+            log.warning("[cooldown] %s errore PERMANENTE (%s): niente cooldown, "
+                        "deployment retired", unique, reason or "-")
+            return 0.0
         # --- budget guard: apprendimento del limite dal 429 --------------
         bg_cfg = pol.budget_guard or {}
         if reason == "http_429" and bg_cfg.get("enabled"):
@@ -834,11 +861,12 @@ class Router:
         # dopo essere stato "svegliato" dal paracadute e aver fallito, non
         # deve essere ritentato a breve. clear_cooldown su successo lo azzera.
         thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10) or 10))
-        if s.fail_count_24h >= thr:
+        if s.fail_count_24h >= thr and kind != ErrorKind.QUOTA_RESET:
             floor_cd = max(1.0, float(getattr(
                 pol, "chronic_fail_cooldown_sec", 7200) or 7200))
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
-        seconds = self._apply_jitter(seconds)
+        if kind != ErrorKind.QUOTA_RESET:
+            seconds = self._apply_jitter(seconds)
         self._cooldown[unique] = time.time() + seconds
         self._cooldown_since[unique] = time.time()
         self._cooldown_full_map()[unique] = float(seconds)
@@ -855,6 +883,20 @@ class Router:
             unique, key_level=self._is_key_level_failure(status, reason))
 
         return seconds
+
+    def _retire_permanent(self, unique: str, reason: str) -> None:
+        """Ritira un deployment permanentemente rotto (chiave morta, modello
+        rimosso). NON tocca il CSV: usa il lifecycle keyhealth (retired)."""
+        try:
+            from . import main as _gw_mod          # lazy: evita cicli import
+            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            if kh is None:
+                return
+            kh.set_state(unique, "retired", reason=reason)
+            kh.save()
+            log.warning("[lifecycle] %s RETIRED (permanent: %s)", unique, reason)
+        except Exception:  # noqa: BLE001
+            log.debug("[lifecycle] retire %s fallito", unique, exc_info=True)
 
     def escalate_cooldown(self, base_seconds: float,
                           fail_count_24h: int) -> float:
@@ -1199,13 +1241,20 @@ class Router:
         self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["ATTEMPT_KEY"]
         log.debug("[rep-attempt] %s provider+=%d key+=%d", unique, SW["ATTEMPT_PROVIDER"], SW["ATTEMPT_KEY"])
 
-    def record_success(self, unique: str, latency_ms: float) -> None:
-        """Registra un successo: decrementa i punteggi per deployment, provider, chiave."""
+    def record_success(self, unique: str, latency_ms: float,
+                       quality: float = 1.0) -> None:
+        """Registra un successo: decrementa i punteggi per deployment, provider, chiave.
+
+        `quality` in [0.1, 1.0] scala l'alpha dell'EMA di latenza: una risposta
+        "sporca" (tool_repair, fake tool-call, QC fallita, stallo) pesa meno e
+        degrada l'EMA piu' lentamente."""
         if not hasattr(self, 'config') or self.config is None:
             return
         dep = self.config.deployment_by_unique(unique)
         if dep is None:
             return
+        q = min(1.0, max(0.1, float(quality)))
+        alpha = max(0.05, 0.3 * q)
         self._base_scores[unique] = self._base_scores.get(unique, 0) + SW["SUCCESS_DEPLOYMENT"]
         pk = self._provider_key(dep)
         self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["SUCCESS_PROVIDER"]
@@ -1216,7 +1265,7 @@ class Router:
         if old_avg is None:
             self._avg_latencies[unique] = latency_ms
         else:
-            self._avg_latencies[unique] = (old_avg * 0.7 + latency_ms * 0.3)
+            self._avg_latencies[unique] = old_avg * (1 - alpha) + latency_ms * alpha
         ema_new = self._avg_latencies[unique]
         if old_avg is None or (old_avg < LATENCY_ROTATE_THRESHOLD_MS and ema_new >= LATENCY_ROTATE_THRESHOLD_MS):
             log.info("[latency-cross] %s ema superata soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg or 0, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
@@ -1802,23 +1851,30 @@ class Router:
         # [Blocco 1] Registra tentativo per reputation scoring
         self.record_attempt(unique)
 
-    def note_result(self, unique: str, latency_ms: float) -> None:
+    def note_result(self, unique: str, latency_ms: float,
+                    quality: float = 1.0) -> None:
         """Risposta ricevuta: aggiorna l'EMA di latenza (non tocca inflight:
         per lo streaming chiude la nota_end al termine del flusso).
         Resetta anche lo streak di fallimenti e aggiorna il tasso successo.
-        [Blocco 1] Registra anche il successo per il reputation scoring."""
+        [Blocco 1] Registra anche il successo per il reputation scoring.
+
+        `quality` in [0.1, 1.0] scala l'alpha delle EMA: risposte "sporche"
+        (tool_repair/fake tool-call/QC fallita/stallo) pesano meno, cosi' un
+        deployment rotto-ma-vivo non viene giudicato come uno sano."""
+        q = min(1.0, max(0.1, float(quality)))
+        alpha = max(0.05, 0.3 * q)
         s = self.stats_for(unique)
         s.ema_latency_ms = (latency_ms if s.ema_latency_ms is None
-                            else s.ema_latency_ms * 0.7 + latency_ms * 0.3)
+                            else s.ema_latency_ms * (1 - alpha) + latency_ms * alpha)
         s.fail_streak = 0
         s.probe_fail_streak = 0
         prev = 1.0 if s.success_ema is None else s.success_ema
-        s.success_ema = min(1.0, 0.8 * prev + 0.2)
+        s.success_ema = min(1.0, 0.8 * prev + 0.2 * q)
         # contatore cumulativo + timestamp ultimo successo (persistiti)
         s.ok_count += 1
         s.last_success_ts = time.time()
         # [Blocco 1] Registra successo per reputation scoring
-        self.record_success(unique, latency_ms)
+        self.record_success(unique, latency_ms, quality=q)
 
     def note_end(self, unique: str) -> None:
         self.stats_for(unique).inflight = max(

@@ -27,6 +27,7 @@ passive stream watchdog; per-request summary logs.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -198,6 +199,62 @@ LEDGER = _Ledger(VAR_DIR)
 from .keyhealth import KeyHealth as _KeyHealth
 KEYHEALTH = _KeyHealth(VAR_DIR)
 from .atomic_store import load_json as _load_json, save_json as _save_json
+
+# --- Inflight request coalescing (payload identico, solo non-streaming) ---
+# Se due richieste identiche (stesso payload + stesso profilo) sono in volo,
+# solo la prima interroga l'upstream; le altre attendono e ricevono la stessa
+# risposta (deepcopy). Un retry automatico identico al 100% non spreca quota.
+_inflight_coalesce: dict[str, dict] = {}
+_inflight_lock = asyncio.Lock()
+
+
+def _coalesce_key(payload: dict, extra: str = "") -> str:
+    """SHA-256 del payload intero serializzato in modo deterministico."""
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                     default=str)
+    return hashlib.sha256((extra + "|" + raw).encode()).hexdigest()
+
+
+async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
+                             factory):
+    """Coalescing delle richieste identiche in volo (solo non-streaming)."""
+    if payload.get("stream"):
+        return await factory()
+    if not getattr(policy_obj, "request_coalescing_enabled", True):
+        return await factory()
+    ttl = float(getattr(policy_obj, "request_coalescing_ttl_sec", 60.0) or 60.0)
+    max_waiters = int(getattr(policy_obj,
+                              "request_coalescing_max_waiters", 10) or 0)
+    key = _coalesce_key(payload, extra_key)
+    leader = False
+    async with _inflight_lock:
+        entry = _inflight_coalesce.get(key)
+        if entry is None or entry["future"].done():
+            fut = asyncio.get_running_loop().create_future()
+            entry = {"future": fut, "waiters": 0}
+            _inflight_coalesce[key] = entry
+            leader = True
+        elif max_waiters > 0 and entry["waiters"] >= max_waiters:
+            return await factory()
+        else:
+            entry["waiters"] += 1
+    if leader:
+        try:
+            res = await factory()
+        except BaseException as exc:                    # noqa: BLE001
+            if entry["waiters"] > 0 and not entry["future"].done():
+                entry["future"].set_exception(exc)
+            _inflight_coalesce.pop(key, None)
+            raise
+        if not entry["future"].done():
+            entry["future"].set_result(res)
+        _inflight_coalesce.pop(key, None)
+        return res
+    try:
+        res = await asyncio.wait_for(asyncio.shield(entry["future"]), ttl)
+    except asyncio.TimeoutError:
+        return await factory()
+    return copy.deepcopy(res)
 
 
 def _load_adaptive_stats() -> None:
@@ -1262,16 +1319,21 @@ async def chat_completions(request: Request):
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
     try:
-        res = await forwarder.call_with_fallback(
-            router, profile, dep, payload,
-            collect_qc_failures=bool(qc_pol.enabled or router.policy.qc_sanity.enabled),
-            media_strike_hook=_strike_hook(explicit_req, need),
-            need=need,
-            scope="group" if explicit_req else "chain",
-            ctx=ctx_est,
-            attempts_box=attempts_box,
-            session=_sess, ses=session_id, client_ip=_cip, attribution=_attr,
-            requested_group=group_or_explicit)
+        async def _fwd_once():
+            return await forwarder.call_with_fallback(
+                router, profile, dep, payload,
+                collect_qc_failures=bool(qc_pol.enabled
+                                         or router.policy.qc_sanity.enabled),
+                media_strike_hook=_strike_hook(explicit_req, need),
+                need=need,
+                scope="group" if explicit_req else "chain",
+                ctx=ctx_est,
+                attempts_box=attempts_box,
+                session=_sess, ses=session_id, client_ip=_cip,
+                attribution=_attr,
+                requested_group=group_or_explicit)
+        res = await _forward_coalesced(router.policy, payload, profile,
+                                       _fwd_once)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
@@ -1768,7 +1830,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe
             # l'EMA della rotazione adattiva con latenze nulle).
             ttfb_ms = int((time.monotonic() - t_att) * 1000)
-            router.note_result(dep["unique"], (time.monotonic() - t_att) * 1000)
+            _quality = 1.0
             if _was_dormant:
                 router.clear_cooldown(dep["unique"])
             # ANTI-STALLO (1): lo stream verso il client NON parte finche' non
@@ -1799,6 +1861,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         _tool_calls_sse(_parsed, dep.get("model")))
                     metrics.inc("nx_text_toolcall_total",
                                 (dep["unique"], "parsed"))
+                    _quality = 0.6
                     log.warning("[text-toolcall] stream %s: %d "
                                 "tool-call recuperati dal testo",
                                 dep["unique"], len(_parsed))
@@ -1813,11 +1876,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.warning("[fake-tool-call] stream %s: tool-call reso "
                                 "come testo (pattern=%s), escalation",
                                 dep["unique"], _pat)
+                    _quality = 0.3
                     verdict = "fake_tool_call"
             if verdict == "content":
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
                 # scorciatoia per le prossime richieste di QUEL bucket.
+                router.note_result(dep["unique"],
+                                   (time.monotonic() - t_att) * 1000,
+                                   quality=_quality)
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"])
                 break                   # risposta reale in arrivo: si parte

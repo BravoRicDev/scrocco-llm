@@ -105,7 +105,7 @@ def test_403_any_body_rotates_never_reaches_client():
     assert used["unique"] == good["unique"]
     assert route["n"] == 2                        # 2 chiamate: broken + good
     # key rifiutata: cooldown lungo (>= 1h)
-    assert router._cooldown[broken["unique"]] - time.time() >= 0.9 * PERMISSION_DENIED_COOLDOWN_S
+    assert not router.is_cooled_down(broken["unique"])  # 403 -> PERMANENT_DEAD
 
 
 def test_403_all_exhausted_returns_503():

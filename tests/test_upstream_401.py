@@ -73,9 +73,8 @@ def test_401_rotates_never_reaches_client():
     assert data["choices"][0]["message"]["content"] == "ok"
     assert used["unique"] == good["unique"]
     assert route["n"] == 2
-    # chiave rifiutata -> cooldown lungo (>= 1h)
-    assert (router._cooldown[broken["unique"]] - time.time()
-            >= 0.9 * PERMISSION_DENIED_COOLDOWN_S)
+    # chiave rifiutata -> PERMANENT_DEAD: retired, niente cooldown
+    assert not router.is_cooled_down(broken["unique"])
 
 
 # ------------------------------------------------------------------ streaming

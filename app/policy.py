@@ -208,6 +208,11 @@ class Policy:
     cooldown_autoprobe_min_gap_sec: float = 60.0
     cooldown_autoprobe_max_total: int = 6
     cooldown_autoprobe_timeout_sec: float = 20.0
+    # Inflight request coalescing (solo non-streaming): richieste identiche
+    # (stesso payload+profilo) in volo condividono una sola chiamata upstream.
+    request_coalescing_enabled: bool = True
+    request_coalescing_ttl_sec: float = 60.0
+    request_coalescing_max_waiters: int = 10
     # Sessioni anonime: se il client non invia alcun id di sessione ne'
     # `user`/`metadata.session_id`, il gateway deriva un id deterministico
     # `fq_<sha1(system+primo user+user-agent)>` dal prefisso della
@@ -777,6 +782,17 @@ class Policy:
                 except (TypeError, ValueError):
                     raise ValueError(
                         f"{_fld} deve essere un numero >= 0") from None
+        if "request_coalescing_enabled" in raw:
+            p.request_coalescing_enabled = _coerce_bool(
+                raw["request_coalescing_enabled"], "request_coalescing_enabled")
+        _rc_ttl = raw.get("request_coalescing_ttl_sec")
+        if _rc_ttl is not None:
+            try:
+                p.request_coalescing_ttl_sec = max(0.0, float(_rc_ttl))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "request_coalescing_ttl_sec deve essere un numero >= 0") from None
+        _set_int(p, raw, "request_coalescing_max_waiters", minimum=0)
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")

@@ -139,6 +139,14 @@ individual account limits instead of dying on the first 429.
   effects. `cooldown_autoprobe_min_age_sec` (300) skips just-cooled keys and
   `cooldown_autoprobe_min_gap_sec` (60) avoids re-probing the same deployment.
   The live path is never slowed down.
+- **Quality-weighted EMA, coalescing & error classification**: `note_result()`
+  accepts a `quality` (1.0 clean; lower for tool-repair/text-parse/QC/fake
+  tool-call) that scales the latency/success EMA update rate, so broken-but-alive
+  deployments adapt slower. Identical non-streaming in-flight requests are
+  coalesced into one upstream call (`request_coalescing_*`). `classify_error()`
+  maps upstream failures to recovery strategies: key/model errors are
+  PERMANENT_DEAD (deployment retired, no cooldown), quotas use the exact reset
+  without escalation, transient/5xx get a short cooldown.
 - **Model families** (`canonical_family`): provider-specific model names are
   canonicalized to a family id (e.g. `meta-llama/llama-3-8b-instruct` ==
   `llama3-8b`). When failover crosses providers but stays on the same family,

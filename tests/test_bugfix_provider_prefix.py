@@ -101,8 +101,8 @@ def test_no_such_model_400_rotates_never_reaches_client():
     assert data["choices"][0]["message"]["content"] == "ok"
     assert used["unique"] == good["unique"]
     assert route["n"] == 2                        # entrambe le chiamate fatte
-    # modello inesistente/giu' -> cooldown 24h fisso (non escalation da 600s)
-    assert router._cooldown[broken["unique"]] - time.time() > 0.9 * MODEL_MISSING_COOLDOWN_S
+    # modello inesistente -> PERMANENT_DEAD: retired, niente cooldown
+    assert not router.is_cooled_down(broken["unique"])
 
 
 def test_model_missing_regex():
@@ -180,7 +180,7 @@ def test_auth_error_envelope_rotates_never_reaches_client():
         fwd.call_with_fallback(router, "test", broken, payload))
     assert data["choices"][0]["message"]["content"] == "ok"
     assert used["unique"] == good["unique"]
-    assert router.is_cooled_down(broken["unique"])       # chiave morta -> cooldown
+    assert not router.is_cooled_down(broken["unique"])   # 401 -> PERMANENT_DEAD (retired)
 
 
 def test_thought_signature_400_rotates_without_cooldown():

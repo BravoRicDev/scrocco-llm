@@ -46,7 +46,7 @@ from urllib.parse import urlsplit
 
 from . import metrics
 from .qc import check_response
-from .router import inject_identity
+from .router import inject_identity, ErrorKind
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
@@ -861,6 +861,32 @@ def _openrouter_attribution(dep: dict,
     return out
 
 
+def classify_error(status: int | None, reason: str | None,
+                   detail: str | None, headers=None) -> str:
+    """Classificazione centralizzata: determina la strategia di recupero.
+
+    - PERMANENT_DEAD: chiave non valida/revocata, modello rimosso -> retire.
+    - QUOTA_RESET:    quota esaurita con reset noto -> cooldown esatto al reset.
+    - TRANSIENT:      rete/timeout/5xx -> cooldown breve, ritenta.
+    - GENERIC_4XX:    altro 4xx -> escalation.
+    """
+    st = abs(int(status)) if status else 0
+    d = detail or ""
+    if _MODEL_MISSING_RE.search(d):
+        return ErrorKind.PERMANENT_DEAD
+    if st in (401, 403):
+        return ErrorKind.PERMANENT_DEAD
+    if st == 402:
+        return ErrorKind.PERMANENT_DEAD
+    if st == 429 or _QUOTA_EXHAUSTED_RE.search(d):
+        return (ErrorKind.QUOTA_RESET if parse_quota_reset_seconds(d)
+                else ErrorKind.GENERIC_4XX)
+    if st >= 500 or st == 0 or (reason or "").lower() in (
+            "timeout", "network_error", "provider_transient"):
+        return ErrorKind.TRANSIENT
+    return ErrorKind.GENERIC_4XX
+
+
 class UpstreamError(Exception):
     def __init__(self, status: int | None, detail: str,
                  retry_after: float | None = None, *, final: bool = False):
@@ -1567,6 +1593,7 @@ class Forwarder:
         _deadline_ms = int(getattr(router.policy.qc_json,
                                    "stream_total_deadline_ms", 180000) or 0)
         _t0 = time.monotonic()
+        _kind_default: str | None = None
 
         def _pick(*a, **k):
             # Fallback + warm sticky handoff: se il prossimo deployment e' della
@@ -1599,10 +1626,13 @@ class Forwarder:
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
             log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
-            def _fail_cur(seconds=None, reason=None, status=None):
-                if _was_dormant:
-                    return router.mark_failed_double_residual(cur, reason=reason, status=status)
-                return router.mark_failed(cur, seconds=seconds, reason=reason, status=status)
+            def _fail_cur(seconds=None, reason=None, status=None, kind=None):
+                _k = kind if kind is not None else _kind_default
+                if _was_dormant and _k != ErrorKind.PERMANENT_DEAD:
+                    return router.mark_failed_double_residual(
+                        cur, reason=reason, status=status)
+                return router.mark_failed(
+                    cur, seconds=seconds, reason=reason, status=status, kind=_k)
             tried.add(cur)                  # note_end deve riferirsi a QUESTO,
             if attempts_box is not None:
                 attempts_box.append(cur)    # osservabilità summary per-richiesta
@@ -1626,13 +1656,12 @@ class Forwarder:
                                profile=profile or "",
                                client_ip=client_ip, session=session,
                                attribution=attribution)
-                router.note_result(cur, (time.monotonic() - t0) * 1000)
                 if _was_dormant:
                     router.clear_cooldown(cur)
-                metrics.observe_latency_ms(cur, (time.monotonic() - t0) * 1000)
-                metrics.inc("nx_upstream_calls_total", (cur, "ok"))
-
-                # ---- TOOL REPAIR (prima del QC) ----
+                    metrics.observe_latency_ms(cur, (time.monotonic() - t0) * 1000)
+                    metrics.inc("nx_upstream_calls_total", (cur, "ok"))
+    
+                    # ---- TOOL REPAIR (prima del QC) ----
                 tr_result = repair_tool_calls(data, payload, dep, tr_cfg)
                 if tr_result["repaired"]:
                     metrics.inc("nx_tool_repair_total", (cur, "ok"))
@@ -1773,6 +1802,8 @@ class Forwarder:
                             raise UpstreamError(
                                 503, "catena esaurita, nessun output utile",
                                  final=True)
+                        router.note_result(cur, (time.monotonic() - t0) * 1000,
+                                           quality=0.5)
                         return data, dep, qc_failed
                 # ---- L2 #5 non conforme: retry correttivo/rotazione ----
                 if _so_rep.get("status") == "invalid" \
@@ -1847,6 +1878,12 @@ class Forwarder:
                 # rispetto a quello richiesto, ricorda il winner (scorciatoia
                 # per le prossime richieste su QUEL bucket richiesto).
                 log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", cur, len(tried), time.monotonic() - _t0)
+                _q = 0.6 if _text_parsed else (
+                    0.7 if tr_result.get("repaired") else 1.0)
+                if collect_qc_failures and qc_failed:
+                    _q = min(_q, 0.5)
+                router.note_result(cur, (time.monotonic() - t0) * 1000,
+                                   quality=_q)
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"])
                 return (data, dep, qc_failed) if collect_qc_failures \
@@ -1855,6 +1892,7 @@ class Forwarder:
                 if getattr(err, "final", False):
                     raise                    # decisione definitiva: non ruotare
                 detail = err.detail or ""
+                _kind_default = classify_error(err.status, None, detail)
                 # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
                 # "usage limit reached" / "Resets in N days"), a prescindere
                 # dallo status HTTP (429 o 4xx provider-side): la key NON torna
