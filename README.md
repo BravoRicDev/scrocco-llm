@@ -129,6 +129,16 @@ individual account limits instead of dying on the first 429.
   many consecutive failed probes (permanent problem, CSV untouched).
   `cooldown_jitter_ratio` (default 0.12) adds ±J% jitter to every cooldown to
   avoid the thundering herd when a whole pool wakes up at the same second.
+- **Cooldown autoprobe** (`cooldown_autoprobe_*`): on each text call a
+  fire-and-forget pass probes the most "ready" cooled deployments (least
+  remaining cooldown) across every text dim — up to `cooldown_autoprobe_per_dim`
+  (2) per dim, capped by `cooldown_autoprobe_max_total` (6) — but never uses
+  them to serve the response. A successful probe clears the cooldown (the key is
+  live again on the next call); a failed one adds `cooldown_autoprobe_grow_sec`
+  (+120s) so the targets rotate, without `note_result`/`mark_failed` side
+  effects. `cooldown_autoprobe_min_age_sec` (300) skips just-cooled keys and
+  `cooldown_autoprobe_min_gap_sec` (60) avoids re-probing the same deployment.
+  The live path is never slowed down.
 - **Model families** (`canonical_family`): provider-specific model names are
   canonicalized to a family id (e.g. `meta-llama/llama-3-8b-instruct` ==
   `llama3-8b`). When failover crosses providers but stays on the same family,
@@ -294,6 +304,8 @@ template. The ones that matter most:
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
 | `cooldown_streak_halflife_sec` / `probe_retire_after` / `cooldown_jitter_ratio` | 1800 / 5 / 0.12 | streak decay while idle; auto-retire after N failed probes; cooldown jitter (±12%) |
+| `cooldown_autoprobe_enabled` / `cooldown_autoprobe_per_dim` / `cooldown_autoprobe_max_total` | true / 2 / 6 | call-triggered probe of cooled text dims: targets per dim / total per pass |
+| `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO add N s (rotate targets); min gap between probes; probe timeout |
 | `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |

@@ -48,6 +48,7 @@ from .auth import AuthManager, AuthResult
 from . import journal, metrics
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from . import sniff
+from . import autoprobe
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PERMISSION_DENIED_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
@@ -1155,6 +1156,9 @@ async def chat_completions(request: Request):
              f"+{count_image_parts(messages)}img" if count_image_parts(messages) else "",
              sorted(need) if need else "-",
              session_id or "anonima", bool(payload.get("stream")))
+
+    # autoprobe cooldown (fire-and-forget: non entra nella risposta)
+    autoprobe.maybe_spawn(router, forwarder, profile)
 
     # sticky session SOLO dal routing automatico (nome base): le richieste
     # esplicite (-Nk/-go/-fallback/__univoco) non leggono né scrivono sticky

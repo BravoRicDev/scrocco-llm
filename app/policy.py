@@ -195,6 +195,19 @@ class Policy:
     # Jitter simmetrico sui cooldown per evitare il thundering herd
     # (0.12 = +/-12%). 0 = off.
     cooldown_jitter_ratio: float = 0.12
+    # Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim
+    # testo). Parte fire-and-forget, senza entrare nella risposta: sonda i
+    # deployment dormienti piu' "pronti" e, se rispondono, li risveglia
+    # (clear_cooldown). Sul fallimento allunga il cooldown di
+    # cooldown_autoprobe_grow_sec cosi' i bersagli ruotano tra le chiamate.
+    # Non tocca note_result/mark_failed (non avvelena la rotazione adattiva).
+    cooldown_autoprobe_enabled: bool = True
+    cooldown_autoprobe_per_dim: int = 2
+    cooldown_autoprobe_min_age_sec: float = 300.0
+    cooldown_autoprobe_grow_sec: float = 120.0
+    cooldown_autoprobe_min_gap_sec: float = 60.0
+    cooldown_autoprobe_max_total: int = 6
+    cooldown_autoprobe_timeout_sec: float = 20.0
     # Sessioni anonime: se il client non invia alcun id di sessione ne'
     # `user`/`metadata.session_id`, il gateway deriva un id deterministico
     # `fq_<sha1(system+primo user+user-agent)>` dal prefisso della
@@ -742,6 +755,22 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "cooldown_jitter_ratio deve essere tra 0 e 1") from None
+        if "cooldown_autoprobe_enabled" in raw:
+            p.cooldown_autoprobe_enabled = _coerce_bool(
+                raw["cooldown_autoprobe_enabled"], "cooldown_autoprobe_enabled")
+        _set_int(p, raw, "cooldown_autoprobe_per_dim", minimum=0)
+        _set_int(p, raw, "cooldown_autoprobe_max_total", minimum=0)
+        for _fld in ("cooldown_autoprobe_min_age_sec",
+                     "cooldown_autoprobe_grow_sec",
+                     "cooldown_autoprobe_min_gap_sec",
+                     "cooldown_autoprobe_timeout_sec"):
+            _val = raw.get(_fld)
+            if _val is not None:
+                try:
+                    setattr(p, _fld, max(0.0, float(_val)))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{_fld} deve essere un numero >= 0") from None
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")

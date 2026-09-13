@@ -92,6 +92,16 @@ cooldown_streak_halflife_sec: 1800
 probe_retire_after: 5
 # Jitter simmetrico sui cooldown, anti "thundering herd" (0.12 = +/-12%; 0 = off).
 cooldown_jitter_ratio: 0.12
+# Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim testo):
+# sonda i dormienti piu' "pronti"; OK = sveglia il deployment, KO = +grow secondi
+# (cosi' i bersagli ruotano). Non rallenta mai la risposta live.
+cooldown_autoprobe_enabled: true
+cooldown_autoprobe_per_dim: 2
+cooldown_autoprobe_min_age_sec: 300
+cooldown_autoprobe_grow_sec: 120
+cooldown_autoprobe_min_gap_sec: 60
+cooldown_autoprobe_max_total: 6
+cooldown_autoprobe_timeout_sec: 20
 # Time-decay dei punteggi di reputazione (halflife in secondi; 0 = off).
 reputation_decay_halflife_sec: 129600
 # Timeout upstream adattivo per-deployment (solo percorso chat):
