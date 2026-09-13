@@ -136,6 +136,10 @@ class Policy:
     legacy_prefixes: list[str] = field(default_factory=list)
 
     estimate_divisor: int = 4
+    # TTL (secondi) della cache in-memory delle GET {endpoint}/models: una
+    # chiamata per endpoint (prima chiave valida), condivisa tra audit, health
+    # e probe. 0 = nessuna cache (una GET per endpoint ad ogni esecuzione).
+    provider_models_ttl_sec: int = 300
     sticky_ttl_sec: int = 3600
     cooldown_sec: int = 600
     hotwords_window: int = 3
@@ -565,6 +569,7 @@ class Policy:
         if not raw:
             return p
         _set_int(p, raw, "estimate_divisor", minimum=1)
+        _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)

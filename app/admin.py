@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from . import csv_store, journal, logview
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
 from .forwarder import UpstreamError, _client_attribution
+from .provider_models import DEFAULT_TTL_SEC, fetch_provider_models
 from .router import estimate_tokens
 from .policy import Policy
 
@@ -1309,91 +1310,99 @@ async def capabilities_audit(request: Request):
     if denied:
         return denied
     gw = _gw()
-    accounts: dict[tuple[str, str], set[str]] = {}
+    # Raggruppa per ENDPOINT: la lista /models e' identica per tutte le chiavi
+    # dello stesso provider. Una GET per endpoint (prima chiave valida, con
+    # fallback sulle successive), cache TTL condivisa (provider_models).
+    keys_by: dict[str, list[str]] = {}
+    models_by: dict[str, set[str]] = {}
+    _seen_keys: dict[str, set[str]] = {}
     for deps in gw.config.groups.values():
         for d in deps:
-            acc = accounts.setdefault((d["api_base"], d["api_key"]), set())
-            acc.add(d["model"])
+            base = (d["api_base"] or "").rstrip("/")
+            models_by.setdefault(base, set()).add(d["model"])
+            ks = keys_by.setdefault(base, [])
+            sk = _seen_keys.setdefault(base, set())
+            if d["api_key"] and d["api_key"] not in sk:
+                sk.add(d["api_key"])
+                ks.append(d["api_key"])
 
     missing: list[dict] = []
     extra: list[dict] = []
     suggestions: dict[str, list[str]] = {}
     checked = 0
     errors: list[str] = []
+    ttl = int(getattr(gw.router.policy, "provider_models_ttl_sec",
+                      DEFAULT_TTL_SEC) or 0)
 
-    async def _one(base: str, key: str, models: set[str]):
+    async def _one(base: str, keys: list[str], models: set[str]):
         nonlocal checked
-        masked = f"{key[:6]}…{key[-3:]}" if len(key) > 10 else "***"
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as http:
-                r = await http.get(f"{base.rstrip('/')}/models",
-                                   headers={"Authorization": f"Bearer {key}"})
-            checked += 1
-            if r.status_code != 200:
-                errors.append(f"{base} ({masked}): HTTP {r.status_code}")
-                return
-            items = r.json().get("data") or []
-            ids = {m.get("id", "") for m in items}
-            # modelli disponibili dal provider ma NON configurati nel CSV:
-            # candidati per arricchire (free_guess marca i free/zen).
-            eff_norm = {e[7:] if e.startswith("models/") else e
-                        for e in models}
-            for m in items:
-                mid = m.get("id", "")
-                nm = mid[7:] if mid.startswith("models/") else mid
-                if not nm or nm in eff_norm:
-                    continue
-                entry = {"model": mid, "endpoint": base,
-                         "key_masked": masked,
-                         "free_guess": _free_guess(mid, m, base)}
-                ctx = m.get("context_length") or m.get("context")
-                if ctx:
-                    entry["context_length"] = ctx
-                extra.append(entry)
-            # suggerimenti capacità dai metadati provider (se presenti)
-            from .capabilities import CANONICAL_CAPS
-            for m in items:
-                mid = m.get("id", "")
-                arch = m.get("architecture") or {}
-                caps: set[str] = set()
-                for mod in (arch.get("input_modalities") or []):
-                    low = str(mod).lower()
-                    caps |= {"vision"} if low == "image" else \
-                            {"audio"} if low == "audio" else \
-                            {"video"} if low == "video" else \
-                            {"text"} if low == "text" else set()
-                for mod in (arch.get("output_modalities") or []):
-                    low = str(mod).lower()
-                    if low == "image":
-                        caps.add("image_gen")
-                    elif low == "audio":
-                        caps.add("audio")
-                if caps and mid:
-                    suggestions[mid] = sorted(caps & CANONICAL_CAPS)
-            for eff in models:
-                if eff in ids or f"models/{eff}" in ids:
-                    continue
-                slug = _audit_slug(eff)
-                cands = [i for i in sorted(ids)
-                         if slug and (slug in _audit_slug(i)
-                                      or _audit_slug(i) in slug)]
-                missing.append({"model": eff, "endpoint": base,
-                                "key_masked": masked,
-                                "candidates": cands[:4]})
-        except Exception as exc:             # noqa: BLE001
-            errors.append(f"{base} ({masked}): {type(exc).__name__}: {exc}")
+        res = await fetch_provider_models(http, base, keys, ttl_sec=ttl)
+        if not res.ok:
+            errors.append(f"{base} ({res.key_masked or '—'}): {res.error}")
+            return
+        checked += 1
+        masked = res.key_masked
+        items = res.items
+        ids = res.ids
+        # modelli disponibili dal provider ma NON configurati nel CSV:
+        # candidati per arricchire (free_guess marca i free/zen).
+        eff_norm = {e[7:] if e.startswith("models/") else e
+                    for e in models}
+        for m in items:
+            mid = m.get("id", "")
+            nm = mid[7:] if mid.startswith("models/") else mid
+            if not nm or nm in eff_norm:
+                continue
+            entry = {"model": mid, "endpoint": base,
+                     "key_masked": masked,
+                     "free_guess": _free_guess(mid, m, base)}
+            ctx = m.get("context_length") or m.get("context")
+            if ctx:
+                entry["context_length"] = ctx
+            extra.append(entry)
+        # suggerimenti capacità dai metadati provider (se presenti)
+        from .capabilities import CANONICAL_CAPS
+        for m in items:
+            mid = m.get("id", "")
+            arch = m.get("architecture") or {}
+            caps: set[str] = set()
+            for mod in (arch.get("input_modalities") or []):
+                low = str(mod).lower()
+                caps |= {"vision"} if low == "image" else \
+                        {"audio"} if low == "audio" else \
+                        {"video"} if low == "video" else \
+                        {"text"} if low == "text" else set()
+            for mod in (arch.get("output_modalities") or []):
+                low = str(mod).lower()
+                if low == "image":
+                    caps.add("image_gen")
+                elif low == "audio":
+                    caps.add("audio")
+            if caps and mid:
+                suggestions[mid] = sorted(caps & CANONICAL_CAPS)
+        for eff in models:
+            if eff in ids or f"models/{eff}" in ids:
+                continue
+            slug = _audit_slug(eff)
+            cands = [i for i in sorted(ids)
+                     if slug and (slug in _audit_slug(i)
+                                  or _audit_slug(i) in slug)]
+            missing.append({"model": eff, "endpoint": base,
+                            "key_masked": masked,
+                            "candidates": cands[:4]})
 
     import asyncio as _asyncio
     sem = _asyncio.Semaphore(4)
 
-    async def _guarded(base, key, models):
+    async def _guarded(base, keys, models):
         async with sem:
-            await _one(base, key, models)
+            await _one(base, keys, models)
 
-    await _asyncio.gather(*(_guarded(b, k, ms)
-                            for (b, k), ms in sorted(accounts.items())))
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        await _asyncio.gather(*(_guarded(b, keys_by[b], models_by[b])
+                                for b in sorted(keys_by)))
     extra_free = [e for e in extra if e.get("free_guess")]
-    return {"checked_at": int(time.time()), "accounts": len(accounts),
+    return {"checked_at": int(time.time()), "accounts": len(keys_by),
             "accounts_checked": checked, "missing_models": missing,
             "extra_models": extra, "extra_free_models": extra_free,
             "extra_models_count": len(extra),

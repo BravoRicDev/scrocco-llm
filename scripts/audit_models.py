@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx  # noqa: E402
 
 from app.config import GatewayConfig, infer_model_prefix  # noqa: E402
+from app import provider_models  # noqa: E402
 from tui.gateway_client import GatewayClient, load_master_key  # noqa: E402
 
 BASE = Path(__file__).resolve().parent.parent
@@ -59,33 +60,36 @@ def _candidates(configured: str, available: list[str]) -> list[str]:
 
 async def main(fix: bool) -> int:
     cfg = GatewayConfig(CSV_PATH)
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    # Una sola GET /models per ENDPOINT (prima chiave valida, fallback sulle
+    # successive): le chiavi gemelle condividono la stessa lista.
+    deps_by: dict[str, list[dict]] = defaultdict(list)
+    keys_by: dict[str, list[str]] = defaultdict(list)
+    seen_keys: dict[str, set[str]] = defaultdict(set)
     for gname, deps in cfg.groups.items():
         for d in deps:
-            groups[(d["api_base"], d["api_key"])].append(d)
+            base = (d["api_base"] or "").rstrip("/")
+            deps_by[base].append(d)
+            s = seen_keys[base]
+            if d["api_key"] and d["api_key"] not in s:
+                s.add(d["api_key"])
+                keys_by[base].append(d["api_key"])
 
     print(f"deployment totali: {sum(len(v) for v in cfg.groups.values())} "
-          f"in {len(groups)} combinazioni (endpoint+chiave)\n")
+          f"in {len(deps_by)} endpoint(s)\n")
 
     problems: list[tuple[dict, list[str]]] = []
     async with httpx.AsyncClient(timeout=20.0) as http:
-        for i, ((base, key), deps) in enumerate(sorted(groups.items()),
-                                                start=1):
-            masked = f"{key[:6]}…{key[-3:]}" if len(key) > 10 else "***"
-            try:
-                r = await http.get(f"{base.rstrip('/')}/models",
-                                   headers={"Authorization": f"Bearer {key}"})
-                if r.status_code != 200:
-                    print(f"[{i:>2}] {base} ({masked}) -> HTTP "
-                          f"{r.status_code}: TUTTI i "
-                          f"{len(deps)} dep non verificabili")
-                    continue
-                ids = [m.get("id", "") for m in
-                       (r.json().get("data") or [])]
-                idset = set(ids)
-            except Exception as exc:                    # noqa: BLE001
-                print(f"[{i:>2}] {base} ({masked}) -> ERRORE {type(exc).__name__}")
+        for i, base in enumerate(sorted(deps_by), start=1):
+            deps = deps_by[base]
+            res = await provider_models.fetch_provider_models(
+                http, base, keys_by[base], ttl_sec=0)
+            masked = res.key_masked or "—"
+            if not res.ok:
+                print(f"[{i:>2}] {base} ({masked}) -> {res.error}: "
+                      f"TUTTI i {len(deps)} dep non verificabili")
                 continue
+            ids = [m.get("id", "") for m in (res.items or [])]
+            idset = set(ids)
 
             missing = []
             for d in deps:
@@ -117,7 +121,7 @@ async def main(fix: bool) -> int:
             else:
                 print(f"[{i:>2}] {base} ({masked}) -> tutti OK "
                       f"({len(deps)} dep)")
-            await asyncio.sleep(0.35)                   # gentile coi provider
+            await asyncio.sleep(0.2)                    # gentile coi provider
 
     print(f"\n=== RIEPILOGO: {len(problems)} deployment da sistemare ===")
     if fix and problems:

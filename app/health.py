@@ -14,6 +14,8 @@ import logging
 import time as _time
 from collections import defaultdict
 
+from .provider_models import DEFAULT_TTL_SEC, fetch_provider_models
+
 log = logging.getLogger("nx.health")
 
 
@@ -24,28 +26,36 @@ async def run_health_cycle(router, http) -> tuple[int, int]:
     Aggiorna anche router.last_health per la visibilità in /admin/state e TUI.
     """
     cfg = router.config
-    accounts: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for gname, deps in cfg.groups.items():
+    # Raggruppa per ENDPOINT (non per endpoint+chiave): la lista /models e'
+    # identica per tutte le chiavi dello stesso provider. Una GET con la prima
+    # chiave valida (fallback sulle successive); le chiavi gemelle sono saltate.
+    deps_by_endpoint: dict[str, list[dict]] = defaultdict(list)
+    keys_by_endpoint: dict[str, list[str]] = defaultdict(list)
+    _seen_keys: dict[str, set[str]] = defaultdict(set)
+    for deps in cfg.groups.values():
         for d in deps:
-            if not router.is_cooled_down(d["unique"]):
-                accounts[(d["api_base"], d["api_key"])].append(d)
+            if router.is_cooled_down(d["unique"]):
+                continue
+            base = (d["api_base"] or "").rstrip("/")
+            deps_by_endpoint[base].append(d)
+            k = d["api_key"]
+            if k and k not in _seen_keys[base]:
+                _seen_keys[base].add(k)
+                keys_by_endpoint[base].append(k)
 
+    ttl = int(getattr(router.policy, "provider_models_ttl_sec",
+                      DEFAULT_TTL_SEC) or 0)
     marked = 0
     checked = 0
-    for (base, key), deps in sorted(accounts.items()):
-        try:
-            r = await http.get(f"{base.rstrip('/')}/models",
-                               headers={"Authorization": f"Bearer {key}"})
-            checked += 1
-            if r.status_code != 200:
-                log.debug("[health] %s /models -> %s: giro saltato",
-                          base, r.status_code)
-                continue
-            ids = {m.get("id", "") for m in (r.json().get("data") or [])}
-        except Exception as exc:             # noqa: BLE001 — rete: riprova dopo
-            log.debug("[health] %s errore %s", base, exc)
+    for base, deps in sorted(deps_by_endpoint.items()):
+        res = await fetch_provider_models(http, base, keys_by_endpoint[base],
+                                          ttl_sec=ttl)
+        if not res.ok:
+            log.debug("[health] %s /models -> %s: giro saltato",
+                      base, res.error)
             continue
-
+        checked += 1
+        ids = res.ids
         for d in deps:
             if router.is_cooled_down(d["unique"]):
                 continue
@@ -56,7 +66,7 @@ async def run_health_cycle(router, http) -> tuple[int, int]:
                             d["unique"], eff, len(ids))
                 router.mark_failed(d["unique"])
                 marked += 1
-        await asyncio.sleep(0.3)             # gentilezza tra account
+        await asyncio.sleep(0.15)            # gentilezza tra endpoint
 
     router.last_health = {"last_cycle_at": int(_time.time()),
                           "marked": marked, "accounts": checked,

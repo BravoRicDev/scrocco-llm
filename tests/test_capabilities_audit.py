@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app import admin as admin_mod
 from app import main as m
+from app import provider_models
 from app.admin import _free_guess
 
 MK = {"Authorization": "Bearer test-master-audit"}
@@ -59,6 +60,7 @@ def client(monkeypatch, tmp_path):
     csv_file = tmp_path / "keys_rotation.csv"
     csv_file.write_text(CSV_TEXT)
     (tmp_path / "backups").mkdir()
+    provider_models.clear_cache()
 
     orig_mk = m.authn.master_key
     m.authn.master_key = "test-master-audit"

@@ -274,7 +274,8 @@ CI runs the suite and builds the image on push
 ### Operator scripts (`scripts/`)
 
 Offline helpers that read `var/keys_rotation.csv` and hit each provider's
-`GET /models` once per (endpoint, key). They are read-only unless `--fix`:
+`GET /models` **once per endpoint** (first working key wins; sibling keys are
+skipped — same list, avoids anti-DDoS noise). They are read-only unless `--fix`:
 
 - `scripts/audit_models.py` — checks every CSV deployment resolves to a model
   the provider actually serves (post `infer_model_prefix`); prints a report.

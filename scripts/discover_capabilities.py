@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx
 
 from app.config import GatewayConfig, infer_model_prefix
+from app import provider_models
 from tui.gateway_client import GatewayClient, load_master_key
 
 BASE = Path(__file__).resolve().parent.parent
@@ -50,38 +51,36 @@ async def _slug(name: str) -> str:
 async def main(fix: bool, profile: str | None) -> int:
     cfg = GatewayConfig(CSV_PATH)
 
-    # Raccogliamo tutte le (endpoint, chiave) uniche da esaminare
-    combos: set[tuple[str, str]] = set()
+    # Una sola GET /models per ENDPOINT (prima chiave valida, fallback sulle
+    # successive): le chiavi gemelle dello stesso provider danno la stessa lista.
+    combos: dict[str, list[str]] = {}
+    _seen_keys: dict[str, set[str]] = {}
     for gname, deps in cfg.groups.items():
         for d in deps:
-            combos.add((d["api_base"], d["api_key"]))
+            base = (d["api_base"] or "").rstrip("/")
+            combos.setdefault(base, [])
+            s = _seen_keys.setdefault(base, set())
+            if d["api_key"] and d["api_key"] not in s:
+                s.add(d["api_key"])
+                combos[base].append(d["api_key"])
 
-    # Se il profilo è specificato, filtra per colonne di profilo (simplificato)
-    if profile:
-        # cerca una colonna che inizia con prefix + profilo
-        prefix = cfg.proxy_prefix
-        target = f"{prefix}{profile}"
-        for (base, _) in list(combos):
-            # non facile — skip per ora per semplicità
-            pass
-
-    print(f"Da esaminare {len(combos)} endpoint+chiave unici\n")
+    print(f"Da esaminare {len(combos)} endpoint unici\n")
 
     # Mappa modello -> capacità dedotte (per provider)
     # modello -> {"input": ["vision"], "output": ["image"]}
     discovered: dict[str, dict[str, list[str]]] = {}
 
     async with httpx.AsyncClient(timeout=20.0) as http:
-        for i, (base, key) in enumerate(sorted(combos), start=1):
-            masked = f"{key[:6]}…{key[-3:]}" if len(key) > 10 else "***"
+        for i, base in enumerate(sorted(combos), start=1):
+            res = await provider_models.fetch_provider_models(
+                http, base, combos[base], ttl_sec=0)
+            masked = res.key_masked or "—"
             try:
-                r = await http.get(f"{base.rstrip('/')}/models",
-                                   headers={"Authorization": f"Bearer {key}"})
-                if r.status_code != 200:
-                    print(f"[{i:>2}] {base} ({masked}) -> HTTP {r.status_code}: salto")
+                if not res.ok:
+                    print(f"[{i:>2}] {base} ({masked}) -> {res.error}: salto")
                     continue
 
-                items = r.json().get("data") or []
+                items = res.items or []
                 # Alcuni provider (OpenRouter) restituiscono architettura, altri no
                 for m in items:
                     model_id = m.get("id", "")
