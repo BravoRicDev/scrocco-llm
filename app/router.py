@@ -124,18 +124,9 @@ def _json_size(obj: Any) -> int:
         return 0
 
 
-def estimate_tokens(messages: Any, divisor: int = CHARS_PER_TOKEN,
-                    image_token_estimate: int = 0,
-                    tools: Any = None) -> int:
-    """Stima grezza del contesto: somma caratteri / divisor (default chars/4).
-
-    Conta TUTTO cio' che l'upstream fatturera' nel prompt: content dei
-    messaggi, tool_calls (nome + arguments), reasoning_content/reasoning e,
-    se fornito, gli schemi in `tools`. Se non li si conta, tool_calls e
-    reasoning restano invisibili alla stima e il contesto reale viene
-    sottovalutato fino a ~12x (poi l'upstream risponde 413).
-    Se image_token_estimate > 0, aggiunge quel valore per ogni parte-immagine.
-    """
+def _estimate_legacy(messages: Any, divisor: int = CHARS_PER_TOKEN,
+                     image_token_estimate: int = 0, tools: Any = None) -> int:
+    """Stima storica: somma caratteri / divisor (default chars/4)."""
     total = 0
     if tools:
         total += _json_size(list(tools))
@@ -160,6 +151,122 @@ def estimate_tokens(messages: Any, divisor: int = CHARS_PER_TOKEN,
     if image_token_estimate > 0:
         tokens += count_image_parts(messages) * image_token_estimate
     return tokens
+
+
+def _tokens_for_text(s: str) -> int:
+    """Stima token di UNA stringa con densita' adattiva (nostra, no upstream).
+
+    Il semplice chars/4 e' tarato sulla prosa inglese: sottostima il codice/JSON
+    (ricchi di simboli) e sopravvaluta testo CJK/accentato. Qui scegliamo un
+    divisore per-blocco in base alla composizione del testo. Non e' una
+    calibrazione dagli usage upstream (falsati da troncamento/compressione) ma
+    una stima piu' realistica del contenuto reale.
+    """
+    n = len(s)
+    if n == 0:
+        return 0
+    non_ascii = 0
+    symbols = 0
+    for ch in s:
+        if ord(ch) > 127:
+            non_ascii += 1
+        elif not ch.isalnum() and not ch.isspace():
+            symbols += 1
+    div = float(CHARS_PER_TOKEN)
+    # Codice/JSON: molti simboli -> piu' token per carattere.
+    if symbols / n > 0.15:
+        div -= 0.8
+    # CJK/accentato: pochissimi caratteri per token.
+    if non_ascii / n > 0.10:
+        div = min(div, 2.2)
+    div = max(1.5, div)
+    return int(n / div)
+
+
+def _estimate_adaptive(messages: Any, divisor: int = CHARS_PER_TOKEN,
+                       image_token_estimate: int = 0, tools: Any = None) -> int:
+    """Stima adattiva: densita' per-blocco invece di un divisore unico."""
+    total = 0
+    if tools:
+        total += _tokens_for_text(json.dumps(list(tools), ensure_ascii=False,
+                                             default=str))
+    for m in messages or ():
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            total += _tokens_for_text(c)
+        elif isinstance(c, list):
+            total += sum(_tokens_for_text(p.get("text", "")) for p in c
+                         if isinstance(p, dict))
+        for tc in m.get("tool_calls") or ():
+            if isinstance(tc, dict):
+                fn = tc.get("function") or {}
+                total += _tokens_for_text(str(fn.get("name") or ""))
+                total += _tokens_for_text(json.dumps(fn.get("arguments"),
+                                                      ensure_ascii=False,
+                                                      default=str))
+        rc = m.get("reasoning_content") or m.get("reasoning")
+        if isinstance(rc, str):
+            total += _tokens_for_text(rc)
+    if image_token_estimate > 0:
+        total += count_image_parts(messages) * image_token_estimate
+    return total
+
+
+# Modalita' della stima: shadow = calcola e logga entrambe ma ritorna la
+# legacy; adaptive = ritorna quella adattiva. Configurate dalla policy.
+_ESTIMATE_ADAPTIVE = False
+_ESTIMATE_SHADOW = True
+_estimate_shadow_stats: dict[str, int] = {"n": 0, "legacy": 0, "adaptive": 0}
+
+
+def configure_estimate(*, adaptive: bool, shadow: bool) -> None:
+    global _ESTIMATE_ADAPTIVE, _ESTIMATE_SHADOW
+    _ESTIMATE_ADAPTIVE = bool(adaptive)
+    _ESTIMATE_SHADOW = bool(shadow)
+
+
+def estimate_shadow_stats() -> dict:
+    """Contatori cumulativi della modalita' shadow (per /admin/policy)."""
+    s = dict(_estimate_shadow_stats)
+    n = s.get("n") or 0
+    if n:
+        s["legacy_avg"] = round(s["legacy"] / n, 1)
+        s["adaptive_avg"] = round(s["adaptive"] / n, 1)
+        s["delta_pct"] = round((s["adaptive"] - s["legacy"]) * 100.0
+                               / max(1, s["legacy"]), 1)
+    return s
+
+
+def estimate_tokens(messages: Any, divisor: int = CHARS_PER_TOKEN,
+                    image_token_estimate: int = 0,
+                    tools: Any = None) -> int:
+    """Stima grezza del contesto: somma caratteri / divisor (default chars/4).
+
+    Conta TUTTO cio' che l'upstream fatturera' nel prompt: content dei
+    messaggi, tool_calls (nome + arguments), reasoning_content/reasoning e,
+    se fornito, gli schemi in `tools`. Se non li si conta, tool_calls e
+    reasoning restano invisibili alla stima e il contesto reale viene
+    sottovalutato fino a ~12x (poi l'upstream risponde 413).
+    Se image_token_estimate > 0, aggiunge quel valore per ogni parte-immagine.
+
+    Con la stima adattiva attiva (shadow o adaptive, da policy) calcola anche
+    la variante `_estimate_adaptive`; in shadow logga il confronto e ritorna la
+    legacy, cosi' si valida senza cambiare il routing.
+    """
+    legacy = _estimate_legacy(messages, divisor, image_token_estimate, tools)
+    if not (_ESTIMATE_ADAPTIVE or _ESTIMATE_SHADOW):
+        return legacy
+    adaptive = _estimate_adaptive(messages, divisor, image_token_estimate, tools)
+    _estimate_shadow_stats["n"] += 1
+    _estimate_shadow_stats["legacy"] += legacy
+    _estimate_shadow_stats["adaptive"] += adaptive
+    if _ESTIMATE_SHADOW and not _ESTIMATE_ADAPTIVE:
+        log.debug("[estimate] shadow legacy=%d adaptive=%d delta=%+d",
+                  legacy, adaptive, adaptive - legacy)
+        return legacy
+    return adaptive
 
 
 def detect_hot_words(messages: Any, patterns: list[str] | None = None,

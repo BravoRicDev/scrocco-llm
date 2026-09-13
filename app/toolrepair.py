@@ -340,10 +340,11 @@ def _mixed_quoting(args_str: str) -> tuple[str, bool]:
     return args_str, False
 
 
-def _collapse_double_serialization(args_str: str) -> tuple[str, bool]:
-    """Collassa doppie serializzazioni annidate e array-wrapping spurio se univoco."""
-    # Caso: "\"{\\\"a\\\": 1}\"" -> deve diventare "{\"a\": 1}"
-    # Caso: "[\"{\\\"a\\\": 1}\"]" -> deve diventare "{\"a\": 1}" se e' l'unico elemento
+_MAX_UNWRAP_DEPTH = 5
+
+
+def _collapse_once(args_str: str) -> tuple[str, bool]:
+    """Un solo livello di unwrapping: stringa-esca JSON o array mono-elemento."""
     try:
         parsed = json.loads(args_str)
     except (ValueError, TypeError):
@@ -354,20 +355,39 @@ def _collapse_double_serialization(args_str: str) -> tuple[str, bool]:
         if isinstance(inner, str):
             try:
                 inner_parsed = json.loads(inner)
-                # Se l'inner e' un oggetto/array, collassa
-                if isinstance(inner_parsed, (dict, list)):
+                # Se l'inner e' un oggetto/array/stringa, collassa un livello
+                if isinstance(inner_parsed, (dict, list, str)):
                     return json.dumps(inner_parsed), True
             except (ValueError, TypeError):
                 pass
-    # Se e' una stringa che contiene un oggetto/array serializzato
+    # Se e' una stringa che contiene un valore JSON serializzato
     if isinstance(parsed, str):
         try:
             inner_parsed = json.loads(parsed)
-            if isinstance(inner_parsed, (dict, list)):
+            if isinstance(inner_parsed, (dict, list, str)):
                 return json.dumps(inner_parsed), True
         except (ValueError, TypeError):
             pass
     return args_str, False
+
+
+def _collapse_double_serialization(args_str: str) -> tuple[str, bool]:
+    """Collassa serializzazioni annidate (doppie/triple) e array-wrapping spurio.
+
+    Ripete l'unwrapping fino a `_MAX_UNWRAP_DEPTH` volte finche' ogni passo
+    produce un cambiamento: catene profonde (stringa dentro array dentro
+    stringa, ...) vengono ridotte all'oggetto reale. Ogni passo e' limitato e
+    idempotente, quindi nessun rischio di loop.
+    """
+    current = args_str
+    changed_any = False
+    for _ in range(_MAX_UNWRAP_DEPTH):
+        nxt, did = _collapse_once(current)
+        if not did or nxt == current:
+            break
+        current = nxt
+        changed_any = True
+    return current, changed_any
 
 
 # ------------------------------------------------------------------- riparazione principale

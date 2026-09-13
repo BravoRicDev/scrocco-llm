@@ -752,14 +752,34 @@ _RETRY_BODY_RE = re.compile(
     r'|retry\s+in\s+(\d+(?:\.\d+)?)\s*s(?:econds)?',          # "retry in 58.9s"
     re.IGNORECASE)
 _RETRY_BODY_CAP_S = 300.0                                     # un 429 non chiede ore
+# Floor minimo di cooldown per i 429: molti provider free restituiscono
+# Retry-After di 1-2s (o assente) ma bloccano piu' a lungo; senza floor si
+# entra in un loop di 429 ravvicinati. Override da policy
+# (`retry_after_min_sec`); <=0 disabilita il floor.
+RETRY_AFTER_MIN_SEC = 10.0
+
+
+def set_retry_after_floor(sec) -> None:
+    """Imposta il floor di cooldown dei 429 (0 o negativo = disabilitato)."""
+    global RETRY_AFTER_MIN_SEC
+    try:
+        v = float(sec)
+    except (TypeError, ValueError):
+        return
+    RETRY_AFTER_MIN_SEC = max(0.0, v)
+
+
+def _apply_retry_floor(v: float) -> float:
+    return max(RETRY_AFTER_MIN_SEC, v) if RETRY_AFTER_MIN_SEC > 0 else v
 
 
 def _retry_after_from(resp: httpx.Response, body: str | None) -> float | None:
     """Retry-After: prima l'header, poi (fallback) il retryDelay dal body 429.
-    Cap a 300s: un rate-limit non deve mai valere un cooldown di ore."""
+    Cap a 300s: un rate-limit non deve mai valere un cooldown di ore.
+    In coda applichiamo il floor minimo anti-loop (RETRY_AFTER_MIN_SEC)."""
     hdr = _retry_after_of(resp)
     if hdr is not None:
-        return hdr
+        return _apply_retry_floor(hdr)
     if not body:
         return None
     m = _RETRY_BODY_RE.search(body)
@@ -777,7 +797,7 @@ def _retry_after_from(resp: httpx.Response, body: str | None) -> float | None:
         if g is not None:
             try:
                 val = float(g)
-                return max(1.0, min(val, _RETRY_BODY_CAP_S))
+                return _apply_retry_floor(max(1.0, min(val, _RETRY_BODY_CAP_S)))
             except (TypeError, ValueError):
                 continue
     return None

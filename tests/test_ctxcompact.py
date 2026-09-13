@@ -85,9 +85,18 @@ class TestShouldCompact:
         assert "overflow" in d["reason"]
 
     def test_abs_threshold(self):
-        d = should_compact(CtxCompactConfig(), 60000, max_in=1000000)
+        # Con l'isteresi anti-churn la soglia assoluta scatta solo avvicinandosi
+        # alla saturazione della finestra del deployment (qui 90% di 1M).
+        d = should_compact(CtxCompactConfig(), 900000, max_in=1000000,
+                           holder="d1", dep_unique="d1")
         assert d["compact"] is True
         assert "abs" in d["reason"]
+
+    def test_abs_deferred_with_headroom(self):
+        # cache calda + ampio margine: NON riscrivere il prefisso (no churn).
+        d = should_compact(CtxCompactConfig(), 60000, max_in=1000000,
+                           holder="d1", dep_unique="d1")
+        assert d["compact"] is False
 
     def test_below_all_thresholds(self):
         d = should_compact(CtxCompactConfig(), 5000, max_in=1000000)

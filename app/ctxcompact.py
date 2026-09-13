@@ -32,7 +32,8 @@ class CtxCompactConfig:
                  stub_text: str = DEFAULT_STUB,
                  min_ctx_tokens: int = 50000,
                  on_deployment_switch: bool = True,
-                 switch_min_tokens: int = 8000):
+                 switch_min_tokens: int = 8000,
+                 abs_headroom_ratio: float = 0.8):
         self.enabled = bool(enabled)
         self.keep_turns = int(keep_turns)
         self.max_tool_output_chars = int(max_tool_output_chars)
@@ -41,6 +42,11 @@ class CtxCompactConfig:
         self.min_ctx_tokens = int(min_ctx_tokens)
         self.on_deployment_switch = bool(on_deployment_switch)
         self.switch_min_tokens = int(switch_min_tokens)
+        # Isteresi anti-churn: la soglia ASSOLUTA scatta solo se il contesto e'
+        # entro questa frazione della finestra del deployment scelto (0 =
+        # disabilitata, comportamento storico). overflow/switch non sono
+        # filtrati.
+        self.abs_headroom_ratio = max(0.0, float(abs_headroom_ratio))
 
 
 def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfig:
@@ -69,6 +75,8 @@ def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfi
         cfg.on_deployment_switch = bool(ct["on_deployment_switch"])
     if ct.get("stub_text"):
         cfg.stub_text = str(ct["stub_text"])
+    if ct.get("abs_headroom_ratio") is not None:
+        cfg.abs_headroom_ratio = max(0.0, float(ct["abs_headroom_ratio"]))
     return cfg
 
 
@@ -91,6 +99,8 @@ def ctxcompact_config_from_policy(policy) -> CtxCompactConfig:
             getattr(policy, "cache_ctx_on_deployment_switch", True)),
         switch_min_tokens=int(
             getattr(policy, "cache_ctx_switch_min_tokens", 8000) or 0),
+        abs_headroom_ratio=float(
+            getattr(policy, "cache_ctx_abs_headroom_ratio", 0.8) or 0.0),
     )
 
 
@@ -113,10 +123,18 @@ def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
     cold = (holder is None) or (dep_unique is not None
                                 and holder != dep_unique)
     overflow = max_in > 0 and ctx_est > max_in
+    # Isteresi anti-churn: la soglia assoluta NON riscrive il prefisso finche'
+    # la finestra del deployment scelto ha ampio margine (evita di invalidare
+    # la prompt-cache per oscillazioni attorno a min_ctx_tokens). Con max_in
+    # ignoto (0) o ratio<=0 vale il comportamento storico.
+    near_saturation = True
+    if max_in > 0 and cfg.abs_headroom_ratio > 0:
+        near_saturation = ctx_est >= int(max_in * cfg.abs_headroom_ratio)
     reasons = []
     if overflow:
         reasons.append("overflow")
-    if cfg.min_ctx_tokens > 0 and ctx_est >= cfg.min_ctx_tokens:
+    if (cfg.min_ctx_tokens > 0 and ctx_est >= cfg.min_ctx_tokens
+            and (overflow or near_saturation)):
         reasons.append("abs")
     if (cfg.on_deployment_switch and cold
             and ctx_est >= cfg.switch_min_tokens):

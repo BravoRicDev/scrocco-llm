@@ -35,7 +35,7 @@ from . import csv_store, journal, logview
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
 from .forwarder import UpstreamError, _client_attribution
 from .provider_models import DEFAULT_TTL_SEC, fetch_provider_models
-from .router import estimate_tokens
+from .router import estimate_tokens, estimate_shadow_stats
 from .policy import Policy
 
 log = logging.getLogger("nx.admin")
@@ -670,7 +670,10 @@ async def get_policy(request: Request):
                                       for k, v in pol.alias_keys.items()},
                 "client_keys_masked": {k: csv_store.mask_key(v)
                                        for k, v in pol.client_keys.items()},
-                "estimate_divisor": pol.estimate_divisor,
+            "estimate_divisor": pol.estimate_divisor,
+            "estimate_adaptive_enabled": pol.estimate_adaptive_enabled,
+            "estimate_adaptive_shadow": pol.estimate_adaptive_shadow,
+            "estimate_shadow": estimate_shadow_stats(),
                 "sticky_ttl_sec": pol.sticky_ttl_sec,
                 "cooldown_sec": pol.cooldown_sec,
                 "hotwords": pol.hotwords,

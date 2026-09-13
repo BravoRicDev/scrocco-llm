@@ -24,10 +24,11 @@ automatic clearing on successful probe.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
+
+from .atomic_store import load_json, save_json
 
 log = logging.getLogger("nx.keyhealth")
 
@@ -45,23 +46,11 @@ class KeyHealth:
         self._load()
 
     def _load(self) -> None:
-        try:
-            if os.path.exists(self.path):
-                self.data = json.loads(
-                    open(self.path, encoding="utf-8").read() or "{}")
-        except Exception:                    # noqa: BLE001 - corrotto: riparti
-            log.warning("[keyhealth] file illeggibile, riparto pulito",
-                        exc_info=True)
-            self.data = {}
+        data = load_json(self.path)
+        self.data = data if isinstance(data, dict) else {}
 
     def save(self) -> None:
-        tmp = self.path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1)
-            os.replace(tmp, self.path)
-        except OSError:
-            log.debug("[keyhealth] save error", exc_info=True)
+        save_json(self.path, self.data, indent=1)
 
     # ------------------------------------------------------------ observe --
     def observe(self, unique: str, *, fail_streak: int,

@@ -57,13 +57,14 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         is_embedded_provider_error,
                         media_reject_signature, _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
+                        set_retry_after_floor,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy
 from .qc import annotate_reasoning
 from .thought_sig import (has_unsigned_tool_calls, set_avoid_gemini,
                           set_dummy_fill)
-from .router import Router, inject_identity, estimate_tokens
+from .router import Router, inject_identity, estimate_tokens, configure_estimate
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
@@ -159,6 +160,9 @@ router = Router(config, policy)
 # provider callable: l'hot-reload della policy aggiorna anche le chiavi client
 authn = AuthManager(config, client_keys_provider=lambda: policy.client_keys)
 forwarder = Forwarder()
+set_retry_after_floor(policy.retry_after_min_sec)
+configure_estimate(adaptive=policy.estimate_adaptive_enabled,
+                   shadow=policy.estimate_adaptive_shadow)
 
 _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
@@ -179,6 +183,7 @@ LEDGER = _Ledger(VAR_DIR)
 # Evidenza persistente salute chiavi (lifecycle dead/retired, no-delete).
 from .keyhealth import KeyHealth as _KeyHealth
 KEYHEALTH = _KeyHealth(VAR_DIR)
+from .atomic_store import load_json as _load_json, save_json as _save_json
 
 
 def _load_adaptive_stats() -> None:
@@ -186,10 +191,9 @@ def _load_adaptive_stats() -> None:
     if not PERSIST_STATS:
         return
     try:
-        if _stats_file.exists():
-            import json
-            router.load_stats(json.loads(
-                _stats_file.read_text(encoding="utf-8")))
+        data = _load_json(_stats_file, dict)
+        if data:
+            router.load_stats(data)
             log.info("[stats] ripristinate da %s (%d deployment tracciati)",
                      _stats_file.name, len(router._stats))
     except Exception as exc:                 # mai bloccare lo startup
@@ -205,11 +209,10 @@ def _load_thought_sigs() -> None:
     if not PERSIST_STATS:
         return
     try:
-        if _thought_sigs_file.exists():
-            import json
+        data = _load_json(_thought_sigs_file, dict)
+        if data:
             from .thought_sig import THOUGHT_SIGS
-            THOUGHT_SIGS.load(json.loads(
-                _thought_sigs_file.read_text(encoding="utf-8")))
+            THOUGHT_SIGS.load(data)
             log.info("[thought_sig] ripristinate %d firme da %s",
                      len(THOUGHT_SIGS), _thought_sigs_file.name)
     except Exception as exc:                 # mai bloccare lo startup
@@ -224,17 +227,9 @@ def _maybe_save_thought_sigs(force: bool = False) -> None:
     now = time.time()
     if not force and now - _last_stats_save < 60:
         return
-    try:
-        import json
-        import tempfile
-        from .thought_sig import THOUGHT_SIGS
-        _thought_sigs_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=str(VAR_DIR), suffix=".tmp.json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(THOUGHT_SIGS.dump(), f)
-        os.replace(tmp_name, _thought_sigs_file)     # atomico
-    except Exception as exc:                 # best-effort, mai fatali
-        log.debug("[thought_sig] save fallito (%s)", exc)
+    from .thought_sig import THOUGHT_SIGS
+    if not _save_json(_thought_sigs_file, THOUGHT_SIGS.dump()):
+        log.debug("[thought_sig] save fallito")
 
 
 def _maybe_save_adaptive_stats(force: bool = False) -> None:
@@ -246,16 +241,8 @@ def _maybe_save_adaptive_stats(force: bool = False) -> None:
     if not force and now - _last_stats_save < 60:
         return
     _last_stats_save = now
-    try:
-        import json
-        import tempfile
-        _stats_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=str(VAR_DIR), suffix=".tmp.json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(router.dump_stats(), f)
-        os.replace(tmp_name, _stats_file)     # atomico
-    except Exception as exc:                 # best-effort, mai fatali
-        log.debug("[stats] save fallito (%s)", exc)
+    if not _save_json(_stats_file, router.dump_stats()):
+        log.debug("[stats] save fallito")
 
 
 async def _watcher(interval: float) -> None:
@@ -313,6 +300,10 @@ async def _watcher(interval: float) -> None:
                 else:
                     router.policy = fresh          # swap atomico dei riferimenti
                     globals()["policy"] = fresh
+                    set_retry_after_floor(fresh.retry_after_min_sec)
+                    configure_estimate(
+                        adaptive=fresh.estimate_adaptive_enabled,
+                        shadow=fresh.estimate_adaptive_shadow)
                     log.info("[policy] ricaricata: step_up=%s%% aliases=%d "
                              "per-profilo=%s", fresh.step_up_pct,
                              len(fresh.aliases),

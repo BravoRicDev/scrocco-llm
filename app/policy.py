@@ -136,10 +136,18 @@ class Policy:
     legacy_prefixes: list[str] = field(default_factory=list)
 
     estimate_divisor: int = 4
+    # Stima token adattiva (densita' per-blocco). shadow=True calcola e logga
+    # entrambe ma usa la legacy finche' non si abilita adaptive_enabled.
+    estimate_adaptive_enabled: bool = False
+    estimate_adaptive_shadow: bool = True
     # TTL (secondi) della cache in-memory delle GET {endpoint}/models: una
     # chiamata per endpoint (prima chiave valida), condivisa tra audit, health
     # e probe. 0 = nessuna cache (una GET per endpoint ad ogni esecuzione).
     provider_models_ttl_sec: int = 300
+    # Floor minimo (secondi) del cooldown applicato sui 429 quando il provider
+    # indica un Retry-After troppo piccolo/assente: evita loop di 429
+    # ravvicinati. 0 = nessun floor (si usa il valore del provider).
+    retry_after_min_sec: float = 10.0
     sticky_ttl_sec: int = 3600
     cooldown_sec: int = 600
     hotwords_window: int = 3
@@ -298,6 +306,10 @@ class Policy:
     cache_ctx_min_ctx_tokens: int = 50000
     cache_ctx_on_deployment_switch: bool = True
     cache_ctx_switch_min_tokens: int = 8000
+    # Isteresi anti-churn del troncamento contesto: la soglia assoluta scatta
+    # solo entro questa frazione della finestra del deployment scelto
+    # (0 = disabilitata, comportamento storico).
+    cache_ctx_abs_headroom_ratio: float = 0.8
     # DEBUG SNIFF: scatola nera input/output su var/debug-sniff.log con
     # rotazione oraria e retention debug_sniff_retention_hours. Default OFF
     # (file con conversazione completa: solo per debug locale).
@@ -569,7 +581,20 @@ class Policy:
         if not raw:
             return p
         _set_int(p, raw, "estimate_divisor", minimum=1)
+        if "estimate_adaptive_enabled" in raw:
+            p.estimate_adaptive_enabled = _coerce_bool(
+                raw["estimate_adaptive_enabled"], "estimate_adaptive_enabled")
+        if "estimate_adaptive_shadow" in raw:
+            p.estimate_adaptive_shadow = _coerce_bool(
+                raw["estimate_adaptive_shadow"], "estimate_adaptive_shadow")
         _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
+        _rmin = raw.get("retry_after_min_sec")
+        if _rmin is not None:
+            try:
+                p.retry_after_min_sec = max(0.0, float(_rmin))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "retry_after_min_sec deve essere un numero >= 0") from None
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)
@@ -1066,6 +1091,12 @@ class Policy:
                         "cache_aware.context_truncation.on_deployment_switch")
                 if ct.get("stub_text"):
                     p.cache_ctx_stub_text = str(ct["stub_text"])
+                _ahr = ct.get("abs_headroom_ratio")
+                if _ahr is not None:
+                    if isinstance(_ahr, bool) or not isinstance(_ahr, (int, float)):
+                        raise ValueError("cache_aware.context_truncation."
+                                         "abs_headroom_ratio deve essere un numero")
+                    p.cache_ctx_abs_headroom_ratio = max(0.0, float(_ahr))
         # --- DEBUG (sniff input/output) ---
         _dbg = raw.get("debug")
         if _dbg is not None:
