@@ -137,6 +137,10 @@ _MODEL_MISSING_RE = re.compile(
     r"no such model|model_not_found|unknown model|modello inesistente"
     r"|does not exist|modelerror|model[\w .:/'-]*\bnot supported"
     r"|model[\w .:/'()-]{0,60}?\bunavailable"
+    # bynara & co.: 400 {"error":{"type":"bad_request","message":"The requested
+    # model is not available."}} — il modello non e' servito su QUESTO provider:
+    # stesso trattamento (deployment-side, 24h, ruota, mai raw al client).
+    r"|model[\w .:/'()-]{0,80}?\bnot\s+(?:currently\s+|temporarily\s+)?available"
     # EOL / ritiro: OpenRouter risponde 410 {"title":"Gone","detail":"The model
     # '...' has reached [end of life]..."}; altri "no longer available",
     # "has been deprecated/retired/sunset". Il modello non torna -> stesso

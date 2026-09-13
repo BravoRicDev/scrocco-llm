@@ -118,6 +118,13 @@ def test_model_missing_regex():
                      'provider (Console): Upstream request failed: Model is '
                      'unavailable."}}')
     assert RE.search("Model 'DeepSeek-V4-Flash-0731' is currently unavailable.")
+    # bynara: 400 envelope OpenAI "The requested model is not available.":
+    # deve essere deployment-side (ruota), mai consegnato al client.
+    assert RE.search('{"error":{"type":"bad_request","message":"The requested '
+                     'model is not available.","request_id":"x"}}')
+    assert RE.search("The requested model is not available.")
+    assert RE.search("the requested model is not currently available")
+    assert not RE.search("temporarily unavailable")     # senza "model"
     assert not RE.search("invalid api key")
     assert not RE.search("the service is temporarily unavailable")  # niente "model"
     # rifiuto di MODALITA' (non modello): resta sul percorso media-strike
