@@ -68,6 +68,14 @@ cooldown_probe_enabled: true
 cooldown_probe_after_ratio: 0.5
 cooldown_probe_decay: true
 
+# Decadimento del fail_streak in inattivita' (halflife in secondi): dopo N
+# secondi senza fallimenti lo streak si dimezza (0 = off).
+cooldown_streak_halflife_sec: 1800
+# Auto-retirement dopo N probe passivi consecutivi falliti (0 = off).
+probe_retire_after: 5
+# Jitter simmetrico sui cooldown, anti "thundering herd" (0.12 = +/-12%; 0 = off).
+cooldown_jitter_ratio: 0.12
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HOTWORDS — rilevamento intent "deep think" per routing preferenziale
 # ─────────────────────────────────────────────────────────────────────────────

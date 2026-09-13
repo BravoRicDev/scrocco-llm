@@ -100,6 +100,7 @@ class DepStats:
     fail_count: int = 0               # fallimenti cumulativi (mai azzerati)
     last_success_ts: float = 0.0      # timestamp ultimo successo
     last_fail_ts: float = 0.0         # timestamp ultimo fallimento
+    probe_fail_streak: int = 0        # probe passivi consecutivi falliti (cap)
     # --- dynamic scoring: feature osservate per-deployment ---
     latency_history: list[float] = field(default_factory=list)  # ultimi N latency_ms
     total_tokens: int = 0              # token completati cumulativi
@@ -750,6 +751,7 @@ class Router:
         s.fail_count_24h += 1
         # contatore cumulativo + timestamp ultimo fallimento (persistiti)
         s.fail_count += 1
+        s.fail_streak = self._decay_streak(s.fail_streak, s.last_fail_ts)
         s.last_fail_ts = time.time()
         # --- budget guard: apprendimento del limite dal 429 --------------
         bg_cfg = pol.budget_guard or {}
@@ -796,6 +798,7 @@ class Router:
             floor_cd = max(1.0, float(getattr(
                 pol, "chronic_fail_cooldown_sec", 7200) or 7200))
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
+        seconds = self._apply_jitter(seconds)
         self._cooldown[unique] = time.time() + seconds
         self._cooldown_since[unique] = time.time()
         self._cooldown_full_map()[unique] = float(seconds)
@@ -956,8 +959,10 @@ class Router:
             s.fail_day_key = today
         s.fail_count_24h += 1
         s.fail_count += 1
+        s.fail_streak = self._decay_streak(s.fail_streak, s.last_fail_ts, now)
         s.last_fail_ts = now
         s.fail_streak += 1
+        s.probe_fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)
         # Leva B: stessa pausa minima longa (2h) se il cronico fallisce
@@ -970,12 +975,14 @@ class Router:
                 self.policy, "chronic_fail_cooldown_sec", 7200) or 7200))
             new_cd = min(max(new_cd, floor_cd),
                          float(self.policy.max_cooldown_sec))
+        new_cd = self._apply_jitter(new_cd)
         self._cooldown[unique] = now + new_cd
         self._cooldown_since[unique] = now
         self._cooldown_full_map()[unique] = float(new_cd)
         log.warning("[cooldown] %s dormiente ri-fallito -> cooldown "
                     "raddoppiato a %ds (residuo era %ds, fail_24h=%d)",
                     unique, int(new_cd), int(remaining), s.fail_count_24h)
+        self._maybe_retire_on_probe_fail(unique, s)
         return new_cd
 
     def clear_cooldown(self, unique: str) -> None:
@@ -988,6 +995,7 @@ class Router:
         s.fail_streak = 0
         s.fail_count_24h = 0
         s.fail_day_key = ""
+        s.probe_fail_streak = 0
         log.info("[cooldown] %s riabilitato (successo da dormiente)", unique)
 
         # --- Circuit Breaker: success updates ---
@@ -1315,6 +1323,60 @@ class Router:
             return 1.0
         return max(0.0, 1.0 - pr)
 
+    def _decay_streak(self, streak: int, last_fail_ts: float,
+                      now: float | None = None) -> int:
+        """Decadimento del fail_streak per inattivita' (halflife).
+
+        Dopo `cooldown_streak_halflife_sec` senza fallimenti lo streak si
+        dimezza, cosi' una chiave riattivata dopo ore non viene riesiliata
+        per un singolo errore isolato. 0 = nessun decadimento."""
+        if streak <= 0:
+            return 0
+        hl = float(getattr(self.policy, "cooldown_streak_halflife_sec", 0) or 0)
+        if hl <= 0 or not last_fail_ts:
+            return streak
+        now = time.time() if now is None else now
+        elapsed = max(0.0, now - float(last_fail_ts))
+        if elapsed <= 0:
+            return streak
+        decayed = int(round(streak * (0.5 ** (elapsed / hl))))
+        decayed = max(0, min(streak, decayed))
+        if decayed < streak:
+            log.info("[streak] %d -> %d dopo %.0f min di inattivita'",
+                     streak, decayed, elapsed / 60.0)
+        return decayed
+
+    def _apply_jitter(self, seconds: float) -> float:
+        """Jitter simmetrico sui cooldown (anti thundering herd)."""
+        ratio = float(getattr(self.policy, "cooldown_jitter_ratio", 0.0) or 0.0)
+        if ratio <= 0:
+            return max(1.0, float(seconds))
+        return max(1.0, float(seconds) * random.uniform(1.0 - ratio,
+                                                       1.0 + ratio))
+
+    def _maybe_retire_on_probe_fail(self, unique: str, s) -> bool:
+        """Auto-retirement dopo N probe passivi consecutivi falliti: se il
+        problema non e' temporaneo (credenziali/modello morti) smettiamo di
+        sprecare probe. Il CSV non viene toccato (unretire manuale o probe ok)."""
+        cap = int(getattr(self.policy, "probe_retire_after", 0) or 0)
+        if cap <= 0 or s.probe_fail_streak < cap:
+            return False
+        try:
+            from . import main as _gw_mod      # lazy: evita cicli d'import
+            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            if kh is not None and not kh.is_retired(unique):
+                kh.set_state(unique, "retired",
+                             reason="probe_escalation_cap")
+                kh.save()
+                log.warning("[probe] %s RETIRED: %d probe consecutivi falliti "
+                            "(problema permanente, non temporaneo)",
+                            unique, s.probe_fail_streak)
+                return True
+        except Exception:                      # mai bloccare il routing
+            log.debug("[probe] auto-retirement di %s fallito", unique,
+                      exc_info=True)
+        return False
+
     def is_retired(self, unique: str) -> bool:
         """Chiave RETIRED (lifecycle keyhealth): esclusa dal routing.
 
@@ -1588,6 +1650,7 @@ class Router:
         s.ema_latency_ms = (latency_ms if s.ema_latency_ms is None
                             else s.ema_latency_ms * 0.7 + latency_ms * 0.3)
         s.fail_streak = 0
+        s.probe_fail_streak = 0
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = min(1.0, 0.8 * prev + 0.2)
         # contatore cumulativo + timestamp ultimo successo (persistiti)
@@ -1615,7 +1678,8 @@ class Router:
                           "ok_count": s.ok_count,
                           "fail_count": s.fail_count,
                           "last_success_ts": s.last_success_ts,
-                          "last_fail_ts": s.last_fail_ts}
+                          "last_fail_ts": s.last_fail_ts,
+                          "probe_fail_streak": s.probe_fail_streak}
                       for u, s in self._stats.items()},
             "cooldown": dict(self._cooldown),
             "cap_strikes": [{"key": k, **v} for k, v in
@@ -1666,6 +1730,11 @@ class Router:
                 try:
                     s.last_success_ts = float(st.get("last_success_ts") or 0)
                     s.last_fail_ts = float(st.get("last_fail_ts") or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    s.probe_fail_streak = max(
+                        0, int(st.get("probe_fail_streak") or 0))
                 except (TypeError, ValueError):
                     pass
             for u, exp in (data.get("cooldown") or {}).items():

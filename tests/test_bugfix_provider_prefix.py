@@ -65,6 +65,7 @@ def _mk_router():
                 "a,broken,cloudflare,https://cf.test/v1,paid,128,8000,5,K1,\n"
                 "a,good,groq,https://ok.test/v1,paid,128,8000,5,K2,text\n")
     pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}}})
+    pol.cooldown_jitter_ratio = 0        # questi test verificano i secondi esatti
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     router = Router(cfg, pol)
     os.unlink(path)

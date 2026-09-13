@@ -167,6 +167,16 @@ class Policy:
     cooldown_probe_enabled: bool = True
     cooldown_probe_after_ratio: float = 0.5
     cooldown_probe_decay: bool = True
+    # Decadimento del fail_streak per inattivita' (halflife in secondi):
+    # dopo N secondi senza fallimenti lo streak si dimezza, cosi' una chiave
+    # riattivata dopo ore riparte con una fedina quasi pulita. 0 = off.
+    cooldown_streak_halflife_sec: float = 1800.0
+    # Auto-retirement dopo N probe passivi consecutivi falliti (problema
+    # permanente: chiave morta). 0 = off.
+    probe_retire_after: int = 5
+    # Jitter simmetrico sui cooldown per evitare il thundering herd
+    # (0.12 = +/-12%). 0 = off.
+    cooldown_jitter_ratio: float = 0.12
     # Sessioni anonime: se il client non invia alcun id di sessione ne'
     # `user`/`metadata.session_id`, il gateway deriva un id deterministico
     # `fq_<sha1(system+primo user+user-agent)>` dal prefisso della
@@ -653,6 +663,21 @@ class Policy:
         if "cooldown_probe_decay" in raw:
             p.cooldown_probe_decay = _coerce_bool(
                 raw["cooldown_probe_decay"], "cooldown_probe_decay")
+        _csh = raw.get("cooldown_streak_halflife_sec")
+        if _csh is not None:
+            try:
+                p.cooldown_streak_halflife_sec = max(0.0, float(_csh))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "cooldown_streak_halflife_sec deve essere un numero >= 0") from None
+        _set_int(p, raw, "probe_retire_after", minimum=0)
+        _cjr = raw.get("cooldown_jitter_ratio")
+        if _cjr is not None:
+            try:
+                p.cooldown_jitter_ratio = min(1.0, max(0.0, float(_cjr)))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "cooldown_jitter_ratio deve essere tra 0 e 1") from None
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")

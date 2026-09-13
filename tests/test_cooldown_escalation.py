@@ -34,6 +34,7 @@ def _make_router(max_fail=10):
     pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}}})
     pol.stale_cooldown_retry_sec = 300
     pol.cooldown_retry_max_fail_24h = max_fail
+    pol.cooldown_jitter_ratio = 0        # questi test verificano i secondi esatti
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     return Router(cfg, pol), path
 

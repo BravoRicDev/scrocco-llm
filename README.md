@@ -116,6 +116,12 @@ individual account limits instead of dying on the first 429.
   when no live key remains, a "ripe" deployment (>= `cooldown_probe_after_ratio`,
   default 50%) is retried as a single passive probe — success clears the
   cooldown instantly, failure doubles it, without affecting other requests.
+  `cooldown_streak_halflife_sec` (default 1800) decays the fail streak while a
+  key is idle, so a key reactivated after hours doesn't get re-exiled by one
+  isolated error. `probe_retire_after` (default 5) auto-RETIRES a key after that
+  many consecutive failed probes (permanent problem, CSV untouched).
+  `cooldown_jitter_ratio` (default 0.12) adds ±J% jitter to every cooldown to
+  avoid the thundering herd when a whole pool wakes up at the same second.
 - **Model families** (`canonical_family`): provider-specific model names are
   canonicalized to a family id (e.g. `meta-llama/llama-3-8b-instruct` ==
   `llama3-8b`). When failover crosses providers but stays on the same family,
@@ -269,6 +275,7 @@ template. The ones that matter most:
 | `ladder_skip_after` / `ladder_stale_max` | 4 / 3 | attempts per dim before climbing / stale revivals |
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
+| `cooldown_streak_halflife_sec` / `probe_retire_after` / `cooldown_jitter_ratio` | 1800 / 5 / 0.12 | streak decay while idle; auto-retire after N failed probes; cooldown jitter (±12%) |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |
