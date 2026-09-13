@@ -106,7 +106,8 @@ def ctxcompact_config_from_policy(policy) -> CtxCompactConfig:
 
 def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
                    holder: str | None = None, dep_unique: str | None = None,
-                   session_compact: bool = False) -> dict:
+                   session_compact: bool = False,
+                   same_family: bool = False) -> dict:
     """Decide se troncare e perche'. Ritorna un dict:
     {compact, reason (str), cold (bool), overflow (bool)}.
 
@@ -116,6 +117,11 @@ def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
       - switch:   cache FREDDA (nessun detentore o detentore != deployment)
                   e ctx_est >= switch_min_tokens;
       - sticky:   la sessione era gia' compatta.
+
+    `same_family=True` (deployment scelto e detentore appartengono alla stessa
+    famiglia di modelli, anche su provider diversi) sopprime SOLO il trigger
+    `switch`: la prompt-cache resta calda tra provider gemelli. `overflow`,
+    `abs` e `sticky` restano invariati.
     """
     if not cfg.enabled:
         return {"compact": False, "reason": "", "cold": False,
@@ -136,7 +142,7 @@ def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
     if (cfg.min_ctx_tokens > 0 and ctx_est >= cfg.min_ctx_tokens
             and (overflow or near_saturation)):
         reasons.append("abs")
-    if (cfg.on_deployment_switch and cold
+    if (cfg.on_deployment_switch and cold and not same_family
             and ctx_est >= cfg.switch_min_tokens):
         reasons.append("switch")
     if session_compact:

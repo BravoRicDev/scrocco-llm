@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import csv_store, journal, logview
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
+from .capabilities import canonical_family
 from .forwarder import UpstreamError, _client_attribution
 from .provider_models import DEFAULT_TTL_SEC, fetch_provider_models
 from .router import estimate_tokens, estimate_shadow_stats
@@ -1197,7 +1198,8 @@ async def capabilities_seed_from_map(request: Request):
         proposals.append({
             "id": csv_store.row_id(row, endpoint),
             "profile": profile,
-            "modello": modello,
+        "modello": modello,
+        "family": canonical_family(modello) if modello else "",
             "current": current,
             "proposed": proposed,
         })

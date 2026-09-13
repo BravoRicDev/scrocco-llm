@@ -58,6 +58,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         media_reject_signature, _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         set_retry_after_floor,
+                        set_stream_stall_sec,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy
@@ -161,6 +162,7 @@ router = Router(config, policy)
 authn = AuthManager(config, client_keys_provider=lambda: policy.client_keys)
 forwarder = Forwarder()
 set_retry_after_floor(policy.retry_after_min_sec)
+set_stream_stall_sec(policy.stream_stall_sec)
 configure_estimate(adaptive=policy.estimate_adaptive_enabled,
                    shadow=policy.estimate_adaptive_shadow)
 
@@ -301,6 +303,7 @@ async def _watcher(interval: float) -> None:
                     router.policy = fresh          # swap atomico dei riferimenti
                     globals()["policy"] = fresh
                     set_retry_after_floor(fresh.retry_after_min_sec)
+                    set_stream_stall_sec(fresh.stream_stall_sec)
                     configure_estimate(
                         adaptive=fresh.estimate_adaptive_enabled,
                         shadow=fresh.estimate_adaptive_shadow)
@@ -334,10 +337,31 @@ async def lifespan(_app: FastAPI):
         for task in (_watch_task, _health_task):
             if task:
                 task.cancel()
+        # Graceful shutdown: uvicorn ha gia' smesso di accettare nuove
+        # richieste; attendiamo il drain di quelle in volo (best-effort, con
+        # deadline) prima del flush finale, per non troncare risposte.
+        try:
+            _drain = float(getattr(policy, "shutdown_drain_sec", 0.0) or 0.0)
+            _infl = router.inflight_total()
+            if _infl:
+                log.info("[shutdown] drain di %d richieste in volo "
+                         "(max %.1fs)...", _infl, _drain)
+            _deadline = time.monotonic() + _drain
+            while router.inflight_total() > 0 and time.monotonic() < _deadline:
+                await asyncio.sleep(0.2)
+            _left = router.inflight_total()
+            if _left:
+                log.warning("[shutdown] drain scaduto: %d richieste ancora "
+                            "in volo", _left)
+            elif _infl:
+                log.info("[shutdown] drain completato")
+        except Exception:                       # noqa: BLE001
+            pass
         await forwarder.aclose()
         _maybe_save_adaptive_stats(force=True)   # F4: salva allo shutdown
         _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
-        LEDGER.flush()                           # ledger: nessuna riga persa
+        _rows = LEDGER.flush_sync()              # ledger: nessuna riga persa
+        log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
 
 
 app = FastAPI(title=policy.service_name, version="0.2.0", lifespan=lifespan)
@@ -1087,9 +1111,15 @@ async def chat_completions(request: Request):
     _cc = ctxcompact_config_from_policy(router.policy)
     _holder = router.session_holder(session_id)
     _max_in = int(dep.get("max_input_tokens") or 0)
+    _same_family = False
+    if _holder:
+        _hd = router.config.deployment_by_unique(_holder)
+        if _hd and _hd.get("family") and _hd.get("family") == dep.get("family"):
+            _same_family = True
     _dec = should_compact(
         _cc, ctx_est, _max_in, _holder, dep.get("unique"),
-        bool(session_id and router.is_session_compact(session_id)))
+        bool(session_id and router.is_session_compact(session_id)),
+        same_family=_same_family)
     _do_compact = _dec["compact"]
     if _do_compact and session_id:
         router.mark_session_compact(session_id)
@@ -1101,8 +1131,9 @@ async def chat_completions(request: Request):
             log.info("[ctxcompact] ses=%s stubbed=%d saved≈%dtok reason=%s",
                      session_id, _crep["stubbed"],
                      _crep["saved_tokens_est"], _dec["reason"])
-    log.info("[cache] ses=%s holder=%s compact=%s cold=%s reason=%s "
-             "ctx≈%d max_in=%d", session_id, _holder or "-",
+    log.info("[cache] ses=%s holder=%s family=%s same_fam=%s compact=%s "
+             "cold=%s reason=%s ctx≈%d max_in=%d", session_id, _holder or "-",
+             dep.get("family") or "-", _same_family,
              _do_compact, _dec["cold"], _dec["reason"] or "-",
              ctx_est, _max_in)
     if stream and _sm.enabled:
@@ -2066,6 +2097,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             return chunk
 
         gen_broken = False
+        gen_stall = False          # stall mid-stream rilevato (anti-stall)
         aborted = False            # client disconnesso durante lo stream
         monitor: asyncio.Task | None = None
         # il task che sta eseguendo QUESTO generator (sse): e' lui che va
@@ -2126,8 +2158,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if not aborted:
                 await _discard_stream(gen, pending)
             raise                          # disconnessione client: non punire
-        except Exception:
+        except Exception as exc:
             gen_broken = True
+            # anti-stall: StreamStallError e' un asyncio.TimeoutError -> danno
+            # reale (upstream appeso), cooldown lungo invece del soft.
+            gen_stall = isinstance(exc, asyncio.TimeoutError)
         finally:
             if monitor is not None:
                 monitor.cancel()
@@ -2162,14 +2197,27 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 elif gen_broken or (not seen_done and not saw_finish_reason):
                     # troncamento GENUINO: stream rotto a meta' oppure niente
                     # [DONE] E niente finish_reason -> il modello ha scazzato.
-                    wd = "tier2-truncated"
-                    metrics.inc("nx_qc_watchdog_total",
-                                (dep["unique"], "truncated"))
-                    log.warning("[watchdog] tier2 stream TRONCATO da %s "
-                                "(chunk=%d, finish_reason=%s): cooldown",
-                                dep["unique"], chunks, saw_finish_reason)
-                    _fail(dep["unique"], seconds=_soft_cd(
-                        router.stats_for(dep["unique"]).fail_count_24h))
+                    if gen_stall:
+                        # upstream "congelato" a meta' stream (nessun byte per
+                        # stream_stall_sec): danno REALE -> cooldown lungo.
+                        wd = "tier2-stall"
+                        metrics.inc("nx_qc_watchdog_total",
+                                    (dep["unique"], "stall"))
+                        log.warning("[watchdog] tier2 stream in STALLO da %s "
+                                    "(chunk=%d, stall=%.0fs): cooldown",
+                                    dep["unique"], chunks,
+                                    float(getattr(router.policy,
+                                                  "stream_stall_sec", 0) or 0))
+                        _fail(dep["unique"], reason="timeout")
+                    else:
+                        wd = "tier2-truncated"
+                        metrics.inc("nx_qc_watchdog_total",
+                                    (dep["unique"], "truncated"))
+                        log.warning("[watchdog] tier2 stream TRONCATO da %s "
+                                    "(chunk=%d, finish_reason=%s): cooldown",
+                                    dep["unique"], chunks, saw_finish_reason)
+                        _fail(dep["unique"], seconds=_soft_cd(
+                            router.stats_for(dep["unique"]).fail_count_24h))
                 elif not seen_done:
                     # c'e' un finish_reason ma manca [DONE]: risposta di fatto
                     # completa, il provider omette solo il sentinel. Solo log.

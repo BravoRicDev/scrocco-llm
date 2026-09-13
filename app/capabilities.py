@@ -8,6 +8,7 @@ counting; stateless and unit-testable by design.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 CANONICAL_CAPS = frozenset({"text", "vision", "video", "audio", "image_gen",
                             "tools", "tts", "stt", "video_gen"})
@@ -108,3 +109,44 @@ def count_image_parts(messages: list[dict] | None) -> int:
                 if isinstance(part, dict) and part.get("type") in ("image_url", "input_image"):
                     count += 1
     return count
+
+
+# Suffissi/complementi che NON identificano la famiglia del modello: varianti
+# di chat/instruct/quantizzazione. Rimossi per far convergere gli alias dei
+# diversi provider (es. `meta-llama/llama-3-8b-instruct` == `llama3-8b`).
+_FAMILY_NOISE = re.compile(
+    r"[-_.](?:instruct|it|chat|base|latest|preview|hf|awq|gptq|int4|int8|fp8|"
+    r"fp16|bf16|q[0-9_k]+|gguf|quantized)$")
+_PROVIDER_PREFIX = re.compile(
+    r"^(?:models/|[a-z0-9_.-]+/)+")       # `nvidia/`, `openai/`, `z-ai/`, `models/`
+_TAG_SUFFIX = re.compile(r"[:@].*$")       # `:free`, `:latest`, `@200k`
+
+
+def canonical_family(model: str) -> str:
+    """Riduce un nome modello specifico del provider a un ID di FAMIGLIA
+    canonico, confrontabile tra provider diversi.
+
+    Esempi:
+      `meta-llama/llama-3-8b-instruct` -> `llama-3-8b`
+      `llama3-8b`                      -> `llama-3-8b`
+      `nvidia/.../gpt-oss-120b:free`   -> `gpt-oss-120b`
+      `deepseek-v4.1-flash`            -> `deepseek-v-4-1-flash`
+
+    Pura e senza I/O: usata per lo sticky same-family e la preservazione
+    delle soglie di compattamento quando si cambia provider ma NON modello.
+    """
+    s = (model or "").strip().lower()
+    if not s:
+        return ""
+    s = _TAG_SUFFIX.sub("", s)
+    s = _PROVIDER_PREFIX.sub("", s)
+    s = s.replace(".", "-").replace("_", "-")
+    # `llama3` / `gemini15` -> `llama-3` / `gemini-15`
+    s = re.sub(r"([a-z])(\d)", r"\1-\2", s)
+    while True:
+        new = _FAMILY_NOISE.sub("", s)
+        if new == s:
+            break
+        s = new
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s

@@ -78,6 +78,13 @@ class Ledger:
             log.debug("[ledger] flush_async error", exc_info=True)
             return 0
 
+    def flush_sync(self) -> int:
+        """Flush SINCRONO e bloccante per il graceful shutdown
+        (SIGTERM/SIGINT): scrive ogni record rimasto nel buffer senza
+        dipendere dall'event loop, che durante lo shutdown puo' essere gia'
+        in chiusura. Best-effort come `flush()`."""
+        return self.flush()
+
     def flush(self) -> int:
         """Scrive il buffer su disco (append); ritorna le righe scritte."""
         with self._lock:

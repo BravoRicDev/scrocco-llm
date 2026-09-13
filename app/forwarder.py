@@ -128,6 +128,53 @@ RETRYABLE_STATUS = {408, 409, 429} | set(range(500, 600))
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0,
                                  pool=10.0)
 
+# ANTI-STALL (mid-stream): se dopo l'avvio dello stream l'upstream non manda
+# NULLA per N secondi (free-tier/reverse-proxy che si "congelano" senza
+# chiudere la connessione ne' dare errore), il read-timeout del trasporto
+# (180s) e' troppo lento. Un watchdog inter-chunk aborta subito -> failover
+# (pre-byte) o cooldown del deployment (post-byte). 0 = disabilitato.
+STREAM_STALL_SEC = 8.0
+
+
+def set_stream_stall_sec(sec) -> None:
+    """Imposta il watchdog inter-chunk (secondi). <=0 disabilita."""
+    global STREAM_STALL_SEC
+    try:
+        v = float(sec)
+    except (TypeError, ValueError):
+        return
+    STREAM_STALL_SEC = max(0.0, v)
+
+
+class StreamStallError(asyncio.TimeoutError):
+    """Nessun chunk SSE per `seconds`: l'upstream e' appeso a meta' stream.
+
+    Sottoclasse di asyncio.TimeoutError cosi' i consumatori esistenti lo
+    trattano come un TIMEOUT di trasporto (rotazione pre-byte / cooldown
+    lungo post-byte) senza casi speciali."""
+
+    def __init__(self, seconds: float, model: str = ""):
+        self.seconds = float(seconds)
+        self.model = model
+        msg = "upstream stream stall: nessun chunk per %.1fs" % self.seconds
+        if model:
+            msg += " (%s)" % model
+        super().__init__(msg)
+
+
+async def _stall_guard(aiter, timeout: float, model: str = ""):
+    """Avvolge un async-iterator e solleva StreamStallError se l'attesa tra
+    due chunk supera `timeout` secondi."""
+    _it = aiter.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(_it.__anext__(), timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise StreamStallError(timeout, model) from None
+        yield chunk
+
 # "No such model" (cloudflare), model_not_found (openai), "Model X is not
 # supported" / {"type":"ModelError"} (opencode-zen), "Model is (currently)
 # unavailable", ecc. — il modello non esiste / non e' servito / e' giu' su
@@ -945,8 +992,12 @@ class Forwarder:
 
         async def gen() -> AsyncIterator[bytes]:
             buf = b""
+            source = resp.aiter_bytes()
+            _stall = STREAM_STALL_SEC
+            if _stall > 0:
+                source = _stall_guard(source, _stall, dep.get("model", ""))
             try:
-                async for chunk in resp.aiter_bytes():
+                async for chunk in source:
                     if _google:
                         buf += chunk
                         # processa solo righe complete

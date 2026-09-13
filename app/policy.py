@@ -148,6 +148,13 @@ class Policy:
     # indica un Retry-After troppo piccolo/assente: evita loop di 429
     # ravvicinati. 0 = nessun floor (si usa il valore del provider).
     retry_after_min_sec: float = 10.0
+    # Watchdog inter-chunk dello streaming (secondi): se l'upstream non manda
+    # alcun byte per N secondi a stream avviato -> StreamStallError -> failover
+    # (pre-byte) / cooldown (post-byte). 0 = disabilitato.
+    stream_stall_sec: float = 8.0
+    # Graceful shutdown: attesa massima (secondi) del drain delle richieste in
+    # volo prima del flush finale del ledger. 0 = non attendere.
+    shutdown_drain_sec: float = 10.0
     sticky_ttl_sec: int = 3600
     cooldown_sec: int = 600
     hotwords_window: int = 3
@@ -601,6 +608,20 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "retry_after_min_sec deve essere un numero >= 0") from None
+        _sds = raw.get("shutdown_drain_sec")
+        if _sds is not None:
+            try:
+                p.shutdown_drain_sec = max(0.0, float(_sds))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "shutdown_drain_sec deve essere un numero >= 0") from None
+        _stall = raw.get("stream_stall_sec")
+        if _stall is not None:
+            try:
+                p.stream_stall_sec = max(0.0, float(_stall))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "stream_stall_sec deve essere un numero >= 0") from None
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)

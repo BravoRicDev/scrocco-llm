@@ -1494,6 +1494,11 @@ class Router:
             self._stats[unique] = s
         return s
 
+    def inflight_total(self) -> int:
+        """Richieste attualmente in volo su tutti i deployment (usato dal
+        graceful shutdown per attendere il drain prima del flush finale)."""
+        return sum(s.inflight for s in self._stats.values())
+
     def note_start(self, unique: str) -> None:
         """Richiesta inviata: tocca last_used (penalità anti rate-limit),
         incrementa inflight e le FINESTRE budget (minuto/giorno). Nei gruppi

@@ -101,6 +101,19 @@ individual account limits instead of dying on the first 429.
   learned cap means no throttling. `retry_after_min_sec` (default `10`)
   floors tiny/absent `Retry-After` so a burst of near-simultaneous 429s
   cannot loop.
+- **Anti-stall watchdog** (`stream_stall_sec`, default `8`): after a stream
+  has started, if the upstream sends no chunk for N seconds (free-tier /
+  reverse-proxy "hang" without closing), a `StreamStallError` aborts it
+  immediately → standard failover/cooldown instead of blocking the client
+  indefinitely. `0` disables.
+- **Model families** (`canonical_family`): provider-specific model names are
+  canonicalized to a family id (e.g. `meta-llama/llama-3-8b-instruct` ==
+  `llama3-8b`). When failover crosses providers but stays on the same family,
+  the context-compaction `switch` trigger is suppressed (`same_family`) so the
+  prompt cache stays warm.
+- **Graceful shutdown**: on SIGTERM/SIGINT the lifespan stops new work, drains
+  in-flight requests (up to `shutdown_drain_sec`, default `10`) and runs a
+  blocking `flush_sync()` so the usage ledger never loses buffered rows.
 - **Usage & cost insights**: persistent ledger + `GET /admin/insights`
   (per profile/model/day burn; provider-reported vs estimated costs).
 - **Three-tier auth**: master key / deterministic `sk-<profile>` client keys

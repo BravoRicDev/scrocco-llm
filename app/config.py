@@ -29,7 +29,7 @@ import re
 from datetime import date
 from pathlib import Path
 from typing import Any
-from .capabilities import ROUTING_CAPS, GEN_CAPS
+from .capabilities import ROUTING_CAPS, GEN_CAPS, canonical_family
 
 log = logging.getLogger("nx.config")
 
@@ -527,6 +527,7 @@ class GatewayConfig:
                     "model_preference": int(meta.get("model_preference") or 0),
                     "media_defer": bool(meta.get("media_defer", True)),
                     "order": int(meta.get("order", ORDER_LAST)),
+                    "family": canonical_family(model_final),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap
