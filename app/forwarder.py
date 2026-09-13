@@ -58,7 +58,8 @@ from .histnorm import hist_config_from_policy, normalize_messages
 from .sampling import (sampling_config_from_policy,
                        apply_sampling_defaults, response_loop_reason)
 from .schemaout import (schemaout_config_from_policy, enforce_response,
-                        maybe_inject_response_format)
+                        maybe_inject_response_format,
+                        downgrade_response_format)
 from .texttoolparse import (TruncationConfig, apply_to_message,
                             has_unclosed_toolcall, salvage_truncated_toolcall,
                             text_config_from_policy)
@@ -144,6 +145,16 @@ def set_stream_stall_sec(sec) -> None:
     except (TypeError, ValueError):
         return
     STREAM_STALL_SEC = max(0.0, v)
+
+
+# config schemaout (degradazione gentile response_format): impostata da main
+# all'avvio e ad ogni reload della policy. None = default sicuro.
+_SCHEMAOUT_CFG = None
+
+
+def set_schemaout_config(cfg) -> None:
+    global _SCHEMAOUT_CFG
+    _SCHEMAOUT_CFG = cfg
 
 
 class StreamStallError(asyncio.TimeoutError):
@@ -297,7 +308,12 @@ _PAYLOAD_SCHEMA_RE = re.compile(
     r"|unexpected .{0,16}tool_(?:result|use)_id"
     r"|must have a corresponding .{0,24}tool_(?:result|use)"
     r"|does not have a corresponding tool (?:result|message)"
-    r"|missing (?:corresponding )?tool (?:result|response|output)",
+    r"|missing (?:corresponding )?tool (?:result|response|output)"
+    r"|(?:unsupported|not supported|invalid|unknown)\s+"
+    r"(?:value\s+)?['\"]?response_format"
+    r"|response_format['\"]?[^,;.]{0,40}(?:unsupported|not supported|"
+    r"invalid|unknown)"
+    r"|(?:unsupported|not supported)\s+['\"]?json_schema",
     re.IGNORECASE)
 
 # Errore TRANSITORIO del provider/router a monte (non del client, non del
@@ -903,6 +919,11 @@ class Forwarder:
         body = dict(payload)
         body["model"] = dep["model"]
         apply_effort_policy(body, dep)
+        _dg = downgrade_response_format(body, dep, _SCHEMAOUT_CFG)
+        if _dg:
+            log.info("[schemaout] %s: response_format %s rimosso -> "
+                     "istruzione schema nel prompt (%s)",
+                     dep.get("unique", "?"), _dg["kind"], _dg["where"])
         _google = is_gemini_deployment(dep)
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
@@ -1051,6 +1072,11 @@ class Forwarder:
         body = dict(payload)
         body["model"] = dep["model"]
         apply_effort_policy(body, dep)
+        _dg = downgrade_response_format(body, dep, _SCHEMAOUT_CFG)
+        if _dg:
+            log.info("[schemaout] %s: response_format %s rimosso -> "
+                     "istruzione schema nel prompt (%s)",
+                     dep.get("unique", "?"), _dg["kind"], _dg["where"])
         _google = is_gemini_deployment(dep)
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")

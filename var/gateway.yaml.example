@@ -403,6 +403,12 @@ qc_json:
   #   false = solo log ; true = trattato come errore (sconsigliato)
   watchdog_mark_no_done: false
 
+  # STRUTTURATO: degradazione gentile di response_format (json_schema).
+  # Se il provider NON e' in native_schema_providers, il campo viene rimosso
+  # e lo schema iniettato come istruzione nel prompt (evita il 400 upstream).
+  downgrade_response_format: true
+  native_schema_providers: ["openai", "azure"]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SANITY QC — scarta SOLO risposte vuote/triviali (non-streaming)
 # ─────────────────────────────────────────────────────────────────────────────

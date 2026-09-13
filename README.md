@@ -80,7 +80,7 @@ individual account limits instead of dying on the first 429.
 - **History normalize** (`history_normalize`): structural, cache-safe tail cleanup of the outgoing message copy. Handles both orphan `tool` results and **inverse orphans**: an `assistant` with `tool_calls` missing the matching `tool` result (even only for some ids) has the dangling calls stripped (content preserved), so strict providers never reject the chain. No synthesized results.
 - **Sampling defaults** (`sampling_defaults`) + **loop detector** (`loop`): low-risk provider defaults (client wins) and n-gram/tool-call loop escalation to the next dim.
 - **Corrective retry** (`corrective_retry`): one non-streaming retry on invalid/empty/JSON/schema content (no repair model).
-- **Structured output** (`qc_json.struct_out_*`): fence/prose cleanup, JSON-Schema subset validation, schema-driven repair, optional `response_format` injection.
+- **Structured output** (`qc_json.struct_out_*`): fence/prose cleanup, JSON-Schema subset validation, schema-driven repair, optional `response_format` injection. **Gentle downgrade**: if the client asks for `json_schema` but the target provider is not in `native_schema_providers` (default `openai`, `azure`), the field is stripped and the schema is injected as a prompt instruction instead — no 400, uniform behaviour across heterogeneous free providers.
 - **Text tool-call parser** (`text_toolcall`): recovers tool-calls written as text before the fake-call safety net.
 - **Fake tool-call fallback** (`tool_repair.fake_call`): when a request
   declares `tools` but the model writes the call as text (`<arg_key>`,
@@ -129,7 +129,11 @@ individual account limits instead of dying on the first 429.
 - **Three-tier auth**: master key / deterministic `sk-<profile>` client keys
   / custom overrides.
 - **Hot-reload everything**: credentials CSV + policy YAML are re-read
-  atomically (~5s). No restarts, ever.
+  atomically (~5s). No restarts, ever. The CSV reload is **two-phase**: a
+  lint (row/column, e.g. non-numeric `intelligence_score`) plus a full shadow
+  instance check (no empty groups, no duplicate ids) runs first; only if it
+  passes does the atomic swap happen, otherwise the previous config stays
+  intact and the exact problem is logged.
 - **Terminal UI** (`./scrocco.sh`) + Prometheus `/metrics`, plus an optional
   web panel under `web/`.
 

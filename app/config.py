@@ -297,6 +297,80 @@ def _shuffle_bucket(deps: list[dict]) -> list[dict]:
     return out
 
 
+class ConfigValidationError(ValueError):
+    """Il CSV non ha superato il lint: lo stato precedente resta intatto."""
+
+
+# colonne che DEVONO essere numeriche quando valorizzate (lint di fase 1)
+_NUMERIC_COLUMNS = ("priority", "max_input", "intelligence_score",
+                    "order", "model_preference")
+
+
+def _is_number(v: str) -> bool:
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_csv(path: str | Path) -> list[str]:
+    """Lint del CSV PRIMA dello swap. Ritorna i problemi con riga/colonna.
+
+    Non solleva mai: un CSV assente/vuoto e' gestito dal loader (fresh
+    install), quindi qui non e' un errore.
+    """
+    issues: list[str] = []
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = list(csv.reader(f))
+    except (FileNotFoundError, OSError):
+        return issues
+    start = 0
+    while start < len(reader):
+        first = reader[start]
+        if not first or not any(c.strip() for c in first) \
+                or first[0].lstrip().startswith("#"):
+            start += 1
+        else:
+            break
+    if start >= len(reader):
+        return issues
+    header = [h.strip() for h in reader[start]]
+    cols = {name: i for i, name in enumerate(header)}
+    numeric = [(name, cols[name]) for name in _NUMERIC_COLUMNS if name in cols]
+    for i, row in enumerate(reader[start + 1:], start=start + 2):
+        if not row or not any(c.strip() for c in row):
+            continue
+        for name, idx in numeric:
+            val = (row[idx] if idx < len(row) else "").strip()
+            if val and not _is_number(val):
+                issues.append(
+                    f"riga {i}: colonna '{name}' non numerica: {val!r}")
+        if len(row) > len(header):
+            issues.append(f"riga {i}: {len(row)} colonne (attese "
+                          f"{len(header)})")
+    return issues
+
+
+def self_check(cfg: "GatewayConfig") -> list[str]:
+    """Validazione STRUTTURALE dell'istanza ombra (fase 1)."""
+    problems: list[str] = []
+    seen: dict[str, str] = {}
+    for gname, deps in cfg.groups.items():
+        if not deps:
+            problems.append(f"gruppo '{gname}' senza deployment")
+            continue
+        for d in deps:
+            u = d.get("unique", "")
+            if u in seen:
+                problems.append(f"unique duplicato '{u}' (in '{gname}' e "
+                                f"'{seen[u]}')")
+            else:
+                seen[u] = gname
+    return problems
+
+
 class GatewayConfig:
     """Stato runtime completo derivato dal CSV."""
 
@@ -599,26 +673,39 @@ class GatewayConfig:
         return [base] + groups + uniques
 
     def reload(self) -> None:
-        """Rilegge il CSV (hot reload senza riavvio).
+        """Rilegge il CSV in DUE FASI (hot reload senza riavvio).
 
-        ATOMICO: se il nuovo CSV è rotto, lo stato precedente resta integro
-        (nessun downtime per un file scritto a metà).
+        Fase 1 (lint + shadow): valida il file (riga/colonna), poi costruisce
+        un'istanza OMBRA completa e la valida strutturalmente (gruppi non
+        vuoti, unique non duplicati).
+        Fase 2 (atomic swap): solo se TUTTO passa, i riferimenti in memoria
+        vengono sostituiti in un colpo solo. Se la validazione fallisce, lo
+        stato precedente resta INTATTO e il problema esatto va nei log.
         """
-        saved = (self.profiles, dict(self.groups), dict(self.group_caps),
-                 dict(self.profile_dims), dict(self.profile_caps),
-                 dict(self.chains), {k: dict(v) for k, v in self.chains_cap.items()},
-                 {k: {c: dict(x) for c, x in v.items()}
-                  for k, v in self.cap_counts.items()})
-        try:
-            (self.profiles, self.groups, self.group_caps, self.profile_dims,
-             self.profile_caps, self.chains, self.chains_cap,
-             self.cap_counts) = {}, {}, {}, {}, {}, {}, {}, {}
-            self._load()
-        except Exception:
-            (self.profiles, self.groups, self.group_caps, self.profile_dims,
-             self.profile_caps, self.chains, self.chains_cap,
-             self.cap_counts) = saved
-            raise
+        issues = validate_csv(self.csv_path)
+        if issues:
+            for it in issues:
+                log.warning("[config] CSV INVALIDO: %s", it)
+            raise ConfigValidationError(
+                f"{len(issues)} problemi nel CSV (primo: {issues[0]})")
+        shadow = GatewayConfig(
+            self.csv_path, today=self.loaded_at,
+            proxy_prefix=self.proxy_prefix, go_suffix=self.go_suffix,
+            fallback_suffix=self.fallback_suffix,
+            extra_prefixes=self.extra_prefixes)
+        problems = self_check(shadow)
+        if problems:
+            for it in problems:
+                log.warning("[config] CSV INVALIDO (struttura): %s", it)
+            raise ConfigValidationError(problems[0])
+        self.profiles = shadow.profiles
+        self.groups = shadow.groups
+        self.group_caps = shadow.group_caps
+        self.profile_dims = shadow.profile_dims
+        self.profile_caps = shadow.profile_caps
+        self.chains = shadow.chains
+        self.chains_cap = shadow.chains_cap
+        self.cap_counts = shadow.cap_counts
 
 
 # --------------------------------------------------------------------------
@@ -653,7 +740,10 @@ def maybe_reload(cfg: GatewayConfig, last_mtime: int | None) -> int | None:
     try:
         cfg.reload()
         return m
-    except Exception:
-        # CSV temporaneamente corrotto (scrittura parziale ecc.): riproverà al giro dopo
+    except Exception as exc:
+        # CSV temporalmente invalido (lint/struttura o scrittura parziale):
+        # lo stato precedente resta attivo, si riprovera' al giro successivo.
+        log.warning("[config] reload rifiutato, resta la config precedente: "
+                    "%s", exc)
         return last_mtime
 

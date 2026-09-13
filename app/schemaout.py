@@ -17,6 +17,7 @@ Non tocca mai la history (prompt cache preservata).
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -35,6 +36,11 @@ class SchemaOutConfig:
     repair_content: bool = True
     inject_response_format: bool = False
     allow_providers: tuple = ()
+    # degradazione gentile: se il client chiede json_schema e il provider non
+    # lo supporta nativamente, si rimuove response_format e si inietta
+    # l'istruzione con lo schema nel prompt.
+    downgrade_response_format: bool = True
+    native_schema_providers: tuple = ("openai", "azure")
 
 
 def create_schemaout_config(policy_dict: dict | None = None) -> SchemaOutConfig:
@@ -48,12 +54,17 @@ def create_schemaout_config(policy_dict: dict | None = None) -> SchemaOutConfig:
                       ("rewrite_content", "rewrite_content"),
                       ("strict_schema", "strict_schema"),
                       ("repair_content", "repair_content"),
-                      ("inject_response_format", "inject_response_format")):
+                      ("inject_response_format", "inject_response_format"),
+                      ("downgrade_response_format",
+                       "downgrade_response_format")):
         if key in blk:
             setattr(cfg, attr, bool(blk[key]))
     if blk.get("inject_allow_providers") is not None:
         cfg.allow_providers = tuple(
             str(x).lower() for x in blk["inject_allow_providers"])
+    if blk.get("native_schema_providers") is not None:
+        cfg.native_schema_providers = tuple(
+            str(x).lower() for x in blk["native_schema_providers"])
     return cfg
 
 
@@ -71,6 +82,12 @@ def schemaout_config_from_policy(policy) -> SchemaOutConfig:
         allow_providers=tuple(
             str(x).lower() for x in
             (getattr(qc, "inject_allow_providers", ()) or ())),
+        downgrade_response_format=bool(
+            getattr(qc, "downgrade_response_format", True)),
+        native_schema_providers=tuple(
+            str(x).lower() for x in
+            (getattr(qc, "native_schema_providers", ()) or ())) or
+        SchemaOutConfig.native_schema_providers,
     )
 
 
@@ -347,3 +364,67 @@ def maybe_inject_response_format(body: dict, dep: dict,
         return False
     body["response_format"] = {"type": "json_object"}
     return True
+
+
+# --------------------------------------------------------------- degradazione
+def _schema_instruction(schema) -> str:
+    base = ("Rispondi con un UNICO oggetto JSON valido, senza testo extra "
+            "e senza fence markdown.")
+    if isinstance(schema, dict):
+        return (base + " Deve rispettare esattamente questo JSON Schema: "
+                + json.dumps(schema, ensure_ascii=False))
+    return base + " Non aggiungere commenti."
+
+
+def _append_text(msg: dict, text: str) -> None:
+    c = msg.get("content")
+    if isinstance(c, str):
+        msg["content"] = (c + "\n\n" + text) if c else text
+    elif isinstance(c, list):
+        c.append({"type": "text", "text": "\n\n" + text})
+    else:
+        msg["content"] = text
+
+
+def _inject_instruction(body: dict, text: str) -> str | None:
+    """Inietta l'istruzione in modo CACHE-SAFE il piu' possibile:
+    preferisce appendere al system esistente, altrimenti all'ultimo user."""
+    msgs = body.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return None
+    for m in msgs:
+        if isinstance(m, dict) and str(m.get("role")) == "system":
+            _append_text(m, text)
+            return "system"
+    for m in reversed(msgs):
+        if isinstance(m, dict) and str(m.get("role")) == "user":
+            _append_text(m, text)
+            return "last_user"
+    return None
+
+
+def downgrade_response_format(body: dict, dep: dict,
+                              cfg: SchemaOutConfig | None = None) -> dict | None:
+    """Degradazione gentile di `response_format` per provider NON nativi.
+
+    Se il client chiede `json_schema` e il provider non lo supporta
+    nativamente: rimuove `response_format` dal body (evita il 400) e inietta
+    l'istruzione con lo schema nel prompt. NON tocca il payload originale:
+    opera su una copia delle messages. Ritorna un report o None.
+    """
+    cfg = cfg or SchemaOutConfig()
+    if not cfg.enabled or not cfg.downgrade_response_format \
+            or not isinstance(body, dict):
+        return None
+    kind, schema = _wants_json(body.get("response_format"))
+    if kind != "json_schema":
+        return None
+    prov = _provider_key(dep)
+    native = tuple(str(x).lower() for x in (cfg.native_schema_providers or ()))
+    if "*" in native or prov in native:
+        return None
+    body.pop("response_format", None)
+    if isinstance(body.get("messages"), list):
+        body["messages"] = copy.deepcopy(body["messages"])
+    where = _inject_instruction(body, _schema_instruction(schema))
+    return {"kind": kind, "provider": prov, "where": where}

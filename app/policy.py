@@ -110,6 +110,10 @@ class QcJson:
     repair_content: bool = True        # ripara schema-driven (mosse tool_repair)
     inject_response_format: bool = False  # inietta response_format (allow-list)
     inject_allow_providers: tuple[str, ...] = ()
+    # degradazione gentile json_schema: rimuove response_format e inietta lo
+    # schema nel prompt per i provider NON in native_schema_providers.
+    downgrade_response_format: bool = True
+    native_schema_providers: tuple[str, ...] = ("openai", "azure")
 
 
 @dataclass
@@ -1241,7 +1245,9 @@ class Policy:
                               ("strict_schema", "strict_schema"),
                               ("repair_content", "repair_content"),
                               ("inject_response_format",
-                               "inject_response_format")):
+                               "inject_response_format"),
+                              ("downgrade_response_format",
+                               "downgrade_response_format")):
                 if _k in qj:
                     setattr(p.qc_json, _attr, _coerce_bool(
                         qj[_k], f"qc_json.{_k}"))
@@ -1252,6 +1258,13 @@ class Policy:
                                      "deve essere una lista")
                 p.qc_json.inject_allow_providers = tuple(
                     str(x).lower() for x in _iap)
+            _nsp = qj.get("native_schema_providers")
+            if _nsp is not None:
+                if not isinstance(_nsp, (list, tuple)):
+                    raise ValueError("qc_json.native_schema_providers "
+                                     "deve essere una lista")
+                p.qc_json.native_schema_providers = tuple(
+                    str(x).lower() for x in _nsp)
             # stream_buffer_ms / stream_emit_error_tail / on_empty_response:
             # rimossi. Catena esaurita -> sempre 503 retryable, mai un turno
             # finto. Chiavi ignorate se presenti in un vecchio gateway.yaml.
