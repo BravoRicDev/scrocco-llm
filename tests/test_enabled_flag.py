@@ -8,6 +8,8 @@ import os
 import tempfile
 from datetime import date
 
+import pytest
+
 from app import csv_store
 from app.config import GatewayConfig, _classify
 from app.csv_store import apply_payload, ensure_enabled_column, row_id
@@ -96,3 +98,26 @@ def test_row_id_stable_with_enabled():
     disabled = dict(base)
     disabled["enabled"] = "false"
     assert row_id(base, base["endpoint"]) == row_id(disabled, disabled["endpoint"])
+
+
+def test_update_metadata_on_row_without_profile():
+    """Update di soli metadata (enabled) su una riga SENZA profilo/chiave non
+    deve fallire e non deve creare colonne profilo spurie."""
+    row = {"modello": "m", "provider": "p", "endpoint": "https://x.example/v1",
+           "data": "free", "context": "128", "max_input": "0",
+           "priority": "0", "scrocco-llm-test": ""}
+    prof = apply_payload(row, {"enabled": False}, "scrocco-llm-",
+                         current_profile="")
+    assert prof == ""
+    assert row["enabled"] == "false"
+    assert "scrocco-llm-" not in row
+    # 'key' senza profilo -> errore esplicito
+    with pytest.raises(csv_store.CsvStoreError):
+        apply_payload({"modello": "m"}, {"key": "sk-abcdefgh"},
+                      "scrocco-llm-", current_profile="")
+
+
+def test_ensure_profile_column_ignores_empty():
+    header = ["modello", "provider"]
+    assert csv_store.ensure_profile_column(header, "", "scrocco-llm-") is header
+    assert header == ["modello", "provider"]

@@ -158,6 +158,8 @@ def ensure_profile_column(header: list[str], profile: str,
     Ritorna l'header eventualmente esteso. NOTA: le nuove celle vanno
     riempite dal chiamante quando serializza (save_table usa r.get(h,"")).
     """
+    if not profile:
+        return header
     col = prefix + profile
     if col not in header:
         header.append(col)
@@ -201,11 +203,19 @@ def apply_payload(row: dict, payload: dict, prefix: str,
     if unknown:
         raise CsvStoreError(f"campi non gestiti: {sorted(unknown)}")
 
+    # Assegnazione di profilo richiesta SOLO quando il payload tocca
+    # 'profile' o 'key'. Un update di soli metadata (enabled, priority,
+    # modello, ...) e' valido anche su una riga SENZA profilo (chiave vuota):
+    # in quel caso non si tocca nessuna colonna profilo.
+    needs_profile = ("profile" in payload) or ("key" in payload)
     new_profile = payload.get("profile", current_profile)
-    if not isinstance(new_profile, str) or not new_profile.strip():
-        raise CsvStoreError("'profile' mancante o non valido")
-    new_profile = new_profile.strip()
-    new_col = prefix + new_profile
+    if needs_profile:
+        if not isinstance(new_profile, str) or not new_profile.strip():
+            raise CsvStoreError("'profile' mancante o non valido")
+        new_profile = new_profile.strip()
+    else:
+        new_profile = new_profile.strip() if isinstance(new_profile, str) else ""
+    new_col = (prefix + new_profile) if new_profile else ""
 
     if "key" in payload and (not isinstance(payload["key"], str)
                              or len(payload["key"].strip()) < 8):
@@ -225,7 +235,7 @@ def apply_payload(row: dict, payload: dict, prefix: str,
         raise CsvStoreError("'data' (categoria/rinnovo) non può essere vuota")
 
     # spostamento di profilo: svuota la vecchia colonna
-    if current_profile is not None and new_profile != current_profile:
+    if new_profile and current_profile is not None and new_profile != current_profile:
         old_col = prefix + current_profile
         if old_col in row:
             row[old_col] = ""
@@ -266,8 +276,10 @@ def apply_payload(row: dict, payload: dict, prefix: str,
 
     # chiave -> colonna del profilo (nuovo o corrente)
     if "key" in payload:
+        if not new_col:
+            raise CsvStoreError("'key' richiede un profilo valido")
         row[new_col] = payload["key"].strip()
-    elif new_col not in row:
+    elif new_col and new_col not in row:
         row[new_col] = ""
 
     # NOTA: 'endpoint' è scritto dal chiamante via write_endpoint()
