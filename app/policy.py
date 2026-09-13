@@ -199,6 +199,16 @@ class Policy:
         default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
     effort_intel_weight: float = 10.0
 
+    # THOUGHT_SIGNATURE (Gemini 3): Google pretende il blob `thought_signature`
+    # sui functionCall del turno CORRENTE. Se la history arriva da un altro
+    # modello (rotazione) la firma reale non esiste: Google documenta due firme
+    # dummy — "skip_thought_signature_validator" e
+    # "context_engineering_is_the_way_to_go" — che SALTANO la validazione
+    # (qualita' di reasoning inferiore, nessun 400). Con dummy_fill attivo
+    # Gemini resta sempre eleggibile nel routing, come un provider qualsiasi.
+    thought_sig_dummy_fill: bool = True
+    thought_sig_dummy_value: str = "skip_thought_signature_validator"
+
     # TOOL_REPAIR: riparazione argomenti tool-call upstream.
     # Default aggressive su tutti i deployment; Google/Gemini off di default.
     tool_repair_enabled: bool = True
@@ -708,6 +718,17 @@ class Policy:
                         f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
                 clean[lk] = float(v)
             p.effort_temperature_overrides = clean
+
+        # --- THOUGHT_SIGNATURE (Gemini 3 dummy fill) ---
+        _tsf = raw.get("thought_sig_dummy_fill")
+        if _tsf is not None:
+            p.thought_sig_dummy_fill = _coerce_bool(
+                _tsf, "thought_sig_dummy_fill")
+        _tsv = raw.get("thought_sig_dummy_value")
+        if _tsv is not None:
+            _v = str(_tsv).strip()
+            if _v:
+                p.thought_sig_dummy_value = _v
 
         # --- TOOL_REPAIR ---
         _tr = raw.get("tool_repair")

@@ -38,7 +38,7 @@ from .config import GatewayConfig, CAP_PRIORITY_ORDER
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
-from .thought_sig import is_gemini_deployment
+from .thought_sig import is_gemini_deployment, should_avoid_gemini
 
 log = logging.getLogger("nx.router")
 
@@ -454,6 +454,8 @@ class Router:
         dep = self.config.deployment_by_unique(unique)
         if dep is None:                                   # hot-reload: rimosso
             _ew.pop(group_name, None)
+            return None
+        if self._gemini_blocked(dep):                     # richiesta non eleggibile
             return None
         if self.is_cooled_down(unique):                   # non rimuove: revive
             return None
@@ -1687,6 +1689,15 @@ class Router:
         mi = dep.get("max_input_tokens") or 0
         return mi <= 0 or ctx <= mi
 
+    def _gemini_blocked(self, dep: dict) -> bool:
+        """True se il deployment e' Gemini e la richiesta corrente NON puo'
+        usarlo (history con tool_call prive di thought_signature). In quel caso
+        Gemini va escluso A MONTE dalla selezione, come una capability mancante:
+        non compare tra i candidati (niente tentativi finti). Se la richiesta e'
+        'buona' (should_avoid_gemini() False) Gemini resta eleggibile e riceve
+        normalmente il suo model_preference."""
+        return should_avoid_gemini() and is_gemini_deployment(dep)
+
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
                         ctx: int | None = None,
@@ -1706,7 +1717,7 @@ class Router:
         def _ok(d: dict) -> bool:
             if d["unique"] == exclude:
                 return False
-            if is_gemini_deployment(d):
+            if self._gemini_blocked(d):
                 return False
             if self.is_retired(d["unique"]):
                 return False
@@ -1852,6 +1863,8 @@ class Router:
                 # cooldown "stantio": lo ri-consideriamo
             if self.is_retired(u):
                 return None
+            if self._gemini_blocked(dep):
+                return None
             if need and not self._dep_supports(dep, need):
                 return None
             # guardia universale (vedi pick_deployment): _cap_fits e' no-op
@@ -1922,6 +1935,7 @@ class Router:
             # 4) soddisfa le capacità richieste (vision, audio, ...)
             if sd and sd.get("group") == group_name \
                     and not self.is_cooled_down(sticky_dep) \
+                    and not self._gemini_blocked(sd) \
                     and self._cap_fits(sd, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
@@ -1954,6 +1968,7 @@ class Router:
                                    300) or 300)
         _cooled = [d for d in self.config.groups.get(group_name, [])
                    if self.is_cooled_down(d["unique"])
+                   and not self._gemini_blocked(d)
                    and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
                    and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
                    and (need is None or self._dep_supports(d, need))

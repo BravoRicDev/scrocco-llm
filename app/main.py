@@ -60,7 +60,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
 from .health import health_loop
 from .policy import Policy
 from .qc import annotate_reasoning
-from .thought_sig import has_unsigned_tool_calls, is_gemini_deployment
+from .thought_sig import (has_unsigned_tool_calls, set_avoid_gemini,
+                          set_dummy_fill)
 from .router import Router, inject_identity, estimate_tokens
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
@@ -919,6 +920,17 @@ async def chat_completions(request: Request):
     messages = payload.get("messages") or []
     stream = bool(payload.get("stream"))
 
+    # Gemini 3: se la history contiene tool_call prive di thought_signature
+    # (conversazione passata per modelli non-Google) Gemini risponderebbe 400
+    # INVALID_ARGUMENT sul replay. Con `thought_sig_dummy_fill` attivo il
+    # forwarder inietta la firma DUMMY ufficiale sui tool_call non firmati del
+    # turno corrente: Gemini resta quindi eleggibile come qualunque provider.
+    # Solo con la dummy-fill DISATTIVATA lo escludiamo A MONTE dalla selezione
+    # (come un cap mancante, senza salti o tentativi finti).
+    set_avoid_gemini(has_unsigned_tool_calls(messages)
+                     and not policy.thought_sig_dummy_fill)
+    set_dummy_fill(policy.thought_sig_dummy_fill, policy.thought_sig_dummy_value)
+
     # --- normalizzazione del nome richiesto:
     #     1) prefisso STORICO -> prefisso corrente (compatibilità client)
     #     2) alias (gateway.yaml) -> nome canonico
@@ -1562,29 +1574,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     t_req = time.monotonic()
     attempts: list[str] = []
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
-    # Gemini 3 tool replay: se la history ha tool_call senza firma (conversazione
-    # passata per altri modelli), Gemini risponderebbe 400 INVALID_ARGUMENT.
-    # Escludilo a monte e salta direttamente a un deployment non-Gemini.
-    _avoid_gemini = has_unsigned_tool_calls(payload.get("messages") or [])
-    _skip_budget = 64                   # sicurezza anti-loop
+    # Gemini 3 tool replay: una history con tool_call prive di firma rende Gemini
+    # inutilizzabile. L'esclusione avviene A MONTE nel router (set_avoid_gemini in
+    # chat_completions -> _gemini_blocked in pick_deployment/_walk_chain), quindi
+    # qui non serve più alcun salto o tentativo finto.
     while True:
-        if (_avoid_gemini and _skip_budget > 0 and is_gemini_deployment(dep)
-                and dep["unique"] not in tried_set):
-            _skip_budget -= 1
-            tried_set.add(dep["unique"])   # così fallback_next non lo ripropone
-            nxt = router.fallback_next(profile, dep, need,
-                                       "group" if _avoid_gemini else scope,
-                                       ctx=ctx,
-                                       tried=tried_set,
-                                       requested_group=requested_group) \
-                if profile else None
-            if nxt is not None:
-                log.warning("[thought_sig] replay senza firma: salto Gemini "
-                            "%s -> %s", dep["unique"], nxt["unique"])
-                dep = nxt
-                inject_identity(payload, dep, router=router)
-                continue
-            tried_set.discard(dep["unique"])   # nessuna alternativa: prova comunque
         tried += 1
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])

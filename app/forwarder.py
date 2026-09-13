@@ -46,8 +46,8 @@ import httpx
 from . import metrics
 from .qc import check_response
 from .router import inject_identity
-from .thought_sig import (THOUGHT_SIGS, extract_signatures, is_gemini_deployment,
-                          has_unsigned_tool_calls)
+from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
+                          is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
 from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          create_tool_repair_config, repair_tool_calls)
@@ -312,18 +312,31 @@ def _json_to_sse(raw: bytes):
 
 def _inject_thought_signatures(body: dict) -> None:
     """Re-inietta le firme note nei tool_calls di replay (solo se mancanti).
+
+    Se la dummy-fill per-request e' attiva (`get_dummy_fill`), per i tool_call
+    del TURNO CORRENTE (dopo l'ultimo messaggio `user`) privi di firma reale
+    viene iniettata la firma DUMMY ufficiale: Google 3 valida solo il turno
+    corrente e le dummy saltano la validazione (nessun 400, reasoning degradato).
     Ritorna una NUOVA lista messages, per non inquinare il payload originale
     (un fallback su un provider non-Google non deve vedere extra_content)."""
     msgs = body.get("messages")
     if not isinstance(msgs, list):
         return
+    # inizio del turno corrente: indice dell'ultimo messaggio `user`
+    # (-1 = nessun user: considera tutto come turno corrente)
+    turn_start = -1
+    for i, m in enumerate(msgs):
+        if isinstance(m, dict) and m.get("role") == "user":
+            turn_start = i
+    dummy_fill, dummy_value = get_dummy_fill()
     changed = False
     new_msgs = []
-    for m in msgs:
+    for mi, m in enumerate(msgs):
         if not (isinstance(m, dict) and m.get("role") == "assistant"
                 and m.get("tool_calls")):
             new_msgs.append(m)
             continue
+        in_current_turn = mi > turn_start
         new_tcs = []
         msg_changed = False
         for tc in m["tool_calls"]:
@@ -336,6 +349,10 @@ def _inject_thought_signatures(body: dict) -> None:
                 new_tcs.append(tc)          # il client l'ha gia': non tocco
                 continue
             sig = THOUGHT_SIGS.get(tc["id"])
+            is_dummy = False
+            if not sig and dummy_fill and in_current_turn and dummy_value:
+                sig = dummy_value           # firma dummy ufficiale Google
+                is_dummy = True
             if not sig:
                 new_tcs.append(tc)
                 continue
@@ -347,7 +364,11 @@ def _inject_thought_signatures(body: dict) -> None:
             tc2["extra_content"] = ec
             new_tcs.append(tc2)
             msg_changed = True
-            log.info("[thought_sig] injected for tc_id=%s", tc["id"])
+            if is_dummy:
+                log.info("[thought_sig] dummy-fill for tc_id=%s (turno corrente)",
+                         tc["id"])
+            else:
+                log.info("[thought_sig] injected for tc_id=%s", tc["id"])
         if msg_changed:
             m2 = dict(m)
             m2["tool_calls"] = new_tcs
@@ -1265,29 +1286,14 @@ class Forwarder:
                          _hn_rep.get("dangling_tool_calls", 0),
                          _hn_rep.get("empty_assistant", 0),
                          _hn_rep.get("dup_system", 0))
-        # Gemini 3 tool replay: se la history ha tool_call senza firma
-        # (conversazione passata per altri modelli), Gemini risponderebbe 400
-        # INVALID_ARGUMENT. Escludilo a monte e salta a un deployment non-Gemini.
-        _avoid_gemini = has_unsigned_tool_calls(
-            (payload or {}).get("messages") or [])
-        _skip_budget = 64                    # sicurezza anti-loop
+        # Gemini 3 tool replay: una history con tool_call prive di firma rende
+        # Gemini inutilizzabile. L'esclusione avviene A MONTE nel router
+        # (set_avoid_gemini in chat_completions -> _gemini_blocked in
+        # pick_deployment/_walk_chain): qui non serve alcun salto/tentativo.
         while (dep is not None and len(tried) < _max_tries
                and (not _deadline_ms
                     or (time.monotonic() - _t0) * 1000 < _deadline_ms)):
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
-            if (_avoid_gemini and _skip_budget > 0 and is_gemini_deployment(dep)
-                    and cur not in tried):
-                _skip_budget -= 1
-                tried.add(cur)              # così fallback_next non lo ripropone
-                nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                           tried=tried,
-                                           requested_group=requested_group)
-                if nxt is not None:
-                    log.warning("[thought_sig] replay senza firma: salto "
-                                "Gemini %s -> %s", cur, nxt["unique"])
-                    dep = nxt
-                    continue
-                tried.discard(cur)          # nessuna alternativa: prova comunque
             log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
             def _fail_cur(seconds=None, reason=None, status=None):

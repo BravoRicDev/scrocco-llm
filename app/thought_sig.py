@@ -6,6 +6,7 @@ risponde 400 INVALID_ARGUMENT. Il gateway fa da sidecar: cattura le firme
 dalle risposte Google e le re-inietta nelle richieste di replay dirette a
 Google, mappandole per tool_call id.
 """
+import contextvars
 import json
 import logging
 import os
@@ -16,6 +17,53 @@ log = logging.getLogger("nx.thotsig")
 
 
 THOUGHT_SIG_FILE = os.environ.get("THOUGHT_SIG_FILE", "var/thought_sigs.json")
+
+# Flag per-request: la history contiene tool_call prive di thought_signature
+# (conversazione passata per modelli non-Google). In quel caso Gemini NON e'
+# utilizzabile (400 INVALID_ARGUMENT sul replay) e va escluso A MONTE dalla
+# selezione, come una capability mancante — non saltato a tentativi.
+# ContextVar: isolata per-task, una richiesta non "sporca" le concorrenti.
+_avoid_gemini: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nx_avoid_gemini", default=False)
+
+
+def set_avoid_gemini(flag: bool) -> contextvars.Token:
+    """Segna la richiesta corrente come 'Gemini inutilizzabile'."""
+    return _avoid_gemini.set(bool(flag))
+
+
+def reset_avoid_gemini(token: contextvars.Token) -> None:
+    try:
+        _avoid_gemini.reset(token)
+    except (ValueError, LookupError):
+        pass
+
+
+def should_avoid_gemini() -> bool:
+    """True se la richiesta corrente non puo' usare Gemini."""
+    return _avoid_gemini.get()
+
+
+# Config dummy-fill per-request (impostata da main.py leggendo la policy):
+# se attiva, il forwarder inietta la firma dummy sui tool_call NON firmati del
+# turno corrente, così Gemini resta usabile anche con history da altri modelli.
+_dummy_fill: contextvars.ContextVar[tuple[bool, str]] = contextvars.ContextVar(
+    "nx_thought_sig_dummy_fill", default=(False, ""))
+
+
+def set_dummy_fill(enabled: bool, value: str) -> contextvars.Token:
+    return _dummy_fill.set((bool(enabled), str(value or "")))
+
+
+def reset_dummy_fill(token: contextvars.Token) -> None:
+    try:
+        _dummy_fill.reset(token)
+    except (ValueError, LookupError):
+        pass
+
+
+def get_dummy_fill() -> tuple[bool, str]:
+    return _dummy_fill.get()
 
 
 def is_google_base(api_base: str) -> bool:
