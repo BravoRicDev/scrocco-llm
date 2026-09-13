@@ -1397,34 +1397,28 @@ class Router:
             log.debug("[latency-penalty] %s ema=%.0fms threshold=%sms penalty=%.1f (over=%.1fs)",
                       unique, ema, LATENCY_ROTATE_THRESHOLD_MS, penalty, over_seconds)
 
-        # Bias di EFFORT: se il client ha chiesto un effort esplicito, sposta la
-        # scelta verso l'intelligence desiderata e premia chi accetta
-        # `reasoning_effort`. In assenza di effort (default) nessun effetto.
+        # Bias di EFFORT: SOLO quando il client chiede esplicitamente effort
+        # "high" si sposta la scelta verso l'intelligence alta e si premia chi
+        # accetta `reasoning_effort`. Per default/low/medium NESSUN bias: lo
+        # score resta pulito (le metriche non devono piegarsi all'effort).
         # Il punteggio e' "lower is better" e puo' essere NEGATIVO: un fattore
         # che cambia segno (es. 1-(intel-5)*w) ribalterebbe l'ordinamento. Qui
         # il fattore e' SEMPRE POSITIVO e viene orientato dal segno del
         # punteggio, cosi' il vantaggio (riduzione del punteggio) e' sempre
         # negativo per il modello favorito. Peso da policy.effort_intel_weight.
         effort = get_effort()
-        if effort != "default":
+        if effort == "high":
             intel = float(dep.get("intelligence", 5) or 5)
             weight = abs(float(self.policy.effort_intel_weight or 0)) / 100.0
             g = intel - 5.0
-            if effort == "high":
-                base = max(0.05, 1.0 + weight * g)
-                factor = (1.0 / base) if score > 0 else base
-            elif effort == "low":
-                base = max(0.05, 1.0 - weight * g)
-                factor = (1.0 / base) if score > 0 else base
-            else:  # medium: penalizza gli estremi (allontana dal centro)
-                base = 1.0 + weight * abs(g)
-                factor = base if score > 0 else (1.0 / base)
+            base = max(0.05, 1.0 + weight * g)
+            factor = (1.0 / base) if score > 0 else base
             factor = max(0.05, min(20.0, factor))
             score *= factor
             if dep.get("effort_capable"):
                 score -= EFFORT_CAPABLE_BONUS
-            log.debug("[effort-bias] %s effort=%s intel=%.0f factor=%.3f "
-                      "totale=%.1f", unique, effort, intel, factor, score)
+            log.debug("[effort-bias] %s effort=high intel=%.0f factor=%.3f "
+                      "totale=%.1f", unique, intel, factor, score)
 
         # --- Dynamic scoring: latency p95, error_rate, throughput ---
         # Pesi configurabili via policy (DYNAMIC_SCORING_DEFAULTS override)
@@ -2653,6 +2647,34 @@ class Router:
         # INFLIGHT-GUARD (budget predittivo): salta chi ha superato l'80%
         # (configurabile) del cap appreso PRIMA del 429, deviando sul fratello.
         deps = self._apply_inflight_guard(deps)
+        # ORDINAMENTO DETERMINISTICO per -go/-fallback: niente metriche
+        # (reputation, latenza, recency, _score). Solo `data` (giorno rinnovo
+        # -> sort_key) e `model_preference`. Le metriche restano SOLO come
+        # filtri di eleggibilita' (cooldown, _ok, inflight-guard, capacita').
+        # Entro il tier (stesso data+pref) si pesca a caso: non si surriscalda
+        # sempre la stessa chiave, ma la famiglia giusta resta davanti.
+        if deps and self.config.group_caps.get(group_name) is None \
+                and (group_name.endswith(self.config.go_suffix or "-go")
+                     or group_name.endswith(self.config.fallback_suffix
+                                            or "-fallback")):
+            _key = lambda d: (float(d.get("sort_key", float("inf"))),
+                              -int(d.get("model_preference", 0) or 0))
+            best_key = min(_key(d) for d in deps)
+            best = [d for d in deps if _key(d) == best_key]
+            # Entro il tier: privilegia SEMPRE il detentore cache della
+            # sessione (stessa chiave = cache calda); altrimenti random.
+            chosen = None
+            _ch = self.cache_holder(need=need, ctx=ctx)
+            if _ch and any(_ch["unique"] == d["unique"] for d in best):
+                chosen = _ch
+                log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
+                         "cache-holder)", group_name, chosen["unique"])
+            else:
+                chosen = random.choice(best)
+                log.info("[pick-final] %s chosen=%s (go/fallback: solo data+"
+                         "pref, tier=%s, %d chiavi)", group_name,
+                         chosen["unique"], best_key, len(best))
+            return chosen
         # TIER esplicito (colonna `order`): nei gruppi TESTO dims si prova
         # prima il tier col valore minimo tra i vivi; se e' tutto in cooldown
         # si scende automaticamente al tier successivo. Dentro il tier resta

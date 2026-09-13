@@ -188,25 +188,23 @@ def test_high_effort_prefers_high_intelligence():
     assert hi < lo
 
 
-def test_low_effort_prefers_low_intelligence():
+def test_low_effort_ignored_no_bias():
     r = _router()
     with effort_ctx("low"):
         hi = _score(r, _d("s8", 9))
         lo = _score(r, _d("s2", 2))
-    # Moltiplicativo: s8=100*(1+4w), s2=100*(1-3w)
-    # s2 < s8 (low intel ha score piu' basso = meglio)
-    assert lo < hi
+    # SOLO effort=high applica il bias: low non deve toccare lo score.
+    assert lo == hi == 100.0
 
 
-def test_medium_effort_prefers_center():
+def test_medium_effort_ignored_no_bias():
     r = _router()
     with effort_ctx("medium"):
         mid = _score(r, _d("s5", 5))
         hi = _score(r, _d("s10", 10))
         lo = _score(r, _d("s1", 1))
-    # Moltiplicativo: s5=100*(1+0)=100, s10=100*(1+5w), s1=100*(1+4w)
-    # mid < hi and mid < lo (centro ha score piu' basso = meglio)
-    assert mid < hi and mid < lo
+    # SOLO effort=high applica il bias: medium non deve toccare lo score.
+    assert mid == hi == lo == 100.0
 
 
 def test_high_effort_bonus_for_capable():
@@ -239,22 +237,24 @@ def test_high_effort_favors_intel_among_negative_scores():
     assert smart < dumb < 0
 
 
-def test_low_effort_favors_low_intel_among_negative_scores():
+def test_low_effort_ignored_among_negative_scores():
     r = _router()
     r._base_scores = {"low": -10.0, "high": -10.0}
     with effort_ctx("low"):
         low = _score(r, _d("low", 2))
         high = _score(r, _d("high", 9))
-    assert low < high < 0
+    # SOLO effort=high applica il bias: low lascia i punteggi invariati.
+    assert low == high < 0
 
 
-def test_medium_penalizes_extremes_even_with_negative_scores():
+def test_medium_effort_ignored_among_negative_scores():
     r = _router()
     r._base_scores = {"mid": -10.0, "ext": -10.0}
     with effort_ctx("medium"):
         mid = _score(r, _d("mid", 5))
         ext = _score(r, _d("ext", 10))
-    assert mid < ext
+    # SOLO effort=high applica il bias: medium lascia i punteggi invariati.
+    assert mid == ext
 
 
 def test_bias_weight_scales_gap():

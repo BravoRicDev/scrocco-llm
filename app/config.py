@@ -599,6 +599,7 @@ class GatewayConfig:
                     "intelligence": int(meta.get("intelligence") or 5),
                     "tool_repair": meta.get("tool_repair", ""),
                     "model_preference": int(meta.get("model_preference") or 0),
+                    "sort_key": float(meta.get("sort_key") or float("inf")),
                     "media_defer": bool(meta.get("media_defer", True)),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
