@@ -139,6 +139,7 @@ def _deployment_view(header: list[str], row: dict, prefix: str) -> dict:
         "context_k": meta["context_k"],
         "max_input": meta["max_input"],
         "priority": meta["priority"],
+        "enabled": bool(meta.get("enabled", True)),
         "key_masked": csv_store.mask_key(key),
         "group": (f"{prefix}{profile}-{meta['context_k']}k"
                   if profile and meta["context_k"] else ""),
@@ -235,6 +236,8 @@ async def create_deployment(request: Request):
         header = csv_store.ensure_profile_column(header, profile, prefix)
         if "caps" in payload:
             header = csv_store.ensure_caps_column(header)
+        if "enabled" in payload:
+            header = csv_store.ensure_enabled_column(header)
         row = {h: "" for h in header}
         csv_store.apply_payload(row, payload, prefix)
         csv_store.write_endpoint(row, header, payload["endpoint"])
@@ -274,6 +277,8 @@ async def update_deployment(row_hash: str, request: Request):
         old_profile = _deployment_view(header, row, prefix)["profile"]
         if "caps" in payload:
             header = csv_store.ensure_caps_column(header)
+        if "enabled" in payload:
+            header = csv_store.ensure_enabled_column(header)
         new_profile = csv_store.apply_payload(row, payload, prefix, old_profile)
         header = csv_store.ensure_profile_column(header, new_profile, prefix)
         if "endpoint" in payload:
@@ -342,6 +347,8 @@ async def bulk_deployments(request: Request):
             try:
                 if "caps" in data_op:
                     header = csv_store.ensure_caps_column(header)
+                if "enabled" in data_op:
+                    header = csv_store.ensure_enabled_column(header)
                 if action == "create":
                     _required_create(data_op)
                     prof = str(data_op["profile"]).strip()

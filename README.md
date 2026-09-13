@@ -152,6 +152,11 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
   set of fast free providers before a slower but reliable one). Empty/absent =
   neutral, appended last. Text groups order by tier then context; within a
   tier the adaptive pick is unchanged. `-go`/`-fallback` stay last.
+- `enabled`: optional declarative on/off switch (default true; `false`/`0`/`no`/
+  `off` = disabled). A disabled row stays in the CSV — its provider/key pair is
+  preserved — but is excluded from every routing bucket (dims, `-go`,
+  `-fallback`, capability groups). Use it when a provider has no free models
+  right now instead of deleting rows.
 
 Clients call it like OpenAI:
 

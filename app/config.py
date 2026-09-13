@@ -54,6 +54,10 @@ MEDIA_DEFER_HEADER = "media_defer"
 # tra provider diversi). Vuoto/assente = ORDER_LAST (neutro, in coda).
 ORDER_HEADER = "order"
 ORDER_LAST = 1_000_000_000
+# enabled: disabilitazione DICHIARATIVA di un deployment dal CSV. Default true
+# (vuoto/assente = attivo); false/0/no/off -> la riga RESTA nel CSV (chiave e
+# coppia provider/chiave conservate) ma e' esclusa da tutti i bucket di routing.
+ENABLED_HEADER = "enabled"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -250,6 +254,11 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     else:
         order = ORDER_LAST
 
+    # enabled: disabilitazione dichiarativa (default true). La riga disabilitata
+    # resta nel CSV ma viene saltata in _load (nessun bucket la vede).
+    raw_en = (row.get(ENABLED_HEADER) or "").strip().lower()
+    enabled = raw_en not in ("0", "false", "no", "n", "off")
+
     return {
         "modello": modello,
         "provider": provider,
@@ -267,6 +276,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "model_preference": model_preference,
         "media_defer": media_defer,
         "order": order,
+        "enabled": enabled,
     }
 
 
@@ -385,6 +395,10 @@ class GatewayConfig:
                 continue
             row = {header[i]: (r[i] if i < len(r) else "") for i in range(len(header))}
             meta = _classify(row, self.loaded_at)
+            # riga disabilitata dal CSV: resta nel file (chiave conservata) ma
+            # non entra in nessun bucket di routing.
+            if not meta.get("enabled", True):
+                continue
             assign = {}
             for (i, _col), pname in zip(prof_cols, self.profiles):
                 val = (r[i] if i < len(r) else "").strip()
