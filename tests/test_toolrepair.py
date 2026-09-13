@@ -497,3 +497,108 @@ class TestNoToolsRegression:
         result = repair_tool_calls(data, payload, dep, cfg)
         assert result["repaired"] is False
         assert data["choices"][0]["message"]["content"] == "hello"
+
+
+# --------------------------------------------------- streaming index/DONE fixes
+
+class TestStreamingIndexAndDone:
+    """Test per fix: indice corretto in tool_calls multipli + DONE finale in finalize()."""
+
+    def test_multiple_tool_calls_correct_indices(self):
+        """Due tool_calls con index 0 e 1 devono uscire con gli indici corretti."""
+        cfg = ToolRepairConfig()
+        dep = _dep()
+        filt = ToolRepairSSEFilter(cfg, dep)
+
+        # Due tool_calls nello stesso chunk, index 0 e 1, entrambi con JSON malformato
+        chunk1 = {
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [
+                    {"index": 0, "id": "call_1", "type": "function",
+                     "function": {"name": "search", "arguments": '{"q": "hello",}'}},
+                    {"index": 1, "id": "call_2", "type": "function",
+                     "function": {"name": "search2", "arguments": '{"q": "world",}'}},
+                ]},
+                "finish_reason": None,
+            }],
+        }
+        filt.feed(f"data: {json.dumps(chunk1)}\n\n".encode())
+
+        # Trigger flush con finish_reason
+        done = {"choices": [{"finish_reason": "stop", "index": 0}]}
+        out = filt.feed(f"data: {json.dumps(done)}\n\n".encode())
+
+        # Verifica che siano emessi DUE tool_calls con index corretto
+        tc_indices = []
+        for o in out:
+            if b'"tool_calls"' in o:
+                parsed = json.loads(o.decode().replace("data: ", "").strip())
+                for tc in parsed["choices"][0]["delta"]["tool_calls"]:
+                    tc_indices.append(tc["index"])
+
+        assert sorted(tc_indices) == [0, 1], f"Indici tool_call: {tc_indices}"
+
+    def test_finalize_emits_done_if_missing(self):
+        """finalize() deve emettere [DONE] se il modello non l'ha mandato."""
+        cfg = ToolRepairConfig()
+        dep = _dep()
+        filt = ToolRepairSSEFilter(cfg, dep)
+
+        # Feed un tool_call malformato, NO finish_reason, NO [DONE]
+        chunk = {
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "search", "arguments": '{"q": "hello",}'}
+                }]},
+                "finish_reason": None,
+            }],
+        }
+        filt.feed(f"data: {json.dumps(chunk)}\n\n".encode())
+
+        # Chiamiamo finalize() senza aver mandato [DONE] né finish_reason
+        out = filt.finalize()
+
+        # Deve aver flushato il tool_call riparato E aggiunto [DONE]
+        found_done = any(b"[DONE]" in o for o in out)
+        found_tc = any(b'"tool_calls"' in o for o in out)
+
+        assert found_tc, "Tool call riparato non emesso"
+        assert found_done, "[DONE] finale non emesso da finalize()"
+        assert filt._done is True, "Flag _done non settato"
+
+    def test_multiple_tool_calls_different_indices(self):
+        """Tool_calls con index non sequenziali (es. 2 e 5) mantengono i loro indici."""
+        cfg = ToolRepairConfig()
+        dep = _dep()
+        filt = ToolRepairSSEFilter(cfg, dep)
+
+        chunk = {
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [
+                    {"index": 2, "id": "call_a", "type": "function",
+                     "function": {"name": "a", "arguments": '{"x":1,}'}},
+                    {"index": 5, "id": "call_b", "type": "function",
+                     "function": {"name": "b", "arguments": '{"y":2,}'}},
+                ]},
+                "finish_reason": None,
+            }],
+        }
+        filt.feed(f"data: {json.dumps(chunk)}\n\n".encode())
+        done = {"choices": [{"finish_reason": "stop", "index": 0}]}
+        out = filt.feed(f"data: {json.dumps(done)}\n\n".encode())
+
+        tc_indices = []
+        for o in out:
+            if b'"tool_calls"' in o:
+                parsed = json.loads(o.decode().replace("data: ", "").strip())
+                for tc in parsed["choices"][0]["delta"]["tool_calls"]:
+                    tc_indices.append(tc["index"])
+
+        assert set(tc_indices) == {2, 5}, f"Indici tool_call: {tc_indices}"
+
+
+# --------------------------------------------------- end of file

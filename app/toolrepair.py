@@ -559,6 +559,7 @@ class ToolRepairSSEFilter:
         self._done = False
         self._repaired_count = 0
         self._total_moves: list[str] = []
+        self._choice_index: int = 0           # choice index dall'upstream
 
     # ------------------------------------------------------------ helpers
     @staticmethod
@@ -611,6 +612,10 @@ class ToolRepairSSEFilter:
             output.extend(self._process_event(self._raw, b"\n"))
             self._raw = b""
         output.extend(self._flush_buffers())
+        # Se il modello non ha emesso [DONE], lo aggiungiamo noi
+        if not self._done:
+            output.append(b"data: [DONE]\n\n")
+            self._done = True
         return output
 
     def _process_event(self, event: bytes, sep: bytes) -> list[bytes]:
@@ -631,6 +636,8 @@ class ToolRepairSSEFilter:
         if not choices:
             return passthrough
         choice = choices[0] or {}
+        # Salva il choice index per usarlo nei chunk emessi
+        self._choice_index = choice.get("index", 0)
         delta = choice.get("delta") or {}
         finish_reason = choice.get("finish_reason")
 
@@ -651,7 +658,7 @@ class ToolRepairSSEFilter:
                 out = self._flush_buffers()
                 finish_event = {
                     "choices": [{
-                        "index": choice.get("index", 0),
+                        "index": self._choice_index,
                         "delta": {},
                         "finish_reason": finish_reason,
                     }],
@@ -692,7 +699,7 @@ class ToolRepairSSEFilter:
                 "created": int(time.time()),
                 "model": self.dep.get("model", ""),
                 "choices": [{
-                    "index": 0,
+                    "index": self._choice_index,
                     "delta": {"tool_calls": [{
                         "index": idx,
                         "id": call_id,
