@@ -60,6 +60,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         set_retry_after_floors,
                         set_stream_stall_sec,
+                        set_adaptive_timeout, set_latency_lookup,
                         set_schemaout_config,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
@@ -166,6 +167,11 @@ forwarder = Forwarder()
 set_retry_after_floors(policy.retry_after_min_sec,
                        policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
+set_latency_lookup(router._get_avg_latency)
+set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
+                     floor_sec=policy.adaptive_timeout_floor_sec,
+                     multiplier=policy.adaptive_timeout_multiplier,
+                     max_sec=policy.adaptive_timeout_max_sec)
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 set_schemaout_config(_so_cfg_from_policy(policy))
 configure_estimate(adaptive=policy.estimate_adaptive_enabled,
@@ -310,6 +316,11 @@ async def _watcher(interval: float) -> None:
                     set_retry_after_floors(fresh.retry_after_min_sec,
                                            fresh.retry_after_floor_by_provider)
                     set_stream_stall_sec(fresh.stream_stall_sec)
+                    set_adaptive_timeout(
+                        enabled=fresh.adaptive_timeout_enabled,
+                        floor_sec=fresh.adaptive_timeout_floor_sec,
+                        multiplier=fresh.adaptive_timeout_multiplier,
+                        max_sec=fresh.adaptive_timeout_max_sec)
                     set_schemaout_config(
                         _so_cfg_from_policy(fresh))
                     configure_estimate(

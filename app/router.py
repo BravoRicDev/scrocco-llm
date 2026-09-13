@@ -380,6 +380,9 @@ class Router:
         self._provider_scores: dict[str, float] = {}   # provider_model -> group score
         self._key_scores: dict[str, float] = {}        # api_key -> group score
         self._avg_latencies: dict[str, float] = {}     # unique -> average latency
+        # Time-decay dei punteggi di reputazione (halflife da policy).
+        self._scores_decay_ts: float = time.time()
+        self._scores_decay_log_ts: float = time.time()
 
         # --- Circuit Breaker per API Key ---
         # api_key -> {failures: int, last_failure: float, state: "closed|open|half_open", opened_at: float}
@@ -1012,6 +1015,49 @@ class Router:
             self._key_scores: dict[str, float] = {}
         if not hasattr(self, '_avg_latencies'):
             self._avg_latencies: dict[str, float] = {}
+        if not hasattr(self, '_scores_decay_ts'):
+            self._scores_decay_ts: float = time.time()
+        if not hasattr(self, '_scores_decay_log_ts'):
+            self._scores_decay_log_ts: float = time.time()
+
+    def _decay_scores(self, now: float | None = None) -> float:
+        """Time-decay verso lo zero dei punteggi di reputazione.
+
+        Moltiplica _base_scores/_provider_scores/_key_scores per
+        0.5 ** (dt / halflife): il passato viene gradualmente "dimenticato" e
+        contano i comportamenti recenti. Halflife <= 0 disabilita. Ritorna il
+        fattore applicato (1.0 = nessun decay)."""
+        now = time.time() if now is None else now
+        self._init_scoring_if_needed()
+        hl = float(getattr(self.policy, "reputation_decay_halflife_sec", 0.0)
+                   or 0.0)
+        last = self._scores_decay_ts
+        self._scores_decay_ts = now
+        if hl <= 0.0 or now <= last:
+            return 1.0
+        dt = now - last
+        factor = 0.5 ** (dt / hl)
+        pruned = 0
+        for d in (self._base_scores, self._provider_scores,
+                  self._key_scores):
+            for k in list(d.keys()):
+                v = d[k] * factor
+                if abs(v) < 1e-4:
+                    del d[k]
+                    pruned += 1
+                else:
+                    d[k] = v
+        # Heartbeat INFO ogni ~10 minuti (il watcher gira ogni pochi secondi:
+        # loggare ad ogni tick sarebbe rumore); dettaglio a DEBUG.
+        if now - self._scores_decay_log_ts >= 600.0:
+            log.info("[rep-decay] punteggi *=%.4f (halflife=%.1fh, "
+                     "finestra=%.0fs, potati=%d)", factor, hl / 3600.0, dt,
+                     pruned)
+            self._scores_decay_log_ts = now
+        else:
+            log.debug("[rep-decay] *=%.6f dt=%.0fs potati=%d", factor, dt,
+                      pruned)
+        return factor
 
     def _provider_key(self, dep: dict) -> str:
         """Restituisce la chiave provider/modello per il scoring di gruppo."""
@@ -1400,6 +1446,7 @@ class Router:
         rimuove entry stale (>48h) per prevenire crescita infinita della memoria.
         """
         now = time.time()
+        self._decay_scores(now)     # time-decay reputazione (halflife policy)
         dead_sessions = [s for s, (_t, ts) in self._sticky.items()
                          if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_sessions:

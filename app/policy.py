@@ -164,6 +164,19 @@ class Policy:
     # Graceful shutdown: attesa massima (secondi) del drain delle richieste in
     # volo prima del flush finale del ledger. 0 = non attendere.
     shutdown_drain_sec: float = 10.0
+    # Time-decay dei punteggi di reputazione (_base/_provider/_key_scores):
+    # halflife in secondi verso lo zero. Rende la reputazione reattiva ai
+    # cambi di qualita' recenti invece di proteggere uno storico gonfio.
+    # 0 o negativo = nessun decay (comportamento storico).
+    reputation_decay_halflife_sec: float = 129600.0
+    # Timeout upstream ADATTIVO per-deployment in base alla latenza media
+    # storica: read = clamp(max(floor, avg_ms/1000 * multiplier), floor, max).
+    # Provider veloci vengono tagliati presto se si bloccano; i lenti hanno
+    # spazio per rispondere. False = timeout globale fisso.
+    adaptive_timeout_enabled: bool = True
+    adaptive_timeout_floor_sec: float = 15.0
+    adaptive_timeout_multiplier: float = 8.0
+    adaptive_timeout_max_sec: float = 600.0
     # Probe passivo dei deployment dormienti: quando non ci sono chiavi vive,
     # un deployment in cooldown da >= cooldown_probe_after_ratio del suo tempo
     # viene ritentato come "probe": il successo lo riabilita subito, il
@@ -676,6 +689,27 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "stream_stall_sec deve essere un numero >= 0") from None
+        _rdh = raw.get("reputation_decay_halflife_sec")
+        if _rdh is not None:
+            try:
+                p.reputation_decay_halflife_sec = max(0.0, float(_rdh))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "reputation_decay_halflife_sec deve essere un numero "
+                    ">= 0") from None
+        if "adaptive_timeout_enabled" in raw:
+            p.adaptive_timeout_enabled = _coerce_bool(
+                raw["adaptive_timeout_enabled"], "adaptive_timeout_enabled")
+        for _fld in ("adaptive_timeout_floor_sec",
+                     "adaptive_timeout_multiplier",
+                     "adaptive_timeout_max_sec"):
+            _val = raw.get(_fld)
+            if _val is not None:
+                try:
+                    setattr(p, _fld, max(0.0, float(_val)))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{_fld} deve essere un numero >= 0") from None
         if "cooldown_probe_enabled" in raw:
             p.cooldown_probe_enabled = _coerce_bool(
                 raw["cooldown_probe_enabled"], "cooldown_probe_enabled")

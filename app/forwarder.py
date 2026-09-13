@@ -135,6 +135,73 @@ UPSTREAM_LIMITS = httpx.Limits(max_keepalive_connections=30,
                                max_connections=100,
                                keepalive_expiry=120.0)
 
+# Timeout upstream ADATTIVO per-deployment: la latenza media storica (EMA,
+# fornita dal router) scala il read-timeout. Provider veloci (es. TTFB ~300ms)
+# vengono tagliati presto se si bloccano; i lenti hanno lo spazio necessario
+# per rispondere senza false rotazioni.
+#   read = clamp(max(floor, avg_ms/1000 * multiplier), floor, max)
+# Si applica al percorso CHAT (stream e non-stream); media/img/tts/video
+# mantengono i loro timeout dedicati. False = timeout globale fisso.
+ADAPTIVE_TIMEOUT = True
+TIMEOUT_FLOOR_SEC = 15.0
+TIMEOUT_MULTIPLIER = 8.0
+TIMEOUT_MAX_SEC = 600.0
+_LATENCY_LOOKUP = None
+
+
+def set_adaptive_timeout(*, enabled=None, floor_sec=None, multiplier=None,
+                         max_sec=None) -> None:
+    """Configura il timeout adattivo (da policy). Valori None = invariati."""
+    global ADAPTIVE_TIMEOUT, TIMEOUT_FLOOR_SEC, TIMEOUT_MULTIPLIER
+    global TIMEOUT_MAX_SEC
+    if enabled is not None:
+        ADAPTIVE_TIMEOUT = bool(enabled)
+    for name, val in (("TIMEOUT_FLOOR_SEC", floor_sec),
+                      ("TIMEOUT_MULTIPLIER", multiplier),
+                      ("TIMEOUT_MAX_SEC", max_sec)):
+        if val is None:
+            continue
+        try:
+            globals()[name] = max(0.0, float(val))
+        except (TypeError, ValueError):
+            pass
+
+
+def set_latency_lookup(fn) -> None:
+    """Registra la lookup `unique -> latenza media (ms)` usata dal timeout."""
+    global _LATENCY_LOOKUP
+    _LATENCY_LOOKUP = fn
+
+
+def _timeout_for(dep: dict) -> httpx.Timeout | None:
+    """Timeout httpx per-deployment, o None per usare il default del client."""
+    if not ADAPTIVE_TIMEOUT or _LATENCY_LOOKUP is None:
+        return None
+    try:
+        ms = _LATENCY_LOOKUP(dep.get("unique", ""))
+    except Exception:                          # mai bloccare la chiamata
+        return None
+    if not ms or ms <= 0:
+        return None
+    read = (float(ms) / 1000.0) * float(TIMEOUT_MULTIPLIER)
+    read = min(max(float(TIMEOUT_FLOOR_SEC), read), float(TIMEOUT_MAX_SEC))
+    base = UPSTREAM_TIMEOUT
+    try:
+        if base.read is not None and abs(read - float(base.read)) < 0.5:
+            return None                        # identico al default
+    except Exception:
+        pass
+    log.debug("[timeout-adaptive] %s avg=%.0fms -> read=%.0fs",
+              dep.get("unique", "?"), float(ms), read)
+    return httpx.Timeout(connect=base.connect, read=read, write=base.write,
+                         pool=base.pool)
+
+
+def _timeout_kw(dep: dict) -> dict:
+    """kwargs httpx con `timeout` per-deployment solo se valorizzato."""
+    t = _timeout_for(dep)
+    return {} if t is None else {"timeout": t}
+
 # ANTI-STALL (mid-stream): se dopo l'avvio dello stream l'upstream non manda
 # NULLA per N secondi (free-tier/reverse-proxy che si "congelano" senza
 # chiudere la connessione ne' dare errore), il read-timeout del trasporto
@@ -1021,7 +1088,8 @@ class Forwarder:
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
             _cli = self._client_for(url)
-            req = _cli.build_request("POST", url, json=body, headers=headers)
+            req = _cli.build_request("POST", url, json=body, headers=headers,
+                                     **_timeout_kw(dep))
             resp = await _cli.send(req, stream=True)
         except httpx.TimeoutException as exc:
             # Headers mai arrivati entro il read-timeout: l'upstream ha
@@ -1165,7 +1233,9 @@ class Forwarder:
         url = f"{dep['api_base']}/chat/completions"
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            resp = await self._client_for(url).post(url, json=body, headers=headers)
+            resp = await self._client_for(url).post(url, json=body,
+                                                    headers=headers,
+                                                    **_timeout_kw(dep))
         except httpx.TimeoutException as exc:
             # L'upstream ha APPESO (read/connect timeout): danno reale (tempo
             # perso) -> marker distinto, il fallback lo classifica "timeout"

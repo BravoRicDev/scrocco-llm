@@ -133,6 +133,15 @@ individual account limits instead of dying on the first 429.
   `llama3-8b`). When failover crosses providers but stays on the same family,
   the context-compaction `switch` trigger is suppressed (`same_family`) so the
   prompt cache stays warm.
+- **Reputation time-decay & adaptive upstream timeout**: success/failure
+  reputation scores (`_base_scores`/`_provider_scores`/`_key_scores`) decay
+  toward zero with a half-life (`reputation_decay_halflife_sec`, default 36h)
+  so routing reacts to *recent* provider quality instead of a stale past. Chat
+  upstream timeouts adapt per deployment from the latency EMA:
+  `read = clamp(max(adaptive_timeout_floor_sec, avg_latency *
+  adaptive_timeout_multiplier), floor, adaptive_timeout_max_sec)` (defaults
+  15s / 8x / 600s) — fast keys fail fast, slow ones get room. Logs:
+  `[rep-decay]` (INFO, ~10 min) and `[timeout-adaptive]` (DEBUG).
 - **Graceful shutdown**: on SIGTERM/SIGINT the lifespan stops new work, drains
   in-flight requests (up to `shutdown_drain_sec`, default `10`) and runs a
   blocking `flush_sync()` so the usage ledger never loses buffered rows.
@@ -282,6 +291,8 @@ template. The ones that matter most:
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
 | `cooldown_streak_halflife_sec` / `probe_retire_after` / `cooldown_jitter_ratio` | 1800 / 5 / 0.12 | streak decay while idle; auto-retire after N failed probes; cooldown jitter (±12%) |
+| `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
+| `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |
