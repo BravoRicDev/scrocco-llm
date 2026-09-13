@@ -1757,6 +1757,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             schema_sig = bool(_PAYLOAD_SCHEMA_RE.search(detail))
             if schema_sig:
                 thought_sig = True         # riusa tutta la logica no-cooldown
+            # Rifiuto di MODALITA' (vision/image/audio/…): il modello non e'
+            # rotto, semplicemente non accetta quel tipo di input -> ruota
+            # SENZA cooldown (un altro deployment multimodale lo accetta),
+            # mai pass-through del 400 al client.
+            media_sig = bool(media_reject_signature(detail))
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
             prov_fault = is_provider_fault_body(detail)
             quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False
@@ -1781,6 +1786,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # motivo della classificazione deployment-side (per il log)
             if schema_sig:
                 reason = "payload_schema"
+            elif media_sig:
+                reason = "media_reject"
             elif thought_sig:
                 reason = "thought_signature"
             elif quota_exhausted:
@@ -1823,6 +1830,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     or upstream401
                     or empty_body
                     or prov_fault
+                    or media_sig
                     or err.status == -402)
                 # né thought_signature né il body d'errore provider né
                 # il 403 sono rifiuti di modalita': non alimentano l'auto-
@@ -1844,7 +1852,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # Gemini 3 tool replay: ruota SENZA cooldown (vedi _THOUGHT_SIG_RE
             # nel forwarder) — la key Gemini resta sana per il traffico non-tool.
             # model_missing (inesistente/non servito/giu'): 24h fissi.
-            if not thought_sig:
+            if not thought_sig and not media_sig:
                 if reason == "quota_exhausted":
                     # Abbonamento flat esaurito: cooldown = tempo al reset
                     # (es. "Resets in 9 days" -> ~9gg), non escalation.

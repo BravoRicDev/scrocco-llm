@@ -124,7 +124,7 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
 # rivedere a posteriori gli errori usciti che non dovevano.
 errlog = logging.getLogger("nx.erroraudit")
 
-RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+RETRYABLE_STATUS = {408, 409, 429} | set(range(500, 600))
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0,
                                  pool=10.0)
 
@@ -247,7 +247,11 @@ _PROVIDER_TRANSIENT_RE = re.compile(
     r"error from provider|upstream request failed|provider returned error"
     r"|no endpoints found|no allowed providers|temporarily unavailable"
     r"|upstream error|bad gateway|service unavailable|gateway timeout"
-    r"|internal server error|too many requests|overloaded",
+    r"|internal server error|too many requests|overloaded"
+    # auth del NOSTRO deployment verso l'upstream (token service giu' o chiave
+    # rifiutata): errore provider-side -> ruota, mai 400 raw al client.
+    r"|upstream[_ ]+(?:provider[_ ]+)?auth\w*[_ ]*fail"
+    r"|upstream_authentication_failed|provider authentication failed",
     re.IGNORECASE)
 PROVIDER_TRANSIENT_COOLDOWN_S = 120
 
@@ -1825,6 +1829,31 @@ class Forwarder:
                         dep = router.fallback_next(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
                                                    requested_group=requested_group)
+                        continue
+                    # Rifiuto di MODALITA' (vision/image/audio/…): il modello
+                    # non e' rotto, un altro deployment multimodale accetta lo
+                    # stesso payload -> ruota (strike per l'auto-learn), mai
+                    # pass-through del 400 al client.
+                    if media_reject_signature(detail):
+                        metrics.inc("nx_upstream_calls_total",
+                                    (cur, "media_reject"))
+                        last_err = err
+                        if media_strike_hook:
+                            try:
+                                media_strike_hook(dep["model"], detail)
+                            except Exception as exc:
+                                log.debug("[strike] hook error: %s", exc)
+                        nxt = router.fallback_next(profile, dep, need, scope,
+                                                   ctx=ctx, tried=tried,
+                                                   requested_group=requested_group)
+                        if nxt is None:
+                            log.warning("[fallback] %s %s rifiuto modalita': "
+                                        "nessuna alternativa -> 503",
+                                        cur, -err.status)
+                            raise
+                        log.warning("[fallback] %s %s rifiuto modalita' -> %s",
+                                    cur, -err.status, nxt["unique"])
+                        dep = nxt
                         continue
                     raise
                 metrics.inc("nx_upstream_calls_total", (cur, "error"))
