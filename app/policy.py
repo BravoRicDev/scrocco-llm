@@ -155,6 +155,12 @@ class Policy:
     # Graceful shutdown: attesa massima (secondi) del drain delle richieste in
     # volo prima del flush finale del ledger. 0 = non attendere.
     shutdown_drain_sec: float = 10.0
+    # Sessioni anonime: se il client non invia alcun id di sessione ne'
+    # `user`/`metadata.session_id`, il gateway deriva un id deterministico
+    # `fq_<sha1(system+primo user+user-agent)>` dal prefisso della
+    # conversazione, cosi' anche client come Hermes ottengono sticky/cache.
+    # False = lascia la sessione anonima (comportamento storico).
+    anon_session_fingerprint: bool = True
     sticky_ttl_sec: int = 3600
     cooldown_sec: int = 600
     hotwords_window: int = 3
@@ -622,6 +628,9 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "stream_stall_sec deve essere un numero >= 0") from None
+        if "anon_session_fingerprint" in raw:
+            p.anon_session_fingerprint = _coerce_bool(
+                raw["anon_session_fingerprint"], "anon_session_fingerprint")
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)

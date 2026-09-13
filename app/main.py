@@ -27,6 +27,7 @@ passive stream watchdog; per-request summary logs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -692,13 +693,67 @@ async def llamacpp_props_v1():
 
 
 # ---------------------------------------------------------- chat completions
+def _text_of(content) -> str:
+    """Testo da un `content` OpenAI: stringa o lista di parti multimodali."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if isinstance(part, dict):
+                t = part.get("text")
+                if isinstance(t, str):
+                    out.append(t)
+        return "\n".join(out)
+    return ""
+
+
+_ANON_FP_MIN_CHARS = 24
+
+
+def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
+    """Id di sessione deterministico per client ANONIMI.
+
+    Base = primo messaggio `system` + primo messaggio `user` + `user-agent`.
+    Stabile tra i turni della stessa conversazione, distinto tra conversazioni
+    diverse; del contenuto viene salvato solo l'hash (nessun testo in chiaro).
+    Gated da `policy.anon_session_fingerprint`.
+    """
+    if not getattr(policy, "anon_session_fingerprint", True):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list):
+        return None
+    sys_txt = usr_txt = ""
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "system" and not sys_txt:
+            sys_txt = _text_of(m.get("content"))
+        elif role == "user" and not usr_txt:
+            usr_txt = _text_of(m.get("content"))
+        if sys_txt and usr_txt:
+            break
+    ua = (request.headers.get("user-agent") or "").strip()
+    basis = "\x1f".join((sys_txt.strip()[:4096], usr_txt.strip()[:4096], ua))
+    if len(basis.replace("\x1f", "").strip()) < _ANON_FP_MIN_CHARS:
+        return None
+    digest = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:16]
+    return "fq_" + digest
+
+
 def _session_id(request: Request, payload: dict) -> str | None:
     sid = request.headers.get("x-session-id")
     if sid:
         return sid
     md = payload.get("metadata") or {}
     sid = payload.get("user") or md.get("session_id")
-    return str(sid) if sid else None
+    if sid:
+        return str(sid)
+    return _anon_session_fingerprint(request, payload)
 
 
 def _client_ip(request: Request) -> str:

@@ -49,6 +49,12 @@ estimate_divisor: 3
 #   3600 = 1 ora ; 0 = sticky disabilitato
 sticky_ttl_sec: 3600
 
+# Sessioni anonime (client che non inviano alcun id di sessione, es. Hermes):
+# il gateway deriva un id deterministico `fq_<hash>` dal prefisso della
+# conversazione (system + primo messaggio user + user-agent) per abilitare
+# sticky e cache-aware. false = lascia la sessione anonima (storico).
+anon_session_fingerprint: true
+
 # Cooldown base in secondi per chiavi/modelli che falliscono (600 = 10 minuti).
 # Vedere anche `cooldown_mode` più sotto per l'escalation.
 cooldown_sec: 600
