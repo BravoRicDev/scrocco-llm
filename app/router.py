@@ -59,6 +59,18 @@ from app.constants import SCORING_WEIGHTS as SW
 LATENCY_ROTATE_THRESHOLD_MS = 90000   # 90 seconds default threshold
 LATENCY_PENALTY_PER_SEC = 0.5         # 0.5 points per second over threshold
 
+# Dynamic scoring defaults (override via gateway.yaml -> policy)
+DYNAMIC_SCORING_DEFAULTS = {
+    "enabled": True,
+    "latency_p95_weight": 1.0,
+    "error_rate_weight": 2.0,
+    "throughput_weight": 0.5,
+    "history_window": 100,
+}
+
+# Provider bias normalization: "log" (default), "sqrt", "none"
+PROVIDER_BIAS_NORMALIZATION = "log"
+
 
 @dataclass
 class DepStats:
@@ -88,6 +100,12 @@ class DepStats:
     fail_count: int = 0               # fallimenti cumulativi (mai azzerati)
     last_success_ts: float = 0.0      # timestamp ultimo successo
     last_fail_ts: float = 0.0         # timestamp ultimo fallimento
+    # --- dynamic scoring: feature osservate per-deployment ---
+    latency_history: list[float] = field(default_factory=list)  # ultimi N latency_ms
+    total_tokens: int = 0              # token completati cumulativi
+    total_duration_ms: float = 0.0     # durata cumulativa ms
+    recent_failures: int = 0           # fallimenti negli ultimi N tentativi
+    recent_attempts: int = 0           # tentativi negli ultimi N
 
 HOT_WORDS: dict[str, str] = {
     r"pensaci\s+bene": "max",
@@ -254,6 +272,14 @@ class Router:
         self._key_scores: dict[str, float] = {}        # api_key -> group score
         self._avg_latencies: dict[str, float] = {}     # unique -> average latency
 
+        # --- Circuit Breaker per API Key ---
+        # api_key -> {failures: int, last_failure: float, state: "closed|open|half_open", opened_at: float}
+        self._circuit_breakers: dict[str, dict] = {}
+        # Config defaults
+        self._circuit_breaker_threshold = 5  # consecutive failures to open
+        self._circuit_breaker_timeout = 60.0  # seconds before half-open
+        self._circuit_breaker_half_open_requests = 3  # requests in half-open before close
+
     # ------------------------------------------------- escalation winner
     def _esc(self) -> dict:
         """Ritorna (e crea al volo se serve) il dict escalation-winner.
@@ -311,6 +337,40 @@ class Router:
 
     def dep_sticky_release(self, session_id: str) -> None:
         self._sticky_dep.pop(session_id, None)
+
+    # --- Sticky per-capability (deployment_sticky_per_capability) ---
+    def _cap_sticky_key(self, session_id: str, need: frozenset[str] | None) -> str:
+        """Chiave per lo sticky per-capability: session_id + sorted caps."""
+        cap_str = ",".join(sorted(need)) if need else "_text"
+        return f"{session_id}|{cap_str}"
+
+    def dep_cap_sticky_get(self, session_id: str, need: frozenset[str] | None) -> str | None:
+        """Ritorna l'unique sticky per la specifica capability richiesta."""
+        if not getattr(self.policy, "deployment_sticky_per_capability", False):
+            return None
+        key = self._cap_sticky_key(session_id, need)
+        entry = self._sticky_dep.get(key)
+        if not entry:
+            return None
+        unique, ts = entry
+        if time.time() - ts > self.policy.sticky_ttl_sec:
+            self._sticky_dep.pop(key, None)
+            return None
+        log.debug("[cap-sticky] %s key=%s riuso %s", session_id, key, unique)
+        return unique
+
+    def dep_cap_sticky_set(self, session_id: str, need: frozenset[str] | None, unique: str) -> None:
+        if not getattr(self.policy, "deployment_sticky_per_capability", False):
+            return
+        key = self._cap_sticky_key(session_id, need)
+        log.debug("[cap-sticky] %s key=%s -> %s", session_id, key, unique)
+        self._sticky_dep[key] = (unique, time.time())
+
+    def dep_cap_sticky_release(self, session_id: str, need: frozenset[str] | None) -> None:
+        if not getattr(self.policy, "deployment_sticky_per_capability", False):
+            return
+        key = self._cap_sticky_key(session_id, need)
+        self._sticky_dep.pop(key, None)
 
     # --------------------------------------------- session cache holder
     def _cache_ok(self) -> dict:
@@ -637,6 +697,11 @@ class Router:
         log.warning("[cooldown] %s inattivo per %ds%s (streak=%d, "
                     "fail_24h=%d)",
                     unique, int(seconds), esc, s.fail_streak, s.fail_count_24h)
+
+        # --- Circuit Breaker per API Key ---
+        # Aggiorna lo stato del circuit breaker per la chiave API
+        self._update_circuit_breaker_on_failure(unique)
+
         return seconds
 
     def escalate_cooldown(self, base_seconds: float,
@@ -665,6 +730,92 @@ class Router:
         potent = min(potent, float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
         return min(float(base_seconds) + 0.1 * potent,
                    float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
+
+    # --- Circuit Breaker methods ---
+    def _get_circuit_breaker(self, unique: str) -> dict | None:
+        """Ritorna lo stato del circuit breaker per la chiave API del deployment."""
+        if not hasattr(self, 'config') or self.config is None:
+            return None
+        # Handle Router.__new__ test pattern where config may not have deployment_by_unique
+        if not hasattr(self.config, 'deployment_by_unique'):
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if not dep:
+            return None
+        ak = self._api_key_str(dep)
+        if not ak:
+            return None
+        cb = self._circuit_breakers.get(ak)
+        if cb is None:
+            cb = {
+                "failures": 0,
+                "last_failure": 0.0,
+                "state": "closed",
+                "opened_at": 0.0,
+                "half_open_successes": 0
+            }
+            self._circuit_breakers[ak] = cb
+        return cb
+
+    def _update_circuit_breaker_on_failure(self, unique: str) -> None:
+        """Aggiorna il circuit breaker su fallimento."""
+        cb = self._get_circuit_breaker(unique)
+        if not cb:
+            return
+        cb["failures"] += 1
+        cb["last_failure"] = time.time()
+        threshold = getattr(self.policy, "circuit_breaker_threshold", 5)
+        if cb["state"] == "closed" and cb["failures"] >= threshold:
+            cb["state"] = "open"
+            cb["opened_at"] = time.time()
+            dep = self.config.deployment_by_unique(unique) if hasattr(self.config, 'deployment_by_unique') else None
+            log.warning("[circuit-breaker] API key %s OPEN (failures=%d)",
+                        self._api_key_str(dep or {}), cb["failures"])
+        elif cb["state"] == "half_open":
+            # Fallimento in half-open -> riapri
+            cb["state"] = "open"
+            cb["opened_at"] = time.time()
+            cb["half_open_successes"] = 0
+            dep = self.config.deployment_by_unique(unique) if hasattr(self.config, 'deployment_by_unique') else None
+            log.warning("[circuit-breaker] API key %s RE-OPEN after half-open failure",
+                        self._api_key_str(dep or {}))
+
+    def _update_circuit_breaker_on_success(self, unique: str) -> None:
+        """Aggiorna il circuit breaker su successo."""
+        cb = self._get_circuit_breaker(unique)
+        if not cb:
+            return
+        if cb["state"] == "half_open":
+            cb["half_open_successes"] += 1
+            half_open_reqs = getattr(self.policy, "circuit_breaker_half_open_requests", 3)
+            if cb["half_open_successes"] >= half_open_reqs:
+                cb["state"] = "closed"
+                cb["failures"] = 0
+                dep = self.config.deployment_by_unique(unique) if hasattr(self.config, 'deployment_by_unique') else None
+                log.info("[circuit-breaker] API key %s CLOSED after %d half-open successes",
+                         self._api_key_str(dep or {}), cb["half_open_successes"])
+        elif cb["state"] == "closed":
+            # Reset failures on success in closed state
+            cb["failures"] = 0
+
+    def _is_circuit_open(self, unique: str) -> bool:
+        """Controlla se il circuit breaker per la chiave API è aperto."""
+        cb = self._get_circuit_breaker(unique)
+        if not cb or cb["state"] == "closed":
+            return False
+        if cb["state"] == "open":
+            timeout = getattr(self.policy, "circuit_breaker_timeout", 60.0)
+            if time.time() - cb["opened_at"] >= timeout:
+                # Transition to half-open
+                cb["state"] = "half_open"
+                cb["half_open_successes"] = 0
+                dep = self.config.deployment_by_unique(unique) if hasattr(self.config, 'deployment_by_unique') else None
+                log.info("[circuit-breaker] API key %s HALF-OPEN (timeout %ds)",
+                         self._api_key_str(dep or {}), int(timeout))
+                return False  # Allow one request through
+            return True
+        # half-open: allow through (limited by _update_circuit_breaker_on_success)
+        return False
 
     def mark_failed_double_residual(self, unique: str,
                                      reason: str | None = None,
@@ -727,6 +878,9 @@ class Router:
         s.fail_count_24h = 0
         s.fail_day_key = ""
         log.info("[cooldown] %s riabilitato (successo da dormiente)", unique)
+
+        # --- Circuit Breaker: success updates ---
+        self._update_circuit_breaker_on_success(unique)
 
     # --------------------------------------------------- Reputation scoring
     def _init_scoring_if_needed(self) -> None:
@@ -796,6 +950,9 @@ class Router:
             log.info("[latency-cross] %s ema rientrata sotto soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
         log.debug("[rep-success] %s dep+=%d provider+=%d key+=%d ema=%.0fms", unique, SW["SUCCESS_DEPLOYMENT"], SW["SUCCESS_PROVIDER"], SW["SUCCESS_KEY"], latency_ms)
 
+        # --- Circuit Breaker: success updates ---
+        self._update_circuit_breaker_on_success(unique)
+
     def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:
         """Registra un fallimento: incrementa i punteggi per deployment, provider, chiave."""
         if not hasattr(self, 'config') or self.config is None:
@@ -820,12 +977,45 @@ class Router:
             return 0.0
         score = self._base_scores.get(unique, 0.0)
         pk = self._provider_key(dep)
-        score += self._provider_scores.get(pk, 0.0)
-        score += self._key_scores.get(self._api_key_str(dep), 0.0)
-        base = self._base_scores.get(unique, 0.0)
-        prov = self._provider_scores.get(pk, 0.0)
-        key = self._key_scores.get(self._api_key_str(dep), 0.0)
-        log.debug("[rep] %s base=%.1f provider=%.1f key=%.1f total=%.1f", unique, base, prov, key, score)
+        ak = self._api_key_str(dep)
+
+        # --- Provider/Key bias normalization (log-scaling) ---
+        # Conta deployment per provider/model e per api_key per normalizzare
+        prov_score = self._provider_scores.get(pk, 0.0)
+        key_score = self._key_scores.get(ak, 0.0)
+
+        # Normalizzazione log-scaling: provider/key con molti deployment non dominano
+        # log(n+1) dove n = deployment count per provider/key
+        norm = PROVIDER_BIAS_NORMALIZATION
+        if norm != "none" and hasattr(self, 'config') and self.config and hasattr(self.config, 'groups'):
+            if norm == "log":
+                # Conta deployment per questo provider/model e per api_key
+                prov_count = sum(
+                    1 for lst in self.config.groups.values()
+                    for d in lst if self._provider_key(d) == pk
+                )
+                key_count = sum(
+                    1 for lst in self.config.groups.values()
+                    for d in lst if self._api_key_str(d) == ak
+                )
+                prov_score = prov_score / math.log(prov_count + 1) if prov_count > 0 else prov_score
+                key_score = key_score / math.log(key_count + 1) if key_count > 0 else key_score
+            elif norm == "sqrt":
+                prov_count = sum(
+                    1 for lst in self.config.groups.values()
+                    for d in lst if self._provider_key(d) == pk
+                )
+                key_count = sum(
+                    1 for lst in self.config.groups.values()
+                    for d in lst if self._api_key_str(d) == ak
+                )
+                prov_score = prov_score / math.sqrt(prov_count) if prov_count > 0 else prov_score
+                key_score = key_score / math.sqrt(key_count) if key_count > 0 else key_score
+        # "none" = no normalization
+
+        score = self._base_scores.get(unique, 0.0)
+        score += prov_score
+        score += key_score
 
         # NEW: Latency penalty — annuls success advantage for slow deployments
         # Uses _avg_latencies[unique] which is PER-DEPLOYMENT scoped,
@@ -874,6 +1064,41 @@ class Router:
         pref = dep.get("model_preference", 0)
         score -= pref * abs(score) / 100.0
         log.debug("[pref] %s pref=%d score=%.1f", unique, pref, score)
+
+        # --- Dynamic scoring: latency p95, error_rate, throughput ---
+        # Pesi configurabili via policy (DYNAMIC_SCORING_DEFAULTS override)
+        ds_enabled = getattr(self.policy, "dynamic_scoring_enabled", True)
+        if ds_enabled and hasattr(self, '_stats') and unique in self._stats:
+            stats = self._stats[unique]
+            hist = stats.latency_history or []
+            if hist and len(hist) >= 3:
+                # p95 latency
+                sorted_hist = sorted(hist)
+                p95_idx = max(0, int(len(sorted_hist) * 0.95) - 1)
+                p95_latency = sorted_hist[p95_idx]
+                p95_weight = getattr(self.policy, "dynamic_scoring_latency_p95_weight", 1.0)
+                score += (p95_latency / 1000.0) * p95_weight  # ms -> sec * weight
+
+                # error_rate in recent window
+                recent_attempts = stats.recent_attempts or 0
+                recent_failures = stats.recent_failures or 0
+                if recent_attempts > 0:
+                    error_rate = recent_failures / recent_attempts
+                    err_weight = getattr(self.policy, "dynamic_scoring_error_rate_weight", 2.0)
+                    score += error_rate * 100.0 * err_weight  # penalty up to 200 points
+
+                # throughput (tokens/sec)
+                total_tokens = stats.total_tokens or 0
+                total_duration = stats.total_duration_ms or 0.0
+                if total_tokens > 0 and total_duration > 0:
+                    throughput = (total_tokens / total_duration) * 1000.0  # tokens/sec
+                    tput_weight = getattr(self.policy, "dynamic_scoring_throughput_weight", 0.5)
+                    # Higher throughput = better (lower score)
+                    score -= min(throughput, 1000.0) * tput_weight / 100.0  # cap at 1000 tok/s
+
+                log.debug("[dynamic-scoring] %s p95=%.0fms err=%.2f tput=%.1f score=%.1f",
+                          unique, p95_latency, error_rate if recent_attempts else 0,
+                          throughput if total_tokens else 0, score)
 
         return score
 
@@ -1729,6 +1954,8 @@ class Router:
                 return False
             if self.is_retired(d["unique"]):
                 return False
+            if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
+                return False
             if restrict_model and d.get("model") != restrict_model:
                 return False
             if need and not self._dep_supports(d, need):
@@ -1929,10 +2156,16 @@ class Router:
         max_input dello sticky, si cerca lo STESSO modello+chiave nel nuovo
         gruppo dim (crescita cache-preserving)."""
         # --- STICKY per-deployment (SOLO FREE, mai renewal/paid) ---------
-        sticky_dep = (session_id
-                      and self.policy.deployment_sticky
-                      and not self._is_renewal_bucket(group_name)
-                      and self.dep_sticky_get(session_id))
+        sticky_dep = None
+        # Prima prova lo sticky per-capability se abilitato
+        if session_id and not self._is_renewal_bucket(group_name):
+            sticky_dep = self.dep_cap_sticky_get(session_id, need)
+        # Fallback allo sticky classico (per-sessione)
+        if not sticky_dep:
+            sticky_dep = (session_id
+                          and self.policy.deployment_sticky
+                          and not self._is_renewal_bucket(group_name)
+                          and self.dep_sticky_get(session_id))
         if sticky_dep:
             sd = self.config.deployment_by_unique(sticky_dep)
             # Validità dello sticky:
@@ -1960,9 +2193,11 @@ class Router:
         # modello+key dello sticky, riagganciamo lo sticky al nuovo gruppo.
         if dep is not None:
             # --- SET STICKY: free bucket, sessione non anonima -------------
-            if session_id and self.policy.deployment_sticky \
-                    and not self._is_renewal_bucket(group_name):
-                self.dep_sticky_set(session_id, dep["unique"])
+            if session_id and not self._is_renewal_bucket(group_name):
+                if getattr(self.policy, "deployment_sticky_per_capability", False):
+                    self.dep_cap_sticky_set(session_id, need, dep["unique"])
+                elif self.policy.deployment_sticky:
+                    self.dep_sticky_set(session_id, dep["unique"])
             return dep
 
         # Cooldown-wakeup: se pick_deployment non ha trovato nulla, prova il
@@ -2004,9 +2239,11 @@ class Router:
             _p = self._esc_pin_probe(group_name, _ew, need, ctx, tried=None,
                                      allow_retry=False)
             _use = _p if _p is not None else _ew
-            if session_id and self.policy.deployment_sticky \
-                    and not self._is_renewal_bucket(group_name):
-                self.dep_sticky_set(session_id, _use["unique"])
+            if session_id and not self._is_renewal_bucket(group_name):
+                if getattr(self.policy, "deployment_sticky_per_capability", False):
+                    self.dep_cap_sticky_set(session_id, need, _use["unique"])
+                elif self.policy.deployment_sticky:
+                    self.dep_sticky_set(session_id, _use["unique"])
             return _use
         # Nessuna pesca riuscita: catena/ladder come prima
         cap = self.config.group_caps.get(group_name)

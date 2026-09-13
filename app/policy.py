@@ -199,6 +199,19 @@ class Policy:
         default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
     effort_intel_weight: float = 10.0
 
+    # DYNAMIC SCORING: feature osservate per-deployment (latency p95, error rate, throughput)
+    # per aggiustare il punteggio di reputazione oltre l'EMA di latenza base.
+    dynamic_scoring_enabled: bool = True
+    dynamic_scoring_latency_p95_weight: float = 1.0   # peso per latency p95 (ms/1000)
+    dynamic_scoring_error_rate_weight: float = 2.0    # peso per error rate (0-1 * 100)
+    dynamic_scoring_throughput_weight: float = 0.5    # peso per throughput (tok/s / 100)
+
+    # CIRCUIT BREAKER per API Key: previene il martellamento di chiavi rotte/esauste
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_threshold: int = 5          # fallimenti consecutivi per aprire
+    circuit_breaker_timeout: float = 60.0       # secondi prima di half-open
+    circuit_breaker_half_open_requests: int = 3  # successi in half-open per chiudere
+
     # THOUGHT_SIGNATURE (Gemini 3): Google pretende il blob `thought_signature`
     # sui functionCall del turno CORRENTE. Se la history arriva da un altro
     # modello (rotazione) la firma reale non esiste: Google documenta due firme
@@ -289,6 +302,12 @@ class Policy:
     # per-deployment, non dalla recency globale.
     go_recency_halflife_sec: float = 300.0
     deployment_sticky: bool = True
+    # STICKY PER CAPABILITY: quando abilitato, le sessioni restano attaccate
+    # allo stesso deployment PER CAPABILITÀ RICHIESTA (es. text, vision, stt).
+    # Così una sessione che fa solo testo resta sulla stessa key, ma se poi
+    # chiede vision può usare un deployment diverso senza rompere lo sticky
+    # del testo. DEFAULT OFF per compatibilità.
+    deployment_sticky_per_capability: bool = False
 
     # ESCALATION WINNER (SCORCIATOIA, solo-in-salita): quando una richiesta
     # PARTITA da un bucket (es. -200k) fallisce e SALTA verso un gruppo piu'
@@ -672,6 +691,9 @@ class Policy:
         ds = raw.get("deployment_sticky")
         if ds is not None:
             p.deployment_sticky = _coerce_bool(ds, "deployment_sticky")
+        dspc = raw.get("deployment_sticky_per_capability")
+        if dspc is not None:
+            p.deployment_sticky_per_capability = _coerce_bool(dspc, "deployment_sticky_per_capability")
         epp = raw.get("escalation_pin")
         if epp is not None:
             p.escalation_pin = _coerce_bool(epp, "escalation_pin")
@@ -718,6 +740,48 @@ class Policy:
                         f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
                 clean[lk] = float(v)
             p.effort_temperature_overrides = clean
+
+        # --- DYNAMIC SCORING ---
+        _ds = raw.get("dynamic_scoring")
+        if _ds is not None:
+            if not isinstance(_ds, dict):
+                raise ValueError("dynamic_scoring deve essere una mappa")
+            if "enabled" in _ds:
+                p.dynamic_scoring_enabled = _coerce_bool(
+                    _ds["enabled"], "dynamic_scoring.enabled")
+            for _k, _attr in (
+                    ("latency_p95_weight", "dynamic_scoring_latency_p95_weight"),
+                    ("error_rate_weight", "dynamic_scoring_error_rate_weight"),
+                    ("throughput_weight", "dynamic_scoring_throughput_weight")):
+                _v = _ds.get(_k)
+                if _v is not None:
+                    if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
+                        raise ValueError(f"dynamic_scoring.{_k} deve essere un numero >= 0")
+                    setattr(p, _attr, float(_v))
+
+        # --- CIRCUIT BREAKER per API Key ---
+        _cb = raw.get("circuit_breaker")
+        if _cb is not None:
+            if not isinstance(_cb, dict):
+                raise ValueError("circuit_breaker deve essere una mappa")
+            if "enabled" in _cb:
+                p.circuit_breaker_enabled = _coerce_bool(
+                    _cb["enabled"], "circuit_breaker.enabled")
+            _ct = _cb.get("threshold")
+            if _ct is not None:
+                if isinstance(_ct, bool) or not isinstance(_ct, (int, float)) or _ct < 1:
+                    raise ValueError("circuit_breaker.threshold deve essere intero >= 1")
+                p.circuit_breaker_threshold = int(_ct)
+            _cto = _cb.get("timeout")
+            if _cto is not None:
+                if isinstance(_cto, bool) or not isinstance(_cto, (int, float)) or _cto <= 0:
+                    raise ValueError("circuit_breaker.timeout deve essere numero > 0")
+                p.circuit_breaker_timeout = float(_cto)
+            _cho = _cb.get("half_open_requests")
+            if _cho is not None:
+                if isinstance(_cho, bool) or not isinstance(_cho, (int, float)) or _cho < 1:
+                    raise ValueError("circuit_breaker.half_open_requests deve essere intero >= 1")
+                p.circuit_breaker_half_open_requests = int(_cho)
 
         # --- THOUGHT_SIGNATURE (Gemini 3 dummy fill) ---
         _tsf = raw.get("thought_sig_dummy_fill")

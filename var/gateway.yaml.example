@@ -144,6 +144,65 @@ thought_sig_dummy_fill: true
 thought_sig_dummy_value: skip_thought_signature_validator
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DYNAMIC SCORING — punteggio contestuale per-deployment (latency p95, error rate, throughput)
+# ─────────────────────────────────────────────────────────────────────────────
+# Il router mantiene statistiche per-deployment (latency_history, recent_failures,
+# recent_attempts, total_tokens, total_duration_ms) e aggiusta il punteggio di
+# reputazione con tre componenti (pesi configurabili):
+#   1) latency_p95_weight  * (p95_ms / 1000)       -> penalizza latenza alta
+#   2) error_rate_weight   * (fail/attempt * 100)   -> penalizza error rate
+#   3) throughput_weight   * (tok/sec / 100)        -> premia throughput alto
+# Tutti i pesi default > 0: un deployment veloce, affidabile e con alto
+# throughput riceve un punteggio MIGLIORE (piu' negativo = better).
+dynamic_scoring:
+  enabled: true
+  latency_p95_weight: 1.0
+  error_rate_weight: 2.0
+  throughput_weight: 0.5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CIRCUIT BREAKER PER API KEY — previene martellamento chiavi rotte/esauste
+# ─────────────────────────────────────────────────────────────────────────────
+# Traccia fallimenti consecutivi PER API KEY (tutti i deployment che la usano).
+# - chiuso (closed): funziona normalmente
+# - aperto (open): salta TUTTI i deployment con quella chiave per N secondi
+# - half-open: permette pochi tentativi per verificare se la chiave e' guarita
+# threshold: fallimenti consecutivi per aprire (default 5)
+# timeout: secondi prima di passare a half-open (default 60)
+# half_open_requests: successi richiesti in half-open per chiudere (default 3)
+circuit_breaker:
+  enabled: true
+  threshold: 5
+  timeout: 60
+  half_open_requests: 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOYMENT STICKY PER CAPABILITY — sticky separato per capability richiesta
+# ─────────────────────────────────────────────────────────────────────────────
+# Quando deployment_sticky_per_capability=true, le sessioni restano attaccate
+# allo stesso deployment PER CAPABILITÀ RICHIESTA (es. text, vision, stt).
+# Così una sessione che fa solo testo resta sulla stessa key, ma se poi chiede
+# vision può usare un deployment diverso senza rompere lo sticky del testo.
+# DEFAULT false per compatibilità (sticky classico per-sessione).
+deployment_sticky_per_capability: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OBSERVABILITY — Trace ID, JSON logging, Prometheus /metrics, Replay
+# ─────────────────────────────────────────────────────────────────────────────
+# Controllabile via env vars (precedenza su gateway.yaml):
+#   GATEWAY_OBSERVABILITY=0 disabilita tutto
+#   GATEWAY_JSON_LOGGING=1 abilita formatter JSON su stdout
+#   GATEWAY_TRACE_HEADER=X-Request-ID header per trace ID
+# Endpoint:
+#   GET /metrics           # Prometheus text exposition
+#   GET /admin/replay      # Buffer replay richieste (debug)
+#   DELETE /admin/replay   # Pulisce buffer replay
+# observability:
+#   enabled: true
+#   json_logging: false
+#   trace_header: "X-Request-ID"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ESCALATION WINNER — scorciatoia SOLO-IN-SALITA, trasversale alla sessione
 # ─────────────────────────────────────────────────────────────────────────────
 # Problema: una richiesta partita da un bucket piccolo (es. -200k) che trova

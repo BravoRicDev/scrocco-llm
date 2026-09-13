@@ -1994,6 +1994,85 @@ async def admin_deployments_stats(request: Request, profile: str | None = None):
     return {"count": len(rows), "rows": rows}
 
 
+@admin_api.get("/providers/health")
+async def admin_providers_health(request: Request):
+    """Salute aggregata per provider: contatori, circuit breaker, latenze."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    cfg = gw.config
+    router = gw.router
+
+    # Aggrega per provider (api_base)
+    providers = {}
+    for unique, s in router._stats.items():
+        dep = cfg.deployment_by_unique(unique) or {}
+        api_base = dep.get("api_base", "unknown")
+        model = dep.get("model", "")
+        provider_key = api_base
+
+        if provider_key not in providers:
+            providers[provider_key] = {
+                "provider": provider_key,
+                "models": set(),
+                "total_deployments": 0,
+                "total_ok": 0,
+                "total_fail": 0,
+                "total_calls": 0,
+                "ema_latency_ms": 0.0,
+                "latency_count": 0,
+                "circuit_breakers": {"closed": 0, "open": 0, "half_open": 0},
+                "deployments": []
+            }
+        p = providers[provider_key]
+        p["models"].add(model)
+        p["total_deployments"] += 1
+        p["total_ok"] += s.ok_count
+        p["total_fail"] += s.fail_count
+        p["total_calls"] += s.ok_count + s.fail_count
+        if s.ema_latency_ms:
+            p["ema_latency_ms"] += s.ema_latency_ms
+            p["latency_count"] += 1
+        p["deployments"].append({
+            "unique": unique,
+            "model": model,
+            "ok": s.ok_count,
+            "fail": s.fail_count,
+            "ema_latency_ms": s.ema_latency_ms,
+            "fail_streak": s.fail_streak,
+            "last_reason": s.last_reason,
+        })
+
+    # Circuit breaker status per API key
+    for ak, cb in router._circuit_breakers.items():
+        # Find which provider this key belongs to
+        for provider_key, p in providers.items():
+            for dep_info in p["deployments"]:
+                dep = cfg.deployment_by_unique(dep_info["unique"]) or {}
+                if router._api_key_str(dep) == ak:
+                    p["circuit_breakers"][cb["state"]] = p["circuit_breakers"].get(cb["state"], 0) + 1
+                    break
+
+    # Finalize
+    result = []
+    for p in providers.values():
+        if p["latency_count"] > 0:
+            p["ema_latency_ms"] = round(p["ema_latency_ms"] / p["latency_count"], 1)
+        else:
+            p["ema_latency_ms"] = 0.0
+        p["models"] = sorted(p["models"])
+        p["success_rate"] = round(p["total_ok"] / p["total_calls"] * 100, 1) if p["total_calls"] > 0 else 100.0
+        result.append(p)
+
+    result.sort(key=lambda x: x["total_calls"], reverse=True)
+    return {"providers": result, "circuit_breaker_config": {
+        "threshold": getattr(router.policy, "circuit_breaker_threshold", 5),
+        "timeout": getattr(router.policy, "circuit_breaker_timeout", 60.0),
+        "half_open_requests": getattr(router.policy, "circuit_breaker_half_open_requests", 3),
+    }}
+
+
 # ------------------------------------------------------------------ playground
 # Simulatore di chat READ-ONLY: rigira UNA richiesta reale (canonicalize ->
 # resolve_group_for_request -> initial_pick -> loop fallback_next) e riporta il

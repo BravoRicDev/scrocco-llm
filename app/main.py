@@ -348,6 +348,18 @@ app = FastAPI(title=policy.service_name, version="0.2.0", lifespan=lifespan)
 app.include_router(admin_api)
 app.include_router(bootstrap_api)
 
+# --- Observability: Trace ID, JSON logging, Prometheus /metrics ---
+from .observability import setup_observability, setup_replay_endpoint
+_obs_enabled = os.environ.get("GATEWAY_OBSERVABILITY", "1").strip() != "0"
+if _obs_enabled:
+    setup_observability(
+        app,
+        enable_json_logging=os.environ.get("GATEWAY_JSON_LOGGING", "0").strip() == "1",
+        enable_trace_id=True,
+        enable_prometheus=True,
+    )
+    setup_replay_endpoint(app)
+
 # ------------------------------------------------------------------ Exception handlers (Blocco 1: Refactoring errori globali)
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError):
