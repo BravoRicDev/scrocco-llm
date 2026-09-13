@@ -400,6 +400,10 @@ class Router:
         # Time-decay dei punteggi di reputazione (halflife da policy).
         self._scores_decay_ts: float = time.time()
         self._scores_decay_log_ts: float = time.time()
+        # CONNECTION DRAINING (hot-reload): unique rimosso dal CSV -> {ts,
+        # inflight, dep}. Resta in config marcato draining finche' le richieste
+        # in volo non terminano (o scade il TTL), poi rimosso definitivamente.
+        self._draining: dict[str, dict] = {}
 
         # --- Circuit Breaker per API Key ---
         # api_key -> {failures: int, last_failure: float, state: "closed|open|half_open", opened_at: float}
@@ -1905,6 +1909,73 @@ class Router:
     def note_end(self, unique: str) -> None:
         self.stats_for(unique).inflight = max(
             0, self.stats_for(unique).inflight - 1)
+        # Connection draining: una richiesta a un deployment in draining e'
+        # terminata -> decrementa il contatore; a zero il deployment viene
+        # rimosso definitivamente (anche dalla config).
+        d = self._drain().get(unique)
+        if d:
+            d["inflight"] = max(0, d["inflight"] - 1)
+            if d["inflight"] == 0:
+                self._finish_drain(unique)
+
+    # ------------------------------------------- connection draining (hot-reload)
+    def start_draining(self, unique: str, dep: dict,
+                       inflight: int) -> None:
+        """Archivia un deployment rimosso dal CSV ma con richieste in volo.
+
+        Il dep viene RI-AGGIUNTO alla config (se assente) marcato draining:
+        riferimenti/retry/record_* dello stesso ciclo continuano a risolverlo,
+        mentre pick_deployment lo ignora per le nuove richieste.
+        """
+        n = max(0, int(inflight))
+        self._drain()[unique] = {
+            "ts": time.time(),
+            "inflight": n,
+            "dep": dep,
+        }
+        grp = (dep or {}).get("group")
+        if grp and self.config is not None:
+            lst = self.config.groups.setdefault(grp, [])
+            if not any(x.get("unique") == unique for x in lst):
+                lst.append(dep)
+
+    def _drain(self) -> dict:
+        """Accessor lazy di `_draining` (pattern `_esc`): protegge i Router
+        costruiti senza __init__ (`Router.__new__(Router)` nei test)."""
+        d = getattr(self, "_draining", None)
+        if d is None:
+            d = {}
+            self._draining = d
+        return d
+
+    def is_draining(self, unique: str) -> bool:
+        return unique in self._drain()
+
+    def purge_draining(self) -> int:
+        """Rimuove i draining oltre il TTL (anche con inflight residua)."""
+        now = time.time()
+        ttl = max(1.0, float(getattr(self.policy, "hotreload_drain_ttl_sec",
+                                     120.0) or 120.0))
+        dead = [u for u, d in list(self._drain().items())
+                if now - d.get("ts", 0) > ttl]
+        for u in dead:
+            log.info("[drain] %s: TTL %ds scaduto (%d inflight) -> rimosso "
+                     "definitivamente", u, int(ttl),
+                     self._drain()[u].get("inflight", 0))
+            self._finish_drain(u)
+        return len(dead)
+
+    def _finish_drain(self, unique: str) -> None:
+        d = self._drain().pop(unique, None)
+        if d is None:
+            return
+        dep = d.get("dep") or {}
+        grp = dep.get("group")
+        if grp and self.config is not None and grp in self.config.groups:
+            self.config.groups[grp] = [x for x in self.config.groups[grp]
+                                       if x.get("unique") != unique]
+        log.info("[drain] %s: draining completata -> rimosso dalla config",
+                 unique)
 
     # ------------------------------------------------ persistenza (F4)
     def dump_stats(self) -> dict:
@@ -2540,6 +2611,8 @@ class Router:
             if self._gemini_blocked(d):
                 return False
             if self.is_retired(d["unique"]):
+                return False
+            if self.is_draining(d["unique"]):
                 return False
             if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
                 return False

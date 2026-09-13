@@ -357,6 +357,16 @@ def _all_uniques() -> set:
     return out
 
 
+def _all_deps() -> dict:
+    """unique -> dep dict di tutti i deployment configurati (per il drain
+    hot-reload: serve il dep VECCHIO di quelli rimossi)."""
+    out: dict = {}
+    for _lst in config.groups.values():
+        for _d in _lst:
+            out[_d.get("unique")] = _d
+    return out
+
+
 async def _watcher(interval: float) -> None:
     """Ogni `interval` secondi controlla mtime di CSV (credenziali) e
     gateway.yaml (policy) e ricarica ciò che è cambiato.
@@ -366,9 +376,11 @@ async def _watcher(interval: float) -> None:
     last_csv: int | None = None
     last_yaml: int | None = None
     _prev_uniques = _all_uniques()
+    _prev_deps = _all_deps()
     while True:
         try:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
+            router.purge_draining()     # draining scaduti oltre il TTL
             _maybe_save_adaptive_stats()
             _maybe_save_cooldowns()     # cooldown attivi su disco
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
@@ -412,8 +424,25 @@ async def _watcher(interval: float) -> None:
                                                     _added[:_max_p])
                     log.info("[hotreload] %d deployment nuovi: probe "
                              "fire-and-forget", min(len(_added), _max_p))
+                # CONNECTION DRAINING: i deployment rimossi dal CSV con
+                # richieste in volo restano in config marcati draining
+                # (ignorati dal pick per le nuove richieste); l'inflight
+                # viene drenato in note_end, il TTL li forza comunque via.
+                _cur = _all_uniques()
+                for _u in sorted(set(_prev_deps) - _cur):
+                    _inf = router.stats_for(_u).inflight
+                    if _inf > 0:
+                        router.start_draining(_u, _prev_deps[_u], _inf)
+                        log.info("[drain] %s: rimosso dal CSV con %d richieste "
+                                 "in volo -> draining (TTL %ds)", _u, _inf,
+                                 int(getattr(policy, "hotreload_drain_ttl_sec",
+                                             120) or 120))
+                    else:
+                        log.debug("[drain] %s: rimosso dal CSV, nessuna "
+                                  "richiesta in volo -> drop immediato", _u)
             last_csv = new
             _prev_uniques = _all_uniques()
+            _prev_deps = _all_deps()
 
             ym = csv_mtime_ns(POLICY_PATH)
             if ym is not None and last_yaml is not None and ym != last_yaml:

@@ -221,6 +221,10 @@ class Policy:
     hotreload_probe_max: int = 20
     hotreload_probe_timeout_sec: float = 15.0
     hotreload_probe_cooldown_sec: float = 300.0
+    # CONNECTION DRAINING su hot-reload: i deployment rimossi dal CSV con
+    # richieste in volo restano marcati draining (ignorati da pick_deployment)
+    # finche' l'inflight non torna a zero o scade questo TTL massimo.
+    hotreload_drain_ttl_sec: float = 120.0
     # Inflight request coalescing (solo non-streaming): richieste identiche
     # (stesso payload+profilo) in volo condividono una sola chiamata upstream.
     request_coalescing_enabled: bool = True
@@ -808,7 +812,8 @@ class Policy:
         for _fld in ("cooldown_autoprobe_crisis_ratio",
                      "cooldown_autoprobe_crisis_mult",
                      "hotreload_probe_timeout_sec",
-                     "hotreload_probe_cooldown_sec"):
+                     "hotreload_probe_cooldown_sec",
+                     "hotreload_drain_ttl_sec"):
             _val = raw.get(_fld)
             if _val is not None:
                 try:
