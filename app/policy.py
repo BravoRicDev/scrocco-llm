@@ -372,6 +372,21 @@ class Policy:
     loop_repeats: int = 3
     loop_toolcall_repeat: int = 2
     loop_min_tokens: int = 16
+    # Streaming: loop detector ON-THE-FLY sul buffer circolare degli ultimi
+    # N token di contenuto. Con un modello in loop degenere il kill arriva
+    # in pochi secondi invece di aspettare lo stall watchdog (che non scatta
+    # mai se il modello continua a produrre output). 0 disabilita il check.
+    loop_stream_buffer_words: int = 200
+
+    # CONCURRENCY LIMIT dinamico (#C): connessioni concorrenti per
+    # deployment. Se inflight >= limite, il deployment e' saturo per le NUOVE
+    # richieste (le in volo proseguono). Il limite e' appreso empiricamente:
+    # parte da conc_default_limit e sale di 1 ogni conc_learn_success_streak
+    # successi consecutivi a saturazione (max conc_max_limit); un errore di
+    # concorrenza (429/503) lo dimezza (min 1). Resetta al default al restart.
+    conc_default_limit: int = 3
+    conc_max_limit: int = 10
+    conc_learn_success_streak: int = 20
 
     # CORRECTIVE_RETRY (#3): 1 tentativo correttivo, solo non-streaming,
     # su fallimenti di contenuto/formato (non timeout).
@@ -825,6 +840,10 @@ class Policy:
         if "hotreload_probe_enabled" in raw:
             p.hotreload_probe_enabled = _coerce_bool(
                 raw["hotreload_probe_enabled"], "hotreload_probe_enabled")
+        _set_int(p, raw, "loop_stream_buffer_words", minimum=0)
+        _set_int(p, raw, "conc_default_limit", minimum=1)
+        _set_int(p, raw, "conc_max_limit", minimum=1)
+        _set_int(p, raw, "conc_learn_success_streak", minimum=1)
         if "request_coalescing_enabled" in raw:
             p.request_coalescing_enabled = _coerce_bool(
                 raw["request_coalescing_enabled"], "request_coalescing_enabled")

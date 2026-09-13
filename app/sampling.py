@@ -176,6 +176,20 @@ def detect_loop(text, tool_calls, cfg: SamplingConfig | None = None) -> str | No
         or _loop_reason_text(text if isinstance(text, str) else "", cfg.loop)
 
 
+def stream_loop_reason(words, lc: "LoopConfig") -> str | None:
+    """Loop detector ON-THE-FLY per lo streaming.
+
+    `words` e' un buffer circolare (ultime ~200 parole) estratto dai chunk
+    SSE di contenuto. Viene rieseguito a ogni chunk: un modello in loop
+    degenere scatta in 2-5 secondi invece di streammare all'infinito.
+    Ritorna il motivo del loop ("repeated_ngram") o None."""
+    if not lc.enabled:
+        return None
+    if len(words) < max(lc.min_tokens, lc.ngram_size * lc.repeats):
+        return None
+    return _loop_reason_text(" ".join(words), lc)
+
+
 def response_loop_reason(data: dict, cfg: SamplingConfig | None = None) -> str | None:
     """Loop detector applicato a una risposta chat non-streaming."""
     if not isinstance(data, dict):

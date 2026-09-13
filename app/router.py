@@ -404,6 +404,13 @@ class Router:
         # inflight, dep}. Resta in config marcato draining finche' le richieste
         # in volo non terminano (o scade il TTL), poi rimosso definitivamente.
         self._draining: dict[str, dict] = {}
+        # DYNAMIC CONCURRENCY LIMIT per-deployment: unique -> limite corrente
+        # (in memoria, mai persistito: riparte dal default al restart).
+        # Appreso empiricamente: sale con successi a saturazione, dimezza sui
+        # 429/503 di concorrenza. Lazy-init via _concl()/_concok() per i
+        # Router "nudi" dei test.
+        self._conc_limit: dict[str, int] = {}
+        self._conc_ok: dict[str, int] = {}
 
         # --- Circuit Breaker per API Key ---
         # api_key -> {failures: int, last_failure: float, state: "closed|open|half_open", opened_at: float}
@@ -836,6 +843,10 @@ class Router:
             log.info("[budget] %s: cap appresi da 429 -> ~%.0f/min, "
                      "~%.0f/giorno", unique, s.min_cap_learned,
                      s.day_cap_learned)
+        # --- dynamic concurrency limit: 429/503 = concorrenza oltre il
+        # limite -> dimezza il limite appreso (min 1) -----------------------
+        if status in (429, 503):
+            self._punish_concurrency(unique)
         s.fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)      # EMA verso lo 0 (α=0.2)
@@ -1899,6 +1910,8 @@ class Router:
         s.last_success_ts = time.time()
         # [Blocco 1] Registra successo per reputation scoring
         self.record_success(unique, latency_ms, quality=q)
+        # Dynamic concurrency limit: successo a saturazione -> il limite sale
+        self._learn_concurrency(unique)
 
     def note_end(self, unique: str) -> None:
         self.stats_for(unique).inflight = max(
@@ -2583,6 +2596,101 @@ class Router:
                      len(deps) - len(alive), len(deps), safety * 100)
         return alive
 
+    # --------------------------------- dynamic concurrency limit (per-deployment)
+    def _concl(self) -> dict:
+        d = getattr(self, "_conc_limit", None)
+        if d is None:
+            d = {}
+            self._conc_limit = d
+        return d
+
+    def _concok(self) -> dict:
+        d = getattr(self, "_conc_ok", None)
+        if d is None:
+            d = {}
+            self._conc_ok = d
+        return d
+
+    def _conc_default(self) -> int:
+        return max(1, int(getattr(self.policy, "conc_default_limit", 3) or 3))
+
+    def _conc_max(self) -> int:
+        return max(1, int(getattr(self.policy, "conc_max_limit", 10) or 10))
+
+    def _conc_streak(self) -> int:
+        return max(1, int(getattr(self.policy, "conc_learn_success_streak",
+                                  20) or 20))
+
+    def _concurrent_limit_for(self, d: dict) -> int:
+        """Limite di concorrenza per il deployment: il valore FISSO dalla
+        colonna `concurrent_limit` del CSV vince SEMPRE; altrimenti il limite
+        DINAMICO appreso (default conservativo, resettato al restart)."""
+        fixed = d.get("concurrent_limit")
+        if fixed:
+            return max(1, int(fixed))
+        return self._concl().get(d["unique"], self._conc_default())
+
+    def _apply_concurrency_limit(self, deps: list[dict]) -> list[dict]:
+        """Esclude i deployment con inflight >= limite di concorrenza: le
+        richieste gia' assegnate proseguono, le NUOVE vengono deviate su chiavi
+        disponibili. Se TUTTO il gruppo e' saturo, lascia passare (l'edge
+        estremo non deve svuotare il pick: il fallback/ultima-spiaggia decide).
+        Questo NON e' rate-limiting temporale: e' il collo di bottiglia delle
+        connessioni concorrenti per chiave (oltre il limite: 429/refused)."""
+        if not deps:
+            return deps
+        avail = [d for d in deps
+                 if self.stats_for(d["unique"]).inflight
+                 < self._concurrent_limit_for(d)]
+        if avail:
+            return avail
+        return deps
+
+    def _learn_concurrency(self, unique: str) -> None:
+        """Adatta il limite dinamico DOPO un successo (in note_result):
+        se la richiesta e' terminata con inflight >= limite (saturazione
+        gestita senza errori) per N successi consecutivi, il limite sale di 1
+        (max conc_max_limit). Sotto saturazione la streak si azzera."""
+        cfg = getattr(self, "config", None)
+        if cfg is None:
+            return                        # Router "nudo" (test): no-op
+        dep = cfg.deployment_by_unique(unique)
+        if dep is None or dep.get("concurrent_limit"):
+            return                        # limite FISSO: niente apprendimento
+        s = self.stats_for(unique)
+        if s.inflight >= self._concurrent_limit_for(dep):
+            ok = self._concok()
+            n = ok.get(unique, 0) + 1
+            ok[unique] = n
+            if n >= self._conc_streak():
+                ok.pop(unique, None)
+                lim = self._concl().get(unique, self._conc_default())
+                newlim = min(self._conc_max(), lim + 1)
+                self._concl()[unique] = newlim
+                log.info("[concurrency] %s: limite dinamico %d -> %d "
+                         "(%d successi a saturazione)",
+                         unique, lim, newlim, n)
+        else:
+            self._concok().pop(unique, None)
+
+    def _punish_concurrency(self, unique: str) -> None:
+        """Un errore di concorrenza (429/503) dimezza il limite dinamico
+        (min 1): il provider ha rifiutato connessioni concorrenti. Chiamato
+        da mark_failed sui 429/503. Il limite FISSO non viene toccato."""
+        cfg = getattr(self, "config", None)
+        if cfg is None:
+            return                        # Router "nudo" (test): no-op
+        dep = cfg.deployment_by_unique(unique)
+        if dep is None or dep.get("concurrent_limit"):
+            return
+        self._concok().pop(unique, None)
+        lim = self._concl().get(unique, self._conc_default())
+        newlim = max(1, lim // 2)
+        if newlim != lim:
+            self._concl()[unique] = newlim
+            log.info("[concurrency] %s: 429/503 -> limite dimezzato %d -> %d",
+                     unique, lim, newlim)
+
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
                         ctx: int | None = None,
@@ -2647,6 +2755,13 @@ class Router:
         # INFLIGHT-GUARD (budget predittivo): salta chi ha superato l'80%
         # (configurabile) del cap appreso PRIMA del 429, deviando sul fratello.
         deps = self._apply_inflight_guard(deps)
+        # CONCURRENCY LIMIT dinamico (per-deployment): salta chi ha raggiunto
+        # il limite di connessioni concorrenti (le in volo proseguono). Se
+        # tutto il gruppo e' saturo il pick procede comunque (edge estremo).
+        # SOLO mondo TESTO: i gruppi capacita' (gen/stt/video) hanno la loro
+        # model-stickiness e non devono essere disturbati dalla saturazione.
+        if self.config.group_caps.get(group_name) is None:
+            deps = self._apply_concurrency_limit(deps)
         # ORDINAMENTO DETERMINISTICO per -go/-fallback: niente metriche
         # (reputation, latenza, recency, _score). Solo `data` (giorno rinnovo
         # -> sort_key) e `model_preference`. Le metriche restano SOLO come

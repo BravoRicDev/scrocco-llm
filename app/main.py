@@ -53,6 +53,7 @@ from . import autoprobe
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PERMISSION_DENIED_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
+                        StreamLoopDetected, STREAM_LOOP_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
                         _PROVIDER_TRANSIENT_RE,
                         _THOUGHT_SIG_RE, is_provider_error_body,
@@ -377,6 +378,10 @@ async def _watcher(interval: float) -> None:
     last_yaml: int | None = None
     _prev_uniques = _all_uniques()
     _prev_deps = _all_deps()
+    # Lock seriale del reload: un reload in corso NON viene sovrapposto ma
+    # serializzato (insieme al suo post-processing probe/drain). Il lock
+    # sincrono in config.reload() protegge invece il momento dello swap.
+    _reload_lock = asyncio.Lock()
     while True:
         try:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
@@ -409,40 +414,43 @@ async def _watcher(interval: float) -> None:
             for j in expired:
                 _videos_jobs.pop(j, None)
 
-            new = maybe_reload(config, last_csv)
-            if last_csv is not None and new != last_csv:
-                log.info("[config] CSV ricaricato: profili=%s deployment=%d",
-                         ",".join(config.profiles),
-                         sum(len(v) for v in config.groups.values()))
-                # Probe immediato dei deployment appena aggiunti: scoprono lo
-                # stato di salute PRIMA del traffico reale (vedi autoprobe).
-                _added = sorted(_all_uniques() - _prev_uniques)
-                _max_p = max(0, int(getattr(policy, "hotreload_probe_max", 20)
-                                    or 0))
-                if _added and _max_p:
-                    autoprobe.spawn_hotreload_probe(router, forwarder,
-                                                    _added[:_max_p])
-                    log.info("[hotreload] %d deployment nuovi: probe "
-                             "fire-and-forget", min(len(_added), _max_p))
-                # CONNECTION DRAINING: i deployment rimossi dal CSV con
-                # richieste in volo restano in config marcati draining
-                # (ignorati dal pick per le nuove richieste); l'inflight
-                # viene drenato in note_end, il TTL li forza comunque via.
-                _cur = _all_uniques()
-                for _u in sorted(set(_prev_deps) - _cur):
-                    _inf = router.stats_for(_u).inflight
-                    if _inf > 0:
-                        router.start_draining(_u, _prev_deps[_u], _inf)
-                        log.info("[drain] %s: rimosso dal CSV con %d richieste "
-                                 "in volo -> draining (TTL %ds)", _u, _inf,
-                                 int(getattr(policy, "hotreload_drain_ttl_sec",
-                                             120) or 120))
-                    else:
-                        log.debug("[drain] %s: rimosso dal CSV, nessuna "
-                                  "richiesta in volo -> drop immediato", _u)
-            last_csv = new
-            _prev_uniques = _all_uniques()
-            _prev_deps = _all_deps()
+            async with _reload_lock:
+                new = maybe_reload(config, last_csv)
+                if last_csv is not None and new != last_csv:
+                    log.info("[config] CSV ricaricato: profili=%s deployment=%d",
+                             ",".join(config.profiles),
+                             sum(len(v) for v in config.groups.values()))
+                    # Probe immediato dei deployment appena aggiunti: scoprono lo
+                    # stato di salute PRIMA del traffico reale (vedi autoprobe).
+                    _added = sorted(_all_uniques() - _prev_uniques)
+                    _max_p = max(0, int(getattr(policy, "hotreload_probe_max", 20)
+                                        or 0))
+                    if _added and _max_p:
+                        autoprobe.spawn_hotreload_probe(router, forwarder,
+                                                        _added[:_max_p])
+                        log.info("[hotreload] %d deployment nuovi: probe "
+                                 "fire-and-forget", min(len(_added), _max_p))
+                    # CONNECTION DRAINING: i deployment rimossi dal CSV con
+                    # richieste in volo restano in config marcati draining
+                    # (ignorati dal pick per le nuove richieste); l'inflight
+                    # viene drenato in note_end, il TTL li forza comunque via.
+                    _cur = _all_uniques()
+                    for _u in sorted(set(_prev_deps) - _cur):
+                        _inf = router.stats_for(_u).inflight
+                        if _inf > 0:
+                            router.start_draining(_u, _prev_deps[_u], _inf)
+                            log.info("[drain] %s: rimosso dal CSV con %d "
+                                     "richieste in volo -> draining (TTL %ds)",
+                                     _u, _inf,
+                                     int(getattr(policy,
+                                                 "hotreload_drain_ttl_sec",
+                                                 120) or 120))
+                        else:
+                            log.debug("[drain] %s: rimosso dal CSV, nessuna "
+                                      "richiesta in volo -> drop immediato", _u)
+                last_csv = new
+                _prev_uniques = _all_uniques()
+                _prev_deps = _all_deps()
 
             ym = csv_mtime_ns(POLICY_PATH)
             if ym is not None and last_yaml is not None and ym != last_yaml:
@@ -1863,6 +1871,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                truncation_config_from_policy)
     _tt = text_config_from_policy(router.policy)
     _tct_cfg = truncation_config_from_policy(router.policy)
+    from .sampling import sampling_config_from_policy
+    _sm = sampling_config_from_policy(router.policy)
     _synth: list[bytes] = []
     t_req = time.monotonic()
     attempts: list[str] = []
@@ -2070,7 +2080,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                           or "body non leggibile" in detail.lower()
                           or len(detail.strip()) < 12)
             # motivo della classificazione deployment-side (per il log)
-            if schema_sig:
+            if isinstance(err, StreamLoopDetected):
+                reason = "loop_detected"
+            elif schema_sig:
                 reason = "payload_schema"
             elif media_sig:
                 reason = "media_reject"
@@ -2171,6 +2183,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         cur = router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
                             router.dep_sticky_release(ses)
+                elif reason == "loop_detected":
+                    # Loop degenere in streaming: cooldown medio, si ruota
+                    # subito (un'altra chiave/modello puo' rispondere).
+                    _cd = STREAM_LOOP_COOLDOWN_S
                 else:
                     _cd = err.retry_after
                 # reason propagato solo per il TIMEOUT (mark_failed applica il
@@ -2339,6 +2355,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
 
         gen_broken = False
         gen_stall = False          # stall mid-stream rilevato (anti-stall)
+        gen_loop = False           # loop degenere rilevato in streaming
         aborted = False            # client disconnesso durante lo stream
         monitor: asyncio.Task | None = None
         # il task che sta eseguendo QUESTO generator (sse): e' lui che va
@@ -2404,6 +2421,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # anti-stall: StreamStallError e' un asyncio.TimeoutError -> danno
             # reale (upstream appeso), cooldown lungo invece del soft.
             gen_stall = isinstance(exc, asyncio.TimeoutError)
+            gen_loop = isinstance(exc, StreamLoopDetected)
         finally:
             if monitor is not None:
                 monitor.cancel()
@@ -2435,6 +2453,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 "da %s (chunks=%d)", dep["unique"], chunks)
                     _fail(dep["unique"], seconds=_soft_cd(
                         router.stats_for(dep["unique"]).fail_count_24h))
+                elif gen_loop:
+                    # loop degenere: il modello streammava output ripetitivo,
+                    # il detector l'ha killato -> cooldown medio e riparti.
+                    wd = "loop-detected"
+                    metrics.inc("nx_qc_watchdog_total",
+                                (dep["unique"], "loop"))
+                    log.warning("[watchdog] stream in LOOP da %s (chunks=%d): "
+                                "kill precoce, cooldown %ds",
+                                dep["unique"], chunks, STREAM_LOOP_COOLDOWN_S)
+                    _fail(dep["unique"], seconds=STREAM_LOOP_COOLDOWN_S,
+                          reason="loop_detected")
                 elif gen_broken or (not seen_done and not saw_finish_reason):
                     # troncamento GENUINO: stream rotto a meta' oppure niente
                     # [DONE] E niente finish_reason -> il modello ha scazzato.

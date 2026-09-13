@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from typing import AsyncIterator
 
 import httpx
@@ -57,7 +58,8 @@ from .fakecall import (fake_config_from_policy, is_escalation_group,
                        message_fake_pattern)
 from .histnorm import hist_config_from_policy, normalize_messages
 from .sampling import (sampling_config_from_policy,
-                       apply_sampling_defaults, response_loop_reason)
+                       apply_sampling_defaults, response_loop_reason,
+                       stream_loop_reason)
 from .schemaout import (schemaout_config_from_policy, enforce_response,
                         maybe_inject_response_format,
                         downgrade_response_format)
@@ -409,6 +411,10 @@ PROVIDER_TRANSIENT_COOLDOWN_S = 120
 # 403 upstream (permission denied / project banned / key disabled...): la key
 # non torna presto -> cooldown lungo, poi si ruota sul successivo.
 PERMISSION_DENIED_COOLDOWN_S = 3600          # 1h
+
+# Loop degenere rilevato in STREAMING (kill precoce): il modello produce
+# output ripetitivo all'infinito -> cooldown medio, il routing ruota subito.
+STREAM_LOOP_COOLDOWN_S = 300                  # 5min
 
 
 def _sse(obj) -> bytes:
@@ -923,6 +929,103 @@ class UpstreamError(Exception):
         super().__init__(detail)
 
 
+class StreamLoopDetected(UpstreamError):
+    """Loop degenere rilevato DURANTE lo streaming: stream interrotto subito,
+    il chiamante tratta il fallimento come una normale rotazione
+    (reason="loop_detected"). Nessun status HTTP: lo stream e' gia' stato
+    interrotto, non c'e' una risposta upstream da passare al client."""
+
+    def __init__(self, detail: str):
+        super().__init__(None, detail)
+
+
+_STREAM_CONTENT_KEYS = ("content", "reasoning_content", "text", "thinking")
+
+
+def _extract_stream_words(obj, out: deque, max_words: int) -> None:
+    """Estrae le parole di CONTENUTO da un oggetto SSE (delta content /
+    reasoning / tool_call args) nel buffer circolare. Best-effort, mai errori."""
+    if not isinstance(obj, dict):
+        return
+    try:
+        choices = obj.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta") or choices[0].get("message") or {}
+            if isinstance(delta, dict):
+                for k in _STREAM_CONTENT_KEYS:
+                    v = delta.get(k)
+                    if isinstance(v, str) and v:
+                        out.extend(v.split())
+                _tcs = delta.get("tool_calls")
+                if isinstance(_tcs, list):
+                    for _tc in _tcs:
+                        if not isinstance(_tc, dict):
+                            continue
+                        _fn = _tc.get("function")
+                        if isinstance(_fn, dict):
+                            _a = _fn.get("arguments")
+                            if isinstance(_a, str) and _a:
+                                out.extend(_a.split())
+            return
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass
+    # provider non-OpenAI: stringa grezza o campo contenuto in testa
+    for k in _STREAM_CONTENT_KEYS:
+        v = obj.get(k)
+        if isinstance(v, str) and v:
+            out.extend(v.split())
+            return
+
+
+def _feed_stream_words(line: bytes, out: deque, max_words: int) -> None:
+    if max_words <= 0:
+        return
+    ln = line.strip()
+    if not ln.startswith(b"data:"):
+        return
+    data = ln[5:].strip()
+    if not data or data == b"[DONE]":
+        return
+    try:
+        obj = json.loads(data)
+    except Exception:
+        return
+    _extract_stream_words(obj, out, max_words)
+
+
+def _stream_loop_guard(source: AsyncIterator[bytes], lc, max_words: int,
+                       unique: str, model: str) -> AsyncIterator[bytes]:
+    """Wrapper dello stream SSE con loop detector ON-THE-FLY.
+
+    Buffer circolare delle ultime `max_words` parole di contenuto estratte dai
+    chunk. A ogni chunk riesegue `stream_loop_reason` sul buffer: se scatta,
+    solleva StreamLoopDetected -> il generator upstream viene chiuso dal
+    teardown del for (resp.aclose()) e il chiamante ruota (pre-byte) o chiude
+    lo stream verso il client (mid-stream)."""
+    buf: deque[str] = deque(maxlen=max(1, max_words))
+    line_buf = b""
+
+    async def _gen() -> AsyncIterator[bytes]:
+        nonlocal line_buf
+        async for chunk in source:
+            line_buf += chunk
+            while b"\n" in line_buf:
+                line, line_buf = line_buf.split(b"\n", 1)
+                _feed_stream_words(line, buf, max_words)
+            _feed_stream_words(line_buf, buf, max_words)
+            if max_words > 0:
+                _lr = stream_loop_reason(list(buf), lc)
+                if _lr:
+                    log.warning("[stream-loop] %s (%s): loop rilevato (%s) "
+                                "dopo %d parole -> kill stream", unique, model,
+                                _lr, len(buf))
+                    raise StreamLoopDetected(
+                        f"stream loop rilevato ({_lr}) su {model}")
+            yield chunk
+
+    return _gen()
+
+
 def _retry_after_of(resp: httpx.Response) -> float | None:
     """Header Retry-After (delta-seconds). HTTP-date non supportato: raro e
     ambiguo -> meglio l'escalation standard."""
@@ -1125,9 +1228,11 @@ class Forwarder:
                               attribution: dict | None = None,
                               tool_repair_config: ToolRepairConfig | None = None,
                               truncation_config: TruncationConfig | None = None,
-                              truncation_hook=None,
-                              rate_hook=None,
-                              ) -> AsyncIterator[bytes]:
+truncation_hook=None,
+                               rate_hook=None,
+                               loop_config=None,
+                               loop_stream_words=0,
+                               ) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
         Solleva UpstreamError per stati ritriabili PRIMA del primo byte inviato
@@ -1258,6 +1363,19 @@ class Forwarder:
                 await resp.aclose()
 
         raw_gen = gen()
+
+        # ---- STREAMING LOOP DETECTOR (kill precoce) ----
+        # Buffer circolare delle ultime parole di contenuto, check n-gram a
+        # ogni chunk: un loop degenere viene killato in 2-5s invece di
+        # streammare all'infinito (lo stall watchdog non scatta se il modello
+        # produce output costante). Il generator upstream viene chiuso dal
+        # teardown del for -> resp.aclose().
+        if loop_config is not None \
+                and getattr(loop_config, "enabled", False) \
+                and loop_stream_words > 0:
+            raw_gen = _stream_loop_guard(
+                raw_gen, loop_config, int(loop_stream_words),
+                dep.get("unique", "?"), dep.get("model", ""))
 
         # ---- TOOL REPAIR streaming ----
         _tr_cfg = tool_repair_config or ToolRepairConfig()

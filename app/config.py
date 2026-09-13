@@ -26,12 +26,19 @@ import csv
 import logging
 import random
 import re
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Any
 from .capabilities import ROUTING_CAPS, GEN_CAPS, canonical_family
 
 log = logging.getLogger("nx.config")
+
+# Lock che serializza reload() ovunque venga chiamato (watcher async task,
+# PUT /admin/csv in threadpool, test): due reload sovrapposti non applicano
+# mai stati misti. threading.Lock (non asyncio) perche' reload() e' sincrono e
+# puo' girare in thread diversi; la sezione critica e' breve.
+_RELOAD_LOCK = threading.Lock()
 
 ENDPOINT_HEADERS = {"endpoint", "endppoint", "end point", "endpoint_url"}
 MODEL_HEADER = "modello"
@@ -277,6 +284,9 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "media_defer": media_defer,
         "order": order,
         "enabled": enabled,
+        # limite FISSO di connessioni concorrenti (CSV, opzionale): vince
+        # sempre sul limite dinamico appreso dal router.
+        "concurrent_limit": _int_or_none(row.get("concurrent_limit")),
     }
 
 
@@ -312,6 +322,19 @@ def _is_number(v: str) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _int_or_none(v: object) -> int | None:
+    """Parsa un intero positivo; None se assente o non numerico."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or not _is_number(s):
+        return None
+    try:
+        return max(1, int(float(s)))
+    except (TypeError, ValueError):
+        return None
 
 
 def validate_csv(path: str | Path) -> list[str]:
@@ -371,6 +394,136 @@ def self_check(cfg: "GatewayConfig") -> list[str]:
     return problems
 
 
+# --------------------------------------------------------------------------
+# Diff strutturato per l'hot-reload: cosa e' cambiato tra lo stato APPLICATO
+# e il nuovo file CSV. Identita' per riga = (modello, endpoint); la chiave
+# (colonne non-standard) e' un campo MODIFICABILE (mai stampata in chiaro).
+# --------------------------------------------------------------------------
+
+_STANDARD_COLS = frozenset({
+    "commento", "modello", "provider", "endpoint", "data", "context",
+    "max_input", "priority", "caps", "effort_capable", "intelligence_score",
+    "model_preference", "media_defer", "order", "enabled",
+})
+
+
+def _csv_field_rows(path: str | Path) -> list[dict]:
+    """Righe CSV normalizzate (header-aware) per il diff strutturato.
+    Ogni elemento: {model, endpoint, key, fields:{col->val}, line}."""
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = list(csv.reader(f))
+    except (FileNotFoundError, OSError):
+        return []
+    start = 0
+    while start < len(reader) and (
+            not reader[start] or not any(c.strip() for c in reader[start])
+            or reader[start][0].lstrip().startswith("#")):
+        start += 1
+    if start >= len(reader):
+        return []
+    header = [h.strip() for h in reader[start]]
+    out: list[dict] = []
+    for i, r in enumerate(reader[start + 1:], start=start + 2):
+        if not r or not any(c.strip() for c in r):
+            continue
+        cells = {header[j]: (r[j] if j < len(r) else "").strip()
+                 for j in range(len(header))}
+        key = "|".join(v for c, v in cells.items()
+                       if c not in _STANDARD_COLS and v) or ""
+        out.append({
+            "line": i,
+            "model": cells.get("modello", ""),
+            "endpoint": cells.get("endpoint", ""),
+            "key": key,
+            "fields": cells,
+        })
+    return out
+
+
+def _config_diff(old_rows: list[dict], new_rows: list[dict]) -> dict:
+    """Classifica ogni riga: added / removed / modified / renamed / unchanged.
+    Una riga e' identica se modello+endpoint+key+tutti i campi coincidono.
+    MODIFIED: stessa identita' (modello, endpoint), qualche campo cambiato
+    (es. key revocata). RENAME: i campi coincidono tranne il modello."""
+    def _ident(r):
+        return (r["model"], r["endpoint"])
+
+    old_by = {_ident(r): r for r in old_rows}
+    new_by = {_ident(r): r for r in new_rows}
+    added: list[dict] = []
+    removed: list[dict] = []
+    modified: list[dict] = []
+    unchanged = 0
+    for r in new_rows:
+        o = old_by.get(_ident(r))
+        if o is None:
+            added.append(r)
+        elif o["key"] == r["key"] and o["fields"] == r["fields"]:
+            unchanged += 1
+        else:
+            modified.append({"model": r["model"], "endpoint": r["endpoint"],
+                             "old": o["fields"], "new": r["fields"]})
+    for r in old_rows:
+        if _ident(r) not in new_by:
+            removed.append(r)
+    # rename modello: una REMOVED che combacia con una ADDED su tutto tranne
+    # modello -> riportata come MODIFIED "model changed" (niente churn).
+    renamed: list[tuple[dict, dict]] = []
+    keep_r, keep_a = [], []
+    for r in removed:
+        _m = [a for a in added
+              if a["key"] == r["key"]
+              and a["endpoint"] == r["endpoint"]
+              and {k: v for k, v in a["fields"].items() if k != "modello"}
+              == {k: v for k, v in r["fields"].items() if k != "modello"}]
+        if _m:
+            renamed.append((r, _m[0]))
+        else:
+            keep_r.append(r)
+    for a in added:
+        if not any(_m is a for _r, _m in renamed):
+            keep_a.append(a)
+    removed, added = keep_r, keep_a
+    return {"added": added, "removed": removed, "modified": modified,
+            "renamed": renamed, "unchanged": unchanged}
+
+
+def _emit_config_diff(diff: dict) -> None:
+    log.info("[CONFIG_DIFF] added=%d removed=%d modified=%d "
+             "unchanged=%d", len(diff["added"]), len(diff["removed"]),
+             len(diff["modified"]), diff["unchanged"])
+    if not (diff["added"] or diff["removed"] or diff["modified"]
+            or diff["renamed"]):
+        return
+    for r in diff["added"]:
+        log.info("[CONFIG_DIFF] + deployment=%s endpoint=%s",
+                 r["model"] or "?", r["endpoint"] or "?")
+    for r in diff["removed"]:
+        log.info("[CONFIG_DIFF] - deployment=%s endpoint=%s",
+                 r["model"] or "?", r["endpoint"] or "?")
+    for m in diff["modified"]:
+        _changes = []
+        for name, v in m["new"].items():
+            ov = m["old"].get(name, "")
+            if ov == v:
+                continue
+            if name in _STANDARD_COLS:
+                if name == "modello":
+                    _changes.append(f"model changed: {ov or '∅'} -> {v or '∅'}")
+                elif name == "endpoint":
+                    _changes.append(f"endpoint changed: {ov or '∅'} -> {v or '∅'}")
+                else:
+                    _changes.append(f"{name} changed: {ov or '∅'} -> {v or '∅'}")
+            else:
+                _changes.append("key changed")   # mai la key in chiaro
+        log.info("[CONFIG_DIFF] ~ deployment=%s %s",
+                 m["model"] or "?", "; ".join(_changes))
+    for r, a in diff["renamed"]:
+        log.info("[CONFIG_DIFF] ~ deployment=%s model changed: %s -> %s",
+                 a["model"] or "?", r["model"] or "?", a["model"] or "?")
+
+
 class GatewayConfig:
     """Stato runtime completo derivato dal CSV."""
 
@@ -401,6 +554,8 @@ class GatewayConfig:
         self.chains_cap: dict[str, dict[str, list[str]]] = {}   # profilo->{cap:[uniques]}
         self.cap_counts: dict[str, dict[str, dict[str, int]]] = {}  # profilo->{cap:{primary,go,fallback}}
         self._load()
+        # snapshot dello stato APPLICATO, per il diff strutturato al reload
+        self._last_rows = _csv_field_rows(self.csv_path)
 
     # ------------------------------------------------------------------ load
     def _match_column_prefix(self, header: str) -> str | None:
@@ -600,6 +755,7 @@ class GatewayConfig:
                     "tool_repair": meta.get("tool_repair", ""),
                     "model_preference": int(meta.get("model_preference") or 0),
                     "sort_key": float(meta.get("sort_key") or float("inf")),
+                    "concurrent_limit": meta.get("concurrent_limit"),
                     "media_defer": bool(meta.get("media_defer", True)),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
@@ -689,24 +845,36 @@ class GatewayConfig:
                 log.warning("[config] CSV INVALIDO: %s", it)
             raise ConfigValidationError(
                 f"{len(issues)} problemi nel CSV (primo: {issues[0]})")
-        shadow = GatewayConfig(
-            self.csv_path, today=self.loaded_at,
-            proxy_prefix=self.proxy_prefix, go_suffix=self.go_suffix,
-            fallback_suffix=self.fallback_suffix,
-            extra_prefixes=self.extra_prefixes)
-        problems = self_check(shadow)
-        if problems:
-            for it in problems:
-                log.warning("[config] CSV INVALIDO (struttura): %s", it)
-            raise ConfigValidationError(problems[0])
-        self.profiles = shadow.profiles
-        self.groups = shadow.groups
-        self.group_caps = shadow.group_caps
-        self.profile_dims = shadow.profile_dims
-        self.profile_caps = shadow.profile_caps
-        self.chains = shadow.chains
-        self.chains_cap = shadow.chains_cap
-        self.cap_counts = shadow.cap_counts
+        # Lock seriale: un reload gia' in corso (watcher + PUT /admin/csv)
+        # viene serializzato, mai sovrapposto -> niente stati misti.
+        with _RELOAD_LOCK:
+            old_rows = getattr(self, "_last_rows", None)
+            new_rows = _csv_field_rows(self.csv_path)
+            shadow = GatewayConfig(
+                self.csv_path, today=self.loaded_at,
+                proxy_prefix=self.proxy_prefix, go_suffix=self.go_suffix,
+                fallback_suffix=self.fallback_suffix,
+                extra_prefixes=self.extra_prefixes)
+            problems = self_check(shadow)
+            if problems:
+                for it in problems:
+                    log.warning("[config] CSV INVALIDO (struttura): %s", it)
+                raise ConfigValidationError(problems[0])
+            self.profiles = shadow.profiles
+            self.groups = shadow.groups
+            self.group_caps = shadow.group_caps
+            self.profile_dims = shadow.profile_dims
+            self.profile_caps = shadow.profile_caps
+            self.chains = shadow.chains
+            self.chains_cap = shadow.chains_cap
+            self.cap_counts = shadow.cap_counts
+            # diff strutturato: cosa e' cambiato in questo reload (log CLOG)
+            if old_rows is not None:
+                _emit_config_diff(_config_diff(old_rows, new_rows))
+            else:
+                log.info("[CONFIG_DIFF] primo caricamento, %d righe "
+                         "(no diff)", len(new_rows))
+            self._last_rows = new_rows
 
 
 # --------------------------------------------------------------------------
