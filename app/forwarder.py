@@ -50,7 +50,8 @@ from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
 from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
-                         create_tool_repair_config, repair_tool_calls)
+                         TruncatedToolcallSSEFilter, create_tool_repair_config,
+                         repair_tool_calls)
 from .fakecall import (fake_config_from_policy, is_escalation_group,
                        message_fake_pattern)
 from .histnorm import hist_config_from_policy, normalize_messages
@@ -58,7 +59,9 @@ from .sampling import (sampling_config_from_policy,
                        apply_sampling_defaults, response_loop_reason)
 from .schemaout import (schemaout_config_from_policy, enforce_response,
                         maybe_inject_response_format)
-from .texttoolparse import text_config_from_policy, apply_to_message
+from .texttoolparse import (TruncationConfig, apply_to_message,
+                            has_unclosed_toolcall, salvage_truncated_toolcall,
+                            text_config_from_policy)
 
 
 def _corrective_note(kind: str) -> str:
@@ -799,6 +802,8 @@ class Forwarder:
                               session: str | None = None,
                               attribution: dict | None = None,
                               tool_repair_config: ToolRepairConfig | None = None,
+                              truncation_config: TruncationConfig | None = None,
+                              truncation_hook=None,
                               ) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
@@ -921,8 +926,27 @@ class Forwarder:
                         yield repaired
                 for repaired in _tr_filter.finalize():
                     yield repaired
-            return _repaired_gen()
-        return raw_gen
+            base_gen: AsyncIterator[bytes] = _repaired_gen()
+        else:
+            base_gen = raw_gen
+
+        # ---- TRUNCATED TOOL-CALL guard streaming ----
+        # Trattiene la coda da un tag aperto; a fine stream salva la tool-call
+        # o scarta il tag rotto (mai verso il client) + hook di declassamento.
+        _tct_cfg = truncation_config or TruncationConfig()
+        if _tct_cfg.enabled and _tct_cfg.holdback and payload.get("tools"):
+            _tct_filter = TruncatedToolcallSSEFilter(
+                dep.get("model", ""), payload.get("tools"), _tct_cfg,
+                on_truncation=truncation_hook)
+
+            async def _tct_gen() -> AsyncIterator[bytes]:
+                async for chunk in base_gen:
+                    for guarded in _tct_filter.feed(chunk):
+                        yield guarded
+                for guarded in _tct_filter.finalize():
+                    yield guarded
+            return _tct_gen()
+        return base_gen
 
     async def call(self, dep: dict, payload: dict, *,
                    profile: str = "",
@@ -1351,6 +1375,48 @@ class Forwarder:
                         log.info("[text-toolcall] %s: %d tool-call "
                                  "recuperati dal testo", cur,
                                  len(_tc_info))
+                # ---- TOOLCALL TRUNCATION: tag aperto mai chiuso ----
+                if (_tt.enabled and payload.get("tools") and not _text_parsed
+                        and getattr(router.policy,
+                                    "toolcall_truncation_enabled", True)):
+                    _msg0 = ((data.get("choices") or [{}])[0].get(
+                        "message") or {})
+                    _ctxt = _msg0.get("content")
+                    if isinstance(_ctxt, list):
+                        _ctxt = "".join(
+                            p.get("text", "") for p in _ctxt
+                            if isinstance(p, dict)
+                            and isinstance(p.get("text"), str))
+                    if isinstance(_ctxt, str) and has_unclosed_toolcall(_ctxt):
+                        _salv = None
+                        try:
+                            _salv = salvage_truncated_toolcall(
+                                _ctxt, payload.get("tools"), _tt)
+                        except Exception:
+                            _salv = None
+                        _cd = int(getattr(
+                            router.policy,
+                            "toolcall_truncation_cooldown_sec", 30) or 30)
+                        if _salv:
+                            _msg0["tool_calls"] = _salv
+                            _msg0["content"] = ""
+                            _text_parsed = True
+                            metrics.inc("nx_truncated_toolcall_total",
+                                        (cur, "salvaged"))
+                            log.warning("[truncation] %s: tool-call salvata "
+                                        "da tag rotto (%d)", cur, len(_salv))
+                        else:
+                            metrics.inc("nx_truncated_toolcall_total",
+                                        (cur, "rotate"))
+                            log.warning("[truncation] %s: tag tool-call rotto "
+                                        "non salvabile -> ruoto (cooldown "
+                                        "%ds)", cur, _cd)
+                            _fail_cur(seconds=_cd, reason="truncated_toolcall")
+                            last_broken = (data, dep)
+                            dep = router.fallback_next(
+                                profile, dep, need, scope, ctx=ctx,
+                                tried=tried, requested_group=requested_group)
+                            continue
                 # ---- L2 #5: output strutturato (A/B/D) ----
                 _so_rep = enforce_response(data, payload, _so) \
                     if (_so.enabled and not _text_parsed) \

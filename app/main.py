@@ -1580,8 +1580,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     })
     _fc = fake_config_from_policy(router.policy)
     from .texttoolparse import (text_config_from_policy,
-                               parse_text_toolcalls)
+                               parse_text_toolcalls,
+                               truncation_config_from_policy)
     _tt = text_config_from_policy(router.policy)
+    _tct_cfg = truncation_config_from_policy(router.policy)
     _synth: list[bytes] = []
     t_req = time.monotonic()
     attempts: list[str] = []
@@ -1602,12 +1604,33 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         router.note_start(dep["unique"])
         try:
             t_att = time.monotonic()
+            # hook: a fine stream, se il guard ha trovato un tag tool-call
+            # rotto, declassa il deployment (cooldown breve). `salvaged` dice
+            # se la chiamata e' stata recuperata o scartata.
+            _trunc_unique = dep["unique"]
+            _trunc_was_dormant = _was_dormant
+            def _trunc_hook(_salvaged, _u=_trunc_unique,
+                            _was=_trunc_was_dormant):
+                metrics.inc("nx_truncated_toolcall_total",
+                            (_u, "salvaged" if _salvaged else "dropped"))
+                log.warning("[truncation] stream %s: tag tool-call rotto "
+                            "(%s) -> declasso %ds", _u,
+                            "salvato" if _salvaged else "scartato",
+                            _tct_cfg.cooldown_sec)
+                if _was:
+                    router.mark_failed_double_residual(
+                        _u, reason="truncated_toolcall")
+                else:
+                    router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
+                                       reason="truncated_toolcall")
             gen = await forwarder.stream_response(dep, payload,
                                                   profile=profile or "",
                                                   client_ip=client_ip,
                                                   session=session,
                                                   attribution=attribution,
-                                                  tool_repair_config=_tr_cfg)
+                                                  tool_repair_config=_tr_cfg,
+                                                  truncation_config=_tct_cfg,
+                                                  truncation_hook=_trunc_hook)
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe

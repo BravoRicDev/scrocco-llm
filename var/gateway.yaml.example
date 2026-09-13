@@ -260,6 +260,25 @@ text_toolcall:
   fallback_to_escalation: true
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TOOLCALL TRUNCATION — tag tool-call aperto e mai chiuso
+# ─────────────────────────────────────────────────────────────────────────────
+# Una risposta che si chiude con un tag tool-call APERTO e mai chiuso
+# (es. "...<tool_call>{"name":"bash","args":{") e' TRONCATA o allucinata.
+# Il gateway TRATTIENE la coda (holdback) cosi' il tag rotto non raggiunge
+# MAI il client, poi:
+#   - se riesce a estrarre nome (fuzzy sui tools dichiarati) + args, chiude il
+#     JSON e inietta una `tool_calls` STRUTTURATA (finish_reason=tool_calls):
+#     l'agente esegue il tool e CONTINUA a lavorare;
+#   - se non salvabile, scarta il tag e ruota in modo trasparente (nessun byte
+#     rotto inviato).
+# In entrambi i casi il deployment va in cooldown breve.
+# Agnostic rispetto al client: non serve che il client sappia nulla.
+toolcall_truncation:
+  enabled: true
+  cooldown_sec: 30
+  holdback: true
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ALIAS KEYS — chiavi custom per alias generici (MAI esposte via API)
 # ─────────────────────────────────────────────────────────────────────────────
 # Mappa chiave -> nome modello per consentire a un client di autenticarsi con
@@ -332,7 +351,7 @@ qc_json:
   # Timeout in ms per il PRIMO byte di contenuto utile (prima si ruota).
   # 240000 = 4 min: i modelli con contesto lungo (200k+) possono impiegare
   # diversi minuti prima del primo token.
-  stream_first_content_ms: 240000
+  stream_first_content_ms: 120000
 
   # Deadline totale in ms per l'INTERO stream (960000 = 16 minuti).
   stream_total_deadline_ms: 960000

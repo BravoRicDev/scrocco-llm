@@ -25,10 +25,14 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from .thought_sig import is_gemini_deployment
+from .texttoolparse import (TruncationConfig, has_unclosed_toolcall,
+                            partial_opener_at_end, salvage_truncated_toolcall,
+                            unclosed_toolcall_index)
 
 log = logging.getLogger("nx.toolrepair")
 
@@ -724,6 +728,184 @@ class ToolRepairSSEFilter:
             "total_moves": self._total_moves,
             "level": self.level,
         }
+
+
+# ------------------------------------------------- truncated tool-call guard
+def _sse_builder(model: str):
+    cid = "chatcmpl-" + uuid.uuid4().hex[:24]
+    created = int(time.time())
+
+    def _chunk(delta, finish=None) -> bytes:
+        obj = {"id": cid, "object": "chat.completion.chunk",
+               "created": created, "model": model,
+               "choices": [{"index": 0, "delta": delta,
+                            "finish_reason": finish}]}
+        return ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode()
+
+    return _chunk
+
+
+def _synth_content_sse(text: str, model: str) -> list[bytes]:
+    """SSE sintetico con solo contenuto testuale."""
+    _chunk = _sse_builder(model)
+    return [_chunk({"role": "assistant", "content": text})]
+
+
+def _synth_answer_sse(prefix: str, tool_calls, model: str) -> list[bytes]:
+    """SSE sintetico: eventuale testo precedente + tool_calls + finish + DONE."""
+    _chunk = _sse_builder(model)
+    out: list[bytes] = []
+    if prefix:
+        out.append(_chunk({"role": "assistant", "content": prefix}))
+    out.append(_chunk({"tool_calls": [
+        {"index": i, "id": tc.get("id"), "type": "function",
+         "function": tc.get("function")}
+        for i, tc in enumerate(tool_calls)]}))
+    out.append(_chunk({}, "tool_calls"))
+    out.append(b"data: [DONE]\n\n")
+    return out
+
+
+def _synth_toolcall_sse(tool_calls, model: str) -> list[bytes]:
+    """SSE OpenAI sintetico per consegnare tool_calls salvate da un tag rotto."""
+    return _synth_answer_sse("", tool_calls, model)
+
+
+class TruncatedToolcallSSEFilter:
+    """Trattiene la coda quando un tool-call testuale resta APERTO (troncato).
+
+    Finche' nessun tag di apertura compare, il flusso passa INVARIATO (zero
+    latenza aggiunta). Appena compare un'apertura (`<tool_call>`, ...) il
+    contenuto viene TRATTENUTO: se il tag si chiude viene rilasciato (il parser
+    testuale esistente lo gestisce); se lo stream finisce col tag ancora aperto
+    si tenta il SALVATAGGIO (tool_calls strutturata) e in ogni caso il tag rotto
+    NON raggiunge mai il client. `on_truncation(salvaged)` e' invocata a fine
+    stream per il declassamento del deployment.
+    """
+
+    def __init__(self, model: str, tools, cfg: TruncationConfig,
+                 text_cfg=None, on_truncation=None):
+        self.model = model
+        self.tools = tools or []
+        self.cfg = cfg
+        self.text_cfg = text_cfg
+        self._on_truncation = on_truncation
+        self._raw = b""
+        self._holding = False
+        self._held_text = ""
+        self._held_events: list[bytes] = []
+        self._tail_events: list[bytes] = []
+        self._done = False
+        self.truncated = False
+        self.salvaged = False
+
+    def feed(self, chunk_bytes: bytes) -> list[bytes]:
+        if not self.cfg.enabled or self._done:
+            return [chunk_bytes]
+        self._raw += chunk_bytes
+        out: list[bytes] = []
+        while True:
+            found = ToolRepairSSEFilter._find_sep(self._raw)
+            if found is None:
+                break
+            idx, seplen = found
+            event = self._raw[:idx]
+            self._raw = self._raw[idx + seplen:]
+            out.extend(self._process(event, b"\n\n"))
+        return out
+
+    def finalize(self) -> list[bytes]:
+        out: list[bytes] = []
+        if self._raw.strip():
+            out.extend(self._process(self._raw, b"\n"))
+            self._raw = b""
+        if self._holding:
+            out.extend(self._decide())
+        return out
+
+    def _process(self, event: bytes, sep: bytes) -> list[bytes]:
+        passthrough = [event + sep]
+        data = ToolRepairSSEFilter._data_of(event)
+        if not data:
+            return [] if self._holding else passthrough
+        if data.strip() == "[DONE]":
+            if self._holding:
+                self._done = True
+                return self._decide()
+            self._done = True
+            return passthrough
+        try:
+            obj = json.loads(data)
+        except (ValueError, TypeError):
+            return [] if self._holding else passthrough
+        choices = obj.get("choices") if isinstance(obj, dict) else None
+        if not choices:
+            return [] if self._holding else passthrough
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        content = delta.get("content")
+        if not isinstance(content, str) or content == "":
+            # evento non-contenuto (role/tool_calls/finish/usage): in holding
+            # lo si accoda e si decide alla fine.
+            if self._holding:
+                self._tail_events.append(event + sep)
+                return []
+            return passthrough
+        if not self._holding:
+            if has_unclosed_toolcall(content) or partial_opener_at_end(content):
+                self._holding = True
+                self._held_text = content
+                self._held_events = [event + sep]
+                return []
+            return passthrough
+        self._held_text += content
+        self._held_events.append(event + sep)
+        if not has_unclosed_toolcall(self._held_text) \
+                and not partial_opener_at_end(self._held_text):
+            # tag chiuso o falso allarme: rilascia invariato
+            out = self._held_events
+            self._held_events = []
+            self._held_text = ""
+            self._holding = False
+            return out
+        return []
+
+    def _decide(self) -> list[bytes]:
+        """A fine stream con tag aperto: salva la tool-call o scarta il rotto."""
+        text = self._held_text
+        out: list[bytes] = []
+        idx = unclosed_toolcall_index(text)
+        calls = None
+        if idx != -1:
+            try:
+                calls = salvage_truncated_toolcall(
+                    text, self.tools, self.text_cfg)
+            except Exception:
+                log.exception("[truncation] salvage errore")
+                calls = None
+        prefix = text[:idx].rstrip() if idx > 0 else ""
+        if calls:
+            out.extend(_synth_answer_sse(prefix, calls, self.model))
+            self.salvaged = True
+        else:
+            # nessun salvataggio: il tag rotto NON esce. Si conserva l'eventuale
+            # testo precedente; niente finish_reason (cosi' il chiamante puo'
+            # ruotare in modo trasparente).
+            if prefix:
+                out.extend(_synth_content_sse(prefix, self.model))
+            out.append(b"data: [DONE]\n\n")
+        self.truncated = True
+        self._holding = False
+        self._held_text = ""
+        self._held_events = []
+        self._tail_events = []
+        self._done = True
+        if self._on_truncation:
+            try:
+                self._on_truncation(self.salvaged)
+            except Exception:
+                log.exception("[truncation] hook errore")
+        return out
 
 
 # ------------------------------------------------------------------- factory

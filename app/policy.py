@@ -272,6 +272,15 @@ class Policy:
     text_toolcall_max_bytes: int = 200000
     text_toolcall_hold_until_close: bool = True
     text_toolcall_fallback_to_escalation: bool = True
+    # TOOLCALL_TRUNCATION: una risposta che si chiude con un tag tool-call
+    # APERTO e mai chiuso (`<tool_call>...` senza close) e' troncata o
+    # allucinata. Il tag rotto NON deve uscire: il gateway trattiene la coda,
+    # salva la chiamata parziale (nome+args -> tool_calls strutturata) cosi'
+    # l'agente continua, altrimenti ruota in modo trasparente. Deployment in
+    # cooldown breve (default 30s). holdback: attiva il trattenimento coda.
+    toolcall_truncation_enabled: bool = True
+    toolcall_truncation_cooldown_sec: int = 30
+    toolcall_truncation_holdback: bool = True
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
     cache_prefer_last_success: bool = True
@@ -990,6 +999,25 @@ class Policy:
                 p.text_toolcall_fallback_to_escalation = _coerce_bool(
                     _tt["fallback_to_escalation"],
                     "text_toolcall.fallback_to_escalation")
+
+        # --- TOOLCALL_TRUNCATION ---
+        _tct = raw.get("toolcall_truncation")
+        if _tct is not None:
+            if not isinstance(_tct, dict):
+                raise ValueError("toolcall_truncation deve essere una mappa")
+            if "enabled" in _tct:
+                p.toolcall_truncation_enabled = _coerce_bool(
+                    _tct["enabled"], "toolcall_truncation.enabled")
+            if "holdback" in _tct:
+                p.toolcall_truncation_holdback = _coerce_bool(
+                    _tct["holdback"], "toolcall_truncation.holdback")
+            _cd = _tct.get("cooldown_sec")
+            if _cd is not None:
+                if isinstance(_cd, bool) or not isinstance(
+                        _cd, (int, float)) or int(_cd) < 1:
+                    raise ValueError("toolcall_truncation.cooldown_sec deve "
+                                     "essere >= 1")
+                p.toolcall_truncation_cooldown_sec = int(_cd)
 
         ca = raw.get("cache_aware")
         if ca is not None:

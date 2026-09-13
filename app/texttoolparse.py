@@ -316,3 +316,152 @@ def apply_to_message(message: dict, tools, cfg: TextToolcallConfig):
     info = [{"name": c["function"]["name"],
              "n_args": len(json.loads(c["function"]["arguments"]))} for c in calls]
     return info
+
+
+# ------------------------------------------------ truncated tool-call salvage
+# Tag tool-call come TESTTO che un modello debole puo' emettere (e troncare):
+# coppie (apertura, chiusura). La chiusura mancante = risposta troncata/finta.
+_TOOLCALL_PAIRS: tuple[tuple[str, str], ...] = (
+    ("<tool_call>", "</tool_call>"),
+    ("<function_call>", "</function_call>"),
+    ("<tool_calls>", "</tool_calls>"),
+    ("<function_calls>", "</function_calls>"),
+    ("<function=", "</function>"),
+    ("antml:invoke", "</antml:invoke>"),
+    ("<invoke", "</invoke>"),
+)
+
+# Prefissi parziali: se il testo TERMINA con uno di questi (>=3 char) il tag
+# potrebbe ancora formarsi nel chunk successivo -> si trattiene la coda.
+_PARTIAL_OPENERS: tuple[str, ...] = (
+    "<tool_call>", "<function_call>", "<tool_calls>", "<function_calls>",
+    "<function=", "antml:invoke", "</function>", "<invoke",
+)
+
+
+@dataclass
+class TruncationConfig:
+    """Config per la gestione dei tool-call troncati (policy toolcall_truncation)."""
+    enabled: bool = True
+    cooldown_sec: int = 30
+    holdback: bool = True
+
+
+def truncation_config_from_policy(policy) -> TruncationConfig:
+    if policy is None:
+        return TruncationConfig()
+    return TruncationConfig(
+        enabled=bool(getattr(policy, "toolcall_truncation_enabled", True)),
+        cooldown_sec=int(getattr(policy, "toolcall_truncation_cooldown_sec", 30) or 30),
+        holdback=bool(getattr(policy, "toolcall_truncation_holdback", True)),
+    )
+
+
+def unclosed_toolcall_index(text) -> int:
+    """Indice dell'ULTIMO tag tool-call aperto e mai chiuso, o -1 se nessuno."""
+    if not isinstance(text, str) or not text:
+        return -1
+    best = -1
+    for op, cl in _TOOLCALL_PAIRS:
+        oi = text.rfind(op)
+        if oi != -1 and text.find(cl, oi) == -1 and oi > best:
+            best = oi
+    return best
+
+
+def has_unclosed_toolcall(text) -> bool:
+    """True se `text` contiene un tag tool-call APERTO senza chiusura dopo.
+
+    Solo l'ULTIMA apertura per coppia conta: se un tag precedente e' chiuso ma
+    l'ultimo e' aperto, la risposta e' troncata.
+    """
+    return unclosed_toolcall_index(text) != -1
+
+
+def partial_opener_at_end(text) -> bool:
+    """True se il testo termina con un prefisso (>=3 char) di un tag di apertura.
+
+    Serve a trattenere l'ultimo frammento quando un tag puo' essere spezzato
+    tra due chunk (es. "...<tool" + "_call>...").
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    t = text.lower()
+    for op in _PARTIAL_OPENERS:
+        low = op.lower()
+        lo = min(len(low), len(t))
+        for k in range(3, lo + 1):
+            if t.endswith(low[:k]):
+                return True
+    return False
+
+
+def _fuzzy_declared(low: str, declared: dict[str, str]) -> str | None:
+    """Match approssimato di un nome (anche parziale/troncato) sui tool dichiarati."""
+    if not low:
+        return None
+    for dlow, dorig in declared.items():
+        if low == dlow or dlow.startswith(low) or low.startswith(dlow):
+            return dorig
+    return None
+
+
+def _salvage_json_body(body: str, tools, cfg: TextToolcallConfig):
+    body = _strip_code_fence(body).strip()
+    if not body:
+        return None
+    obj = None
+    try:
+        obj = json.loads(body)
+    except Exception:
+        # JSON troncato: chiudilo con il repair aggressive (close_truncated_json)
+        try:
+            from .toolrepair import ToolRepairConfig, repair_arguments
+            repaired, _changed, _moves = repair_arguments(
+                body, "aggressive", ToolRepairConfig())
+            obj = json.loads(repaired)
+        except Exception:
+            return None
+    calls = _obj_to_calls(obj)
+    if not calls:
+        return None
+    declared = _declared(tools)
+    for c in calls:
+        name = c["function"]["name"]
+        if cfg.require_declared_name and declared and name.strip().lower() not in declared:
+            match = _fuzzy_declared(name.strip().lower(), declared)
+            if not match:
+                log.info("[truncation] nome %r non dichiarato: no salvage", name)
+                return None
+            c["function"]["name"] = match
+        try:
+            v = json.loads(c["function"]["arguments"])
+        except Exception:
+            return None
+        if not isinstance(v, dict):
+            return None
+    return calls
+
+
+def salvage_truncated_toolcall(text, tools, cfg: TextToolcallConfig | None = None):
+    """Estrae una tool-call da un tag APERTO non chiuso. None se non confidente.
+
+    Solo per corpi JSON (`<tool_call>{...}`, `<function_call>{...}`): completa
+    il JSON troncato e valida il nome contro i tool dichiarati (fuzzy match).
+    I formati XML/antml troncati non sono salvabili -> None (il chiamante ruota).
+    """
+    cfg = cfg or TextToolcallConfig()
+    if not cfg.enabled or not tools:
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    best_pos = unclosed_toolcall_index(text)
+    if best_pos < 0:
+        return None
+    op = next((o for o, _c in _TOOLCALL_PAIRS if text.startswith(o, best_pos)),
+              None)
+    if op not in ("<tool_call>", "<function_call>",
+                  "<tool_calls>", "<function_calls>"):
+        return None
+    body = text[best_pos + len(op):]
+    return _salvage_json_body(body, tools, cfg)
