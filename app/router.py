@@ -1071,6 +1071,14 @@ class Router:
             | (dep.get("caps") or frozenset())
         return bool(declared & self.MEDIA_TOKENS)
 
+    def _is_deferrable(self, dep: dict) -> bool:
+        """True se il deployment partecipa al MEDIA DEFER (multimodal_last_resort):
+        multimodale E non esentato dalla colonna CSV `media_defer`.
+        media_defer=false -> il deployment resta eleggibile per il testo puro
+        senza toccare le sue capacità reali (caps intatti)."""
+        return (self._is_media_capable(dep)
+                and bool(dep.get("media_defer", True)))
+
     def _prefer_same_model(self, cap: str | None, cur_model: str) -> bool:
         """True se il fallback da questo gruppo cap deve PRIORIZZARE (non
         escludere) gli altri deployment dello stesso modello upstream."""
@@ -1101,7 +1109,7 @@ class Router:
             return deps, False                      # richiesta media: mai
         if self.config.group_caps.get(group_name) is not None:
             return deps, False                      # gruppo cap: mai
-        text_only = [d for d in deps if not self._is_media_capable(d)]
+        text_only = [d for d in deps if not self._is_deferrable(d)]
         if text_only and len(text_only) < len(deps):
             self.media_deferred[group_name] = \
                 self.media_deferred.get(group_name, 0) + 1
@@ -2109,7 +2117,7 @@ class Router:
                 return uniqs
             deps = [d for d in (ccfg.deployment_by_unique(u) for u in uniqs)
                     if d is not None]
-            text_only = [d for d in deps if not self._is_media_capable(d)]
+            text_only = [d for d in deps if not self._is_deferrable(d)]
             if text_only and len(text_only) < len(deps):
                 kept = {d["unique"] for d in text_only}
                 return [u for u in uniqs if u in kept]

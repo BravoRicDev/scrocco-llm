@@ -111,6 +111,39 @@ deployment_sticky: true
 go_recency_halflife_sec: 300
 
 # ─────────────────────────────────────────────────────────────────────────────
+# EFFORT / REASONING — bias di routing verso l'intelligence
+# ─────────────────────────────────────────────────────────────────────────────
+# Quando il client invia `reasoning_effort` (low/medium/high) il router
+# moltiplica il punteggio (lower-is-better) dei deployment in base al loro
+# `intelligence_score` (colonna CSV, 1-10):
+#   high   -> score *= (1 - (intel-5)*w)   favorisce i piu' intelligenti
+#   low    -> score *= (1 + (intel-5)*w)   favorisce i piu' leggeri
+#   medium -> score *= (1 + |intel-5|*w)   favorisce il centro della scala
+# `effort_intel_weight` e' l'ampiezza del bias (0 = disabilita).
+# Il forwarder inietta `reasoning_effort` SOLO sui deployment effort_capable
+# (colonna CSV) e applica gli override di temperatura SOLO se il client non
+# ha inviato `temperature` (il client vince sempre). Su host incompatibili
+# (es. Groq) il parametro viene rimosso.
+enable_effort_temperature_override: true
+effort_temperature_overrides:
+  low: 1.0
+  medium: 0.7
+  high: 0.2
+effort_intel_weight: 10
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THOUGHT SIGNATURE (Gemini) — riempimento dummy per storico non firmato
+# ─────────────────────────────────────────────────────────────────────────────
+# Google pretende una `thought_signature` sui functionCall del turno corrente.
+# Se lo storico contiene tool-call non firmate (es. prodotte da altri modelli),
+# la richiesta viene ESCLUSA da Gemini a monte, come una capability mancante
+# (niente tentativi "finti"). Con thought_sig_dummy_fill=true, al posto
+# dell'esclusione si inietta una firma DUMMY ufficiale che SALTA la
+# validazione (Google la documenta come last resort: il reasoning degrada).
+thought_sig_dummy_fill: true
+thought_sig_dummy_value: skip_thought_signature_validator
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ESCALATION WINNER — scorciatoia SOLO-IN-SALITA, trasversale alla sessione
 # ─────────────────────────────────────────────────────────────────────────────
 # Problema: una richiesta partita da un bucket piccolo (es. -200k) che trova

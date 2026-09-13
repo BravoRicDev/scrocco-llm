@@ -27,7 +27,7 @@ from pathlib import Path
 from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      DATA_HEADER, CONTEXT_HEADER, MAX_INPUT_HEADER,
                      PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER,
-                     GatewayConfig)
+                     MEDIA_DEFER_HEADER, GatewayConfig)
 
 # campi gestiti dall'API (il resto delle colonne passa trasparente)
 PAYLOAD_FIELDS = {
@@ -39,6 +39,7 @@ PAYLOAD_FIELDS = {
     "priority": PRIORITY_HEADER,
     "caps": CAPS_HEADER,
     "tool_repair": TOOL_REPAIR_HEADER,
+    "media_defer": MEDIA_DEFER_HEADER,
 }
 
 # token ammessi nella colonna caps (speculare a ROUTING_CAPS + text)
@@ -222,6 +223,18 @@ def apply_payload(row: dict, payload: dict, prefix: str,
         if payload_key in payload:
             if payload_key == "caps":
                 row[header_name] = validate_caps(payload["caps"])
+                continue
+            if payload_key == "media_defer":
+                v = payload["media_defer"]
+                if isinstance(v, bool):
+                    row[header_name] = "true" if v else "false"
+                elif v is None:
+                    row[header_name] = ""
+                else:
+                    s = str(v).strip().lower()
+                    row[header_name] = "" if s == "" else (
+                        "false" if s in ("0", "false", "no", "n", "off")
+                        else "true")
                 continue
             v = payload[payload_key]
             row[header_name] = "" if v is None else str(v)

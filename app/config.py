@@ -45,6 +45,10 @@ EFFORT_CAPABLE_HEADER = "effort_capable"
 INTELLIGENCE_HEADER = "intelligence_score"
 TOOL_REPAIR_HEADER = "tool_repair"
 MODEL_PREFERENCE_HEADER = "model_preference"
+# media_defer=false: il deployment (anche multimodale) NON viene rimandato dal
+# multimodal_last_resort nelle richieste di testo puro: resta eleggibile nelle
+# chat senza dover svuotare la colonna `caps` (capacità reali intatte).
+MEDIA_DEFER_HEADER = "media_defer"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -225,6 +229,11 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     if raw_tr not in ("", "off", "safe", "aggressive"):
         raw_tr = ""
 
+    # media_defer: partecipa al MEDIA DEFER per le richieste testo?
+    # default/vuoto = true (comportamento storico); false = esente.
+    raw_md = (row.get(MEDIA_DEFER_HEADER) or "").strip().lower()
+    media_defer = raw_md not in ("0", "false", "no", "n", "off")
+
     return {
         "modello": modello,
         "provider": provider,
@@ -240,6 +249,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "intelligence": intelligence,
         "tool_repair": raw_tr,
         "model_preference": model_preference,
+        "media_defer": media_defer,
     }
 
 
@@ -481,6 +491,7 @@ class GatewayConfig:
                     "intelligence": int(meta.get("intelligence") or 5),
                     "tool_repair": meta.get("tool_repair", ""),
                     "model_preference": int(meta.get("model_preference") or 0),
+                    "media_defer": bool(meta.get("media_defer", True)),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap

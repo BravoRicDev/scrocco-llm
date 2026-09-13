@@ -12,12 +12,19 @@
 # Colonna opzionale "tool_repair": livello di riparazione argomenti tool-call.
 #   "" vuoto = aggressive (default); "safe" = solo mosse sicure; "off" = disattivato.
 #   I deployment Google/Gemini sono off di default (disable_for_google).
+#
+# Colonna opzionale "media_defer": partecipazione al MEDIA DEFER
+#   (multimodal_last_resort) per le richieste di testo puro.
+#   "" vuoto/true = deferito (comportamento storico); false = esente: resta
+#   eleggibile per il testo anche se ha capacità media (es. vision), senza
+#   svuotare la colonna caps (capacità reali intatte).
 
-commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-myteam,caps,tool_repair,model_preference
-sk-FAKE-KEY-A1B2C3D4E5F6G7H8,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128,8000,0,sk-FAKE-KEY-A1B2C3D4E5F6G7H8,,,0
-sk-FAKE-KEY-F6G7H8I9J0K1L2M3,NVIDIA/nemotron-3.5-lightning:free,openrouter,https://openrouter.ai/api/v1,free,200,50000,0,sk-FAKE-KEY-F6G7H8I9J0K1L2M3,,,0
-sk-FAKE-KEY-L3M4N5O6P7Q8R9S0,mistral-medium-latest,mistral,https://api.mistral.ai/v1,free,128,50000,0,sk-FAKE-KEY-L3M4N5O6P7Q8R9S0,,,0
-sk-FAKE-KEY-T9U0V1W2X3Y4Z5A6,cohere/north-mini-code:free,openrouter,https://openrouter.ai/api/v1,free,256,50000,0,sk-FAKE-KEY-T9U0V1W2X3Y4Z5A6,,,0
+commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-myteam,caps,tool_repair,model_preference,media_defer
+sk-FAKE-KEY-A1B2C3D4E5F6G7H8,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128,8000,0,sk-FAKE-KEY-A1B2C3D4E5F6G7H8,,,0,
+sk-FAKE-KEY-F6G7H8I9J0K1L2M3,NVIDIA/nemotron-3.5-lightning:free,openrouter,https://openrouter.ai/api/v1,free,200,50000,0,sk-FAKE-KEY-F6G7H8I9J0K1L2M3,,,0,
+sk-FAKE-KEY-L3M4N5O6P7Q8R9S0,mistral-medium-latest,mistral,https://api.mistral.ai/v1,free,128,50000,0,sk-FAKE-KEY-L3M4N5O6P7Q8R9S0,,,0,
+sk-FAKE-KEY-T9U0V1W2X3Y4Z5A6,cohere/north-mini-code:free,openrouter,https://openrouter.ai/api/v1,free,256,50000,0,sk-FAKE-KEY-T9U0V1W2X3Y4Z5A6,,,0,
+# modelli media (es. Gemini) eleggibili per il testo: media_defer=false
 # STT locale (speaches/whisper nel docker-compose): chiave placeholder, il servizio
 # locale non la verifica. Il modello va censito in gateway.yaml: "*whisper*": [stt]
 # local-whisper,Systran/faster-whisper-base,speaches,http://speaches:8000/v1,free,128,0,10,placeholder-key,stt
