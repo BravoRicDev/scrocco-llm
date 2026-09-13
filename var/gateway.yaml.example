@@ -510,3 +510,13 @@ cache_aware:
     on_deployment_switch: true
     switch_min_tokens: 8000
     stub_text: "[tool output omesso: {n} caratteri]"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEBUG — scatola nera input/output (solo per debug locale)
+# Registra OGNI richiesta e risposta (SSE inclusa) in var/debug-sniff.log con
+# rotazione ORARIA; retention = retention_hours ore (default 24).
+# ATTENZIONE: contiene la conversazione COMPLETA (nessuna redazione).
+debug:
+  sniff:
+    enabled: false          # true per attivare lo sniff
+    retention_hours: 24     # file orari tenuti (default 24 = ultime 24h)

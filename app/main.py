@@ -46,6 +46,7 @@ from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult
 from . import journal, metrics
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
+from . import sniff
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PERMISSION_DENIED_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
@@ -146,6 +147,10 @@ _install_file_logging()
 # file assente/corrotto -> default, il servizio parte comunque.
 # I nomi pubblici usano policy.proxy_prefix: nessun nome è hardcodato qui.
 policy = Policy.load_or_default(POLICY_PATH)
+# Debug SNIFF: handler con rotazione oraria, default OFF. Registrato anche se
+# disattivato (l'abilitazione e' live via policy/env) — nessun costo se spento.
+sniff.configure(str(VAR_DIR / "debug-sniff.log"),
+                policy.debug_sniff_retention_hours)
 config = GatewayConfig(CSV_PATH, proxy_prefix=policy.proxy_prefix,
                        go_suffix=policy.go_suffix,
                        fallback_suffix=policy.fallback_suffix,
@@ -931,6 +936,9 @@ async def chat_completions(request: Request):
     raw_model = payload.get("model") or ""
     messages = payload.get("messages") or []
     stream = bool(payload.get("stream"))
+    # id breve per correlare input/output nel file di debug-sniff
+    import uuid as _uuid
+    _rid = _uuid.uuid4().hex[:12]
 
     # Gemini 3: se la history contiene tool_call prive di thought_signature
     # (conversazione passata per modelli non-Google) Gemini risponderebbe 400
@@ -1127,6 +1135,15 @@ async def chat_completions(request: Request):
     _attr = _client_attribution(request)
 
     if stream:
+        _sniffer = None
+        if sniff.enabled(router.policy):
+            _sniffer = sniff.begin(
+                _rid, {"model": raw_model, "canonical": model,
+                       "profile": profile, "session": _sess or "-",
+                       "client_ip": _cip, "need": sorted(need),
+                       "group": group_or_explicit,
+                       "dep": dep.get("unique"), "stream": True},
+                payload)
         return await _stream_with_fallback(
             profile, dep, payload, need,
             hook=_strike_hook(explicit_req, need),
@@ -1134,7 +1151,8 @@ async def chat_completions(request: Request):
             ctx=ctx_est,
             ses=session_id, req=raw_model,
             session=_sess, client_ip=_cip, request=request,
-            attribution=_attr, requested_group=group_or_explicit)
+            attribution=_attr, requested_group=group_or_explicit,
+            sniffer=_sniffer)
 
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
@@ -1201,6 +1219,14 @@ async def chat_completions(request: Request):
                   dur_ms=int((time.monotonic() - t_req) * 1000),
                   stream=False, qc=bool(qc_failed), wd=None,
                   usage=_usage_of(data))
+    if sniff.enabled(router.policy):
+        sniff.begin(_rid, {"model": raw_model, "canonical": model,
+                           "profile": profile, "session": _sess or "-",
+                           "client_ip": _cip, "need": sorted(need),
+                           "dep": used["unique"], "stream": False},
+                    payload).finish_json(
+            data, {"status": "success", "tries": max(1, len(attempts_box)),
+                   "qc_failed": bool(qc_failed)})
     return data
 
 
@@ -1555,7 +1581,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 client_ip: str = "",
                                 request: "Request | None" = None,
                                 attribution: dict | None = None,
-                                requested_group: str | None = None):
+                                requested_group: str | None = None,
+                                sniffer=None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
     # Gruppo ORIGINARIO della richiesta (es. -200k): serve al pin
@@ -1997,6 +2024,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             nonlocal chunks, seen_done, seen_error, usage_final
             nonlocal answer_total, finish_len, had_tool_calls, sent_first
             nonlocal saw_finish_reason
+            if sniffer is not None:
+                sniffer.feed(chunk)
             chunks += 1
             if b"[DONE]" in chunk:
                 seen_done = True
@@ -2172,6 +2201,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     _fail(dep["unique"], seconds=_soft_cd(
                         router.stats_for(dep["unique"]).fail_count_24h))
             _summary(dur_ms)
+            if sniffer is not None:
+                sniffer.finish_stream({
+                    "status": "success" if (finished and not gen_broken)
+                    else ("aborted" if aborted else "broken"),
+                    "wd": wd, "chunks": chunks, "answer_chars": answer_total,
+                    "had_tool_calls": had_tool_calls,
+                    "finish_reason_len": finish_len,
+                    "saw_finish_reason": saw_finish_reason,
+                    "seen_done": seen_done, "usage": usage_final,
+                    "dep_final": dep.get("unique"), "tries": len(attempts),
+                })
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 

@@ -294,6 +294,11 @@ class Policy:
     cache_ctx_min_ctx_tokens: int = 50000
     cache_ctx_on_deployment_switch: bool = True
     cache_ctx_switch_min_tokens: int = 8000
+    # DEBUG SNIFF: scatola nera input/output su var/debug-sniff.log con
+    # rotazione oraria e retention debug_sniff_retention_hours. Default OFF
+    # (file con conversazione completa: solo per debug locale).
+    debug_sniff_enabled: bool = False
+    debug_sniff_retention_hours: int = 24
 
     # CACHE-PRESERVING: gli abbonamenti flat (Go/Zen) hanno cache a livello
     # API key; usare la STESSA key ripetutamente entro una sessione massimizza
@@ -1056,6 +1061,25 @@ class Policy:
                         "cache_aware.context_truncation.on_deployment_switch")
                 if ct.get("stub_text"):
                     p.cache_ctx_stub_text = str(ct["stub_text"])
+        # --- DEBUG (sniff input/output) ---
+        _dbg = raw.get("debug")
+        if _dbg is not None:
+            if not isinstance(_dbg, dict):
+                raise ValueError("debug deve essere una mappa")
+            _sn = _dbg.get("sniff")
+            if _sn is not None:
+                if not isinstance(_sn, dict):
+                    raise ValueError("debug.sniff deve essere una mappa")
+                if "enabled" in _sn:
+                    p.debug_sniff_enabled = _coerce_bool(
+                        _sn["enabled"], "debug.sniff.enabled")
+                if _sn.get("retention_hours") is not None:
+                    _rh = _sn["retention_hours"]
+                    if isinstance(_rh, bool) or \
+                            not isinstance(_rh, (int, float)) or int(_rh) < 1:
+                        raise ValueError("debug.sniff.retention_hours deve "
+                                         "essere >= 1")
+                    p.debug_sniff_retention_hours = int(_rh)
         qj = raw.get("qc_json")
         if qj is not None:
             if not isinstance(qj, dict):
