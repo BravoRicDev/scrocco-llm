@@ -196,11 +196,15 @@ class Policy:
     # (0.12 = +/-12%). 0 = off.
     cooldown_jitter_ratio: float = 0.12
     # Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim
-    # testo). Parte fire-and-forget, senza entrare nella risposta: sonda i
-    # deployment dormienti piu' "pronti" e, se rispondono, li risveglia
-    # (clear_cooldown). Sul fallimento allunga il cooldown di
-    # cooldown_autoprobe_grow_sec cosi' i bersagli ruotano tra le chiamate.
-    # Non tocca note_result/mark_failed (non avvelena la rotazione adattiva).
+    # testo). Parte fire-and-forget, senza entrare nella risposta: se ci sono
+    # deployment MAI USATI nelle ultime `cooldown_autoprobe_fresh_age_sec`
+    # (24h) sonda PRIMA quelli con un probe "normale" (note_result/mark_failed)
+    # cosi' i buoni salgono in cima alla classifica; se non ci sono freschi
+    # ripiega sul comportamento classico: sonda i deployment dormienti piu'
+    # "pronti" e, se rispondono, li risveglia (clear_cooldown). Sul fallimento
+    # allunga il cooldown di cooldown_autoprobe_grow_sec cosi' i bersagli
+    # ruotano tra le chiamate (nel modo classico non tocca note_result/
+    # mark_failed: non avvelena la rotazione adattiva).
     cooldown_autoprobe_enabled: bool = True
     cooldown_autoprobe_per_dim: int = 2
     cooldown_autoprobe_min_age_sec: float = 300.0
@@ -208,6 +212,7 @@ class Policy:
     cooldown_autoprobe_min_gap_sec: float = 60.0
     cooldown_autoprobe_max_total: int = 6
     cooldown_autoprobe_timeout_sec: float = 20.0
+    cooldown_autoprobe_fresh_age_sec: float = 86400.0
     # CRISIS MODE autoprobe: se la quota di deployment dim in cooldown supera
     # `cooldown_autoprobe_crisis_ratio`, il pass raddoppia `per_dim` e dimezza
     # `min_gap` per risvegliare il pool piu' in fretta sotto pressione.
@@ -812,7 +817,8 @@ class Policy:
         for _fld in ("cooldown_autoprobe_min_age_sec",
                      "cooldown_autoprobe_grow_sec",
                      "cooldown_autoprobe_min_gap_sec",
-                     "cooldown_autoprobe_timeout_sec"):
+                     "cooldown_autoprobe_timeout_sec",
+                     "cooldown_autoprobe_fresh_age_sec"):
             _val = raw.get(_fld)
             if _val is not None:
                 try:

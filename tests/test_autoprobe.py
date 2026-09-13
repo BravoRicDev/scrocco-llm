@@ -78,8 +78,17 @@ def _cool(router, dep, remaining=3600.0, age=600.0):
     router._cooldown_since[dep["unique"]] = now - age
 
 
+def _used_all(router):
+    """Marca tutti i deployment dim come USATI (non freschi), cosi' il pass
+    ripiega sul modo COOLED (fallback)."""
+    now = time.time()
+    for d in router.config.groups[DIM]:
+        router.stats_for(d["unique"]).last_used = now
+
+
 def test_probe_ok_wakes(router):
     d = _dep(router, DIM, "K-A")
+    _used_all(router)
     _cool(router, d)
     fwd = _Fwd(_Resp(200))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
@@ -90,6 +99,7 @@ def test_probe_ok_wakes(router):
 
 def test_probe_ko_grows_cooldown(router):
     d = _dep(router, DIM, "K-A")
+    _used_all(router)
     _cool(router, d, remaining=3600.0)
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
@@ -99,6 +109,7 @@ def test_probe_ko_grows_cooldown(router):
 
 
 def test_per_dim_cap(router):
+    _used_all(router)
     for k in ("K-A", "K-B", "K-C"):
         _cool(router, _dep(router, DIM, k), remaining=3000.0 + (0 if k == "K-A" else 500))
     fwd = _Fwd(_Resp(200))
@@ -109,6 +120,7 @@ def test_per_dim_cap(router):
 
 def test_crisis_doubles_per_dim(router):
     """1/3 cooled = 33% < soglia 0.50 -> nessun boost: per_dim resta 1."""
+    _used_all(router)
     router.policy.cooldown_autoprobe_crisis_ratio = 0.50
     _cool(router, _dep(router, DIM, "K-A"), remaining=3000.0)
     router.policy.cooldown_autoprobe_per_dim = 1
@@ -119,6 +131,7 @@ def test_crisis_doubles_per_dim(router):
 
 def test_crisis_above_ratio_boosts(router):
     """2/3 cooled = 67% > 0.50 -> per_dim 1x2=2 -> entrambi sondati."""
+    _used_all(router)
     router.policy.cooldown_autoprobe_crisis_ratio = 0.50
     for k in ("K-A", "K-B"):
         _cool(router, _dep(router, DIM, k), remaining=3000.0)
@@ -129,6 +142,7 @@ def test_crisis_above_ratio_boosts(router):
 
 
 def test_crisis_disabled_no_boost(router):
+    _used_all(router)
     router.policy.cooldown_autoprobe_crisis_enabled = False
     for k in ("K-A", "K-B", "K-C"):
         _cool(router, _dep(router, DIM, k), remaining=3000.0)
@@ -139,6 +153,7 @@ def test_crisis_disabled_no_boost(router):
 
 
 def test_crisis_below_ratio_no_boost(router):
+    _used_all(router)
     router.policy.cooldown_autoprobe_crisis_ratio = 0.9   # soglia altissima
     _cool(router, _dep(router, DIM, "K-A"), remaining=3000.0)
     router.policy.cooldown_autoprobe_per_dim = 1
@@ -186,6 +201,7 @@ def _drain_spawn(router, fwd, uniques):
 
 def test_min_age_skips_fresh(router):
     d = _dep(router, DIM, "K-A")
+    _used_all(router)
     _cool(router, d, age=10.0)          # < min_age 300
     fwd = _Fwd(_Resp(200))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
@@ -194,6 +210,7 @@ def test_min_age_skips_fresh(router):
 
 def test_min_gap_skips_recently_probed(router):
     d = _dep(router, DIM, "K-A")
+    _used_all(router)
     _cool(router, d)
     autoprobe._last_probe[d["unique"]] = time.time()   # appena sondato
     fwd = _Fwd(_Resp(200))
@@ -203,6 +220,7 @@ def test_min_gap_skips_recently_probed(router):
 
 def test_only_dim_groups(router):
     g = _dep(router, GO, "K-G")
+    _used_all(router)
     _cool(router, g)
     fwd = _Fwd(_Resp(200))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
@@ -253,3 +271,80 @@ def test_parsing_knobs():
     assert d.cooldown_autoprobe_enabled is True
     assert d.cooldown_autoprobe_per_dim == 2
     assert d.cooldown_autoprobe_grow_sec == 120.0
+    assert d.cooldown_autoprobe_fresh_age_sec == 86400.0
+    assert Policy.from_dict({"cooldown_autoprobe_fresh_age_sec": 7200}) \
+        .cooldown_autoprobe_fresh_age_sec == 7200.0
+
+
+# ---------------------------------------------------------------- MODO FRESH
+
+def test_fresh_probe_ok_promotes(router):
+    """Senza cooled e con deployment mai usati: probe "normale" (note_result)
+    -> il deployment fresco sale in classifica con un successo."""
+    router.policy.cooldown_autoprobe_per_dim = 1
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    s = router.stats_for(d["unique"])
+    assert s.ok_count == 1
+    assert not router.is_cooled_down(d["unique"])
+
+
+def test_fresh_probe_ko_cooldowns(router):
+    """Probe KO su fresco -> mark_failed: cooldown breve, non si insiste."""
+    router.policy.cooldown_autoprobe_per_dim = 1
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(503))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    assert router.is_cooled_down(d["unique"])
+    assert router.stats_for(d["unique"]).last_fail_ts > 0
+
+
+def test_fresh_preferred_over_cooled(router):
+    """Se esistono freschi, si sondano quelli: il cooled NON viene insistito."""
+    router.policy.cooldown_autoprobe_per_dim = 2
+    a = _dep(router, DIM, "K-A")
+    _cool(router, a)                          # K-A fallito di recente
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 2            # K-B e K-C (freschi), non K-A
+    assert router.is_cooled_down(a["unique"])  # K-A intatto
+
+
+def test_fresh_skips_recently_probed(router):
+    router.policy.cooldown_autoprobe_per_dim = 1
+    for d in router.config.groups[DIM]:
+        autoprobe._last_probe[d["unique"]] = time.time()   # appena sondati
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert fwd.cli.calls == []
+
+
+def test_fresh_uses_fresh_age(router):
+    """Fresco = nessuna attivita' nelle ultime fresh_age (default 24h)."""
+    router.policy.cooldown_autoprobe_per_dim = 1
+    a = _dep(router, DIM, "K-A")
+    b = _dep(router, DIM, "K-B")
+    c = _dep(router, DIM, "K-C")
+    router.stats_for(a["unique"]).last_used = time.time() - 90000   # 25h fa
+    router.stats_for(b["unique"]).last_used = time.time() - 3600    # 1h fa
+    router.stats_for(c["unique"]).last_used = time.time() - 3600    # 1h fa
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    assert router.stats_for(a["unique"]).ok_count == 1   # A fresco -> sondato
+    assert router.stats_for(b["unique"]).ok_count == 0   # B recente -> no
+
+
+def test_no_fresh_falls_back_to_cooled(router):
+    """Niente freschi -> ripiega sul modo COOLED classico (risveglio)."""
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d)
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    assert not router.is_cooled_down(d["unique"])       # risvegliato
+    assert router.stats_for(d["unique"]).ok_count == 0  # NESSUN note_result

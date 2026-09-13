@@ -1,13 +1,20 @@
 """Autoprobe dei cooldown, triggerato da una chiamata (solo gruppi -dim testo).
 
-Non entra MAI nel percorso di risposta: parte fire-and-forget e si limita a
-"sondare" i deployment dormienti piu' pronti. Se un probe riesce il deployment
-viene risvegliato (cooldown azzerato) e dalla chiamata successiva sara' tra i
-vivi; se fallisce si allunga il cooldown di poco (`grow`) cosi' i bersagli
-ruotano tra una chiamata e l'altra e non si insiste sempre sugli stessi.
+Non entra MAI nel percorso di risposta: parte fire-and-forget.
 
-Non chiama `note_result`/`mark_failed`/`note_start`: il probe e' puramente
-ricognitivo e non deve avvelenare la rotazione adattiva.
+Due modalita':
+1) FRESH: se nel pool dim ci sono deployment MAI USATI nelle ultime
+   `cooldown_autoprobe_fresh_age_sec` (24h) li sonda PRIMA con un probe
+   "normale" (note_result/mark_failed): se buoni salgono in cima alla
+   classifica, se falliscono finiscono in cooldown (non si insiste). Un
+   probe riuscito/fallito li toglie dal set "fresco", quindi non vengono
+   ri-sondati in continuazione.
+2) COOLED (fallback, come da sempre): se non ci sono freschi sonda i
+   deployment dormienti piu' "pronti". Se il probe riesce il deployment
+   viene risvegliato (cooldown azzerato); se fallisce si allunga il cooldown
+   di poco (`grow`). In questa modalita' NON chiama
+   note_result/mark_failed/note_start: il probe e' puramente ricognitivo e
+   non deve avvelenare la rotazione adattiva.
 """
 from __future__ import annotations
 
@@ -37,6 +44,8 @@ def _cfg(policy):
         bool(getattr(policy, "cooldown_autoprobe_crisis_enabled", True)),
         float(getattr(policy, "cooldown_autoprobe_crisis_ratio", 0.30) or 0.0),
         float(getattr(policy, "cooldown_autoprobe_crisis_mult", 2.0) or 0.0),
+        float(getattr(policy, "cooldown_autoprobe_fresh_age_sec",
+                       86400.0) or 86400.0),
     )
 
 
@@ -69,6 +78,54 @@ def spawn_hotreload_probe(router, forwarder, uniques) -> None:
     except RuntimeError:
         return
     loop.create_task(_hotreload_pass(router, forwarder, _u))
+
+
+def _is_fresh(router, unique: str, now: float, fresh_age: float) -> bool:
+    """True se il deployment non ha AVUTO ATTIVITA' (uso/successo/fallimento)
+    nelle ultime `fresh_age` secondi (o non ha mai avuto attivita')."""
+    s = router._stats.get(unique)
+    if s is None:
+        return True
+    last_act = max(s.last_used, s.last_success_ts, s.last_fail_ts)
+    if last_act <= 0:
+        return True
+    return (now - last_act) > fresh_age
+
+
+def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
+                          min_gap: float, max_total: int) -> list[tuple[str, str]]:
+    """Bersagli FRESCHI: deployment dim mai usati nelle ultime 24h (o mai
+    usati affatto), NON in cooldown (niente insistenza sui falliti), ordinati
+    per attivita' piu' vecchia prima (i piu' vergini vengono sondati per
+    primi)."""
+    now = time.time()
+    pfx = f"{getattr(router.config, 'proxy_prefix', 'scrocco-llm-')}{profile}-"
+    by_group: dict[str, list[tuple[float, str]]] = {}
+    for grp, deps in (getattr(router.config, "groups", {}) or {}).items():
+        if not _DIM_RE.search(grp):
+            continue           # solo dim testo (-<N>k), niente -go/-fallback/cap
+        if profile and not grp.startswith(pfx):
+            continue
+        for d in deps:
+            unique = d.get("unique") or ""
+            if router.is_cooled_down(unique):
+                continue       # appena fallito: non insistere
+            if router.is_retired(unique):
+                continue
+            if not _is_fresh(router, unique, now, fresh_age):
+                continue
+            if now - _last_probe.get(unique, 0.0) < min_gap:
+                continue
+            s = router._stats.get(unique)
+            last_act = 0.0 if s is None else max(
+                s.last_used, s.last_success_ts, s.last_fail_ts)
+            by_group.setdefault(grp, []).append((last_act, unique))
+    targets: list[tuple[str, str]] = []
+    for grp, items in by_group.items():
+        items.sort(key=lambda x: x[0])      # meno recenti (vergini) prima
+        for _la, unique in items[:per_dim]:
+            targets.append((grp, unique))
+    return targets[:max_total]
 
 
 def _select_targets(router, profile: str, per_dim: int, min_age: float,
@@ -134,9 +191,36 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
     global _running
     try:
         (_en, per_dim, min_age, grow, min_gap, max_total, timeout,
-         crisis_en, crisis_ratio, crisis_mult) = _cfg(router.policy)
+         crisis_en, crisis_ratio, crisis_mult, fresh_age) = _cfg(router.policy)
         if per_dim <= 0 or max_total <= 0:
             return
+        # --- MODO FRESH: sonda i MAI USATI (24h) con probe "normale" -----
+        fresh = _select_fresh_targets(
+            router, profile, per_dim, fresh_age, min_gap, max_total)
+        if fresh:
+            log.info("[autoprobe] fresh: %d deployment mai usati in %.0fh -> "
+                     "probe normale", len(fresh), fresh_age / 3600.0)
+            for _grp, unique in fresh:
+                try:
+                    dep = router.config.deployment_by_unique(unique)
+                except Exception:  # noqa: BLE001
+                    continue
+                if not dep:
+                    continue
+                _last_probe[unique] = time.time()
+                ok, lat = await _probe_one(forwarder, dep, timeout)
+                if ok:
+                    router.note_result(unique, lat)
+                    log.info("[autoprobe] %s: probe OK -> promosso (%.0fms)",
+                             unique, lat)
+                else:
+                    router.mark_failed(unique, seconds=grow,
+                                       reason="autoprobe_fresh")
+                    log.info("[autoprobe] %s: probe KO -> cooldown %.0fs",
+                             unique, grow)
+                await asyncio.sleep(0.2)
+            return
+        # --- MODO COOLED (fallback): risveglio dormienti, come da sempre ----
         targets = _select_targets(
             router, profile, per_dim, min_age, min_gap, max_total,
             crisis=(crisis_en, crisis_ratio, crisis_mult))
