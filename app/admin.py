@@ -1276,6 +1276,29 @@ def _audit_slug(name: str) -> str:
     return _re.sub(r"[^a-z0-9]+", "", s)
 
 
+def _free_guess(mid: str, item: dict, base: str) -> bool:
+    """Euristica 'free/zen' per un modello esposto dal provider.
+
+    True se il provider e' zen (endpoint), l'id contiene 'free'/:free, oppure
+    il provider espone il prezzo (es. OpenRouter pricing.*) ed e' zero su
+    prompt+completion. Solo euristica di report: nessuna scrittura."""
+    low = (mid or "").lower()
+    if "zen" in (base or "").lower():
+        return True
+    if "free" in low:
+        return True
+    pr = item.get("pricing") or {}
+    if isinstance(pr, dict) and ("prompt" in pr or "completion" in pr):
+        def _zero(v):
+            try:
+                return float(v) == 0.0
+            except (TypeError, ValueError):
+                return False
+        if _zero(pr.get("prompt")) and _zero(pr.get("completion")):
+            return True
+    return False
+
+
 @admin_api.post("/capabilities/audit")
 async def capabilities_audit(request: Request):
     """Audit server-side: per ogni account (endpoint+chiave) verifica che i
@@ -1293,6 +1316,7 @@ async def capabilities_audit(request: Request):
             acc.add(d["model"])
 
     missing: list[dict] = []
+    extra: list[dict] = []
     suggestions: dict[str, list[str]] = {}
     checked = 0
     errors: list[str] = []
@@ -1310,6 +1334,22 @@ async def capabilities_audit(request: Request):
                 return
             items = r.json().get("data") or []
             ids = {m.get("id", "") for m in items}
+            # modelli disponibili dal provider ma NON configurati nel CSV:
+            # candidati per arricchire (free_guess marca i free/zen).
+            eff_norm = {e[7:] if e.startswith("models/") else e
+                        for e in models}
+            for m in items:
+                mid = m.get("id", "")
+                nm = mid[7:] if mid.startswith("models/") else mid
+                if not nm or nm in eff_norm:
+                    continue
+                entry = {"model": mid, "endpoint": base,
+                         "key_masked": masked,
+                         "free_guess": _free_guess(mid, m, base)}
+                ctx = m.get("context_length") or m.get("context")
+                if ctx:
+                    entry["context_length"] = ctx
+                extra.append(entry)
             # suggerimenti capacità dai metadati provider (se presenti)
             from .capabilities import CANONICAL_CAPS
             for m in items:
@@ -1352,8 +1392,12 @@ async def capabilities_audit(request: Request):
 
     await _asyncio.gather(*(_guarded(b, k, ms)
                             for (b, k), ms in sorted(accounts.items())))
+    extra_free = [e for e in extra if e.get("free_guess")]
     return {"checked_at": int(time.time()), "accounts": len(accounts),
             "accounts_checked": checked, "missing_models": missing,
+            "extra_models": extra, "extra_free_models": extra_free,
+            "extra_models_count": len(extra),
+            "extra_free_models_count": len(extra_free),
             "cap_suggestions": dict(sorted(suggestions.items())),
             "errors": errors}
 
