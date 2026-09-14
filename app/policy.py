@@ -96,6 +96,15 @@ class QcJson:
     # byte inviato). Esaurita la catena -> risposta "notice" non vuota.
     stream_first_content_ms: int = 20000   # attesa max del primo contenuto
                                            # (clamp >= 2000)
+    # ADATTIVO: la finestra sul primo contenuto non e' piu' fissa ma legata
+    # alla latenza storica (EMA, `_avg_latencies`) del deployment scelto:
+    #   deadline = min(stream_first_content_ms, max(floor, mult * EMA))
+    # Un dep che normalmente risponde in pochi secondi non blocca 180s se
+    # stalla; un dep strutturalmente lento mantiene un margine proporzionato
+    # (comunque <= stream_first_content_ms). Se EMA ignota -> si usa il cap.
+    stream_first_content_adaptive: bool = True
+    stream_first_content_mult: float = 3.0   # deadline = mult * EMA del dep
+    stream_first_content_floor_ms: int = 20000  # pavimento (>=2000)
     stream_commit_min_chars: int = 40      # caratteri di RISPOSTA minimi per
                                            # impegnare lo stream (evita di
                                            # committare su 1 token poi morto);
@@ -1559,6 +1568,24 @@ class Policy:
                     raise ValueError("qc_json.stream_first_content_ms deve "
                                      "essere 2000..900000")
                 p.qc_json.stream_first_content_ms = int(v)
+            if "stream_first_content_adaptive" in qj:
+                p.qc_json.stream_first_content_adaptive = _coerce_bool(
+                    qj["stream_first_content_adaptive"],
+                    "qc_json.stream_first_content_adaptive")
+            if "stream_first_content_mult" in qj:
+                v = qj["stream_first_content_mult"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0.5 <= float(v) <= 30.0):
+                    raise ValueError("qc_json.stream_first_content_mult deve "
+                                     "essere 0.5..30.0")
+                p.qc_json.stream_first_content_mult = float(v)
+            if "stream_first_content_floor_ms" in qj:
+                v = qj["stream_first_content_floor_ms"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= int(v) <= 900000):
+                    raise ValueError("qc_json.stream_first_content_floor_ms "
+                                     "deve essere 0..900000")
+                p.qc_json.stream_first_content_floor_ms = int(v)
             if "stream_commit_min_chars" in qj:
                 v = qj["stream_commit_min_chars"]
                 if isinstance(v, bool) or not isinstance(v, (int, float)) \

@@ -113,6 +113,12 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   Ordine: cache-holder di sessione, poi MRU, poi `order`, poi `max_input`
   crescente. Vale per il routing automatico e per i dim espliciti (`-Nk`); mai
   per `-go`/`-fallback` (escalation deliberata a pagamento). Tag log `[warm]`.
+  Un dep con EMA di latenza sopra i 90s — o andato **lento per questa
+  sessione** — esce da caldi/sticky/cache-holder e dalle selezioni successive;
+  per la stessa sessione torna pescabile solo all'ultimo scaglione
+  (`-fallback`/ultima spiaggia). Il pool caldi non pesca mai una dim
+  **inferiore** a quella richiesta: con `...-200k` esplicito ignora i caldi
+  `-64k` della stessa sessione (il `-Nk` è il minimo voluto dal client).
 - **L'autoprobe non insiste.** Un probe KO fa **almeno raddoppiare** il residuo
   del cooldown, moltiplicato per il numero di probe fatti su quel deployment
   nelle ultime 24h; i residui oltre 2 ore escono dai probe e li rivede la scala

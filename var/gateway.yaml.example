@@ -445,6 +445,15 @@ qc_json:
   # diversi minuti prima del primo token.
   stream_first_content_ms: 120000
 
+  # ADATTIVO: la finestra sopra e' un TETTO. Con adaptive=true la deadline
+  # effettiva per-deployment e':
+  #     min(stream_first_content_ms, max(floor_ms, mult * EMA_latenza_dep))
+  # Un dep normalmente veloce che stalla ruota presto; un dep strutturalmente
+  # lento mantiene un margine proporzionato. EMA ignota -> usa il tetto.
+  stream_first_content_adaptive: true
+  stream_first_content_mult: 3.0        # deadline = mult * EMA del dep
+  stream_first_content_floor_ms: 20000  # pavimento (>= 2000)
+
   # Deadline totale in ms per l'INTERO stream (960000 = 16 minuti).
   stream_total_deadline_ms: 960000
 
@@ -635,6 +644,13 @@ session_dep_guard:
 # (-Nk); NON per -go/-fallback (escalation deliberata a pagamento).
 # `ttl_sec: 0` -> usa session_dep_guard_sec; `max_attempts: 0` -> illimitato
 # (bounded dal set dei gia' tentati nella richiesta).
+# GUARDIA DI LATENZA + FLOOR DIM: un dep con EMA di latenza sopra
+# LATENCY_ROTATE_THRESHOLD_MS (90s), o andato lento per QUESTA sessione, NON
+# entra nel tier caldo ne' resta come sticky/cache-holder: esce dai tier
+# economici e (stessa sessione) torna pescabile solo all'ultimo scaglione
+# (-fallback/ultima spiaggia). Inoltre il pool caldi non pesca mai una dim
+# INFERIORE a quella richiesta: con `...-200k` esplicito ignora i caldi `-64k`
+# della stessa sessione (il -Nk e' il minimo voluto dal client).
 warm_pool:
   enabled: true
   ttl_sec: 0

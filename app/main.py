@@ -2045,8 +2045,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # un upstream vuoto/errore/lento viene ruotato in modo TRASPARENTE
             # (nessun byte inviato). Esaurita la catena -> risposta "notice".
             qcp = router.policy.qc_json
-            fc_ms = max(2000, int(getattr(qcp, "stream_first_content_ms",
-                                          20000) or 20000))
+            # ADATTIVO: deadline proporzionale alla latenza storica (EMA) del
+            # dep scelto, con pavimento e tetto. Un dep normalmente veloce che
+            # stalla non trattiene la richiesta per il cap; un dep lento ha un
+            # margine proporzionato (mai oltre il cap). EMA ignota -> cap.
+            fc_ms = router.first_content_deadline_ms(dep["unique"])
             incl_reason = bool(getattr(qcp, "stream_commit_include_reasoning",
                                        False))
             min_ch = int(getattr(qcp, "stream_commit_min_chars", 40) or 0)
@@ -2121,7 +2124,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                    (time.monotonic() - t_att) * 1000,
                                    quality=_quality)
                 router.record_escalation_win(requested_group, dep)
-                router.note_session_success(ses, dep["unique"])
+                router.note_session_success(ses, dep["unique"],
+                                            (time.monotonic() - t_att) * 1000)
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)

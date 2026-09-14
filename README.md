@@ -113,7 +113,14 @@ individual account limits instead of dying on the first 429.
   then smallest `max_input`. Applies to automatic routing and explicit `-Nk`
   dims; never to `-go`/`-fallback` (deliberate paid escalation). The window is
   `session_dep_guard_sec` (or `ttl_sec`); `max_attempts` caps the pool (0 =
-  unlimited). Log tag `[warm]`.
+  unlimited). Log tag `[warm]`. A dep whose latency EMA exceeds
+  `LATENCY_ROTATE_THRESHOLD_MS` (90s), **or that was slow for this session**
+  (per-session latch), is excluded from the warm pool, sticky and cache-holder:
+  it still competes as a normal ladder reserve, and for the same session it
+  only becomes fishable again at the last stage (`-fallback`/last resort). The
+  warm pool never picks a dim **smaller** than the requested one: for an
+  explicit `...-200k` it ignores warm `-64k` deps of the same session (the
+  `-Nk` is the client's *minimum*).
 - **Multi-SDK upstreams** (`api_style` CSV column): the gateway always speaks
   and accepts OpenAI Chat Completions, but each deployment can declare its
   upstream's native protocol — `responses` (OpenAI Responses `/responses`),
@@ -372,11 +379,12 @@ template. The ones that matter most:
 | `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO residual at least doubles (min +grow, rotate targets); min gap between probes; probe timeout |
 | `cooldown_autoprobe_multiply_24h` / `cooldown_autoprobe_skip_over_sec` | true / 7200 | KO increment × probes in the last 24h (1×, 2×, 3×…); cooled > 2h excluded from probing (ladder wakeup / last resort / time will retry) |
 | `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 900 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |
-| `warm_pool.enabled` / `warm_pool.ttl_sec` / `warm_pool.max_attempts` | true / 0 / 0 | tier "caldi" prima del `-dim` e della scala: esaurisce i free-dims serviti con successo da QUESTA sessione (ordine: cache-holder, MRU, `order`, `max_input`); `ttl_sec=0` usa `session_dep_guard_sec`; `max_attempts=0` illimitato |
+| `warm_pool.enabled` / `warm_pool.ttl_sec` / `warm_pool.max_attempts` | true / 0 / 0 | tier "caldi" prima del `-dim` e della scala: esaurisce i free-dims serviti con successo da QUESTA sessione (ordine: cache-holder, MRU, `order`, `max_input`); `ttl_sec=0` usa `session_dep_guard_sec`; `max_attempts=0` illimitato; esclude i dep lenti (EMA > 90s o lenti-per-sessione) e non pesca mai dim < richiesta |
 | `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
+| `qc_json.stream_first_content_adaptive` / `stream_first_content_mult` / `stream_first_content_floor_ms` | true / 3.0 / 20000 | adaptive first-content deadline: `min(stream_first_content_ms, max(floor, mult * latency EMA))`; unknown EMA -> the cap. Avoids holding a 180s window on a normally-fast dep that stalled |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |
 | `retry_after_floor_by_provider` | `{}` | per-provider Retry-After floor (provider -> seconds), overrides `retry_after_min_sec` |
 | `anon_session_fingerprint` | true | derive a deterministic `fq_<hash>` session id for anonymous clients (system + first user + user-agent) so sticky/cache apply (e.g. Hermes); false = stay anonymous |

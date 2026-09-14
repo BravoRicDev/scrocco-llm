@@ -84,7 +84,10 @@ no restart.
 **Where did my request go?** every request logs one `[summary]` line;
 routing state per deployment: `GET /admin/state` (includes
 `adaptive.session_dep_guard` and `adaptive.warm_pool`). Useful tags:
-`[prelast]` (shared deployment tier), `[warm]` (own warm-pool tier),
+`[prelast]` (shared deployment tier), `[warm]` (own warm-pool tier; never a
+dim below the requested `-Nk`; drops deps whose latency EMA exceeds 90s or
+that were slow for this session from warm/sticky/cache-holder and from the
+cheap selections — same session only, re-fished at `-fallback`),
 `[maxtok]` (`max_tokens` clamped to the window), `[autoprobe]`
 (cooldown probe / backoff), `[cache]` (session holder),
 `[fallback]` (failure + next hop).

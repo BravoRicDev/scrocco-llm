@@ -394,6 +394,13 @@ class Router:
         # recenti vengono "rinfrescati" e restano suoi; 15 min di silenzio e
         # l'intero set decade (torna libero).
         self._session_deps: dict[str, set[str]] = {}
+        # SESSION-SLOW DEMOTE: session -> {unique: ts} dei free-dims serviti
+        # con SUCCESSO ma LENTO (TTFB > LATENCY_ROTATE_THRESHOLD_MS). Tali dep
+        # escono da caldi/sticky/cache e da OGNI selezione successiva della
+        # STESSA sessione, tornando pescabili solo all'ultimo scaglione
+        # (-fallback / ultima spiaggia). Un successo rapido li riabilita.
+        # In-memory, mai persistito. Lazy-init via _sess_slow().
+        self._session_slow: dict[str, dict[str, float]] = {}
         # COLD SPREAD: finestra ROLLING di 24h dei TENTATIVI per-deployment
         # (ok+fail, ESCLUSI i probe: quelli restano in autoprobe._probe_times).
         # Serve a NASCONDERE dai candidati il 20% (configurabile) piu' usato
@@ -593,6 +600,15 @@ class Router:
             self._session_deps = d
         return d
 
+    def _sess_slow(self) -> dict:
+        """Accessor lazy dell'indice session -> {unique: ts} dei free-dims
+        'lenti per la stessa sessione' (protetto per i Router 'nudi')."""
+        d = getattr(self, "_session_slow", None)
+        if d is None:
+            d = {}
+            self._session_slow = d
+        return d
+
     # --------------------------------------------- cold usage spread
     _USAGE_WINDOW = 86400.0
 
@@ -782,13 +798,16 @@ class Router:
         return (time.time() - ts) < self._guard_sec()
 
     def note_session_success(self, session_id: str | None,
-                             unique: str | None) -> None:
+                             unique: str | None,
+                             latency_ms: float | None = None) -> None:
         """Ricorda l'ultimo deployment che ha servito con SUCCESSO la
         sessione (detentore cache) + l'inverso per la SESSION-DEP GUARD.
-        In-memory."""
+        Con `latency_ms` > soglia marca anche il dep come 'lento per la
+        sessione' (session-slow demote). In-memory."""
         if not session_id or not unique:
             return
         self._note_dep_session(session_id, unique)
+        self._note_session_slow(session_id, unique, latency_ms)
         if not getattr(self.policy, "cache_aware_enabled", True):
             return
         d = self._cache_ok()
@@ -829,6 +848,8 @@ class Router:
         if dep is None:
             return None
         if self.is_cooled_down(unique) or self.is_retired(unique):
+            return None
+        if self._is_demoted_dep(unique, session_id):
             return None
         if not self._cap_fits(dep, ctx):
             return None
@@ -960,6 +981,8 @@ class Router:
             if self.is_cooled_down(u) or self.is_retired(u):
                 continue
             if self.other_session_recent(u):
+                continue
+            if self.is_slow_for_session(u):
                 continue
             if not self._cap_fits(d, ctx):
                 continue
@@ -1777,6 +1800,111 @@ class Router:
         if not hasattr(self, 'config') or self.config is None:
             return None
         return self._avg_latencies.get(unique)
+
+    def _is_slow_dep(self, unique: str) -> bool:
+        """True se la latenza media storica del deployment supera la soglia di
+        rotazione (LATENCY_ROTATE_THRESHOLD_MS, 90s di default).
+
+        Serve a NON tenere un key lento nel tier "caldi"/sticky: una latenza
+        sopra soglia lo fa USCIIRE dal pool caldo e dallo sticky, ma resta
+        eleggibile nel ladder come riserva (non lo mettiamo in quarantena)."""
+        avg = getattr(self, "_avg_latencies", {}).get(unique)
+        return avg is not None and float(avg) > LATENCY_ROTATE_THRESHOLD_MS
+
+    def is_slow_for_session(self, unique: str,
+                            session_id: str | None = None) -> bool:
+        """True se QUESTA sessione ha avuto un successo LENTO (TTFB oltre
+        LATENCY_ROTATE_THRESHOLD_MS) su `unique` entro la finestra warm.
+
+        Un key andato lento alla sessione esce da caldi/sticky/cache e dalle
+        selezioni successive (dim/ladder/prelast/-go) della STESSA sessione:
+        torna pescabile solo all'ultimo scaglione (-fallback/ultima spiaggia).
+        Un successo rapido ripulisce il marchio. Le ALTRE sessioni non sono
+        toccate (la latenza e' valutata per-sessione)."""
+        if not getattr(self.policy, "warm_pool_enabled", True):
+            return False
+        sid = session_id or current_session()
+        if not sid:
+            return False
+        m = self._sess_slow().get(sid)
+        if not m:
+            return False
+        ts = m.get(unique)
+        if ts is None:
+            return False
+        if time.time() - ts > self._warm_ttl():
+            m.pop(unique, None)
+            return False
+        return True
+
+    def _note_session_slow(self, session_id: str | None, unique: str,
+                           latency_ms: float | None) -> None:
+        """Marchia (o ripulisce) `unique` come 'lento per la sessione'. Solo
+        free-dims (mai -go/-fallback ne' gruppi capacita'), come la warm
+        ownership: e' li' che la latenza e' un segnale utile."""
+        if not session_id or not unique:
+            return
+        if not getattr(self.policy, "warm_pool_enabled", True):
+            return
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return
+        g = dep.get("group", "")
+        if self.config.group_caps.get(g) is not None \
+                or self._is_renewal_bucket(g):
+            return
+        try:
+            slow = latency_ms is not None and \
+                float(latency_ms) > LATENCY_ROTATE_THRESHOLD_MS
+        except (TypeError, ValueError):
+            slow = False
+        d = self._sess_slow()
+        if slow:
+            d.setdefault(session_id, {})[unique] = time.time()
+        else:
+            m = d.get(session_id)
+            if m:
+                m.pop(unique, None)
+                if not m:
+                    d.pop(session_id, None)
+        if len(d) > 4096:
+            _ttl = self._warm_ttl() * 4
+            _now = time.time()
+            for sid, m in list(d.items()):
+                for u, ts in list(m.items()):
+                    if _now - ts > _ttl:
+                        m.pop(u, None)
+                if not m:
+                    d.pop(sid, None)
+
+    def _is_demoted_dep(self, unique: str,
+                        session_id: str | None = None) -> bool:
+        """Dep fuori dai tier 'economici' per la sessione: EMA globale sopra
+        soglia OPPURE successo lento registrato per QUESTA sessione. Resta
+        eleggibile nell'ultimo scaglione (-fallback/ultima spiaggia)."""
+        return (self._is_slow_dep(unique)
+                or self.is_slow_for_session(unique, session_id))
+
+    def first_content_deadline_ms(self, unique: str) -> int:
+        """Finestra d'attesa del primo contenuto per `unique`.
+
+        Fissa se `stream_first_content_adaptive` e' False; altrimenti:
+            min(cap, max(floor, mult * EMA_latenza_dep))
+        con `cap = stream_first_content_ms`. EMA ignota/0 -> cap. Cosi' un dep
+        normalmente veloce che stalla ruota presto, mentre un dep lento mantiene
+        un margine proporzionato (mai oltre il cap)."""
+        qcp = getattr(self.policy, "qc_json", None)
+        cap = max(2000, int(getattr(qcp, "stream_first_content_ms", 20000)
+                            or 20000))
+        if not bool(getattr(qcp, "stream_first_content_adaptive", True)):
+            return cap
+        ema = float(self._get_avg_latency(unique) or 0.0)
+        if ema <= 0:
+            return cap
+        mult = float(getattr(qcp, "stream_first_content_mult", 3.0) or 3.0)
+        floor = min(int(getattr(qcp, "stream_first_content_floor_ms", 20000)
+                        or 0), cap)
+        return max(2000, min(cap, max(floor, int(ema * mult))))
 
     # --------------------------------------------------- auto-learn capacità
     _CAP_STRIKE_WINDOW_SEC = 7 * 86400   # strike più vecchi di 7gg si azzerano
@@ -3090,6 +3218,13 @@ class Router:
             # (eleggibili solo nel tier pre-ultima-spiaggia).
             if self.other_session_recent(d["unique"]):
                 return False
+            # SESSION-SLOW DEMOTE: un free-dim andato lento a QUESTA sessione
+            # non va ri-pescato nei tier economici; torna solo a -fallback/
+            # ultima spiaggia (vedi _walk_chain allow_slow).
+            if self.config.group_caps.get(group_name) is None \
+                    and not self._is_renewal_bucket(group_name) \
+                    and self.is_slow_for_session(d["unique"]):
+                return False
             if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
                 return False
             if restrict_model and d.get("model") != restrict_model:
@@ -3241,8 +3376,9 @@ class Router:
                     prefer_model: str | None = None, *,
                     ignore_cooldown: bool = False,
                     min_cooldown_age: float | None = None,
-                    limit: int = 0,
-                    tried: set[str] | None = None) -> dict | None:
+                     limit: int = 0,
+                     tried: set[str] | None = None,
+                     allow_slow: bool = False) -> dict | None:
         """Cammina una catena piatta di univoci saltando cooled-down,
         deployment senza le capacità `need`, (se ctx) sopra max_input e —
         per richieste pure-testo su catene dims — i multimodali finché
@@ -3307,6 +3443,8 @@ class Router:
                     return None
                 # cooldown "stantio": lo ri-consideriamo
             if self.other_session_recent(u):
+                return None
+            if not allow_slow and self.is_slow_for_session(u):
                 return None
             if u in _hidden:
                 return None
@@ -3380,6 +3518,8 @@ class Router:
                 continue
             if not self.other_session_recent(u):
                 continue
+            if self.is_slow_for_session(u):
+                continue
             dep = self.config.deployment_by_unique(u)
             if dep is None or self.is_retired(u) or self.is_cooled_down(u):
                 continue
@@ -3436,6 +3576,27 @@ class Router:
             v = 0.0
         return v if v > 0 else self._guard_sec()
 
+    def _group_min_dim(self, group_name: str | None) -> int:
+        """Dim minima (in k) richiesta da un gruppo TESTO.
+
+        `-Nk` -> N (SOGLIA MINIMA: il client non vuole dim inferiori); per i
+        bucket -go/-fallback o gruppi senza dim ritorna 0 (nessun floor)."""
+        if not group_name:
+            return 0
+        m = self.DIM_SUFFIX_RE.search(group_name)
+        return int(m.group(1)) if m else 0
+
+    def _warm_allowed(self, pname: str, group_name: str | None) -> set[str]:
+        """Univoci ammessi nel pool caldi per `pname` IMPONENDO la dim minima
+        del gruppo di partenza: mai dim < dim(group_name), anche se la
+        sessione le ha gia' servite con successo (es. richiesta esplicita
+        `...-200k` -> il caldo `-64k` della stessa sessione NON va pescato).
+
+        I bucket -go/-fallback sono inclusi ma il pool li ignora comunque
+        (l'ownership caldi traccia solo i free-dims)."""
+        floor = self._group_min_dim(group_name)
+        return set(self._text_ladder(pname, start_dim=floor))
+
     def _warm_pool(self, session_id: str | None, allowed: set[str] | None,
                    need: frozenset[str] | None = None,
                    ctx: int | None = None,
@@ -3477,6 +3638,10 @@ class Router:
             if dep is None or self.is_retired(u) or self.is_draining(u):
                 continue
             if self.is_cooled_down(u) or self._gemini_blocked(dep):
+                continue
+            if self._is_demoted_dep(u, sid):
+                log.debug("[warm] skip lento (ema>%.0fms o lento-sessione): %s",
+                          LATENCY_ROTATE_THRESHOLD_MS, u)
                 continue
             if need and not self._dep_supports(dep, need):
                 continue
@@ -3522,9 +3687,9 @@ class Router:
         if warm and self.config.group_caps.get(group_name) is None:
             _pname = self._group_profile(group_name)
             if _pname:
-                _warm = self._warm_pool(session_id,
-                                        set(self.config.chains.get(_pname, [])),
-                                        need=need, ctx=ctx)
+                _warm = self._warm_pool(
+                    session_id, self._warm_allowed(_pname, group_name),
+                    need=need, ctx=ctx)
                 if _warm:
                     _dep = _warm[0]
                     log.info("[warm] initial_pick %s -> %s (caldo proprio: "
@@ -3561,6 +3726,7 @@ class Router:
                     and not self.is_cooled_down(sticky_dep) \
                     and not self._gemini_blocked(sd) \
                     and not self.other_session_recent(sticky_dep) \
+                    and not self._is_demoted_dep(sticky_dep, session_id) \
                     and self._cap_fits(sd, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
@@ -3597,6 +3763,7 @@ class Router:
                    if getattr(self.policy, "initial_pick_cooldown_wakeup", True)
                    and self.is_cooled_down(d["unique"])
                    and not self._gemini_blocked(d)
+                   and not self.is_slow_for_session(d["unique"])
                    and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
                    and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
                    and (need is None or self._dep_supports(d, need))
@@ -3663,7 +3830,12 @@ class Router:
                 if dep is not None:
                     return dep
         chain = self.config.chains.get(profile or "", [])
-        return self._walk_chain(chain, None, need, ctx)
+        dep = self._walk_chain(chain, None, need, ctx)
+        if dep is None:
+            # ULTIMO SCAGLIONE: riammetti i free-dims 'lenti per la sessione'
+            # (demoted) solo ora che tutto il resto e' esaurito.
+            dep = self._walk_chain(chain, None, need, ctx, allow_slow=True)
+        return dep
 
     def _walk_ladder_resilient(self, ladder: list[str],
                                failed_unique: str | None,
@@ -3808,6 +3980,8 @@ class Router:
             for u in _chronic_filter(dims, True):
                 if u in _tried_set or not self.is_cooled_down(u):
                     continue
+                if self.is_slow_for_session(u):
+                    continue
                 _cage = self.cooldown_age(u)
                 if _cage is None or _cage < age:
                     continue                       # cooldown fresco: non svegliare
@@ -3878,6 +4052,7 @@ class Router:
                             if u != failed_unique
                             and not (tried and u in tried)
                             and _is_chronic(u)
+                            and not self.is_slow_for_session(u)
                             and not self.is_retired(u)]
             # contesto/capacità compatibili e (Opzione A) testo puro -> text-only
             chronic_pool = _chronic_context(cfg, chronic_pool, need, ctx)
@@ -3899,7 +4074,8 @@ class Router:
         # 5) -fallback INTERO: ignore cooldown, il servizio deve rispondere
         if fb:
             nxt = self._walk_chain(fb, failed_unique, need, ctx,
-                                   ignore_cooldown=True, tried=tried)
+                                   ignore_cooldown=True, tried=tried,
+                                   allow_slow=True)
             if nxt is not None:
                 log.info("[ladder] escalation a -fallback (no cooldown) "
                          "-> %s", nxt["unique"])
@@ -4001,7 +4177,7 @@ class Router:
             _pname = self._group_profile(cur_dep["group"])
             if _pname:
                 _warm = self._warm_pool(
-                    None, set(self.config.chains.get(_pname, [])),
+                    None, self._warm_allowed(_pname, req_grp),
                     need=need, ctx=ctx, tried=tried,
                     failed_unique=cur_dep.get("unique"))
                 if _warm:
