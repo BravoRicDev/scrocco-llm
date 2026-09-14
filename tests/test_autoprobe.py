@@ -108,28 +108,41 @@ def test_probe_ok_wakes(router):
 
 
 def test_probe_ko_grows_cooldown(router):
+    """KO 429 sul cooled: il residuo ALMENO RADDOPPIA (backoff), cosi'
+    l'autoprobe non insiste con richieste ravvicinate inutili."""
     d = _dep(router, DIM, "K-A")
     _used_all(router)
     _cool(router, d, remaining=3600.0)
     fwd = _Fwd(_Resp(429))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     rem = router._cooldown[d["unique"]] - time.time()
-    assert rem > 3600.0 + 100          # 3600 + grow(120): il 429 resta 120s
+    assert 7150.0 <= rem <= 7250.0     # 3600 -> almeno 7200 (2x)
     assert router.is_cooled_down(d["unique"])
 
 
 def test_probe_ko_transient_modest_cooldown(router):
-    """KO 5xx (transitorio): allunga il cooldown del MODESTO transient (30s):
-    si ruota via dal dep flaky senza bruciare il grow pieno."""
+    """Quando il residuo e' PICCOLO (< incremento) l'aggiunta e' il MODESTO
+    transient (30s): si ruota via dal dep flaky senza bruciare il grow pieno."""
     d = _dep(router, DIM, "K-A")
     _used_all(router)
-    _cool(router, d, remaining=3600.0)
+    _cool(router, d, remaining=5.0)
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     assert len(fwd.cli.calls) == 1
     assert router.is_cooled_down(d["unique"])
     rem = router._cooldown[d["unique"]] - time.time()
-    assert 3620.0 <= rem <= 3700.0     # 3600 + transient(30) ~= 3630
+    assert 30.0 <= rem <= 45.0     # 5 + transient(30) ~= 35
+
+
+def test_cooled_ko_doubles_residual(router):
+    """Backoff: il residuo cooled almeno raddoppia a ogni KO."""
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d, remaining=1800.0)
+    fwd = _Fwd(_Resp(429))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    rem = router._cooldown[d["unique"]] - time.time()
+    assert 3550.0 <= rem <= 3650.0     # 1800 -> almeno 3600
 
 
 def test_per_dim_cap(router):
@@ -378,14 +391,14 @@ def test_probe_ko_transient_escalates_on_streak(router):
     Pass2 (streak cap -> grow 120) x2 = +240. MAI retire dall'autoprobe."""
     d = _dep(router, DIM, "K-A")
     _used_all(router)
-    _cool(router, d, remaining=3600.0)
+    _cool(router, d, remaining=5.0)
     router.policy.cooldown_autoprobe_min_gap_sec = 0
     router.policy.probe_retire_after = 2
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 1 -> +30
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 2 -> +240
     rem = router._cooldown[d["unique"]] - time.time()
-    assert 3600.0 + 30.0 + 240.0 - 10 <= rem <= 3600.0 + 30.0 + 240.0 + 10
+    assert 250.0 <= rem <= 300.0       # 5 + 30 + 240 = 275
     assert router.stats_for(d["unique"]).probe_fail_streak == 2
     assert not router.is_retired(d["unique"])
 
@@ -490,32 +503,32 @@ def test_no_fresh_falls_back_to_cooled(router):
 
 def test_probe_cd_multiplied_by_24h_count(router):
     """Il cooldown di un KO del probe e' MOLTIPLICATO per i probe/24h: con 3
-    probe storici (piu' il corrente = 4) un 429 aggiunge 120*4=480 in modo
-    additivo al residuo."""
+    probe storici (piu' il corrente = 4) un 429 aggiunge 120*4=480. Residuo
+    piccolo -> domina il prodotto."""
     d = _dep(router, DIM, "K-A")
     _used_all(router)
-    _cool(router, d, remaining=3600.0)
+    _cool(router, d, remaining=5.0)
     dq = autoprobe._probe_times.setdefault(d["unique"], deque())
     for _ in range(3):
         dq.append(time.time() - 10)
     fwd = _Fwd(_Resp(429))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     rem = router._cooldown[d["unique"]] - time.time()
-    assert 3600.0 + 480.0 - 25 <= rem <= 3600.0 + 480.0 + 25
+    assert 5.0 + 480.0 - 25 <= rem <= 5.0 + 480.0 + 25
 
 
 def test_probe_cd_multiply_can_be_disabled(router):
     router.policy.cooldown_autoprobe_multiply_24h = False
     d = _dep(router, DIM, "K-A")
     _used_all(router)
-    _cool(router, d, remaining=3600.0)
+    _cool(router, d, remaining=5.0)
     dq = autoprobe._probe_times.setdefault(d["unique"], deque())
     for _ in range(5):
         dq.append(time.time() - 10)
     fwd = _Fwd(_Resp(429))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     rem = router._cooldown[d["unique"]] - time.time()
-    assert 3600.0 + 120.0 - 25 <= rem <= 3600.0 + 120.0 + 25
+    assert 5.0 + 120.0 - 25 <= rem <= 5.0 + 120.0 + 25
 
 
 def test_cooled_over_2h_skipped(router):

@@ -145,3 +145,43 @@ def test_stale_max_zero_disables_dim_stale_retry(router):
     d = router._walk_ladder_resilient(
         router.config.chains[PROF], None, None, None, set())
     assert d is not None and d["unique"] in _go(router.config)
+
+
+def test_wakeup_cap_ten_wakes_all_dims(router):
+    """Cap 10 (> dims disponibili): il risveglio prova TUTTI i dim cooled
+    prima di passare al -go."""
+    router.policy.ladder_cooldown_wakeups = 10
+    dims = _dims(router.config)
+    for u in dims:
+        _cool(router, u)
+    tried = set()
+    picks = []
+    for _ in range(len(dims) + 1):
+        d = router._walk_ladder_resilient(
+            router.config.chains[PROF], None, None, None, tried)
+        if d is None:
+            break
+        picks.append(d["unique"])
+        tried.add(d["unique"])
+    assert set(picks[:len(dims)]) == set(dims)
+    assert picks[len(dims)] in _go(router.config)
+
+
+def test_wakeup_orders_by_smallest_residual(router):
+    """Fra i dim cooled vince il 'piu' pronto' (residuo MINORE), poi a salire."""
+    router.policy.ladder_cooldown_wakeups = 10
+    dims = _dims(router.config)
+    now = time.time()
+    for i, u in enumerate(dims):          # dims[0] = residuo minore
+        router._cooldown[u] = now + 1000.0 * (i + 1)
+        router._cooldown_since[u] = now - 1800.0
+    tried = set()
+    picks = []
+    for _ in range(len(dims)):
+        d = router._walk_ladder_resilient(
+            router.config.chains[PROF], None, None, None, tried)
+        assert d is not None
+        picks.append(d["unique"])
+        tried.add(d["unique"])
+    assert picks == dims
+

@@ -20,9 +20,12 @@ Due modalita':
    `grow` (escalation): rotazione piu' lunga, MAI retire dall'autoprobe.
    L'incremento e' MOLTIPLICATO per il numero di probe fatti su quel
    deployment nelle ultime 24h (cooldown_autoprobe_multiply_24h): 120s, 240s,
-   360s... I deployment il cui cooldown residuo supera
+   360s... Inoltre il residuo ALMENO RADDOPPIA a ogni KO (backoff: niente
+   richieste ravvicinate inutili).
+   I deployment il cui cooldown residuo supera
    `cooldown_autoprobe_skip_over_sec` (2h) sono ESCLUSI del tutto dai probe:
-   li rivedra' il tempo o la ULTIMA SPIAGGIA della scala.
+   li rivedra' il tempo, il risveglio della scala (fra -dim e -go) o la
+   ULTIMA SPIAGGIA.
 """
 from __future__ import annotations
 
@@ -307,13 +310,18 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 if _esc:
                     _cd = max(_cd, grow)
                 _cd = _scale_probe_cd(unique, _cd, time.time(), multiply)
-                _n = _probe_count_24h(unique, time.time())
-                log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
-                         "+%.0fs (x%d/24h%s)", unique, code or "timeout",
-                         _cd, max(1, _n), " escalation" if _esc else "")
                 now2 = time.time()
                 base = max(router._cooldown.get(unique, 0.0), now2)
-                new_exp = base + _cd
+                # BACKOFF: il residuo almeno RADDOPPIA a ogni KO cooled (cosi'
+                # non si fanno richieste ravvicinate inutili), con un minimo di
+                # +_cd. Il residuo residuo lo riproveranno la scala (fra -dim e
+                # -go) o l'ultima spiaggia, non l'autoprobe.
+                _add = max(_cd, base - now2)
+                new_exp = base + _add
+                _n = _probe_count_24h(unique, now2)
+                log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
+                         "+%.0fs (x%d/24h%s)", unique, code or "timeout",
+                         _add, max(1, _n), " escalation" if _esc else "")
                 since = router._cooldown_since.get(unique)
                 if since is None:
                     since = now2
