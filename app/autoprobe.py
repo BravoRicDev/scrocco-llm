@@ -314,8 +314,8 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 base = max(router._cooldown.get(unique, 0.0), now2)
                 # BACKOFF: il residuo almeno RADDOPPIA a ogni KO cooled (cosi'
                 # non si fanno richieste ravvicinate inutili), con un minimo di
-                # +_cd. Il residuo residuo lo riproveranno la scala (fra -dim e
-                # -go) o l'ultima spiaggia, non l'autoprobe.
+                # +_cd. Quel residuo lo riproveranno la scala (fra -dim e -go)
+                # o l'ultima spiaggia, non l'autoprobe.
                 _add = max(_cd, base - now2)
                 new_exp = base + _add
                 _n = _probe_count_24h(unique, now2)

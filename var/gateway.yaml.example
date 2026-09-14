@@ -93,8 +93,10 @@ probe_retire_after: 5
 # Jitter simmetrico sui cooldown, anti "thundering herd" (0.12 = +/-12%; 0 = off).
 cooldown_jitter_ratio: 0.12
 # Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim testo):
-# sonda i dormienti piu' "pronti"; OK = sveglia il deployment, KO = +grow secondi
-# (cosi' i bersagli ruotano). Non rallenta mai la risposta live.
+# sonda i dormienti piu' "pronti"; OK = sveglia il deployment; KO = il residuo
+# ALMENO RADDOPPIA (con minimo +grow) e i bersagli ruotano. L'autoprobe non
+# insiste mai: i residui lunghi li rivedra' la scala che risveglia i cooldown
+# (fra -dim e -go) o l'ULTIMA SPIAGGIA. Non rallenta mai la risposta live.
 cooldown_autoprobe_enabled: true
 cooldown_autoprobe_per_dim: 2
 cooldown_autoprobe_min_age_sec: 300
@@ -102,6 +104,12 @@ cooldown_autoprobe_grow_sec: 120
 cooldown_autoprobe_min_gap_sec: 60
 cooldown_autoprobe_max_total: 6
 cooldown_autoprobe_timeout_sec: 20
+# Moltiplica l'incremento KO per il numero di probe fatti su quel deployment
+# nelle ultime 24h (1o=1x, 2o=2x, 3o=3x...): meno richieste ravvicinate inutili.
+cooldown_autoprobe_multiply_24h: true
+# Esclude del tutto dai probe i deployment con cooldown residuo > N sec (2h):
+# li rivedra' il tempo o l'ULTIMA SPIAGGIA. 0 = nessuna esclusione.
+cooldown_autoprobe_skip_over_sec: 7200
 # Time-decay dei punteggi di reputazione (halflife in secondi; 0 = off).
 reputation_decay_halflife_sec: 129600
 # Timeout upstream adattivo per-deployment (solo percorso chat):
@@ -414,6 +422,11 @@ ladder_stale_max: 3
 # PRIMA di salire a -go (0 = nessuno, come prima).
 ladder_cooldown_wakeups: 3
 
+# Risveglio di un dim in cooldown gia' alla PRIMA scelta (initial_pick), non
+# solo lungo la scala: un dim stantio (age >= stale_cooldown_retry_sec) con il
+# residuo minore viene riprovato prima di esc-win/ladder.
+initial_pick_cooldown_wakeup: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # QUALITY CONTROL JSON + RETRY + WATCHDOG STREAMING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -586,6 +599,24 @@ cache_aware:
     on_deployment_switch: true
     switch_min_tokens: 8000
     stub_text: "[tool output omesso: {n} caratteri]"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION-DEP GUARD — anti-usurpazione cross-sessione dei deployment free
+# ─────────────────────────────────────────────────────────────────────────────
+# Evita che sessioni concorrenti "premiano" gli stessi deployment free
+# usurandoli (rate-limit/consumo). Si registra l'ULTIMA sessione che ha
+# servito con SUCCESSO (non un semplice tentativo) ogni deployment free-dims;
+# se un'ALTRA sessione l'ha usato meno di `sec` fa, quel deployment viene
+# IGNORATO fra i vivi e reso eleggibile solo nel tier "pre-ultima-spiaggia"
+# (fra l'ultimo -dim e il -go, ordinato per max_input crescente).
+# Finche' la sessione e' VIVA i suoi deployment restano suoi (ownership
+# rinnovata a ogni richiesta); `sec` di silenzio e l'intero set torna libero.
+# Solo bucket free-dims: -go/-fallback e i gruppi capacita' non sono tracciati.
+# Regola direzionale (ultimo successo): due sessioni che partono nello stesso
+# istante possono collidere una volta, poi la vincente tiene il deployment.
+session_dep_guard:
+  enabled: true
+  sec: 900
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEBUG — scatola nera input/output (solo per debug locale)

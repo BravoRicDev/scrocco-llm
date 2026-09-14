@@ -94,6 +94,32 @@ individual account limits instead of dying on the first 429.
   (old tool outputs stubbed) only when the request would not fit the
   chosen deployment, and the session stays compacted so the provider
   prefix remains cacheable.
+- **Session-dep guard** (`session_dep_guard`): stops concurrent sessions from
+  "grabbing" the same free deployments and burning them (rate-limits). The last
+  session that *successfully* served a free-dims deployment is remembered (an
+  attempt alone never claims it); while that session is alive its deployments
+  stay its own (ownership refreshed on every request), and another session
+  asking within `sec` (900) ignores them among the live keys — they remain
+  eligible only in a *pre-last-resort* tier (between the last `-dim` and `-go`,
+  ordered by the smallest fitting `max_input`). `sec` seconds of silence and the
+  whole set is freed again. Only free-dims buckets are tracked (`-go`/`-fallback`
+  and capability groups are never claimed). The routing session id comes from
+  `x-opencode-session`/`x-session-affinity`/`x-session-id`, then the body, then
+  the anonymous fingerprint.
+- **Multi-SDK upstreams** (`api_style` CSV column): the gateway always speaks
+  and accepts OpenAI Chat Completions, but each deployment can declare its
+  upstream's native protocol — `responses` (OpenAI Responses `/responses`),
+  `messages` (Anthropic `/messages`, auth `x-api-key` + `anthropic-version`),
+  `google` (Gemini `:generateContent`, auth `x-goog-api-key`). Request, response
+  and SSE stream are translated transparently, so models that only exist on those
+  SDKs (e.g. `muse-spark-*-free` on opencode zen) work through the same
+  OpenAI-compatible endpoint. Clients keep using `@ai-sdk/openai-compatible`.
+- **Hard context guard + `max_tokens` clamp**: `max_input` (and the dims
+  estimate) is enforced on *every* chat pick — including explicit group requests
+  like `-200k` — so a 32k model is never chosen for a 150k prompt. The outgoing
+  `max_tokens` is also clamped to `max(1, max_input - estimated_input)` when both
+  are known, so a client reserving a huge completion cannot push
+  `input + output` past the model window (upstream 400/413). Log tag `[maxtok]`.
 - **Predictive budget guard** (`budget_guard`): once a per-key cap is
   *learned from a real 429*, `safety_ratio` (default `0.8`) marks a
   deployment as virtually saturated — counting in-flight requests too
@@ -133,12 +159,19 @@ individual account limits instead of dying on the first 429.
   fire-and-forget pass probes the most "ready" cooled deployments (least
   remaining cooldown) across every text dim — up to `cooldown_autoprobe_per_dim`
   (2) per dim, capped by `cooldown_autoprobe_max_total` (6) — but never uses
-  them to serve the response. A successful probe clears the cooldown (the key is
-  live again on the next call); a failed one adds `cooldown_autoprobe_grow_sec`
-  (+120s) so the targets rotate, without `note_result`/`mark_failed` side
-  effects. `cooldown_autoprobe_min_age_sec` (300) skips just-cooled keys and
-  `cooldown_autoprobe_min_gap_sec` (60) avoids re-probing the same deployment.
-  The live path is never slowed down.
+  them to serve the response. A successful probe clears the cooldown (live again
+  on the next call); a failed one makes the residual **at least double** (min
+  +`cooldown_autoprobe_grow_sec`, 429/definitive; a modest transient bump
+  otherwise), **multiplied by the number of probes on that deployment in the
+  last 24h** (`cooldown_autoprobe_multiply_24h`: 120s, 240s, 360s…) so targets
+  rotate and no needless close-together retries happen.
+  `cooldown_autoprobe_min_age_sec` (300) skips just-cooled keys,
+  `cooldown_autoprobe_min_gap_sec` (60) avoids re-probing the same deployment,
+  and `cooldown_autoprobe_skip_over_sec` (7200) excludes anything already cooled
+  > 2h — the *stale-cooldown wakeup* in the ladder (between `-dim` and `-go`) or
+  the last-resort pass retries those, never the autoprobe. The live path is
+  never slowed down (fresh probes use `note_result`/`mark_failed`; cooled probes
+  stay purely reconnaissance).
 - **Quality-weighted EMA, coalescing & error classification**: `note_result()`
   accepts a `quality` (1.0 clean; lower for tool-repair/text-parse/QC/fake
   tool-call) that scales the latency/success EMA update rate, so broken-but-alive
@@ -190,7 +223,9 @@ individual account limits instead of dying on the first 429.
 
 1. **Resolve** the requested model/alias to a group (`-vision`, `-200k`, …).
 2. **Estimate** tokens and choose the target rung: the requested one, or the
-   smallest dim that fits the estimate (`dims_ladder_floor`).
+   smallest dim that fits the estimate (`dims_ladder_floor`). The per-deployment
+   `max_input` is enforced on every pick (even for explicit `-Nk` requests) and
+   the outgoing `max_tokens` is clamped to the remaining window.
 3. **Pick** a deployment inside the group (adaptive score: latency EMA,
    recency, inflight, sticky affinity; skips cooled/retired keys).
 4. **On failure** mark a cooldown and walk the ladder: remaining live
@@ -241,6 +276,10 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
   preserved — but is excluded from every routing bucket (dims, `-go`,
   `-fallback`, capability groups). Use it when a provider has no free models
   right now instead of deleting rows.
+- `api_style`: optional upstream protocol for this row (default empty = `chat`,
+  i.e. `/chat/completions`). `responses` (OpenAI Responses), `messages`
+  (Anthropic) or `google` (native Gemini) make the gateway translate the request,
+  response and SSE stream to/from that API (correct URL, auth header and body).
 
 Clients call it like OpenAI:
 
@@ -316,11 +355,14 @@ template. The ones that matter most:
 | `max_cooldown_sec` | 18000 | cooldown ceiling (5 h) |
 | `timeout_cooldown_mult` | 10 | multiplier applied to a *timeout* failure |
 | `ladder_skip_after` / `ladder_stale_max` / `ladder_cooldown_wakeups` | 10 / 3 / 3 | attempts per dim before climbing / stale revivals / cooled-dim wakeup probes per request before `-go` |
+| `initial_pick_cooldown_wakeup` | true | retry a stale cooled dim at the very first pick (before esc-win/ladder) |
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
 | `cooldown_streak_halflife_sec` / `probe_retire_after` / `cooldown_jitter_ratio` | 1800 / 5 / 0.12 | streak decay while idle; auto-retire after N failed probes; cooldown jitter (±12%) |
 | `cooldown_autoprobe_enabled` / `cooldown_autoprobe_per_dim` / `cooldown_autoprobe_max_total` | true / 2 / 6 | call-triggered probe of cooled text dims: targets per dim / total per pass |
-| `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO add N s (rotate targets); min gap between probes; probe timeout |
+| `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO residual at least doubles (min +grow, rotate targets); min gap between probes; probe timeout |
+| `cooldown_autoprobe_multiply_24h` / `cooldown_autoprobe_skip_over_sec` | true / 7200 | KO increment × probes in the last 24h (1×, 2×, 3×…); cooled > 2h excluded from probing (ladder wakeup / last resort / time will retry) |
+| `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 900 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |
 | `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |

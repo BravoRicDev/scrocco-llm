@@ -5,7 +5,7 @@
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-brightgreen.svg)](https://unlicense.org/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-compose%20up-blue.svg)](#in-cinque-comandi)
-[![Tests](https://img.shields.io/badge/tests-421%20passing-brightgreen.svg)](#test)
+[![Tests](https://img.shields.io/badge/tests-1081%20passing-brightgreen.svg)](#test)
 
 **Un gateway LLM che mette in pool decine di chiavi free e a pagamento, sceglie
 il modello più piccolo che regge il contesto, e non spreca chiamate inutili.**
@@ -32,7 +32,10 @@ questi due problemi capitano abbastanza spesso da volerli automatizzare via.
 al gruppo di contesto più piccolo che basta (`-24k`, `-128k`, `-1000k`...). Le
 "dim" non sono fisse: vengono lette dal CSV, quindi aggiungere un modello a
 256k crea da solo il gradino `-256k`. Una richiesta esplicita (`-200k`,
-`-1000k`) è una **soglia minima**: la rotazione sale, mai scende.
+`-1000k`) è una **soglia minima**: la rotazione sale, mai scende. Il limite
+`max_input` di ogni deployment viene applicato **sempre** (anche sulle richieste
+esplicite), e `max_tokens` è ridotto alla finestra residua (`max_input - input`),
+così un modello 32k non viene mai scelto per un prompt da 150k.
 
 **Ruota prima di rompersi, non solo dopo.** Un fallimento mette la chiave in
 cooldown con escalation **lineare** (30 minuti di base, +30 per ogni
@@ -94,8 +97,22 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   contano le chiamate invece dei token, un probe periodico brucerebbe quota
   inutilmente. Il risultato resta su disco e viene riverificato solo con un
   `force=true` esplicito.
+- **Protocolli nativi per riga (`api_style`).** Il gateway parla e accetta
+  sempre OpenAI Chat Completions, ma ogni riga del CSV può dichiarare il
+  protocollo nativo dell'upstream (`responses`, `messages`, `google`): richiesta,
+  risposta e stream SSE vengono tradotti al volo, quindi i modelli che esistono
+  solo su quegli SDK funzionano dallo stesso endpoint OpenAI-compatible.
+- **Session-dep guard.** Evita che sessioni concorrenti si usurpino gli stessi
+  deployment free. L'ultima sessione che ha servito con **successo** un
+  deployment free-dims se lo tiene (ownership rinnovata finché è viva); per le
+  altre resta eleggibile solo nel tier pre-ultima-spiaggia, fra l'ultimo `-dim` e
+  il `-go`. Dopo 15 minuti di silenzio l'intero set torna libero.
+- **L'autoprobe non insiste.** Un probe KO fa **almeno raddoppiare** il residuo
+  del cooldown, moltiplicato per il numero di probe fatti su quel deployment
+  nelle ultime 24h; i residui oltre 2 ore escono dai probe e li rivede la scala
+  che risveglia i cooldown o l'ultima spiaggia.
 
-<a name="test"></a>421 test coprono queste logiche: molti sono nati da bug
+<a name="test"></a>1081 test coprono queste logiche: molti sono nati da bug
 reali, non sono test scritti per riempire una percentuale.
 
 ## Cosa non è

@@ -82,7 +82,11 @@ curl -X POST localhost:4001/admin/deployments/probe/bulk \
 no restart.
 
 **Where did my request go?** every request logs one `[summary]` line;
-routing state per deployment: `GET /admin/state`.
+routing state per deployment: `GET /admin/state` (includes
+`adaptive.session_dep_guard`). Useful tags: `[prelast]` (shared
+deployment tier), `[maxtok]` (`max_tokens` clamped to the window),
+`[autoprobe]` (cooldown probe / backoff), `[cache]` (session holder),
+`[fallback]` (failure + next hop).
 
 ## Invariants (do not break)
 
