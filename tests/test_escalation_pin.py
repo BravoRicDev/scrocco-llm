@@ -14,7 +14,7 @@ import pytest
 
 from app.config import GatewayConfig
 from app.policy import Policy
-from app.router import Router
+from app.router import Router, set_current_session
 
 CSV = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
 t@x,m/small,groq,https://api.groq.com/openai/v1,free,200,8000,5,K-SMALL,
@@ -406,4 +406,39 @@ def test_pin_probe_walks_all_tiers_of_requested_dim():
     tried.add(c2["unique"])
     # tier esauriti e nessuna dim intermedia -> None (il chiamante usa il winner)
     assert r._esc_pin_probe(G200, go, need=None, ctx=100, tried=tried) is None
+
+
+# ============ SKIP winner==detentore SOLO stesso bucket (regressione live) ===
+# note_session_success registra il detentore cache su QUALSIASI successo,
+# renewal/pagati inclusi: una sessione che una volta e' salita a -go ha
+# holder=-go. Se il pin winner (-go) == holder (-go) saltava il probe ANCHE
+# per una richiesta free -Nk, la sessione restava incollata a -go senza mai
+# riprovare la dim richiesta (in log: [esc-pin] 'salto la scala' con
+# 'winner==detentore: salto il probe' a ripetizione). Lo skip deve valere
+# solo quando winner e holder sono NELLO STESSO bucket della richiesta.
+
+def test_probe_retry_not_skipped_when_holder_is_paid_bucket():
+    r = _mkrouter_tiers()
+    go = _dep(r, GGO, "K-GO")
+    r.note_session_success("s1", go["unique"])     # holder = -go (scalata)
+    r.record_escalation_win(G200, go)
+    set_current_session("s1")
+    try:
+        cand = r._esc_pin_probe(G200, go, need=None, ctx=100, tried=set())
+    finally:
+        set_current_session(None)
+    assert cand is not None                        # il probe NON va saltato
+    assert cand["group"] == G200                   # e resta nella free-dim
+
+
+def test_probe_retry_still_skipped_when_holder_same_bucket():
+    r = _mkrouter_tiers()
+    a0 = _dep(r, G200, "K-A0")
+    r.note_session_success("s1", a0["unique"])     # holder nel bucket richiesto
+    r.record_escalation_win(G200, a0)
+    set_current_session("s1")
+    try:
+        assert r._esc_pin_probe(G200, a0, need=None, ctx=100, tried=set()) is None
+    finally:
+        set_current_session(None)
 

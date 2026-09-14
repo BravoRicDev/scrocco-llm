@@ -1024,8 +1024,18 @@ class Router:
                             True)):
             _hold = self.session_holder()
             if _hold and winner.get("unique") == _hold:
-                log.info("[cache] winner==detentore %s: salto il probe", _hold)
-                return None
+                if winner.get("group") == req_grp:
+                    log.info("[cache] winner==detentore %s (stesso bucket): "
+                             "salto il probe", _hold)
+                    return None
+                # Detentore su bucket DIVERSO (tipico: -go dopo un'escalation,
+                # perche' note_session_success registra il holder su QUALSIASI
+                # successo, renewal inclusi): NON saltare il probe, o la
+                # sessione resta incollata al bucket a pagamento senza mai
+                # riprovare la free-dim richiesta (regressione vista live).
+                log.info("[cache] winner==detentore %s ma su altro bucket "
+                         "(%s != %s): provo comunque la richiesta",
+                         _hold, winner.get("group"), req_grp)
         n_dims = max(0, int(getattr(self.policy, "escalation_pin_probe_dims",
                                      2) or 0))
         if n_dims <= 0:
