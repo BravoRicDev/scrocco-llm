@@ -704,6 +704,46 @@ class Router:
                  group_name, unique, time.time() - ts)
         return dep
 
+    def _pick_tiered(self, group_name: str,
+                     need: frozenset[str] | None = None,
+                     ctx: int | None = None,
+                     tried: set[str] | None = None) -> dict | None:
+        """Sceglie 1 deployment VIVO nel TIER (order) vivo piu' basso non
+        ancora sondato in questo gruppo. Serve a provare, UNO PER TIER, tutti
+        i tier vivi di una dim (non solo il primo di `pick_deployment`): il
+        chiamante registra l'unique in `tried` e alla chiamata successiva si
+        passa al tier successivo. Ritorna None quando i tier vivi sono
+        esauriti. Entro il tier preferisce il detentore cache, poi random."""
+        deps = self.config.groups.get(group_name) or []
+        tried = tried or set()
+        tried_tiers: set[int] = set()
+        for u in tried:
+            d = self.config.deployment_by_unique(u)
+            if d and d.get("group") == group_name:
+                tried_tiers.add(int(d.get("order", ORDER_LAST)))
+        tiers: dict[int, list[dict]] = {}
+        for d in deps:
+            u = d.get("unique")
+            if not u or u in tried:
+                continue
+            tier = int(d.get("order", ORDER_LAST))
+            if tier in tried_tiers:
+                continue
+            if self.is_cooled_down(u) or self.is_retired(u):
+                continue
+            if not self._cap_fits(d, ctx):
+                continue
+            if need and not self._dep_supports(d, need):
+                continue
+            tiers.setdefault(tier, []).append(d)
+        if not tiers:
+            return None
+        pool = tiers[min(tiers)]
+        ch = self.cache_holder(need=need, ctx=ctx)
+        if ch and any(ch["unique"] == d["unique"] for d in pool):
+            return ch
+        return random.choice(pool)
+
     def _esc_pin_probe(self, req_grp: str | None, winner: dict | None,
                        need: frozenset[str] | None = None,
                        ctx: int | None = None,
@@ -751,38 +791,55 @@ class Router:
                 g = d.get("group", "")
                 tried_groups[g] = tried_groups.get(g, 0) + 1
 
-        # (a) retry nella dim richiesta (1 tentativo extra, mai piu' di 2 in
-        #     tutto): il bucket nominale resta la prima scelta anche col pin.
+        # (a) retry nella dim richiesta: 1 tentativo per OGNI tier vivo del
+        #     bucket (non solo il primo di pick_deployment). Il bucket
+        #     nominale resta la prima scelta anche col pin.
         if allow_retry and getattr(self.policy, "escalation_pin_probe_retry",
                                    True):
-            if tried_groups.get(req_grp, 0) < 2:
-                cand = self.pick_deployment(req_grp, need=need, ctx=ctx,
-                                            live_only=True)
-                if cand is not None and cand["unique"] not in tried_set:
-                    log.info("[esc-pin-probe] %s: retry dim richiesta -> %s",
-                             req_grp, cand["unique"])
-                    return cand
+            cand = self._pick_tiered(req_grp, need=need, ctx=ctx,
+                                     tried=tried_set)
+            if cand is not None:
+                log.info("[esc-pin-probe] %s: retry dim richiesta "
+                         "(tier=%s) -> %s", req_grp, cand.get("order"),
+                         cand["unique"])
+                return cand
 
         # (b) dim intermedie (> dim richiesta, escluso il gruppo winner).
+        #     Per OGNI dim prescelta si prova 1 candidato per tier vivo: le
+        #     dim gia' "aperte" (hanno un tried ma tier ancora vivi) si
+        #     continuano prima di aprirne di nuove; il budget
+        #     `escalation_pin_probe_dims` conta le dim gia' aperte.
         winner_group = winner.get("group")
         inter = [d for d in self.config.profile_dims.get(pname, [])
                  if d > req_dim and f"{base}-{d}k" != winner_group]
         if not inter:
             return None
-        already = [d for d in inter if f"{base}-{d}k" in tried_groups]
-        if len(already) >= n_dims:
-            return None                       # campionamento gia' esaurito
-        avail = [d for d in inter if f"{base}-{d}k" not in tried_groups]
-        if getattr(self.policy, "escalation_pin_probe_random", True):
-            random.shuffle(avail)
-        for d in avail:
+        cand_by_dim = []
+        for d in inter:
             g = f"{base}-{d}k"
-            cand = self.pick_deployment(g, need=need, ctx=ctx, live_only=True)
-            if cand is not None and cand["unique"] not in tried_set:
-                log.info("[esc-pin-probe] %s: sondo dim intermedia %s -> %s",
-                         req_grp, g, cand["unique"])
-                return cand
-        return None
+            c = self._pick_tiered(g, need=need, ctx=ctx, tried=tried_set)
+            if c is not None:
+                cand_by_dim.append((d, g, c))
+        if not cand_by_dim:
+            return None
+        opened = [d for d in inter if f"{base}-{d}k" in tried_groups]
+        cont = [(d, g, c) for (d, g, c) in cand_by_dim
+                if f"{base}-{d}k" in tried_groups]
+        fresh = [(d, g, c) for (d, g, c) in cand_by_dim
+                 if f"{base}-{d}k" not in tried_groups]
+        if getattr(self.policy, "escalation_pin_probe_random", True):
+            random.shuffle(fresh)
+        if cont:
+            _d, g, cand = cont[0]
+        elif len(opened) >= n_dims:
+            return None                       # campionamento gia' esaurito
+        elif fresh:
+            _d, g, cand = fresh[0]
+        else:
+            return None
+        log.info("[esc-pin-probe] %s: sondo dim intermedia %s (tier=%s) -> %s",
+                 req_grp, g, cand.get("order"), cand["unique"])
+        return cand
 
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,

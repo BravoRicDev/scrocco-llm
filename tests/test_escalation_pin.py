@@ -261,35 +261,30 @@ def _cool(r, dep):
     r._cooldown[dep["unique"]] = time.time() + 9999
 
 
-def test_pin_probe_retry_then_dims_then_winner():
+def test_pin_probe_one_per_tier_then_dims_then_winner():
     r = _mkrouter_multi()
     small = _dep(r, G200, "K-SMALL")
-    small2 = _dep(r, G200, "K-SMALL2")
     go = _dep(r, GGO, "K-GO")
     r.record_escalation_win(G200, go)
     _cool(r, small)                      # come dopo un fallimento reale
     tried = {small["unique"]}
-    # 1) retry nella dim richiesta -> l'altra key -200k
+    # la -200k ha UN solo tier (order default) e quell'unico candidato e' gia'
+    # stato provato: con '1 per tier' NON si ritenta un'altra key dello stesso
+    # tier -> si passa subito alle dim intermedie.
     n1 = r.fallback_next("test", small, None, "chain", ctx=100,
                          tried=tried, requested_group=G200)
-    assert n1 is not None and n1["group"] == G200
-    assert n1["unique"] == small2["unique"]
+    assert n1 is not None and n1["group"] in (G256, G1000)
     tried.add(n1["unique"])
-    # 2) prima dim intermedia (256 o 1000)
+    # seconda dim intermedia, diversa dalla prima
     n2 = r.fallback_next("test", n1, None, "chain", ctx=100,
                          tried=tried, requested_group=G200)
     assert n2 is not None and n2["group"] in (G256, G1000)
+    assert n2["group"] != n1["group"]
     tried.add(n2["unique"])
-    # 3) seconda dim intermedia, diversa dalla prima
+    # esaurite le 2 intermedie -> winner
     n3 = r.fallback_next("test", n2, None, "chain", ctx=100,
                          tried=tried, requested_group=G200)
-    assert n3 is not None and n3["group"] in (G256, G1000)
-    assert n3["group"] != n2["group"]
-    tried.add(n3["unique"])
-    # 4) esaurite le 2 intermedie -> winner
-    n4 = r.fallback_next("test", n3, None, "chain", ctx=100,
-                         tried=tried, requested_group=G200)
-    assert n4 is not None and n4["unique"] == go["unique"]
+    assert n3 is not None and n3["unique"] == go["unique"]
 
 
 def test_pin_probe_disabled_returns_winner():
@@ -345,4 +340,70 @@ def test_initial_pick_dead_bucket_probes_intermediates():
     dep = r.initial_pick("test", G200, ctx=50000)
     assert dep is not None and dep["group"] in (G256, G1000)
     assert dep["unique"] != go["unique"]
+
+
+# ============================== UNO PER TIER (richiesta C) ===================
+# Bucket -200k con DUE tier (order 0 e order 6): il probe pre-pin deve provare
+# 1 candidato per OGNI tier vivo, non solo il primo del tier minimo.
+CSV_TIERS = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps,order
+t@x,m/a0,groq,https://api.groq.com/openai/v1,free,200,100000,5,K-A0,,0
+t@x,m/a1,groq,https://api.groq.com/openai/v1,free,200,100000,5,K-A1,,0
+t@x,m/b6,groq,https://api.groq.com/openai/v1,free,200,100000,5,K-B6,,6
+t@x,m/go,groq,https://api.groq.com/openai/v1,,0,0,5,K-GO,
+"""
+
+
+def _mkrouter_tiers(**polkw):
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_TIERS)
+    pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}},
+                            **polkw})
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    r = Router(cfg, pol)
+    os.unlink(path)
+    return r
+
+
+def test_pick_tiered_one_per_tier():
+    r = _mkrouter_tiers()
+    first = r._pick_tiered(G200, tried=set())
+    assert first is not None and int(first["order"]) == 0
+    second = r._pick_tiered(G200, tried={first["unique"]})
+    assert second is not None and int(second["order"]) == 6
+    third = r._pick_tiered(G200, tried={first["unique"], second["unique"]})
+    assert third is None
+
+
+def test_pick_tiered_skips_cooled_tier():
+    r = _mkrouter_tiers()
+    for d in r.config.groups[G200]:
+        if int(d["order"]) == 0:
+            _cool(r, d)                       # tier 0 tutto in cooldown
+    got = r._pick_tiered(G200, tried=set())
+    assert got is not None and int(got["order"]) == 6
+
+
+def test_pick_tiered_none_when_all_tried():
+    r = _mkrouter_tiers()
+    allu = {d["unique"] for d in r.config.groups[G200]}
+    assert r._pick_tiered(G200, tried=allu) is None
+
+
+def test_pin_probe_walks_all_tiers_of_requested_dim():
+    """Con il pin attivo, i primi tentativi restano nella dim richiesta
+    scorrendo TUTTI i suoi tier (0, 6) e solo dopo (nessuna intermedia qui)
+    si lascia il posto al winner."""
+    r = _mkrouter_tiers()
+    go = _dep(r, GGO, "K-GO")
+    r.record_escalation_win(G200, go)
+    tried = set()
+    c1 = r._esc_pin_probe(G200, go, need=None, ctx=100, tried=tried)
+    assert c1 is not None and int(c1["order"]) == 0
+    tried.add(c1["unique"])
+    c2 = r._esc_pin_probe(G200, go, need=None, ctx=100, tried=tried)
+    assert c2 is not None and int(c2["order"]) == 6
+    tried.add(c2["unique"])
+    # tier esauriti e nessuna dim intermedia -> None (il chiamante usa il winner)
+    assert r._esc_pin_probe(G200, go, need=None, ctx=100, tried=tried) is None
 
