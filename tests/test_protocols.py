@@ -348,3 +348,134 @@ def test_config_parses_api_style(tmp_path):
     assert by_model["m1"]["api_style"] == "google"
     assert by_model["m2"]["api_style"] == "chat"
     assert by_model["m3"]["api_style"] == "responses"
+
+
+# ============================================================ REASONING/THINKING
+# Il thinking degli upstream tradotti (responses/messages/google) NON deve
+# essere perso: in risposta finisce in message.reasoning_content (o delta
+# reasoning_content in stream), come nei provider OpenAI-compat pass-through.
+
+def test_responses_to_chat_maps_reasoning_summary():
+    obj = {"id": "resp_1", "model": "m", "status": "completed",
+           "output": [
+               {"type": "reasoning", "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "Penso"},
+                            {"type": "summary_text", "text": "quindi"}]},
+               {"type": "message", "role": "assistant", "content": [
+                   {"type": "output_text", "text": "ciao"}]}]}
+    chat = P.responses_to_chat(obj, _dep("responses"))
+    msg = chat["choices"][0]["message"]
+    assert msg["content"] == "ciao"
+    assert msg["reasoning_content"] == "Penso\n\nquindi"
+
+
+def test_responses_to_chat_no_reasoning_no_field():
+    obj = {"output": [{"type": "message", "role": "assistant",
+                       "content": [{"type": "output_text", "text": "x"}]}]}
+    msg = P.responses_to_chat(obj, _dep("responses"))["choices"][0]["message"]
+    assert "reasoning_content" not in msg
+
+
+def test_chat_to_responses_propagates_effort():
+    body = {"messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"}
+    out = P.chat_to_responses(body, _dep("responses"))
+    assert out["reasoning"] == {"effort": "high", "summary": "auto"}
+    out2 = P.chat_to_responses({"messages": [
+        {"role": "user", "content": "hi"}]}, _dep("responses"))
+    assert "reasoning" not in out2
+
+
+def test_messages_to_chat_maps_thinking_blocks():
+    obj = {"id": "x", "content": [
+        {"type": "thinking", "thinking": "rifletto", "signature": "s"},
+        {"type": "text", "text": "risposta"}]}
+    msg = P.messages_to_chat(obj, _dep("messages"))["choices"][0]["message"]
+    assert msg["content"] == "risposta"
+    assert msg["reasoning_content"] == "rifletto"
+
+
+def test_chat_to_messages_enables_thinking_from_effort():
+    body = {"messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "medium", "temperature": 0.7, "max_tokens": 8000}
+    out = P.chat_to_messages(body, _dep("messages"))
+    assert out["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    # con thinking attivo Anthropic non accetta temperature/top_p
+    assert "temperature" not in out and "top_p" not in out
+    out2 = P.chat_to_messages({"messages": [
+        {"role": "user", "content": "hi"}], "temperature": 0.7,
+        "max_tokens": 8000}, _dep("messages"))
+    assert "thinking" not in out2 and out2["temperature"] == 0.7
+
+
+def test_gemini_maps_thought_parts():
+    body = {"messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "low"}
+    out = P.chat_to_gemini(body, _dep("google"))
+    tc = out["generationConfig"]["thinkingConfig"]
+    assert tc["includeThoughts"] is True and tc["thinkingBudget"] == 1024
+    obj = {"candidates": [{"content": {"parts": [
+        {"text": "pensiero", "thought": True}, {"text": "risposta"}]}}]}
+    msg = P.gemini_to_chat(obj, _dep("google"))["choices"][0]["message"]
+    assert msg["content"] == "risposta"
+    assert msg["reasoning_content"] == "pensiero"
+
+
+def test_stream_responses_reasoning_delta():
+    evs = [
+        {"type": "response.created", "response": {"id": "r"}},
+        {"type": "response.reasoning_summary_text.delta", "delta": "pen"},
+        {"type": "response.output_text.delta", "delta": "ciao"},
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ]
+    blob = asyncio.run(_collect(
+        P.stream_translator("responses", _aiter([_sse(evs)]),
+                            _dep("responses"))))
+    objs = _events(blob)
+    deltas = [o["choices"][0]["delta"] for o in objs if o.get("choices")]
+    assert {"reasoning_content": "pen"} in deltas
+    assert {"content": "ciao"} in deltas
+    # l'ordine del delta reasoning precede quello di risposta
+    assert deltas.index({"reasoning_content": "pen"}) \
+        < deltas.index({"content": "ciao"})
+
+
+def test_stream_messages_thinking_delta():
+    evs = [
+        {"type": "message_start", "message": {"id": "m"}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "thinking_delta", "thinking": "th"}},
+        {"type": "content_block_delta", "index": 1,
+         "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "message_stop"},
+    ]
+    blob = asyncio.run(_collect(
+        P.stream_translator("messages", _aiter([_sse(evs)]),
+                            _dep("messages"))))
+    deltas = [o["choices"][0]["delta"] for o in _events(blob)
+              if o.get("choices")]
+    assert {"reasoning_content": "th"} in deltas and {"content": "ok"} in deltas
+
+
+def test_stream_google_thought_part():
+    evs = [
+        {"candidates": [{"content": {"parts": [
+            {"text": "tt", "thought": True}]}}]},
+        {"candidates": [{"content": {"parts": [{"text": "cc"}]},
+                         "finishReason": "STOP"}]},
+    ]
+    blob = asyncio.run(_collect(
+        P.stream_translator("google", _aiter([_sse(evs)]),
+                            _dep("google"))))
+    deltas = [o["choices"][0]["delta"] for o in _events(blob)
+              if o.get("choices")]
+    assert {"reasoning_content": "tt"} in deltas and {"content": "cc"} in deltas
+
+
+def test_chat_obj_to_sse_includes_reasoning():
+    obj = {"id": "c", "model": "m", "choices": [{"index": 0, "finish_reason": "stop",
+           "message": {"role": "assistant", "content": "hi",
+                       "reasoning_content": "why"}}]}
+    objs = _events(b"".join(P.chat_obj_to_sse(obj)))
+    deltas = [o["choices"][0]["delta"] for o in objs if o.get("choices")]
+    assert {"reasoning_content": "why"} in deltas

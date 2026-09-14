@@ -140,6 +140,13 @@ individual account limits instead of dying on the first 429.
   and SSE stream are translated transparently, so models that only exist on those
   SDKs (e.g. `muse-spark-*-free` on opencode zen) work through the same
   OpenAI-compatible endpoint. Clients keep using `@ai-sdk/openai-compatible`.
+  Thinking/reasoning crosses this boundary too: a client that asks for reasoning
+  (`reasoning_effort`/`effort`/`x-effort`, gated on the row's `effort_capable`)
+  gets it enabled natively upstream (`reasoning.summary` auto, Anthropic
+  `thinking.budget_tokens`, Gemini `thinkingConfig`), and the upstream thinking is
+  delivered back as `message.reasoning_content` (non-stream, in the final JSON
+  too) / `delta.reasoning_content` (stream) — the same fields OpenAI-compatible
+  providers already use on the pass-through `chat` style.
 - **Hard context guard + `max_tokens` clamp**: `max_input` (and the dims
   estimate) is enforced on *every* chat pick — including explicit group requests
   like `-200k` — so a 32k model is never chosen for a 150k prompt. The outgoing

@@ -122,6 +122,18 @@ def _parts_to_text(content: Any) -> str:
 
 
 # ================================================================ RESPONSES
+def _reasoning_from_body(body: dict) -> str | None:
+    """Effort normalizzato dal body chat (apply_effort_policy lo ha gia'
+    messo/tolto): 'low'|'medium'|'high' o None."""
+    eff = str(body.get("reasoning_effort") or "").strip().lower()
+    return eff if eff in ("low", "medium", "high") else None
+
+
+# Budget di thinking per livello nei protocolli nativi che lo chiedono in
+# token (Anthropic budget_tokens / Gemini thinkingBudget).
+_THINK_BUDGET = {"low": 1024, "medium": 4096, "high": 8192}
+
+
 def chat_to_responses(body: dict, dep: dict) -> dict:
     """OpenAI Chat Completions -> OpenAI Responses API (/responses)."""
     out: dict[str, Any] = {"model": dep.get("model") or body.get("model")}
@@ -196,20 +208,36 @@ def chat_to_responses(body: dict, dep: dict) -> dict:
     for k_src, k_dst in (("temperature", "temperature"), ("top_p", "top_p")):
         if body.get(k_src) is not None:
             out[k_dst] = body[k_src]
+    eff = _reasoning_from_body(body)
+    if eff:
+        # 'summary': auto -> l'upstream rimette il riepilogo del thinking
+        # (item type=="reasoning") che responses_to_chat riconverte in
+        # reasoning_content. Senza effort richiesto, non chiediamo nulla.
+        out["reasoning"] = {"effort": eff, "summary": "auto"}
     if body.get("stream"):
         out["stream"] = True
     return out
 
 
 def responses_to_chat(obj: dict, dep: dict) -> dict:
-    """OpenAI Responses API -> OpenAI Chat Completion."""
+    """OpenAI Responses API -> OpenAI Chat Completion.
+
+    Gli item `type=="reasoning"` (riepilogo del thinking, presente ANCHE
+    nella risposta non-stream quando abbiamo chiesto `reasoning.summary`)
+    finiscono in `message.reasoning_content`, come i provider OpenAI-compat.
+    """
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
     for item in (obj.get("output") or []):
         if not isinstance(item, dict):
             continue
         it = item.get("type")
-        if it == "message":
+        if it == "reasoning":
+            for s in (item.get("summary") or []):
+                if isinstance(s, dict) and s.get("text"):
+                    reasoning_parts.append(str(s["text"]))
+        elif it == "message":
             for c in (item.get("content") or []):
                 if isinstance(c, dict) and c.get("type") in (
                         "output_text", "text"):
@@ -226,6 +254,8 @@ def responses_to_chat(obj: dict, dep: dict) -> dict:
         finish = "length"
     msg: dict[str, Any] = {"role": "assistant",
                            "content": "".join(text_parts) or None}
+    if reasoning_parts:
+        msg["reasoning_content"] = "\n\n".join(reasoning_parts)
     if tool_calls:
         msg["tool_calls"] = tool_calls
     u = obj.get("usage") or {}
@@ -329,9 +359,16 @@ def chat_to_messages(body: dict, dep: dict) -> dict:
                                       "name") or tc.get("name")}
     out["max_tokens"] = int(body.get("max_completion_tokens")
                             or body.get("max_tokens") or 4096)
-    if body.get("temperature") is not None:
+    eff = _reasoning_from_body(body)
+    if eff and out["max_tokens"] > 1024:
+        # Anthropic con thinking attivo RIFIUTA temperature/top_p != 1:
+        # l'effort (scelta esplicita del client) vince e non li copiamo;
+        # il budget deve restare STRETTO sotto max_tokens.
+        budget = min(_THINK_BUDGET.get(eff, 4096), out["max_tokens"] - 1)
+        out["thinking"] = {"type": "enabled", "budget_tokens": max(1024, budget)}
+    if body.get("temperature") is not None and "thinking" not in out:
         out["temperature"] = body["temperature"]
-    if body.get("top_p") is not None:
+    if body.get("top_p") is not None and "thinking" not in out:
         out["top_p"] = body["top_p"]
     stop = body.get("stop")
     if isinstance(stop, str):
@@ -363,12 +400,19 @@ def _merge_consecutive(msgs: list[dict]) -> list[dict]:
 def messages_to_chat(obj: dict, dep: dict) -> dict:
     """Anthropic Messages -> OpenAI Chat Completion."""
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
     for b in (obj.get("content") or []):
         if not isinstance(b, dict):
             continue
         if b.get("type") == "text":
             text_parts.append(b.get("text") or "")
+        elif b.get("type") == "thinking":
+            # Anthropic: il blocco thinking (o redacted_thinking) diventa
+            # reasoning_content OpenAI-compat per il client.
+            th = b.get("thinking") or b.get("text")
+            if th:
+                reasoning_parts.append(str(th))
         elif b.get("type") == "tool_use":
             tool_calls.append({
                 "id": b.get("id") or "",
@@ -382,6 +426,8 @@ def messages_to_chat(obj: dict, dep: dict) -> dict:
               "end_turn": "stop", "stop_sequence": "stop"}.get(sr, "stop")
     msg: dict[str, Any] = {"role": "assistant",
                            "content": "".join(text_parts) or None}
+    if reasoning_parts:
+        msg["reasoning_content"] = "\n\n".join(reasoning_parts)
     if tool_calls:
         msg["tool_calls"] = tool_calls
     u = obj.get("usage") or {}
@@ -476,6 +522,12 @@ def chat_to_gemini(body: dict, dep: dict) -> dict:
         gen["stopSequences"] = [stop]
     elif isinstance(stop, list):
         gen["stopSequences"] = stop
+    eff = _reasoning_from_body(body)
+    if eff:
+        # Gemini: includeThoughts chiede il riepilogo dei thinking (parts con
+        # thought:true) che gemini_to_chat converte in reasoning_content.
+        gen["thinkingConfig"] = {"includeThoughts": True,
+                                 "thinkingBudget": _THINK_BUDGET.get(eff, 4096)}
     if gen:
         out["generationConfig"] = gen
     return out
@@ -490,6 +542,7 @@ def _tool_response_obj(content: Any) -> dict:
 def gemini_to_chat(obj: dict, dep: dict) -> dict:
     """Google generateContent -> OpenAI Chat Completion."""
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
     finish = "stop"
     cands = obj.get("candidates") or []
@@ -503,7 +556,10 @@ def gemini_to_chat(obj: dict, dep: dict) -> dict:
             if not isinstance(p, dict):
                 continue
             if "text" in p and p.get("text"):
-                text_parts.append(p["text"])
+                if p.get("thought"):
+                    reasoning_parts.append(p["text"])
+                else:
+                    text_parts.append(p["text"])
             fc = p.get("functionCall")
             if isinstance(fc, dict):
                 tool_calls.append({
@@ -517,6 +573,8 @@ def gemini_to_chat(obj: dict, dep: dict) -> dict:
         finish = "tool_calls"
     msg: dict[str, Any] = {"role": "assistant",
                            "content": "".join(text_parts) or None}
+    if reasoning_parts:
+        msg["reasoning_content"] = "\n\n".join(reasoning_parts)
     if tool_calls:
         msg["tool_calls"] = tool_calls
     um = obj.get("usageMetadata") or {}
@@ -580,6 +638,11 @@ def chat_obj_to_sse(obj: dict) -> list[bytes]:
         d0["tool_calls"] = tool_calls
     out = [_sse({**base, "choices": [{"index": 0, "delta": d0,
                                       "finish_reason": None}]})]
+    rc = msg.get("reasoning_content")
+    if isinstance(rc, str) and rc:
+        out.append(_sse({**base, "choices": [{"index": 0,
+                       "delta": {"reasoning_content": rc},
+                       "finish_reason": None}]}))
     if content:
         out.append(_sse({**base, "choices": [{"index": 0,
                        "delta": {"content": content},
@@ -638,6 +701,13 @@ class _StreamState:
         return _sse({"id": self.id, "object": "chat.completion.chunk",
                      "created": _now(), "model": self.model,
                      "choices": [{"index": 0, "delta": {"content": text},
+                                  "finish_reason": None}]})
+
+    def reasoning(self, text: str) -> bytes:
+        return _sse({"id": self.id, "object": "chat.completion.chunk",
+                     "created": _now(), "model": self.model,
+                     "choices": [{"index": 0,
+                                  "delta": {"reasoning_content": text},
                                   "finish_reason": None}]})
 
     def tool_start(self, key: str, call_id: str, name: str) -> bytes:
@@ -709,6 +779,17 @@ async def _stream_responses(source: AsyncIterator[bytes],
             d = ev.get("delta")
             if d:
                 yield st.content(d)
+        elif t in ("response.reasoning_summary_text.delta",
+                   "response.reasoning_text.delta"):
+            # Riepilogo del thinking (o corpo reasoning): delta
+            # reasoning_content come dai provider OpenAI-compat. Il peek li
+            # conta solo per il verdetto di commit, non per i caratteri di
+            # risposta.
+            if not st.role_sent:
+                yield st.start()
+            d = ev.get("delta")
+            if d:
+                yield st.reasoning(d)
         elif t == "response.output_item.added":
             item = ev.get("item") or {}
             if item.get("type") == "function_call":
@@ -763,6 +844,13 @@ async def _stream_messages(source: AsyncIterator[bytes],
                     yield st.start()
                 if d.get("text"):
                     yield st.content(d["text"])
+            elif d.get("type") == "thinking_delta":
+                # Anthropic streaming: i block thinking diventano
+                # delta.reasoning_content verso il client.
+                if not st.role_sent:
+                    yield st.start()
+                if d.get("thinking"):
+                    yield st.reasoning(d["thinking"])
             elif d.get("type") == "input_json_delta":
                 if not st.role_sent:
                     yield st.start()
@@ -813,7 +901,10 @@ async def _stream_google(source: AsyncIterator[bytes],
                 if p.get("text"):
                     if not st.role_sent:
                         yield st.start()
-                    yield st.content(p["text"])
+                    if p.get("thought"):
+                        yield st.reasoning(p["text"])
+                    else:
+                        yield st.content(p["text"])
                 fc = p.get("functionCall")
                 if isinstance(fc, dict):
                     if not st.role_sent:

@@ -101,7 +101,13 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   sempre OpenAI Chat Completions, ma ogni riga del CSV può dichiarare il
   protocollo nativo dell'upstream (`responses`, `messages`, `google`): richiesta,
   risposta e stream SSE vengono tradotti al volo, quindi i modelli che esistono
-  solo su quegli SDK funzionano dallo stesso endpoint OpenAI-compatible.
+  solo su quegli SDK funzionano dallo stesso endpoint OpenAI-compatible. Anche
+  il **thinking** attraversa il confine: se il client chiede reasoning
+  (`reasoning_effort`/`effort`/`x-effort`, filtrato da `effort_capable` di riga)
+  il gateway lo abilita in nativo (`reasoning.summary`, `thinking.budget_tokens`,
+  `thinkingConfig`) e lo restituisce come `message.reasoning_content` (anche
+  nella risposta finale non-stream) / `delta.reasoning_content` (stream), gli
+  stessi campi dei provider OpenAI-compat in pass-through.
 - **Session-dep guard.** Evita che sessioni concorrenti si usurpino gli stessi
   deployment free. L'ultima sessione che ha servito con **successo** un
   deployment free-dims se lo tiene (ownership rinnovata finché è viva); per le

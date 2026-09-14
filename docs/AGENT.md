@@ -96,7 +96,12 @@ renewal tier — paid cache, never for auto routing), `[ctxcompact]` (cold-cache
 context trim: old large tool outputs → deterministic head+tail stub with
 `[tool] N char, M righe[, exit X]` summary, duplicates → `[rimando: ...]`;
 error outputs are NEVER rewritten; tail protected while it fits
-`keep_tail_pct`% of the window).
+`keep_tail_pct`% of the window), `[effort]` (`reasoning_effort` injected/
+removed per the row's `effort_capable`). Thinking crosses the translator
+boundary: upstream reasoning (Responses summaries, Anthropic `thinking`
+blocks, Gemini `thought` parts) is delivered to the client as
+`message.reasoning_content` / `delta.reasoning_content`, exactly like the
+pass-through `chat` style — non-stream final answers included.
 
 ## Invariants (do not break)
 
