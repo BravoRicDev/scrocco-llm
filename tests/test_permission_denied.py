@@ -23,8 +23,8 @@ from app.router import Router
 
 
 def test_cooldown_is_long():
-    """Cooldown >= 1h (key/progetto rifiutato: non torna presto)."""
-    assert PERMISSION_DENIED_COOLDOWN_S >= 3600
+    """Cooldown >= 30min (key/progetto rifiutato: non torna presto)."""
+    assert PERMISSION_DENIED_COOLDOWN_S >= 1800
 
 
 def test_not_actionable_at_chain_exhaustion():

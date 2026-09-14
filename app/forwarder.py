@@ -266,14 +266,16 @@ async def _stall_guard(aiter, timeout: float, model: str = ""):
 # unavailable", ecc. — il modello non esiste / non e' servito / e' giu' su
 # QUESTO provider: deployment-side, sempre ritriabile (mai pass-through del
 # 4xx al client). Condizione effettivamente duratura -> cooldown 24h fisso.
+# NOTA: le alternative \bunavailable / "not (currently|temporarily)?available"
+# NON sono incluse qui: "Model is unavailable" / "The requested model is not
+# available" sono ERRORI TRANSIENT del provider (es. OpenCode Go risponde cosi'
+# quando l'endpoint/upstream e' giu' o il modello e' temporaneamente
+# indisponibile) -> vengono trattate da _PROVIDER_TRANSIENT_RE, mai da
+# PERMANENT_DEAD/retire. Restano PERMANENTI solo le condizioni che davvero non
+# tornano: modello inesistente, ritirato/EOL, deprecated.
 _MODEL_MISSING_RE = re.compile(
     r"no such model|model_not_found|unknown model|modello inesistente"
     r"|does not exist|modelerror|model[\w .:/'-]*\bnot supported"
-    r"|model[\w .:/'()-]{0,60}?\bunavailable"
-    # bynara & co.: 400 {"error":{"type":"bad_request","message":"The requested
-    # model is not available."}} — il modello non e' servito su QUESTO provider:
-    # stesso trattamento (deployment-side, 24h, ruota, mai raw al client).
-    r"|model[\w .:/'()-]{0,80}?\bnot\s+(?:currently\s+|temporarily\s+)?available"
     # EOL / ritiro: OpenRouter risponde 410 {"title":"Gone","detail":"The model
     # '...' has reached [end of life]..."}; altri "no longer available",
     # "has been deprecated/retired/sunset". Il modello non torna -> stesso
@@ -406,11 +408,11 @@ _PROVIDER_TRANSIENT_RE = re.compile(
     r"|upstream[_ ]+(?:provider[_ ]+)?auth\w*[_ ]*fail"
     r"|upstream_authentication_failed|provider authentication failed",
     re.IGNORECASE)
-PROVIDER_TRANSIENT_COOLDOWN_S = 120
+PROVIDER_TRANSIENT_COOLDOWN_S = 60
 
 # 403 upstream (permission denied / project banned / key disabled...): la key
 # non torna presto -> cooldown lungo, poi si ruota sul successivo.
-PERMISSION_DENIED_COOLDOWN_S = 3600          # 1h
+PERMISSION_DENIED_COOLDOWN_S = 1800          # 30min
 
 # Loop degenere rilevato in STREAMING (kill precoce): il modello produce
 # output ripetitivo all'infinito -> cooldown medio, il routing ruota subito.

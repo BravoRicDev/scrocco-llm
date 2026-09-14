@@ -43,7 +43,7 @@ def _mk_router():
 
 
 def test_cooldown_is_long():
-    assert PERMISSION_DENIED_COOLDOWN_S >= 3600
+    assert PERMISSION_DENIED_COOLDOWN_S >= 1800
 
 
 # ----------------------------------------------------------------- non-stream

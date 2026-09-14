@@ -23,6 +23,8 @@ import logging
 import re
 import time
 
+from .forwarder import _MODEL_MISSING_RE
+
 log = logging.getLogger("nx.autoprobe")
 
 # Solo i gruppi dim testo (es. `...-200k`): escludono -go/-fallback/capability.
@@ -208,16 +210,20 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 if not dep:
                     continue
                 _last_probe[unique] = time.time()
-                ok, lat = await _probe_one(forwarder, dep, timeout)
+                ok, lat, code, _body = await _probe_one(forwarder, dep, timeout)
                 if ok:
                     router.note_result(unique, lat)
                     log.info("[autoprobe] %s: probe OK -> promosso (%.0fms)",
                              unique, lat)
-                else:
+                elif _probe_ko_is_cooldown(code, _body):
                     router.mark_failed(unique, seconds=grow,
                                        reason="autoprobe_fresh")
-                    log.info("[autoprobe] %s: probe KO -> cooldown %.0fs",
-                             unique, grow)
+                    log.info("[autoprobe] %s: probe KO (%s) -> cooldown %.0fs",
+                             unique, code or "timeout", grow)
+                else:
+                    log.info("[autoprobe] %s: probe KO (%s) -> skip, nessun "
+                             "cooldown (transitorio)",
+                             unique, code or "timeout")
                 await asyncio.sleep(0.2)
             return
         # --- MODO COOLED (fallback): risveglio dormienti, come da sempre ----
@@ -235,16 +241,19 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
             if not dep or not router.is_cooled_down(unique):
                 continue
             _last_probe[unique] = time.time()
-            ok, _lat = await _probe_one(forwarder, dep, timeout)
+            ok, _lat, code, _body = await _probe_one(forwarder, dep, timeout)
             if ok:
                 router.clear_cooldown(unique)
                 log.info("[autoprobe] %s: probe OK -> risvegliato", unique)
-            else:
+            elif _probe_ko_is_cooldown(code, _body):
                 base = max(router._cooldown.get(unique, 0.0), time.time())
                 router._cooldown[unique] = base + grow
                 rem = max(0.0, router._cooldown[unique] - time.time())
-                log.info("[autoprobe] %s: probe KO -> cooldown +%.0fs "
-                         "(residuo %.0fs)", unique, grow, rem)
+                log.info("[autoprobe] %s: probe KO (%s) -> cooldown +%.0fs "
+                         "(residuo %.0fs)", unique, code or "timeout", grow, rem)
+            else:
+                log.info("[autoprobe] %s: probe KO (%s) -> skip, residuo "
+                         "invariato (transitorio)", unique, code or "timeout")
             await asyncio.sleep(0.2)
     except Exception:  # noqa: BLE001
         log.debug("[autoprobe] pass terminato con errore", exc_info=True)
@@ -267,7 +276,7 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                 dep = None
             if not dep:
                 continue
-            ok, lat = await _probe_one(forwarder, dep, timeout)
+            ok, lat, _code, _body = await _probe_one(forwarder, dep, timeout)
             if ok:
                 router.note_result(unique, lat)
                 log.info("[hotreload] %s: probe OK -> deployment caldo "
@@ -281,7 +290,10 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
         log.debug("[hotreload] pass terminato con errore", exc_info=True)
 
 
-async def _probe_one(forwarder, dep: dict, timeout: float) -> tuple[bool, float]:
+async def _probe_one(forwarder, dep: dict,
+                     timeout: float) -> tuple[bool, float, int, str]:
+    """Sonda un deployment. Ritorna (ok, latency_ms, code, body_snippet).
+    code = status HTTP; 0 = timeout/rete/eccezione (transitorio)."""
     url = f"{str(dep.get('api_base', '')).rstrip('/')}/chat/completions"
     body = {"model": dep.get("model", ""), "max_tokens": 1,
             "messages": [{"role": "user", "content": _PROBE_PROMPT}]}
@@ -292,8 +304,24 @@ async def _probe_one(forwarder, dep: dict, timeout: float) -> tuple[bool, float]
         resp = await cli.post(url, json=body, headers=headers, timeout=timeout)
         lat = (time.monotonic() - t0) * 1000.0
         if resp.status_code != 200:
-            return False, lat
+            return False, lat, resp.status_code, (resp.text or "")[:300]
         data = resp.json()
-        return (isinstance(data, dict) and "choices" in data), lat
+        return (isinstance(data, dict) and "choices" in data), lat, resp.status_code, ""
     except Exception:  # noqa: BLE001
-        return False, (time.monotonic() - t0) * 1000.0
+        return False, (time.monotonic() - t0) * 1000.0, 0, ""
+
+
+def _probe_ko_is_cooldown(code: int, body: str) -> bool:
+    """True se il KO del probe merita un cooldown:
+    - 429 rate-limit: SI' SEMPRE (120s, come richiesto: non si rimuove);
+    - 401/402/403 (auth/permission definitiva): SI';
+    - 400 con "no such model"/model inesistente/ritirato: SI' (definitivo);
+    - transitori (5xx, timeout/rete code=0, altri 4xx): NO -> skip, il pass
+      lo ritenta al giro successivo senza bruciare cooldown."""
+    if code == 429:
+        return True
+    if code in (401, 402, 403):
+        return True
+    if code == 400 and _MODEL_MISSING_RE.search(body or ""):
+        return True
+    return False

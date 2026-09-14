@@ -22,9 +22,10 @@ GO = "scrocco-llm-test-go"
 
 
 class _Resp:
-    def __init__(self, status, payload=None):
+    def __init__(self, status, payload=None, text=""):
         self.status_code = status
         self._payload = payload if payload is not None else {"choices": [{}]}
+        self.text = text
 
     def json(self):
         return self._payload
@@ -101,11 +102,25 @@ def test_probe_ko_grows_cooldown(router):
     d = _dep(router, DIM, "K-A")
     _used_all(router)
     _cool(router, d, remaining=3600.0)
-    fwd = _Fwd(_Resp(503))
+    fwd = _Fwd(_Resp(429))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     rem = router._cooldown[d["unique"]] - time.time()
-    assert rem > 3600.0 + 100          # 3600 + grow(120)
+    assert rem > 3600.0 + 100          # 3600 + grow(120): il 429 resta 120s
     assert router.is_cooled_down(d["unique"])
+
+
+def test_probe_ko_transient_skips_cooldown(router):
+    """KO 5xx/timeout/rete (transitorio): NON allunga il cooldown, si ritenta
+    al giro successivo."""
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d, remaining=3600.0)
+    fwd = _Fwd(_Resp(503))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    assert router.is_cooled_down(d["unique"])
+    rem = router._cooldown[d["unique"]] - time.time()
+    assert 3500.0 <= rem <= 3700.0     # cooldown invariato (3600)
 
 
 def test_per_dim_cap(router):
@@ -278,6 +293,19 @@ def test_parsing_knobs():
 
 # ---------------------------------------------------------------- MODO FRESH
 
+def test_probe_ko_classification():
+    """Classificazione KO del probe: 429/401/403/model-missing -> cooldown;
+    transitori (5xx/timeout/rete) -> skip."""
+    assert autoprobe._probe_ko_is_cooldown(429, "") is True
+    assert autoprobe._probe_ko_is_cooldown(401, "") is True
+    assert autoprobe._probe_ko_is_cooldown(403, "") is True
+    assert autoprobe._probe_ko_is_cooldown(
+        400, "The requested model does not exist.") is True
+    assert autoprobe._probe_ko_is_cooldown(503, "") is False
+    assert autoprobe._probe_ko_is_cooldown(502, "") is False
+    assert autoprobe._probe_ko_is_cooldown(0, "") is False      # timeout/rete
+    assert autoprobe._probe_ko_is_cooldown(400, "") is False    # altro 4xx
+
 def test_fresh_probe_ok_promotes(router):
     """Senza cooled e con deployment mai usati: probe "normale" (note_result)
     -> il deployment fresco sale in classifica con un successo."""
@@ -292,12 +320,36 @@ def test_fresh_probe_ok_promotes(router):
 
 
 def test_fresh_probe_ko_cooldowns(router):
-    """Probe KO su fresco -> mark_failed: cooldown breve, non si insiste."""
+    """Probe KO su fresco con 429 -> mark_failed: cooldown breve (120s)."""
+    router.policy.cooldown_autoprobe_per_dim = 1
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(429))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    assert router.is_cooled_down(d["unique"])
+    assert router.stats_for(d["unique"]).last_fail_ts > 0
+
+
+def test_fresh_probe_ko_transient_skips(router):
+    """KO transitorio (503) su fresco: NESSUN mark_failed/note_result, non si
+    spende il deployment (ritentato al giro dopo)."""
     router.policy.cooldown_autoprobe_per_dim = 1
     d = _dep(router, DIM, "K-A")
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     assert len(fwd.cli.calls) == 1
+    assert not router.is_cooled_down(d["unique"])
+    s = router.stats_for(d["unique"])
+    assert s.ok_count == 0
+    assert s.last_fail_ts == 0
+
+
+def test_fresh_probe_ko_definitive_cooldowns(router):
+    """KO definitivo (401/403/model-missing) su fresco -> cooldown."""
+    router.policy.cooldown_autoprobe_per_dim = 1
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(403))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
     assert router.is_cooled_down(d["unique"])
     assert router.stats_for(d["unique"]).last_fail_ts > 0
 

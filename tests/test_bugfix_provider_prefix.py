@@ -107,6 +107,7 @@ def test_no_such_model_400_rotates_never_reaches_client():
 
 def test_model_missing_regex():
     from app.forwarder import _MODEL_MISSING_RE as RE
+    from app.forwarder import _PROVIDER_TRANSIENT_RE as TR
     assert RE.search("AiError: No such model: x")
     assert RE.search('{"error":"model_not_found"}')
     assert RE.search("Unknown model foo")
@@ -114,17 +115,19 @@ def test_model_missing_regex():
     assert RE.search('{"type":"error","error":{"type":"ModelError",'
                      '"message":"Model x-preview-f-free is not supported"}}')
     assert RE.search("Model gpt-foo is not supported")
-    # "Model is (currently) unavailable" (opencode-zen / llm7)
-    assert RE.search('{"error":{"type":"server_error","message":"Error from '
-                     'provider (Console): Upstream request failed: Model is '
-                     'unavailable."}}')
-    assert RE.search("Model 'DeepSeek-V4-Flash-0731' is currently unavailable.")
-    # bynara: 400 envelope OpenAI "The requested model is not available.":
-    # deve essere deployment-side (ruota), mai consegnato al client.
-    assert RE.search('{"error":{"type":"bad_request","message":"The requested '
-                     'model is not available.","request_id":"x"}}')
-    assert RE.search("The requested model is not available.")
-    assert RE.search("the requested model is not currently available")
+    # "Model is unavailable" / "The requested model is not available." NON sono
+    # piu' model-missing (transient del provider, niente retire): NON devono
+    # matchare _MODEL_MISSING_RE, ma finiscono su _PROVIDER_TRANSIENT_RE.
+    assert not RE.search('{"error":{"type":"server_error","message":"Error from '
+                         'provider (Console): Upstream request failed: Model is '
+                         'unavailable."}}')
+    assert not RE.search("Model 'DeepSeek-V4-Flash-0731' is currently unavailable.")
+    assert not RE.search('{"error":{"type":"bad_request","message":"The requested '
+                         'model is not available.","request_id":"x"}}')
+    assert not RE.search("The requested model is not available.")
+    assert not RE.search("the requested model is not currently available")
+    # ma sono comunque TRANSIENT (cooldown corto, si ruota, mai raw al client):
+    assert TR.search("upstream request failed: Model is unavailable.")
     assert not RE.search("temporarily unavailable")     # senza "model"
     assert not RE.search("invalid api key")
     assert not RE.search("the service is temporarily unavailable")  # niente "model"

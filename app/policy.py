@@ -160,7 +160,7 @@ class Policy:
     # Watchdog inter-chunk dello streaming (secondi): se l'upstream non manda
     # alcun byte per N secondi a stream avviato -> StreamStallError -> failover
     # (pre-byte) / cooldown (post-byte). 0 = disabilitato.
-    stream_stall_sec: float = 8.0
+    stream_stall_sec: float = 20.0
     # Graceful shutdown: attesa massima (secondi) del drain delle richieste in
     # volo prima del flush finale del ledger. 0 = non attendere.
     shutdown_drain_sec: float = 10.0
@@ -174,8 +174,8 @@ class Policy:
     # Provider veloci vengono tagliati presto se si bloccano; i lenti hanno
     # spazio per rispondere. False = timeout globale fisso.
     adaptive_timeout_enabled: bool = True
-    adaptive_timeout_floor_sec: float = 15.0
-    adaptive_timeout_multiplier: float = 8.0
+    adaptive_timeout_floor_sec: float = 30.0
+    adaptive_timeout_multiplier: float = 10.0
     adaptive_timeout_max_sec: float = 600.0
     # Probe passivo dei deployment dormienti: quando non ci sono chiavi vive,
     # un deployment in cooldown da >= cooldown_probe_after_ratio del suo tempo
@@ -211,7 +211,7 @@ class Policy:
     cooldown_autoprobe_grow_sec: float = 120.0
     cooldown_autoprobe_min_gap_sec: float = 60.0
     cooldown_autoprobe_max_total: int = 6
-    cooldown_autoprobe_timeout_sec: float = 20.0
+    cooldown_autoprobe_timeout_sec: float = 45.0
     cooldown_autoprobe_fresh_age_sec: float = 86400.0
     # CRISIS MODE autoprobe: se la quota di deployment dim in cooldown supera
     # `cooldown_autoprobe_crisis_ratio`, il pass raddoppia `per_dim` e dimezza

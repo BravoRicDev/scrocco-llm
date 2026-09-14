@@ -46,7 +46,18 @@ class _KH:
 
 def test_classify_error_mapping():
     assert classify_error(401, None, "invalid api key") == ErrorKind.PERMANENT_DEAD
+    # "The requested model is not available." / "Model is unavailable." sono
+    # errori TRANSIENT del provider (endpoint giu'/modello temporaneamente
+    # indisponibile), NON un modello sparito: MAI PERMANENT_DEAD/retire.
     assert classify_error(400, None, "The requested model is not available.") \
+        != ErrorKind.PERMANENT_DEAD
+    assert classify_error(400, None, "Model is unavailable.") \
+        != ErrorKind.PERMANENT_DEAD
+    # Restano PERMANENTI solo le condizioni che davvero non tornano.
+    assert classify_error(400, None, "no such model") == ErrorKind.PERMANENT_DEAD
+    assert classify_error(400, None, "has reached [end of life]") \
+        == ErrorKind.PERMANENT_DEAD
+    assert classify_error(400, None, "model not supported") \
         == ErrorKind.PERMANENT_DEAD
     assert classify_error(500, None, "internal server error") \
         == ErrorKind.TRANSIENT
