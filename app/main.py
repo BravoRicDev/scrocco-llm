@@ -922,7 +922,13 @@ def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
 
 
 def _session_id(request: Request, payload: dict) -> str | None:
-    sid = request.headers.get("x-session-id")
+    # PRIMA gli header di sessione del client: opencode invia
+    # `x-session-affinity` (vedi _opencode_session) con lo stesso valore della
+    # sua sessione. Ignorarlo faceva ricadere sticky/cache-holder/SESSION-DEP
+    # GUARD sulla fingerprint anonima `fq_...`, instabile (es. dopo una
+    # compattazione o un cambio di system prompt): la stessa conversazione
+    # finiva per risultare "un'altra sessione" e auto-escludersi i deployment.
+    sid = _opencode_session(request)
     if sid:
         return sid
     md = payload.get("metadata") or {}

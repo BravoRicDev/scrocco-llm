@@ -221,3 +221,29 @@ def test_opencode_session_none_when_no_headers():
     # header vuoti non contano come sessione
     req = _FakeRequest({"x-session-affinity": "  "})
     assert _opencode_session(req) is None
+
+
+# ---------------------------------------------------------------------------
+# _session_id (app/main.py): DEVE usare la sessione del client quando presente
+# (opencode manda x-session-affinity). Prima ignorava l'header e ricadeva sulla
+# fingerprint anonima instabile => la guardia sessioni auto-escludeva i
+# deployment della stessa conversazione.
+# ---------------------------------------------------------------------------
+from app.main import _session_id
+
+
+def test_session_id_uses_x_session_affinity():
+    req = _FakeRequest({"x-session-affinity": "ses_aff123"})
+    assert _session_id(req, {}) == "ses_aff123"
+
+
+def test_session_id_header_wins_over_body():
+    req = _FakeRequest({"x-session-affinity": "ses_hdr"})
+    assert _session_id(req, {"user": "body-user",
+                             "metadata": {"session_id": "meta"}}) == "ses_hdr"
+
+
+def test_session_id_body_when_no_header():
+    req = _FakeRequest({})
+    assert _session_id(req, {"metadata": {"session_id": "meta-1"}}) == "meta-1"
+    assert _session_id(req, {"user": "u-1"}) == "u-1"
