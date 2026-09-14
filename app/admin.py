@@ -32,6 +32,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import csv_store, journal, logview
+from . import protocols as proto
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
 from .capabilities import canonical_family
 from .forwarder import UpstreamError, _client_attribution
@@ -1515,20 +1516,33 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                 timeout=_PROBE_TIMEOUT_S)
             ok = resp.status_code == 200
         else:
+            _style = proto.style_of(dep)
+            _chat = {"model": dep["model"], "max_tokens": 1,
+                     "messages": [{"role": "user",
+                                   "content": "Reply with the single letter A"}]}
+            _url = proto.build_url(dep, stream=False)
+            _body = (_chat if _style == proto.CHAT
+                     else proto.translate_request(_style, _chat, dep))
             resp = await http.post(
-                f"{dep['api_base'].rstrip('/')}/chat/completions",
-                json={"model": dep["model"], "max_tokens": 1,
-                      "messages": [{"role": "user",
-                                    "content": "Reply with the single letter A"}]},
-                headers={"Authorization": f"Bearer {dep['api_key']}",
-                         **_session_headers(dep, client_ip=client_ip,
-                                            session=session,
-                                            attribution=attribution)},
+                _url,
+                json=_body,
+                headers=proto.apply_auth(dep, {
+                    "Authorization": f"Bearer {dep['api_key']}",
+                    **_session_headers(dep, client_ip=client_ip,
+                                       session=session,
+                                       attribution=attribution)}),
                 timeout=_PROBE_TIMEOUT_S)
             ok = False
             try:
-                ok = resp.status_code == 200 and "choices" in (resp.json() or {})
-            except ValueError:          # body non-JSON: non un successo
+                _data = resp.json() or {}
+                if not isinstance(_data, dict):
+                    _data = {}
+                if resp.status_code == 200 and _style != proto.CHAT:
+                    _ch = proto.translate_response(_style, _data, dep)
+                    ok = isinstance(_ch, dict) and bool(_ch.get("choices"))
+                elif resp.status_code == 200:
+                    ok = "choices" in _data
+            except Exception:          # body non-JSON / non interpretabile
                 ok = False
         latency = int((time.monotonic() - t0) * 1000)
         entry = {"ok": ok, "latency_ms": latency, "ts": int(time.time()),

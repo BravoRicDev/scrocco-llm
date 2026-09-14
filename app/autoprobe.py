@@ -33,6 +33,7 @@ import time
 from collections import deque
 
 from .forwarder import _MODEL_MISSING_RE
+from . import protocols as proto
 
 log = logging.getLogger("nx.autoprobe")
 
@@ -363,10 +364,14 @@ async def _probe_one(forwarder, dep: dict,
                      timeout: float) -> tuple[bool, float, int, str]:
     """Sonda un deployment. Ritorna (ok, latency_ms, code, body_snippet).
     code = status HTTP; 0 = timeout/rete/eccezione (transitorio)."""
-    url = f"{str(dep.get('api_base', '')).rstrip('/')}/chat/completions"
-    body = {"model": dep.get("model", ""), "max_tokens": 1,
-            "messages": [{"role": "user", "content": _PROBE_PROMPT}]}
-    headers = {"Authorization": f"Bearer {dep.get('api_key', '')}"}
+    style = proto.style_of(dep)
+    url = proto.build_url(dep, stream=False)
+    chat_body = {"model": dep.get("model", ""), "max_tokens": 1,
+                 "messages": [{"role": "user", "content": _PROBE_PROMPT}]}
+    body = (chat_body if style == proto.CHAT
+            else proto.translate_request(style, chat_body, dep))
+    headers = proto.apply_auth(dep, {
+        "Authorization": f"Bearer {dep.get('api_key', '')}"})
     t0 = time.monotonic()
     try:
         cli = forwarder._client_for(url)
@@ -375,6 +380,13 @@ async def _probe_one(forwarder, dep: dict,
         if resp.status_code != 200:
             return False, lat, resp.status_code, (resp.text or "")[:300]
         data = resp.json()
+        if style != proto.CHAT:
+            try:
+                chat = proto.translate_response(style, data, dep)
+                ok = isinstance(chat, dict) and bool(chat.get("choices"))
+            except Exception:  # noqa: BLE001
+                ok = False
+            return ok, lat, resp.status_code, ""
         return (isinstance(data, dict) and "choices" in data), lat, resp.status_code, ""
     except Exception:  # noqa: BLE001
         return False, (time.monotonic() - t0) * 1000.0, 0, ""
