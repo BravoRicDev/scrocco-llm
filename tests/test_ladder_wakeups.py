@@ -117,3 +117,31 @@ def test_parsing_ladder_knobs():
     assert p.ladder_skip_after == 10
     assert p.ladder_cooldown_wakeups == 5
     assert Policy.from_dict({}).ladder_cooldown_wakeups == 3
+    # nuovi toggle "risveglio"
+    assert Policy.from_dict({}).initial_pick_cooldown_wakeup is True
+    assert Policy.from_dict(
+        {"initial_pick_cooldown_wakeup": False}
+    ).initial_pick_cooldown_wakeup is False
+    assert Policy.from_dict({"ladder_stale_max": 0}).ladder_stale_max == 0
+
+
+def test_stale_dim_retry_before_go_default(router):
+    """Default: con dim e -go tutti stantii, STEP 3 (dims stantii) viene
+    prima di STEP 4 (-go stantii)."""
+    router.policy.ladder_cooldown_wakeups = 0        # isola STEP 3
+    for u in _dims(router.config) + _go(router.config):
+        _cool(router, u)
+    d = router._walk_ladder_resilient(
+        router.config.chains[PROF], None, None, None, set())
+    assert d is not None and d["unique"] in _dims(router.config)
+
+
+def test_stale_max_zero_disables_dim_stale_retry(router):
+    """ladder_stale_max=0 disattiva STEP 3: resta il -go stantio (STEP 4)."""
+    router.policy.ladder_cooldown_wakeups = 0
+    router.policy.ladder_stale_max = 0
+    for u in _dims(router.config) + _go(router.config):
+        _cool(router, u)
+    d = router._walk_ladder_resilient(
+        router.config.chains[PROF], None, None, None, set())
+    assert d is not None and d["unique"] in _go(router.config)

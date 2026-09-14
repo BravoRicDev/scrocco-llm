@@ -566,6 +566,12 @@ class Policy:
     # escalare a -go (oltre a quello del dim sticky/esplicito). 0 = nessuno.
     ladder_cooldown_wakeups: int = 3
 
+    # Risveglio del dim CORRENTE in `initial_pick`: se il pick non trova nulla
+    # di vivo, prova il dep cooled da >= stale_cooldown_retry_sec prima di
+    # escalare. Opzionale: l'autoprobe risveglia gia' i dormienti, quindi si
+    # puo' disattivare senza toccare il resto della scala.
+    initial_pick_cooldown_wakeup: bool = True
+
     # SOGLIA "CRONICO": un deployment con questo numero di fallimenti nelle
     # ultime 24h NON viene riesumato dagli step di ri-tentativo della scala
     # (stantii e ULTIMA SPIAGGIA): è statisticamente rotto, ritentarlo ogni
@@ -1629,8 +1635,12 @@ class Policy:
         _set_int(p, raw, "cooldown_base_min", minimum=1)
         _set_int(p, raw, "cooldown_linear_mult_min", minimum=0)
         _set_int(p, raw, "ladder_skip_after", minimum=1)
-        _set_int(p, raw, "ladder_stale_max", minimum=1)
+        _set_int(p, raw, "ladder_stale_max", minimum=0)
         _set_int(p, raw, "ladder_cooldown_wakeups", minimum=0)
+        _ipw = raw.get("initial_pick_cooldown_wakeup")
+        if _ipw is not None:
+            p.initial_pick_cooldown_wakeup = _coerce_bool(
+                _ipw, "initial_pick_cooldown_wakeup")
         _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
         _set_int(p, raw, "ladder_chronic_max", minimum=0)
         _set_int(p, raw, "chronic_fail_cooldown_sec", minimum=0)

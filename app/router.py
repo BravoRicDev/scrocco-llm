@@ -3144,7 +3144,8 @@ class Router:
         _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec",
                                    300) or 300)
         _cooled = [d for d in self.config.groups.get(group_name, [])
-                   if self.is_cooled_down(d["unique"])
+                   if getattr(self.policy, "initial_pick_cooldown_wakeup", True)
+                   and self.is_cooled_down(d["unique"])
                    and not self._gemini_blocked(d)
                    and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
                    and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
@@ -3234,7 +3235,7 @@ class Router:
         go   = [u for u in ladder if _is_go(u)]
         fb   = [u for u in ladder if _is_fb(u)]
         skip = max(1, int(getattr(pol, "ladder_skip_after", 4) or 4))
-        stale_max = max(1, int(getattr(pol, "ladder_stale_max", 3) or 3))
+        stale_max = max(0, int(getattr(pol, "ladder_stale_max", 3) or 0))
         age = float(getattr(pol, "stale_cooldown_retry_sec", 300) or 300)
         # Leva B: un deployment "cronico" (tanti fallimenti nelle ultime 24h)
         # NON va riesumato dagli step di ri-tentativo ordinari (stantii/ultima
@@ -3343,15 +3344,17 @@ class Router:
             log.info("[ladder] escalation a -go -> %s", nxt["unique"])
             return nxt
 
-        # 3) dims stantii (max stale_max) — mai i cronici (Leva B)
-        nxt = self._walk_chain(_chronic_filter(dims, True), failed_unique,
-                               need, ctx,
-                               min_cooldown_age=age, limit=stale_max,
-                               tried=tried)
-        if nxt is not None:
-            log.info("[ladder] dims stantio (>%ds) -> %s",
-                     int(age), nxt["unique"])
-            return nxt
+        # 3) dims stantii (max stale_max) — mai i cronici (Leva B).
+        #    Opzionale: `ladder_stale_max=0` disattiva (l'autoprobe risveglia).
+        if stale_max > 0:
+            nxt = self._walk_chain(_chronic_filter(dims, True), failed_unique,
+                                   need, ctx,
+                                   min_cooldown_age=age, limit=stale_max,
+                                   tried=tried)
+            if nxt is not None:
+                log.info("[ladder] dims stantio (>%ds) -> %s",
+                         int(age), nxt["unique"])
+                return nxt
 
         # 4) -go stantii — mai i cronici (Leva B)
         nxt = self._walk_chain(_chronic_filter(go, True), failed_unique,
