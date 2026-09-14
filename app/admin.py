@@ -586,6 +586,11 @@ async def state(request: Request):
                              "served_group": (gw.config.deployment_by_unique(u) or {}).get("group")}
                          for g, (u, ts) in getattr(gw.router, "_esc_win", {}).items()},
             },
+            "session_dep_guard": {
+                "enabled": bool(getattr(pol, "session_dep_guard_enabled", True)),
+                "sec": int(getattr(pol, "session_dep_guard_sec", 900)),
+                "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
+            },
         },
         "policy": {
             "step_up_pct": pol.step_up_pct,

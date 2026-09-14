@@ -242,6 +242,15 @@ class Policy:
     # cooldown MODESTO al posto dello skip (ruotiamo comunque, ma senza
     # bruciare il grow pieno). I KO definitivi e i 429 usano sempre grow.
     cooldown_autoprobe_transient_sec: float = 30.0
+    # ESCLUSIONE: i deployment con cooldown (residuo efficace) SUPERIORE a
+    # questa soglia NON vengono sondati dall'autoprobe: sono "troppo rotti",
+    # li lasciano al tempo o alla ULTIMA SPIAGGIA della scala.
+    cooldown_autoprobe_skip_over_sec: float = 7200.0
+    # MOLTIPLICATORE del cooldown di un KO del probe: l'incremento base
+    # (grow/transient) viene moltiplicato per il numero di probe fatti su quel
+    # deployment nelle ultime 24h (>=1). Piu' lo si riprova e piu' lo si fa
+    # dormire, senza resettare il residuo.
+    cooldown_autoprobe_multiply_24h: bool = True
     # CRISIS MODE autoprobe: se la quota di deployment dim in cooldown supera
     # `cooldown_autoprobe_crisis_ratio`, il pass raddoppia `per_dim` e dimezza
     # `min_gap` per risvegliare il pool piu' in fretta sotto pressione.
@@ -444,6 +453,16 @@ class Policy:
     toolcall_truncation_enabled: bool = True
     toolcall_truncation_cooldown_sec: int = 30
     toolcall_truncation_holdback: bool = True
+    # SESSION-DEP GUARD (anti-usurpazione cross-sessione): ricorda l'ULTIMA
+    # sessione che ha servito con successo ogni deployment FREE-dims; se un
+    # deployment e' stato usato con successo da un'ALTRA sessione meno di
+    # `session_dep_guard_sec` fa, viene IGNORATO fra i vivi e reso eleggibile
+    # solo in un tier "pre-ultima-spiaggia" (prima del -fallback a pagamento,
+    # ordinato per max_input crescente). Direzionale (ultimo successo):
+    # due sessioni che partono nello stesso istante possono collidere una
+    # volta, poi la vincente tiene il deployment. In-memory, mai persistito.
+    session_dep_guard_enabled: bool = True
+    session_dep_guard_sec: int = 900
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
     cache_prefer_last_success: bool = True
@@ -850,6 +869,10 @@ class Policy:
         if "cooldown_autoprobe_enabled" in raw:
             p.cooldown_autoprobe_enabled = _coerce_bool(
                 raw["cooldown_autoprobe_enabled"], "cooldown_autoprobe_enabled")
+        if "cooldown_autoprobe_multiply_24h" in raw:
+            p.cooldown_autoprobe_multiply_24h = _coerce_bool(
+                raw["cooldown_autoprobe_multiply_24h"],
+                "cooldown_autoprobe_multiply_24h")
         _set_int(p, raw, "cooldown_autoprobe_per_dim", minimum=0)
         _set_int(p, raw, "cooldown_autoprobe_max_total", minimum=0)
         for _fld in ("cooldown_autoprobe_min_age_sec",
@@ -857,7 +880,8 @@ class Policy:
                      "cooldown_autoprobe_min_gap_sec",
                      "cooldown_autoprobe_timeout_sec",
                      "cooldown_autoprobe_fresh_age_sec",
-                     "cooldown_autoprobe_transient_sec"):
+                     "cooldown_autoprobe_transient_sec",
+                     "cooldown_autoprobe_skip_over_sec"):
             _val = raw.get(_fld)
             if _val is not None:
                 try:
@@ -1378,6 +1402,21 @@ class Policy:
                     raise ValueError("toolcall_truncation.cooldown_sec deve "
                                      "essere >= 1")
                 p.toolcall_truncation_cooldown_sec = int(_cd)
+
+        sdg = raw.get("session_dep_guard")
+        if sdg is not None:
+            if not isinstance(sdg, dict):
+                raise ValueError("session_dep_guard deve essere una mappa")
+            if "enabled" in sdg:
+                p.session_dep_guard_enabled = _coerce_bool(
+                    sdg["enabled"], "session_dep_guard.enabled")
+            if sdg.get("sec") is not None:
+                _v = sdg["sec"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"session_dep_guard.sec non valido: {_v!r}")
+                p.session_dep_guard_sec = int(_v)
 
         ca = raw.get("cache_aware")
         if ca is not None:

@@ -18,6 +18,11 @@ Due modalita':
    note_result/mark_failed/note_start (il probe e' puramente ricognitivo).
    Dopo `probe_retire_after` KO consecutivi il cooldown sale al livello
    `grow` (escalation): rotazione piu' lunga, MAI retire dall'autoprobe.
+   L'incremento e' MOLTIPLICATO per il numero di probe fatti su quel
+   deployment nelle ultime 24h (cooldown_autoprobe_multiply_24h): 120s, 240s,
+   360s... I deployment il cui cooldown residuo supera
+   `cooldown_autoprobe_skip_over_sec` (2h) sono ESCLUSI del tutto dai probe:
+   li rivedra' il tempo o la ULTIMA SPIAGGIA della scala.
 """
 from __future__ import annotations
 
@@ -54,6 +59,17 @@ def _probe_count_24h(unique: str, now: float) -> int:
     return len(dq)
 
 
+def _scale_probe_cd(unique: str, base_cd: float, now: float,
+                    multiply: bool) -> float:
+    """MOLTIPLICA l'incremento di cooldown di un KO del probe per il numero di
+    probe fatti su quel deployment nelle ultime 24h (minimo 1). Piu' lo si
+    riprova senza successo, piu' dorme: 120s -> 240s -> 360s ... Il valore e'
+    sempre ADDITIVO al residuo esistente (mark_failed additive / add manuale)."""
+    if not multiply:
+        return base_cd
+    return base_cd * max(1, _probe_count_24h(unique, now))
+
+
 def _cfg(policy):
     return (
         bool(getattr(policy, "cooldown_autoprobe_enabled", True)),
@@ -70,6 +86,9 @@ def _cfg(policy):
                        86400.0) or 86400.0),
         float(getattr(policy, "cooldown_autoprobe_transient_sec",
                        30.0) or 0.0),
+        float(getattr(policy, "cooldown_autoprobe_skip_over_sec",
+                       7200.0) or 0.0),
+        bool(getattr(policy, "cooldown_autoprobe_multiply_24h", True)),
     )
 
 
@@ -154,7 +173,8 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
 
 def _select_targets(router, profile: str, per_dim: int, min_age: float,
                     min_gap: float, max_total: int,
-                    crisis: tuple[bool, float, float] | None = None) -> list[tuple[str, str]]:
+                    crisis: tuple[bool, float, float] | None = None,
+                    skip_over: float = 0.0) -> list[tuple[str, str]]:
     now = time.time()
     pfx = f"{getattr(router.config, 'proxy_prefix', 'scrocco-llm-')}{profile}-"
     by_group: dict[str, list[tuple[float, str]]] = {}
@@ -185,6 +205,8 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
         resid = router.cooldown_residual(unique)
         if resid <= 0:
             continue
+        if skip_over > 0 and resid > skip_over:
+            continue           # cooldown > soglia (2h): troppo rotto, no probe
         try:
             dep = router.config.deployment_by_unique(unique)
         except Exception:  # noqa: BLE001
@@ -217,7 +239,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
     try:
         (_en, per_dim, min_age, grow, min_gap, max_total, timeout,
          crisis_en, crisis_ratio, crisis_mult, fresh_age,
-         transient_sec) = _cfg(router.policy)
+         transient_sec, skip_over, multiply) = _cfg(router.policy)
         if per_dim <= 0 or max_total <= 0:
             return
         _streak_cap = max(0, int(getattr(
@@ -244,23 +266,24 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                              unique, lat)
                 else:
                     _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
-                    if _bump_probe_streak(router, unique, _streak_cap) > 0:
+                    _esc = _bump_probe_streak(router, unique, _streak_cap) > 0
+                    if _esc:
                         _cd = max(_cd, grow)
-                        log.info("[autoprobe] %s: probe KO (%s) streak=%d -> "
-                                 "cooldown %.0fs (escalation)",
-                                 unique, code or "timeout",
-                                 router.stats_for(unique).probe_fail_streak, _cd)
-                    else:
-                        log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
-                                 "%.0fs", unique, code or "timeout", _cd)
+                    _cd = _scale_probe_cd(unique, _cd, time.time(), multiply)
+                    _n = _probe_count_24h(unique, time.time())
+                    log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
+                             "+%.0fs (x%d/24h%s)", unique, code or "timeout",
+                             _cd, max(1, _n), " escalation" if _esc else "")
                     router.mark_failed(unique, seconds=_cd,
-                                       reason="autoprobe_fresh")
+                                       reason="autoprobe_fresh",
+                                       additive=True)
                 await asyncio.sleep(0.2)
             return
         # --- MODO COOLED (fallback): risveglio dormienti, come da sempre ----
         targets = _select_targets(
             router, profile, per_dim, min_age, min_gap, max_total,
-            crisis=(crisis_en, crisis_ratio, crisis_mult))
+            crisis=(crisis_en, crisis_ratio, crisis_mult),
+            skip_over=skip_over)
         if not targets:
             return
         log.info("[autoprobe] pass: %d deployment cooled da sondare", len(targets))
@@ -279,15 +302,14 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 log.info("[autoprobe] %s: probe OK -> risvegliato", unique)
             else:
                 _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
-                if _bump_probe_streak(router, unique, _streak_cap) > 0:
+                _esc = _bump_probe_streak(router, unique, _streak_cap) > 0
+                if _esc:
                     _cd = max(_cd, grow)
-                    log.info("[autoprobe] %s: probe KO (%s) streak=%d -> "
-                             "cooldown +%.0fs (escalation)",
-                             unique, code or "timeout",
-                             router.stats_for(unique).probe_fail_streak, _cd)
-                else:
-                    log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
-                             "+%.0fs", unique, code or "timeout", _cd)
+                _cd = _scale_probe_cd(unique, _cd, time.time(), multiply)
+                _n = _probe_count_24h(unique, time.time())
+                log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
+                         "+%.0fs (x%d/24h%s)", unique, code or "timeout",
+                         _cd, max(1, _n), " escalation" if _esc else "")
                 now2 = time.time()
                 base = max(router._cooldown.get(unique, 0.0), now2)
                 new_exp = base + _cd
@@ -328,7 +350,8 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                 log.info("[hotreload] %s: probe OK -> deployment caldo "
                          "(%.0fms)", unique, lat)
             else:
-                router.mark_failed(unique, seconds=_cd, reason="hotreload_probe")
+                router.mark_failed(unique, seconds=_cd, reason="hotreload_probe",
+                                   additive=True)
                 log.warning("[hotreload] %s: probe KO -> cooldown %.0fs",
                             unique, _cd)
             await asyncio.sleep(0.2)

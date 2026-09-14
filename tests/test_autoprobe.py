@@ -373,8 +373,9 @@ def test_probe_ko_classification():
 
 
 def test_probe_ko_transient_escalates_on_streak(router):
-    """Dopo `probe_retire_after` KO transitori consecutivi il cooldown sale a
-    `grow` (rotazione piu' lunga, MAI retire dall'autoprobe)."""
+    """KO transitori consecutivi: l'incremento sale a `grow` dopo la streak E
+    viene moltiplicato per il numero di probe/24h. Pass1: 30 x1 = +30.
+    Pass2 (streak cap -> grow 120) x2 = +240. MAI retire dall'autoprobe."""
     d = _dep(router, DIM, "K-A")
     _used_all(router)
     _cool(router, d, remaining=3600.0)
@@ -382,9 +383,9 @@ def test_probe_ko_transient_escalates_on_streak(router):
     router.policy.probe_retire_after = 2
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 1 -> +30
-    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 2 -> +120
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 2 -> +240
     rem = router._cooldown[d["unique"]] - time.time()
-    assert 3600.0 + 30.0 + 120.0 - 10 <= rem <= 3600.0 + 30.0 + 120.0 + 10
+    assert 3600.0 + 30.0 + 240.0 - 10 <= rem <= 3600.0 + 30.0 + 240.0 + 10
     assert router.stats_for(d["unique"]).probe_fail_streak == 2
     assert not router.is_retired(d["unique"])
 
@@ -485,3 +486,70 @@ def test_no_fresh_falls_back_to_cooled(router):
     assert len(fwd.cli.calls) == 1
     assert not router.is_cooled_down(d["unique"])       # risvegliato
     assert router.stats_for(d["unique"]).ok_count == 0  # NESSUN note_result
+
+
+def test_probe_cd_multiplied_by_24h_count(router):
+    """Il cooldown di un KO del probe e' MOLTIPLICATO per i probe/24h: con 3
+    probe storici (piu' il corrente = 4) un 429 aggiunge 120*4=480 in modo
+    additivo al residuo."""
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d, remaining=3600.0)
+    dq = autoprobe._probe_times.setdefault(d["unique"], deque())
+    for _ in range(3):
+        dq.append(time.time() - 10)
+    fwd = _Fwd(_Resp(429))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    rem = router._cooldown[d["unique"]] - time.time()
+    assert 3600.0 + 480.0 - 25 <= rem <= 3600.0 + 480.0 + 25
+
+
+def test_probe_cd_multiply_can_be_disabled(router):
+    router.policy.cooldown_autoprobe_multiply_24h = False
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d, remaining=3600.0)
+    dq = autoprobe._probe_times.setdefault(d["unique"], deque())
+    for _ in range(5):
+        dq.append(time.time() - 10)
+    fwd = _Fwd(_Resp(429))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    rem = router._cooldown[d["unique"]] - time.time()
+    assert 3600.0 + 120.0 - 25 <= rem <= 3600.0 + 120.0 + 25
+
+
+def test_cooled_over_2h_skipped(router):
+    """Deployment con cooldown residuo > 2h: NIENTE probe (lo salvano il tempo
+    o la ULTIMA SPIAGGIA della scala)."""
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d, remaining=9000.0)          # 2.5h > 7200
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert fwd.cli.calls == []
+    assert router.is_cooled_down(d["unique"])   # intatto
+
+
+def test_cooled_under_2h_probed(router):
+    """Sotto soglia (es. 6000s) il probe avviene normalmente."""
+    d = _dep(router, DIM, "K-A")
+    _used_all(router)
+    _cool(router, d, remaining=6000.0)
+    fwd = _Fwd(_Resp(200))
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(fwd.cli.calls) == 1
+    assert not router.is_cooled_down(d["unique"])
+
+
+def test_mark_failed_additive_extends_not_resets(router):
+    """mark_failed(additive=True) ESTENDE il residuo invece di resettarlo."""
+    router.policy.cooldown_jitter_ratio = 0.0
+    d = _dep(router, DIM, "K-A")
+    router.mark_failed(d["unique"], seconds=100)
+    exp1 = router._cooldown[d["unique"]]
+    router.mark_failed(d["unique"], seconds=50, additive=True)
+    exp2 = router._cooldown[d["unique"]]
+    assert abs((exp2 - exp1) - 50) <= 2          # +50, additivo
+    router.mark_failed(d["unique"], seconds=10)  # non-additivo -> reset
+    rem = router._cooldown[d["unique"]] - time.time()
+    assert 8 <= rem <= 12

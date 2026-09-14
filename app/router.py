@@ -382,6 +382,12 @@ class Router:
         self._sticky_dep: dict[str, tuple[str, float]] = {}
         # ULTIMO SUCCESSO per-sessione (detentore cache): session -> (unique, ts)
         self._session_last_ok: dict[str, tuple[str, float]] = {}
+        # SESSION-DEP GUARD: inverso del detentore cache, unique ->
+        # (session, ts) per i SOLO deployment free-dims. Serve a ignorare fra
+        # i vivi un deployment servito con successo da un'ALTRA sessione negli
+        # ultimi session_dep_guard_sec (lo rende eleggibile solo nel tier
+        # pre-ultima-spiaggia). In-memory, mai persistito.
+        self._dep_last_session: dict[str, tuple[str, float]] = {}
         # Modalita' COMPATTA sticky per-sessione (troncamento cache-aware)
         self._session_compact: dict[str, float] = {}
         # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
@@ -557,12 +563,70 @@ class Router:
             self._session_last_ok = d
         return d
 
+    def _dep_sess(self) -> dict:
+        """Accessor lazy della mappa inversa unique -> (session, ts) usata
+        dalla SESSION-DEP GUARD (protegge i Router 'nudi' dei test)."""
+        d = getattr(self, "_dep_last_session", None)
+        if d is None:
+            d = {}
+            self._dep_last_session = d
+        return d
+
+    def _note_dep_session(self, session_id: str, unique: str) -> None:
+        """Registra l'ultima sessione che ha servito con SUCCESSO `unique`.
+        SOLO bucket free-dims (mai -go/-fallback ne' gruppi capacita'): la
+        guardia serve a smorzare i rate-limit per-chiave delle key free."""
+        if not getattr(self.policy, "session_dep_guard_enabled", True):
+            return
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return
+        g = dep.get("group", "")
+        if self.config.group_caps.get(g) is not None \
+                or self._is_renewal_bucket(g):
+            return
+        d = self._dep_sess()
+        d[unique] = (session_id, time.time())
+        if len(d) > 8192:
+            _ttl = self._guard_sec() * 4
+            _now = time.time()
+            for k, (_s, ts) in list(d.items()):
+                if _now - ts > _ttl:
+                    d.pop(k, None)
+
+    def _guard_sec(self) -> float:
+        try:
+            return max(0.0, float(getattr(self.policy, "session_dep_guard_sec",
+                                          900) or 0))
+        except (TypeError, ValueError):
+            return 900.0
+
+    def other_session_recent(self, unique: str) -> bool:
+        """True se `unique` e' stato servito con successo da un'ALTRA
+        sessione meno di session_dep_guard_sec fa. False se la guardia e'
+        spenta, se non c'e' una sessione corrente, o se l'ultima che l'ha
+        usato e' la sessione stessa."""
+        if not getattr(self.policy, "session_dep_guard_enabled", True):
+            return False
+        sid = current_session()
+        if not sid:
+            return False
+        ent = self._dep_sess().get(unique)
+        if not ent:
+            return False
+        other, ts = ent
+        if not other or other == sid:
+            return False
+        return (time.time() - ts) < self._guard_sec()
+
     def note_session_success(self, session_id: str | None,
                              unique: str | None) -> None:
         """Ricorda l'ultimo deployment che ha servito con SUCCESSO la
-        sessione (detentore cache). In-memory."""
+        sessione (detentore cache) + l'inverso per la SESSION-DEP GUARD.
+        In-memory."""
         if not session_id or not unique:
             return
+        self._note_dep_session(session_id, unique)
         if not getattr(self.policy, "cache_aware_enabled", True):
             return
         d = self._cache_ok()
@@ -696,6 +760,8 @@ class Router:
             return None
         if self.is_cooled_down(unique):                   # non rimuove: revive
             return None
+        if self.other_session_recent(unique):             # occupato altra sessione
+            return None
         if not self._cap_fits(dep, ctx):                  # NON regge il ctx
             return None
         if need and not self._dep_supports(dep, need):    # capacita' mancante
@@ -730,6 +796,8 @@ class Router:
             if tier in tried_tiers:
                 continue
             if self.is_cooled_down(u) or self.is_retired(u):
+                continue
+            if self.other_session_recent(u):
                 continue
             if not self._cap_fits(d, ctx):
                 continue
@@ -844,10 +912,12 @@ class Router:
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
                     reason: str | None = None, status: int | None = None,
-                    kind: str | None = None) -> float:
+                    kind: str | None = None, *, additive: bool = False) -> float:
         """Marca il deployment fallito con cooldown.
 
         - `seconds` esplicito vince SEMPRE (es. Retry-After su 429)
+        - `additive=True`: ESTENDE il cooldown esistente di `seconds` invece di
+          sovrascriverlo (autoprobe: un KO allunga, non resetta).
         - default: dipende da cooldown_mode:
           * "linear": BASE + MULT*(fail_count_24h - 1) minuti
           * "exponential": cooldown_sec * 2^(streak-1) (legacy)
@@ -939,16 +1009,31 @@ class Router:
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
         if kind != ErrorKind.QUOTA_RESET:
             seconds = self._apply_jitter(seconds)
-        self._cooldown[unique] = time.time() + seconds
-        self._cooldown_since[unique] = time.time()
-        self._cooldown_full_map()[unique] = float(seconds)
+        _now = time.time()
+        if additive:
+            # ESTENSIONE ADDITIVA: non sovrascrivere il residuo esistente ma
+            # sommargli `seconds` (usato dall'autoprobe: un KO deve ALLUNGARE il
+            # cooldown di grow/transient, non resettarlo a un valore secco).
+            base = max(self._cooldown.get(unique, 0.0), _now)
+            since = self._cooldown_since.get(unique)
+            if since is None or since > _now:
+                since = _now
+            new_exp = base + seconds
+            self._cooldown[unique] = new_exp
+            self._cooldown_since[unique] = since
+            self._cooldown_full_map()[unique] = float(new_exp - since)
+        else:
+            self._cooldown[unique] = _now + seconds
+            self._cooldown_since[unique] = _now
+            self._cooldown_full_map()[unique] = float(seconds)
         esc = ""
         if seconds is not None and s.fail_streak > 1 \
                 and getattr(pol, "cooldown_mode", "linear") == "exponential":
             esc = " escalation"
-        log.warning("[cooldown] %s inattivo per %ds%s (streak=%d, "
-                    "fail_24h=%d)",
-                    unique, int(seconds), esc, s.fail_streak, s.fail_count_24h)
+        _tag = "esteso di" if additive else "inattivo per"
+        log.warning("[cooldown] %s %s %ds%s (streak=%d, fail_24h=%d)",
+                    unique, _tag, int(seconds), esc, s.fail_streak,
+                    s.fail_count_24h)
 
         # --- Circuit Breaker (hybrid: dep sempre, key solo errori di chiave) ---
         self._update_circuit_breaker_on_failure(
@@ -1765,6 +1850,11 @@ class Router:
                     if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_dep:
             self._sticky_dep.pop(s, None)
+        # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
+        _gttl = self._guard_sec() * 2
+        _ds = self._dep_sess()
+        for u in [u for u, (_s, ts) in _ds.items() if now - ts > _gttl]:
+            _ds.pop(u, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
         for u in dead_cd:
             self._cooldown.pop(u, None)
@@ -2823,6 +2913,11 @@ class Router:
                 return False
             if self.is_draining(d["unique"]):
                 return False
+            # SESSION-DEP GUARD: ignora fra i vivi i free-dims usati con
+            # successo da un'ALTRA sessione negli ultimi session_dep_guard_sec
+            # (eleggibili solo nel tier pre-ultima-spiaggia).
+            if self.other_session_recent(d["unique"]):
+                return False
             if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
                 return False
             if restrict_model and d.get("model") != restrict_model:
@@ -3030,6 +3125,8 @@ class Router:
                 if age is None or age < min_cooldown_age:
                     return None
                 # cooldown "stantio": lo ri-consideriamo
+            if self.other_session_recent(u):
+                return None
             if self.is_retired(u):
                 return None
             if self._gemini_blocked(dep):
@@ -3076,6 +3173,58 @@ class Router:
             return preferred[0]
         return None
 
+    def prelast_shared(self, uniques: list[str], failed_unique: str | None,
+                       need: frozenset[str] | None = None,
+                       ctx: int | None = None,
+                       tried: set[str] | None = None) -> dict | None:
+        """TIER PRE-ULTIMA-SPIAGGIA (prima del -fallback a pagamento): tra i
+        free-dims VIVI occupati da un'ALTRA sessione negli ultimi
+        `session_dep_guard_sec`, sceglie quello col max_input piu' piccolo che
+        regge la richiesta (fit migliore). Nessun cooldown viene toccato: e'
+        una condivisione temporanea; appena la sessione occupante smette o
+        scade la finestra il deployment torna normale. Ritorna None se non ce
+        ne sono. La guardia e' direzionale (ultimo successo)."""
+        if not getattr(self.policy, "session_dep_guard_enabled", True):
+            return None
+        tried = tried or set()
+        seen: set[str] = set()
+        by_group: dict[str, list[dict]] = {}
+        for u in uniques:
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            if u == failed_unique or u in tried:
+                continue
+            if not self.other_session_recent(u):
+                continue
+            dep = self.config.deployment_by_unique(u)
+            if dep is None or self.is_retired(u) or self.is_cooled_down(u):
+                continue
+            if self._gemini_blocked(dep):
+                continue
+            if need and not self._dep_supports(dep, need):
+                continue
+            if not self._cap_fits(dep, ctx):
+                continue
+            by_group.setdefault(dep.get("group", ""), []).append(dep)
+        if not by_group:
+            return None
+        cands: list[dict] = []
+        for g, ds in by_group.items():
+            kept, _ = self._defer_media(g, need, ds)
+            cands.extend(kept or ds)
+        if not cands:
+            return None
+        cands.sort(key=lambda d: (int(d.get("max_input_tokens") or 0)
+                                  or (1 << 62)))
+        dep = cands[0]
+        ent = self._dep_sess().get(dep["unique"]) or (None, 0.0)
+        log.info("[prelast] sessione condivisa: %s (max_in=%s, eta=%.0fs) -> "
+                 "usato prima di scendere al -fallback",
+                 dep["unique"], int(dep.get("max_input_tokens") or 0),
+                 max(0.0, time.time() - (ent[1] or 0.0)))
+        return dep
+
     def initial_pick(self, profile: str | None, group_name: str,
                      need: frozenset[str] | None = None,
                      ctx: int | None = None,
@@ -3111,6 +3260,7 @@ class Router:
             if sd and sd.get("group") == group_name \
                     and not self.is_cooled_down(sticky_dep) \
                     and not self._gemini_blocked(sd) \
+                    and not self.other_session_recent(sticky_dep) \
                     and self._cap_fits(sd, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
@@ -3187,11 +3337,30 @@ class Router:
         if self.policy.dims_ladder_floor:
             chain = self._ladder_for_group(group_name)
             if chain:
-                dep = self._walk_chain(chain, None, need, ctx)
+                _go_suf = self.config.go_suffix or "-go"
+                _fb_suf = self.config.fallback_suffix or "-fallback"
+
+                def _is_rb(u: str) -> bool:
+                    d = self.config.deployment_by_unique(u)
+                    g = str(d.get("group", "")) if d else ""
+                    return g.endswith(_go_suf) or g.endswith(_fb_suf)
+
+                _dims = [u for u in chain if not _is_rb(u)]
+                dep = self._walk_chain(_dims, None, need, ctx)
                 if dep is not None:
                     log.info("[ladder] initial_pick: %s senza candidati "
                              "vivi -> scala (%d univoci) -> %s",
                              group_name, len(chain), dep["unique"])
+                    return dep
+                # PRE-ULTIMA SPIAGGIA (fra dims e -go): dims vivi occupati da
+                # un'ALTRA sessione negli ultimi session_dep_guard_sec.
+                dep = self.prelast_shared(_dims, None, need, ctx, None)
+                if dep is not None:
+                    return dep
+                # -go/-fallback vivi
+                dep = self._walk_chain([u for u in chain if _is_rb(u)],
+                                       None, need, ctx)
+                if dep is not None:
                     return dep
         chain = self.config.chains.get(profile or "", [])
         return self._walk_chain(chain, None, need, ctx)
@@ -3203,8 +3372,11 @@ class Router:
                                tried: set[str] | None = None) -> dict | None:
         """Cammina la scala testo con early-escalation e cooldown lineare.
 
-        Sequenza (7 step):
+        Sequenza (8 step):
           1) dims vivi — max ladder_skip_after candidati
+          1bis) dims cooldown-wakeup (stantii, residuo minore)
+          1ter) PRE-ULTIMA SPIAGGIA: dims vivi usati di recente da un'ALTRA
+                sessione (session_dep_guard) — condivisi QUI, prima di -go
           2) -go vivi
           3) dims stantii (cooldown > stale_cooldown_retry_sec) — max ladder_stale_max
           4) -go stantii (dormiente, potrebbe essersi svegliato)
@@ -3337,6 +3509,15 @@ class Router:
                 log.info("[ladder] dims cooldown-wakeup (%d/%d): residuo %ds "
                          "-> %s", _woken + 1, _max_wake, _rem, _wake_u)
                 return _wake
+
+        # 1ter) PRE-ULTIMA SPIAGGIA (fra l'ultimo -dim e -go): dims VIVI che
+        #    un'ALTRA sessione ha servito con successo negli ultimi
+        #    session_dep_guard_sec. Sono occupati -> la sessione corrente li
+        #    condivide solo ORA (prima del -go a pagamento), scegliendo il
+        #    max_input piu' piccolo che regge. Gratis e senza toccare cooldown.
+        _shared = self.prelast_shared(dims, failed_unique, need, ctx, tried)
+        if _shared is not None:
+            return _shared
 
         # 2) -go vivi
         nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)

@@ -1223,6 +1223,11 @@ async def chat_completions(request: Request):
 
     # --- routing ---
     session_id = _session_id(request, payload)
+    # SESSION-DEP GUARD: la sessione corrente dev'essere nota GIA' durante
+    # initial_pick/pick_deployment (guardia anti-usurpazione cross-sessione),
+    # non solo dopo il pick come in passato.
+    from .router import set_current_session
+    set_current_session(session_id)
     _sniff_headers(request, logger=_api_log,
                    body_size=len(request._body) if hasattr(request, "_body")
                    else 0, session_id=session_id)
@@ -1339,10 +1344,8 @@ async def chat_completions(request: Request):
                          "shown_orphan_tool", "dangling_tool_calls",
                          "empty_assistant", "dup_system")})
     # ---- cache-aware: detentore sessione + troncamento contesto ----
-    from .router import set_current_session
     from .ctxcompact import (ctxcompact_config_from_policy,
                              compact_tool_outputs, should_compact)
-    set_current_session(session_id)
     _cc = ctxcompact_config_from_policy(router.policy)
     _holder = router.session_holder(session_id)
     _max_in = int(dep.get("max_input_tokens") or 0)
