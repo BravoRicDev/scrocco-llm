@@ -3,6 +3,7 @@ import asyncio
 import os
 import tempfile
 import time
+from collections import deque
 
 import pytest
 
@@ -10,6 +11,14 @@ from app import autoprobe
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+
+
+@pytest.fixture(autouse=True)
+def _reset_probe_state():
+    """Stato module-level di autoprobe isolato per test."""
+    autoprobe._last_probe.clear()
+    autoprobe._probe_times.clear()
+    yield
 
 CSV_ROWS = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
 t@x.com,m-a,groq,https://api.groq.com/openai/v1,free,32,8000,0,K-A,text
@@ -257,6 +266,60 @@ def test_max_total_cap(router):
         _cool(router, _dep(router, DIM, k))
     t = autoprobe._select_targets(router, "test", 5, 300.0, 60.0, 2)
     assert len(t) == 2
+
+
+def test_select_targets_orders_by_probe_count_24h(router):
+    """Vince il deployment con MENO tentativi nelle 24h, anche se il suo
+    cooldown residuo e' maggiore."""
+    a = _dep(router, DIM, "K-A")
+    b = _dep(router, DIM, "K-B")
+    _cool(router, a, remaining=100.0)     # piu' pronto, ma gia' martellato
+    _cool(router, b, remaining=5000.0)    # residuo alto, MA quasi mai tentato
+    now = time.time()
+    autoprobe._probe_times.setdefault(a["unique"], deque()).extend(
+        [now - 10, now - 20, now - 30])   # 3 probe nelle ultime 24h
+    autoprobe._probe_times.setdefault(b["unique"], deque()).append(now - 50)
+    t = autoprobe._select_targets(router, "test", 1, 300.0, 60.0, 6)
+    assert [u for _g, u in t] == [b["unique"]]
+    assert _probe_count(autoprobe._probe_times, a["unique"]) == 3
+    assert _probe_count(autoprobe._probe_times, b["unique"]) == 1
+
+
+def test_select_targets_tie_by_remaining(router):
+    """A parita' di tentativi 24h vince il residuo cooldown minore."""
+    a = _dep(router, DIM, "K-A")
+    b = _dep(router, DIM, "K-B")
+    _cool(router, a, remaining=1000.0)
+    _cool(router, b, remaining=100.0)
+    t = autoprobe._select_targets(router, "test", 1, 300.0, 60.0, 6)
+    assert [u for _g, u in t] == [b["unique"]]
+
+
+def test_probe_count_24h_window(router):
+    """Un probe piu' vecchio di 24h non conta (e viene potato)."""
+    d = _dep(router, DIM, "K-A")
+    now = time.time()
+    dq = autoprobe._probe_times.setdefault(d["unique"], deque())
+    dq.append(now - 90000)          # > 24h fa
+    dq.append(now - 3600)           # entro le 24h
+    assert autoprobe._probe_count_24h(d["unique"], now) == 1
+    assert len(dq) == 1             # il vecchio e' stato potato
+    assert autoprobe._probe_count_24h(d["unique"], now + 86400) == 0
+
+
+def test_probe_times_recorded_in_pass(router):
+    """Il pass registra il timestamp in _probe_times (fresh e cooled)."""
+    router.policy.cooldown_autoprobe_per_dim = 1
+    d = _dep(router, DIM, "K-A")
+    fwd = _Fwd(_Resp(200))
+    autoprobe._probe_times.clear()
+    asyncio.run(autoprobe._probe_pass(router, fwd, "test"))
+    assert len(autoprobe._probe_times.get(d["unique"], [])) == 1
+
+
+def _probe_count(times, unique):
+    dq = times.get(unique)
+    return len(dq) if dq else 0
 
 
 def test_disabled_no_spawn(router):

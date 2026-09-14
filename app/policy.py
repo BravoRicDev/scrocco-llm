@@ -177,6 +177,14 @@ class Policy:
     adaptive_timeout_floor_sec: float = 30.0
     adaptive_timeout_multiplier: float = 10.0
     adaptive_timeout_max_sec: float = 600.0
+    # Pool HTTP persistente PER-ORIGINE (client httpx dedicato per host:port,
+    # riuso TCP/TLS fino a 120s, condividendo lo stesso client tra tutte le
+    # chiavi di quel provider). DISATTIVATO di default: il forwarder usa un
+    # unico client condiviso (comportamento storico). Attivandolo, le chiavi
+    # di uno stesso host condividono le connessioni keep-alive (piu' veloce
+    # ma con un rischio: un provider puo' legare l'auth alla connessione e
+    # bocciare un cambio di chiave su una connessione altrui).
+    http_keepalive_pool: bool = False
     # Probe passivo dei deployment dormienti: quando non ci sono chiavi vive,
     # un deployment in cooldown da >= cooldown_probe_after_ratio del suo tempo
     # viene ritentato come "probe": il successo lo riabilita subito, il
@@ -775,6 +783,9 @@ class Policy:
         if "adaptive_timeout_enabled" in raw:
             p.adaptive_timeout_enabled = _coerce_bool(
                 raw["adaptive_timeout_enabled"], "adaptive_timeout_enabled")
+        if "http_keepalive_pool" in raw:
+            p.http_keepalive_pool = _coerce_bool(
+                raw["http_keepalive_pool"], "http_keepalive_pool")
         for _fld in ("adaptive_timeout_floor_sec",
                      "adaptive_timeout_multiplier",
                      "adaptive_timeout_max_sec"):

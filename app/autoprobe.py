@@ -25,6 +25,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import deque
 
 from .forwarder import _MODEL_MISSING_RE
 
@@ -35,6 +36,22 @@ _DIM_RE = re.compile(r"-(\d+)k$")
 _PROBE_PROMPT = "Reply with the single letter A"
 _running = False
 _last_probe: dict[str, float] = {}
+# Storico dei timestamp di ogni probe (fino a 24h), per ordinare i target
+# dal MENO tentato: si spalma il carico di probing su tutto il pool e si
+# evita che due chiavi vicine siano martellate in continuazione.
+_probe_times: dict[str, deque[float]] = {}
+
+
+def _probe_count_24h(unique: str, now: float) -> int:
+    """Numero di probe eseguiti sul deployment nelle ultime 24h (con potatura
+    degli ingressi piu' vecchi per non far crescere la memoria all'infinito)."""
+    dq = _probe_times.get(unique)
+    if not dq:
+        return 0
+    cutoff = now - 86400.0
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+    return len(dq)
 
 
 def _cfg(policy):
@@ -129,7 +146,7 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
             by_group.setdefault(grp, []).append((last_act, unique))
     targets: list[tuple[str, str]] = []
     for grp, items in by_group.items():
-        items.sort(key=lambda x: x[0])      # meno recenti (vergini) prima
+        items.sort(key=lambda x: (_probe_count_24h(x[1], now), x[0]))
         for _la, unique in items[:per_dim]:
             targets.append((grp, unique))
     return targets[:max_total]
@@ -188,7 +205,7 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
         by_group.setdefault(grp, []).append((exp - now, unique))
     targets: list[tuple[str, str]] = []
     for grp, items in by_group.items():
-        items.sort(key=lambda x: x[0])      # i piu' "pronti" (residuo minore) prima
+        items.sort(key=lambda x: (_probe_count_24h(x[1], now), x[0]))
         for _rem, unique in items[:per_dim]:
             targets.append((grp, unique))
     return targets[:max_total]
@@ -218,6 +235,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 if not dep:
                     continue
                 _last_probe[unique] = time.time()
+                _probe_times.setdefault(unique, deque()).append(_last_probe[unique])
                 ok, lat, code, _body = await _probe_one(forwarder, dep, timeout)
                 if ok:
                     router.note_result(unique, lat)
@@ -253,6 +271,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
             if not dep or not router.is_cooled_down(unique):
                 continue
             _last_probe[unique] = time.time()
+            _probe_times.setdefault(unique, deque()).append(_last_probe[unique])
             ok, _lat, code, _body = await _probe_one(forwarder, dep, timeout)
             if ok:
                 router.clear_cooldown(unique)

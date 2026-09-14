@@ -166,7 +166,7 @@ config = GatewayConfig(CSV_PATH, proxy_prefix=policy.proxy_prefix,
 router = Router(config, policy)
 # provider callable: l'hot-reload della policy aggiorna anche le chiavi client
 authn = AuthManager(config, client_keys_provider=lambda: policy.client_keys)
-forwarder = Forwarder()
+forwarder = Forwarder(keepalive_pool=policy.http_keepalive_pool)
 set_retry_after_floors(policy.retry_after_min_sec,
                        policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
@@ -472,6 +472,7 @@ async def _watcher(interval: float) -> None:
                         max_sec=fresh.adaptive_timeout_max_sec)
                     set_schemaout_config(
                         _so_cfg_from_policy(fresh))
+                    forwarder._keepalive_pool = fresh.http_keepalive_pool
                     configure_estimate(
                         adaptive=fresh.estimate_adaptive_enabled,
                         shadow=fresh.estimate_adaptive_shadow)

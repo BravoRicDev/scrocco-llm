@@ -1174,34 +1174,42 @@ def media_reject_signature(detail: str) -> bool:
 
 
 class Forwarder:
-    def __init__(self, client: httpx.AsyncClient | None = None):
+    def __init__(self, client: httpx.AsyncClient | None = None,
+                 keepalive_pool: bool = False):
         # client iniettabile per i test (httpx.MockTransport); se assente
-        # usiamo un pool di client persistenti PER-ORIGINE (riuso TCP/TLS).
+        # usiamo un unico client condiviso (comportamento storico) oppure,
+        # se `keepalive_pool` e' True, un pool di client persistenti
+        # DEDICATI PER API-KEY (comune per modello): ogni chiave ha la sua
+        # connessione/cookie-jar, cosi' un provider non vede MAI un cambio di
+        # chiave su una connessione altrui. Niente pool per-origine.
         self.client = client
         self._injected = client
+        self._keepalive_pool = bool(keepalive_pool)
         self._clients: dict[str, httpx.AsyncClient] = {}
 
-    def _client_for(self, url: str) -> httpx.AsyncClient:
-        """Client persistente per host:port, creato lazy e riusato.
+    def _client_for(self, url: str, key: str = "") -> httpx.AsyncClient:
+        """Client persistente per API-KEY, creato lazy e riusato.
 
-        Un client httpx poola per-origin; tenerne uno dedicato per origine
-        con limiti ampi garantisce keep-alive attivo tra chiamate allo stesso
-        provider anche in raffica (niente TLS handshake ripetuti).
+        Con `keepalive_pool` attivo, una chiave ha il suo client dedicato
+        (condiviso tra TUTTI i modelli che quella chiave serve): il riuso
+        TCP/TLS e' dentro la stessa chiave, mai tra chiavi diverse dello
+        stesso provider. Con il pool disattivato (default) si usa un unico
+        client condiviso per tutto (comportamento pre-80fbf72).
         """
         if self._injected is not None:
             return self._injected
-        try:
-            _u = urlsplit(url)
-            origin = f"{_u.scheme}://{_u.netloc}"
-        except ValueError:
-            origin = url
-        cli = self._clients.get(origin)
+        if not self._keepalive_pool:
+            if self.client is None:
+                self.client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
+            return self.client
+        k = key or url        # fallback: per-URL se la chiave e' vuota
+        cli = self._clients.get(k)
         if cli is None:
             cli = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT,
                                     limits=UPSTREAM_LIMITS)
-            self._clients[origin] = cli
-            log.info("[http-pool] client persistente per %s "
-                     "(keepalive=%d, max=%d, expiry=%.0fs)", origin,
+            self._clients[k] = cli
+            log.info("[http-pool] client dedicato per api-key "
+                     "(keepalive=%d, max=%d, expiry=%.0fs)",
                      UPSTREAM_LIMITS.max_keepalive_connections,
                      UPSTREAM_LIMITS.max_connections,
                      UPSTREAM_LIMITS.keepalive_expiry or 0.0)
@@ -1210,6 +1218,8 @@ class Forwarder:
     async def aclose(self) -> None:
         seen: set[int] = set()
         clients = list(self._clients.values())
+        if self.client is not None:
+            clients.append(self.client)
         if self._injected is not None:
             clients.append(self._injected)
         for cli in clients:
@@ -1271,7 +1281,7 @@ truncation_hook=None,
         url = f"{dep['api_base']}/chat/completions"
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            _cli = self._client_for(url)
+            _cli = self._client_for(url, dep.get("api_key", ""))
             req = _cli.build_request("POST", url, json=body, headers=headers,
                                      **_timeout_kw(dep))
             resp = await _cli.send(req, stream=True)
@@ -1439,7 +1449,7 @@ truncation_hook=None,
         url = f"{dep['api_base']}/chat/completions"
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            resp = await self._client_for(url).post(url, json=body,
+            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body,
                                                     headers=headers,
                                                     **_timeout_kw(dep))
         except httpx.TimeoutException as exc:
@@ -1493,7 +1503,7 @@ truncation_hook=None,
         _google = is_gemini_deployment(dep)
         log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
         try:
-            resp = await self._client_for(url).post(url, json=body, headers=headers,
+            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=300.0,
                                                                 write=60.0,
@@ -1530,7 +1540,7 @@ truncation_hook=None,
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/audio/speech"
         try:
-            resp = await self._client_for(url).post(url, json=body, headers=headers,
+            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=300.0,
                                                                 write=60.0,
@@ -1570,7 +1580,7 @@ truncation_hook=None,
         files = {"file": (filename or "audio.wav", file_bytes,
                           content_type or "audio/wav")}
         try:
-            resp = await self._client_for(url).post(url, data=data, files=files,
+            resp = await self._client_for(url, dep.get("api_key", "")).post(url, data=data, files=files,
                                           headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=300.0,
@@ -1608,7 +1618,7 @@ truncation_hook=None,
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos"
         try:
-            resp = await self._client_for(url).post(url, json=body, headers=headers,
+            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,
                                                                 read=120.0,
                                                                 write=120.0,
@@ -1636,7 +1646,7 @@ truncation_hook=None,
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos/{job_id}"
         try:
-            resp = await self._client_for(url).get(url, headers=headers)
+            resp = await self._client_for(url, dep.get("api_key", "")).get(url, headers=headers)
         except httpx.HTTPError as exc:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
         if resp.status_code >= 400:
@@ -1703,7 +1713,7 @@ truncation_hook=None,
                                       session=session, attribution=attribution)}
         url = f"{dep['api_base']}/videos/{job_id}/content"
         try:
-            resp = await self._client_for(url).get(url, headers=headers,
+            resp = await self._client_for(url, dep.get("api_key", "")).get(url, headers=headers,
                                          follow_redirects=True,
                                          timeout=httpx.Timeout(600.0,
                                                                connect=15.0))
