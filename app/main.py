@@ -212,6 +212,28 @@ from .atomic_store import load_json as _load_json, save_json as _save_json
 # risposta (deepcopy). Un retry automatico identico al 100% non spreca quota.
 _inflight_coalesce: dict[str, dict] = {}
 _inflight_lock = asyncio.Lock()
+# Finestra POST-risposta (request_coalescing_cache_sec): lo stesso payload
+# arrivato entro N secondi riceve la risposta gia' prodotta, senza ripetere
+# la chiamata upstream. Cache SOLO successi non-stream, cap 64 entry.
+_coalesce_cache: dict[str, dict] = {}
+_COALESCE_CACHE_MAX = 64
+
+
+def _coalesce_cache_take(key: str, now: float):
+    ent = _coalesce_cache.get(key)
+    if ent is None:
+        return None
+    if now >= ent["exp"]:
+        _coalesce_cache.pop(key, None)
+        return None
+    return ent["res"]
+
+
+def _coalesce_cache_put(key: str, res, exp: float) -> None:
+    _coalesce_cache[key] = {"res": res, "exp": exp}
+    while len(_coalesce_cache) > _COALESCE_CACHE_MAX:
+        oldest = min(_coalesce_cache, key=lambda k: _coalesce_cache[k]["exp"])
+        _coalesce_cache.pop(oldest, None)
 
 
 def _coalesce_key(payload: dict, extra: str = "") -> str:
@@ -231,7 +253,14 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
     ttl = float(getattr(policy_obj, "request_coalescing_ttl_sec", 60.0) or 60.0)
     max_waiters = int(getattr(policy_obj,
                               "request_coalescing_max_waiters", 10) or 0)
+    cache_sec = float(getattr(policy_obj,
+                              "request_coalescing_cache_sec", 0.0) or 0.0)
     key = _coalesce_key(payload, extra_key)
+    now = time.time()
+    if cache_sec > 0:
+        hit = _coalesce_cache_take(key, now)
+        if hit is not None:
+            return copy.deepcopy(hit)
     leader = False
     async with _inflight_lock:
         entry = _inflight_coalesce.get(key)
@@ -255,6 +284,10 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
         if not entry["future"].done():
             entry["future"].set_result(res)
         _inflight_coalesce.pop(key, None)
+        if cache_sec > 0:
+            # deep copiamo SUBITO: il leader continuera' a mutare `data`
+            # (model/nx_deployment/annotate) e la cache non deve seguirlo
+            _coalesce_cache_put(key, copy.deepcopy(res), time.time() + cache_sec)
         return res
     try:
         res = await asyncio.wait_for(asyncio.shield(entry["future"]), ttl)
@@ -1189,7 +1222,7 @@ def _strike_hook(explicit: bool, need=frozenset()):
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
+async def chat_completions(request: Request, response: Response):
     _api_log = logging.getLogger("nx.api")
     try:
         payload = await request.json()
@@ -1404,20 +1437,27 @@ async def chat_completions(request: Request):
     _dec = should_compact(
         _cc, ctx_est, _max_in, _holder, dep.get("unique"),
         bool(session_id and router.is_session_compact(session_id)),
-        same_family=_same_family)
+        same_family=_same_family,
+        reasoning=bool(dep.get("effort_capable")))
     _do_compact = _dec["compact"]
     if _do_compact and session_id:
         router.mark_session_compact(session_id)
+    _ctx_saved_hdr = 0
     if _do_compact:
-        _cmsgs, _crep = compact_tool_outputs(payload.get("messages"), _cc,
-                                             max_in=_max_in,
-                                             estimator=lambda ms: estimate_tokens(ms))
+        _cmsgs, _crep = compact_tool_outputs(
+            payload.get("messages"), _cc, max_in=_max_in,
+            estimator=lambda ms: estimate_tokens(ms),
+            boundary_floor=router.ctx_boundary_floor(session_id))
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
+            router.note_compact_boundary(session_id, _crep.get("boundary"))
             metrics.inc("nx_ctxcompact_total", ("stubbed",))
-            log.info("[ctxcompact] ses=%s stubbed=%d dedup=%d saved≈%dtok "
-                     "reason=%s", session_id, _crep["stubbed"],
-                     _crep.get("deduped", 0),
+            for _tn, _tcnt in (_crep.get("tools") or {}).items():
+                metrics.inc("nx_ctxcompact_tool_total", (_tn,))
+            _ctx_saved_hdr = int(_crep.get("saved_tokens_est") or 0)
+            log.info("[ctxcompact] ses=%s stubbed=%d dedup=%d args=%d "
+                     "saved≈%dtok reason=%s", session_id, _crep["stubbed"],
+                     _crep.get("deduped", 0), _crep.get("args_trimmed", 0),
                      _crep["saved_tokens_est"], _dec["reason"])
     log.info("[cache] ses=%s holder=%s family=%s same_fam=%s compact=%s "
              "cold=%s reason=%s ctx≈%d max_in=%d", session_id, _holder or "-",
@@ -1454,7 +1494,7 @@ async def chat_completions(request: Request):
                        "group": group_or_explicit,
                        "dep": dep.get("unique"), "stream": True},
                 payload)
-        return await _stream_with_fallback(
+        _sresp = await _stream_with_fallback(
             profile, dep, payload, need,
             hook=_strike_hook(explicit_req, need),
             scope="group" if explicit_req else "chain",
@@ -1463,6 +1503,9 @@ async def chat_completions(request: Request):
             session=_sess, client_ip=_cip, request=request,
             attribution=_attr, requested_group=group_or_explicit,
             sniffer=_sniffer)
+        if _ctx_saved_hdr:
+            _sresp.headers["X-Ctxcompact-Saved"] = str(_ctx_saved_hdr)
+        return _sresp
 
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
@@ -1542,6 +1585,8 @@ async def chat_completions(request: Request):
                     payload).finish_json(
             data, {"status": "success", "tries": max(1, len(attempts_box)),
                    "qc_failed": bool(qc_failed)})
+    if _ctx_saved_hdr:
+        response.headers["X-Ctxcompact-Saved"] = str(_ctx_saved_hdr)
     return data
 
 
@@ -2138,7 +2183,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                    quality=_quality)
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"],
-                                            (time.monotonic() - t_att) * 1000)
+                                            (time.monotonic() - t_att) * 1000,
+                                            ctx_est=ctx)
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)

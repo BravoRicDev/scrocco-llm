@@ -2142,7 +2142,9 @@ truncation_hook=None,
                 router.note_result(cur, (time.monotonic() - t0) * 1000,
                                    quality=_q)
                 router.record_escalation_win(requested_group, dep)
-                router.note_session_success(ses, dep["unique"])
+                router.note_session_success(ses, dep["unique"],
+                                            (time.monotonic() - t0) * 1000,
+                                            ctx_est=ctx)
                 return (data, dep, qc_failed) if collect_qc_failures \
                     else (data, dep)
             except UpstreamError as err:

@@ -94,9 +94,15 @@ cheap selections — same session only, re-fished at `-fallback`),
 *explicit* `-go`/`-fallback` request the session cache-holder also beats the
 renewal tier — paid cache, never for auto routing), `[ctxcompact]` (cold-cache
 context trim: old large tool outputs → deterministic head+tail stub with
-`[tool] N char, M righe[, exit X]` summary, duplicates → `[rimando: ...]`;
-error outputs are NEVER rewritten; tail protected while it fits
-`keep_tail_pct`% of the window), `[effort]` (`reasoning_effort` injected/
+`[tool] N char, M righe[, exit X]` summary, duplicates → `[rimando: ...]`
+(content-hash refs, `(già compresso)` when the target is itself stubbed;
+per-session frontier watermark: a stub never un-stubs on window rotation);
+old oversized `tool_calls` arguments get a JSON-aware trim
+(`tool_args_max_chars`, never breaks JSON validity); error outputs are NEVER
+rewritten (incl. line-anchored FAILED/ERROR/fatal:); tail protected while it
+fits `keep_tail_pct`% of the window; `X-Ctxcompact-Saved` header +
+`nx_ctxcompact_tool_total` counter; reasoning-only (effort_capable) deps get
+the earlier `reasoning_headroom_ratio` trigger), `[effort]` (`reasoning_effort` injected/
 removed per the row's `effort_capable`). Thinking crosses the translator
 boundary: upstream reasoning (Responses summaries, Anthropic `thinking`
 blocks, Gemini `thought` parts) is delivered to the client as

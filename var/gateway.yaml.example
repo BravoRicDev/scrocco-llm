@@ -49,6 +49,16 @@ estimate_divisor: 3
 #   3600 = 1 ora ; 0 = sticky disabilitato
 sticky_ttl_sec: 3600
 
+# Coalescing delle richieste IDENTICHE (stesso payload+profilo, non-streaming)
+# gia' in volo: una sola chiamata upstream, risposta condivisa (deepcopy).
+# request_coalescing_cache_sec estende il concetto DOPO il completamento: un
+# payload identico che arriva entro N secondi riceve la risposta gia' prodotta
+# (retry ravvicinati e subagenti pagano meta'). 0 = solo in-flight (default).
+# request_coalescing_enabled: true
+# request_coalescing_ttl_sec: 60
+# request_coalescing_max_waiters: 10
+# request_coalescing_cache_sec: 0
+
 # Al failover verso un deployment della STESSA FAMIGLIA, sposta lo sticky sul
 # nuovo deployment (prompt cache calda preservata).
 sticky_handoff_same_family: true
@@ -618,8 +628,17 @@ cache_aware:
     # frontiera dinamica: protegge la coda finche' sta in keep_tail_pct%
     # della finestra del deployment scelto (0 = vale solo keep_turns)
     keep_tail_pct: 2.0
-    # output con errori (Traceback/...Error/Exception/exit != 0): MAI toccati
+    # output con errori: MAI toccati (Traceback/...Error/Exception/exit != 0,
+    # e righe che iniziano con FAILED/ERROR/fatal: - pytest/git)
     keep_error_outputs: true
+    # argomenti dei tool_calls vecchi: troncamento JSON-AWARE (il JSON resta
+    # valido: si tagliano solo valori stringa sopra la soglia, con lo stesso
+    # head+tail deterministico degli stub). 0 = mai toccare (storico)
+    tool_args_max_chars: 2000
+    # headroom ABSOLUTO anticipato sui deployment reasoning-only (riga con
+    # effort_capable): la soglia assoluta scatta a questa frazione MINORE
+    # della finestra, lasciando token liberi per il blocco di thinking
+    reasoning_headroom_ratio: 0.7
     # nuovi inneschi (oltre a max_input): soglia assoluta e cache fredda
     min_ctx_tokens: 50000
     on_deployment_switch: true

@@ -21,11 +21,15 @@ cio' che era gia' stato compresso -> nessuna invalidazione ripetuta della
 prompt-cache.
 
 VINCOLI: non si rimuovono MAI messaggi (l'accoppiata assistant.tool_calls /
-tool.tool_call_id resta valida); si tocca SOLO il `content` stringa dei tool
-vecchi (mai assistant/user/system, mai liste multimodali, mai gli argomenti
-dei tool_calls); gli output che CONTENGONO ERRORI (Traceback/...Error/
-Exception/exit != 0) NON si toccano per nessuna ragione, nemmeno in
-overflow; soglia `min_saved_tokens` per evitare churn inutile.
+tool.tool_call_id resta valida); si tocca il `content` stringa dei tool vecchi
+(mai assistant/user/system, mai liste multimodali) e — se
+`tool_args_max_chars` > 0 — gli ARGOMENTI dei tool_calls vecchi SOLO come
+troncamento JSON-aware che mantiene il JSON valido (mai rischiare un 400 da
+parser stretto). Gli output che CONTENGONO ERRORI (Traceback/...Error/
+Exception/exit != 0/FAILED/ERROR/fatal: a inizio riga) NON si toccano per
+nessuna ragione, nemmeno in overflow; soglia `min_saved_tokens` per evitare
+churn inutile. La frontiera non regredisce MAI dentro una sessione
+(watermark `boundary_floor`): i byte gia' scritti non cambiano.
 
 [EN] WHAT: cache-aware context trimming. When the provider cache is cold,
 large OLD tool outputs are replaced (content-only) with a deterministic
@@ -36,6 +40,7 @@ become a back-reference to the newest call. Error outputs are never touched.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 
@@ -46,8 +51,11 @@ DEFAULT_STUB = "[tool output omesso: {n} caratteri]"
 # Guardie di riconoscimento per l'idempotenza (mai ri-comprimere).
 _RIMANDO_PREFIX = "[rimando:"
 # Errori "importanti": mai toccare (decisone operatore: nemmeno in overflow).
+# II ramo line-anchored cattura i formati dei runner (pytest "FAILED ...",
+# "ERROR ...", git "fatal: ...") che non contengono la parola Error.
 _ERROR_RE = re.compile(
-    r"\b(?:[A-Z][a-zA-Z]*Error|Exception|ENOSPC|EACCES|SIGKILL|Traceback)\b")
+    r"\b(?:[A-Z][a-zA-Z]*Error|Exception|ENOSPC|EACCES|SIGKILL|Traceback)\b"
+    r"|(?im:^\s*(?:FAILED|ERROR)\b|^\s*fatal:)")
 # Exit code nel testo del tool result (formati generici dei vari client).
 _EXIT_RE = re.compile(r"(?im)\bexit(?:[ _-]*code)?\s*[:=]\s*(-?\d+)")
 # Floor del walk a budget: gli ultimi N messaggi restano sempre integri.
@@ -66,7 +74,9 @@ class CtxCompactConfig:
                  head_chars: int = 600,
                  tail_chars: int = 600,
                  keep_tail_pct: float = 2.0,
-                 keep_error_outputs: bool = True):
+                 keep_error_outputs: bool = True,
+                 tool_args_max_chars: int = 2000,
+                 reasoning_headroom_ratio: float = 0.7):
         self.enabled = bool(enabled)
         self.keep_turns = int(keep_turns)
         self.max_tool_output_chars = int(max_tool_output_chars)
@@ -89,6 +99,14 @@ class CtxCompactConfig:
         # solo keep_turns).
         self.keep_tail_pct = float(keep_tail_pct)
         self.keep_error_outputs = bool(keep_error_outputs)
+        # Troncamento JSON-aware degli ARGOMENTI dei tool_calls (write_file con
+        # 30k di codice, execute_code con script interi): 0 = mai toccare
+        # (comportamento storico, gli argomenti sono "intoccabili").
+        self.tool_args_max_chars = int(tool_args_max_chars)
+        # Headroom ANTICIPATO per i modelli reasoning-only (R1 / Qwen thinking):
+        # la soglia assoluta scatta a una frazione MINORE della finestra, cosi'
+        # restano token liberi per il reasoning block prima del limite.
+        self.reasoning_headroom_ratio = max(0.0, float(reasoning_headroom_ratio))
 
 
 def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfig:
@@ -112,11 +130,14 @@ def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfi
                       ("min_ctx_tokens", "min_ctx_tokens"),
                       ("switch_min_tokens", "switch_min_tokens"),
                       ("head_chars", "head_chars"),
-                      ("tail_chars", "tail_chars")):
+                      ("tail_chars", "tail_chars"),
+                      ("tool_args_max_chars", "tool_args_max_chars")):
         if ct.get(src) is not None:
             setattr(cfg, attr, int(ct[src]))
     for src, attr in (("keep_tail_pct", "keep_tail_pct"),
-                      ("abs_headroom_ratio", "abs_headroom_ratio")):
+                      ("abs_headroom_ratio", "abs_headroom_ratio"),
+                      ("reasoning_headroom_ratio",
+                       "reasoning_headroom_ratio")):
         if ct.get(src) is not None:
             setattr(cfg, attr, float(ct[src]))
     if "on_deployment_switch" in ct:
@@ -155,13 +176,19 @@ def ctxcompact_config_from_policy(policy) -> CtxCompactConfig:
                             or 0.0),
         keep_error_outputs=bool(
             getattr(policy, "cache_ctx_keep_error_outputs", True)),
+        tool_args_max_chars=int(
+            getattr(policy, "cache_ctx_tool_args_max_chars", 2000) or 0),
+        reasoning_headroom_ratio=float(
+            getattr(policy, "cache_ctx_reasoning_headroom_ratio", 0.7)
+            or 0.0),
     )
 
 
 def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
                    holder: str | None = None, dep_unique: str | None = None,
                    session_compact: bool = False,
-                   same_family: bool = False) -> dict:
+                   same_family: bool = False,
+                   reasoning: bool = False) -> dict:
     """Decide se troncare e perche'. Ritorna un dict:
     {compact, reason (str), cold (bool), overflow (bool)}.
 
@@ -188,8 +215,12 @@ def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
     # la prompt-cache per oscillazioni attorno a min_ctx_tokens). Con max_in
     # ignoto (0) o ratio<=0 vale il comportamento storico.
     near_saturation = True
-    if max_in > 0 and cfg.abs_headroom_ratio > 0:
-        near_saturation = ctx_est >= int(max_in * cfg.abs_headroom_ratio)
+    ratio = cfg.abs_headroom_ratio
+    if reasoning and cfg.reasoning_headroom_ratio > 0:
+        ratio = (min(ratio, cfg.reasoning_headroom_ratio)
+                 if ratio > 0 else cfg.reasoning_headroom_ratio)
+    if max_in > 0 and ratio > 0:
+        near_saturation = ctx_est >= int(max_in * ratio)
     reasons = []
     if overflow:
         reasons.append("overflow")
@@ -324,21 +355,71 @@ def _walk_boundary(messages, max_in: int, keep_tail_pct: float) -> int:
     return boundary
 
 
+_ARGS_MARKER = "[omessi "
+
+
+def _trim_args_json(args: str, cfg: CtxCompactConfig) -> str | None:
+    """Taglia le stringhe LUNGHE dentro gli argomenti JSON di un tool_call
+    mantenendo il JSON VALIDO (i provider parserizzati in modo stretto non
+    devono mai ricevere un 400). Ritorna None se non si può toccare.
+    Pura funzione dei byte originali: stesso input -> stessi output."""
+    try:
+        obj = json.loads(args)
+    except Exception:
+        return None
+    limit = cfg.tool_args_max_chars
+    mutated = False
+
+    def walk(v):
+        nonlocal mutated
+        if isinstance(v, str):
+            if len(v) <= limit or _ARGS_MARKER in v:
+                return v
+            h = _cut_head(v, cfg.head_chars) if cfg.head_chars > 0 else ""
+            t = _cut_tail(v, cfg.tail_chars) if cfg.tail_chars > 0 else ""
+            omitted = max(len(v) - len(h) - len(t), 0)
+            if omitted <= 0:
+                return v
+            mutated = True
+            return f"{h}\n...[omessi {omitted:,} char]...\n{t}"
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return v
+
+    cut = walk(obj)
+    if not mutated:
+        return None
+    try:
+        out = json.dumps(cut, ensure_ascii=False)
+    except Exception:
+        return None
+    if len(out) >= len(args):
+        return None
+    return out
+
+
 def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
-                         estimator=None):
+                         estimator=None, boundary_floor: int = 0):
     """Ritorna (nuova_lista, report). Non muta l'input.
 
-    report: {stubbed, deduped, saved_chars, saved_tokens_est, boundary,
-    changed}. Se il risparmio stimato < min_saved_tokens la lista originale e'
-    ritornata invariata (changed=False) per non alterare la cache per nulla.
+    report: {stubbed, deduped, args_trimmed, tools (conta per nome di tool),
+    saved_chars, saved_tokens_est, boundary, changed}. Se il risparmio
+    stimato < min_saved_tokens la lista originale e' ritornata invariata
+    (changed=False) per non alterare la cache per nulla.
 
     `max_in` (max_input_tokens del deployment scelto) + `keep_tail_pct`
     attivano la frontiera dinamica per budget token; `estimator` (callable
     lista->token, es. router.estimate_tokens) sostituisce l'euristica //4 per
-    la soglia min_saved_tokens.
+    la soglia min_saved_tokens. `boundary_floor` e' il watermark della
+    frontiera mai applicata a questa sessione: la frontiera NON regredisce
+    mai, cosi' uno stub gia' scritto non torna mai contenuto pieno (byte del
+    prefisso stabili -> cache valida).
     """
-    rep = {"stubbed": 0, "deduped": 0, "saved_chars": 0,
-           "saved_tokens_est": 0, "boundary": None, "changed": False}
+    rep = {"stubbed": 0, "deduped": 0, "args_trimmed": 0, "tools": {},
+           "saved_chars": 0, "saved_tokens_est": 0, "boundary": None,
+           "changed": False}
     if not cfg.enabled or not messages:
         return messages, rep
 
@@ -356,6 +437,12 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
     # mai allargarle oltre se il budget e' generoso: max() delle due.
     boundary = max(boundary, _walk_boundary(messages, max_in,
                                             cfg.keep_tail_pct))
+    # Watermark per-sessione: mai rigressioni (vedi docstring).
+    try:
+        boundary = max(boundary, int(boundary_floor))
+    except (TypeError, ValueError):
+        pass
+    boundary = min(boundary, len(messages))
     rep["boundary"] = boundary
 
     labels = _tool_labels(messages)
@@ -363,6 +450,7 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
     saved = 0
     stubbed = 0
     deduped = 0
+    args_trimmed = 0
     changed_msgs: list = []                # (orig, nuova) per l'estimator
 
     def _cost(msg_list, plain_chars):
@@ -370,8 +458,15 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
             return plain_chars
         return estimator(msg_list)
 
-    # --- PASS 1: dedup (rimando al tool_call_id della copia piu' recente) ---
-    newest: dict = {}                      # md5[:12] -> tool_call_id
+    def _bump(name):
+        rep["tools"][name] = rep["tools"].get(name, 0) + 1
+
+    # --- PASS 1: dedup (rimando alla copia piu' recente) -------------------
+    # md5[:12] -> (riferimento STABILE, indice). Il riferimento e' il
+    # tool_call_id se presente, altrimenti msg@<hash8>: funzione PURA del
+    # contenuto, regge alla riscrittura/slittamento degli indici da parte del
+    # client (un msg@{i} cambierebbe byte a meta' prefisso).
+    newest: dict = {}
     for i in range(len(messages) - 1, -1, -1):
         m = messages[i]
         if not (isinstance(m, dict) and m.get("role") == "tool"
@@ -388,13 +483,27 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
         cid = m.get("tool_call_id")
         if h in newest:
-            stub = f"{_RIMANDO_PREFIX} output identico al tool_call_id {newest[h]}, {len(content):,} char]"
+            ref, j = newest[h]
+            canon = messages[j] if 0 <= j < len(messages) else None
+            cc = canon.get("content") if isinstance(canon, dict) else None
+            # la copia canonica sara' stubbata CON head+tail dal pass 2: il
+            # rimando non promette l'output pieno. In modalità legacy
+            # (head=tail=0) lo stub e' secco: meglio non dire "compressa".
+            already = (isinstance(cc, str)
+                       and len(cc) > cfg.max_tool_output_chars
+                       and (cfg.head_chars > 0 or cfg.tail_chars > 0))
+            where = (f"al messaggio {ref}" if str(ref).startswith("msg@")
+                     else f"al tool_call_id {ref}")
+            stub = (f"{_RIMANDO_PREFIX} output identico"
+                    f"{' (già compresso)' if already else ''} {where}, "
+                    f"{len(content):,} char]")
             new[i] = {**m, "content": stub}
             deduped += 1
             saved += len(content) - len(stub)
+            _bump(labels.get(m.get("tool_call_id"), "tool"))
             changed_msgs.append((m, new[i]))
         else:
-            newest[h] = cid or f"msg@{i}"
+            newest[h] = (cid or f"msg@{h[:8]}", i)
     rep["deduped"] = deduped
 
     # --- PASS 2: stub head+tail dei tool grandi (puliti, non rimandati) -----
@@ -418,7 +527,44 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         new[i] = {**m, "content": stub}
         stubbed += 1
         saved += n - len(stub)
+        _bump(name)
         changed_msgs.append((m, new[i]))
+
+    # --- PASS 3: argomenti tool_calls vecchi: truncing JSON-aware ----------
+    # meta' del contesto degli agenti sono gli args (write_file con 30k di
+    # codice). Vincolo duro: il JSON deve restare VALIDO e la trasformazione
+    # dev'essere pura dei byte originali (cache-correct come gli stub).
+    if cfg.tool_args_max_chars > 0:
+        for i in range(min(boundary, len(new))):
+            m = new[i]
+            if not (isinstance(m, dict) and m.get("role") == "assistant"):
+                continue
+            tcs = m.get("tool_calls")
+            if not isinstance(tcs, list) or not tcs:
+                continue
+            edits = []
+            for j, tc in enumerate(tcs):
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function")
+                if not isinstance(fn, dict):
+                    continue
+                a = fn.get("arguments")
+                if isinstance(a, str) and len(a) > cfg.tool_args_max_chars:
+                    cut = _trim_args_json(a, cfg)
+                    if cut is not None:
+                        edits.append((j, tc, fn, a, cut))
+            if not edits:
+                continue
+            new_tcs = list(tcs)
+            for j, tc, fn, a, cut in edits:
+                new_tcs[j] = {**tc, "function": {**fn, "arguments": cut}}
+                saved += len(a) - len(cut)
+                args_trimmed += 1
+                _bump(fn.get("name") or "tool")
+            new[i] = {**m, "tool_calls": new_tcs}
+            changed_msgs.append((m, new[i]))
+    rep["args_trimmed"] = args_trimmed
     rep["stubbed"] = stubbed
     rep["saved_chars"] = saved
     if estimator is not None and changed_msgs:
@@ -427,7 +573,8 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         rep["saved_tokens_est"] = max(0, before - after)
     else:
         rep["saved_tokens_est"] = saved // 4
-    if (stubbed == 0 and deduped == 0) or rep["saved_tokens_est"] < cfg.min_saved_tokens:
+    if ((stubbed == 0 and deduped == 0 and args_trimmed == 0)
+            or rep["saved_tokens_est"] < cfg.min_saved_tokens):
         return messages, {**rep, "changed": False}
     rep["changed"] = True
     return new, rep

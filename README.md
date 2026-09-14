@@ -97,7 +97,16 @@ individual account limits instead of dying on the first 429.
   back-reference to the newest call) only when the request would not fit
   the chosen deployment, and the session stays compacted so the provider
   prefix remains cacheable. Error outputs (Traceback/…Error/Exception/
-  exit≠0) are never touched, not even on overflow.
+  exit≠0, or lines starting with `FAILED`/`ERROR`/`fatal:`) are never
+  touched, not even on overflow. The frontier is **per-session watermarked**:
+  rotating to a bigger window never un-stubs what was already written (byte
+  stable). Duplicate back-references use a content hash (`msg@<hash>`) so a
+  client rewriting its own history cannot shift them, and they say
+  `(già compresso)` when the target itself is stubbed. When
+  `tool_args_max_chars` > 0, oversized old `tool_calls` arguments are trimmed
+  too — JSON-aware (only long string values, output stays valid JSON).
+  A `X-Ctxcompact-Saved` response header and a per-tool
+  `nx_ctxcompact_tool_total` counter expose how much was reclaimed.
 - **Session-dep guard** (`session_dep_guard`): stops concurrent sessions from
   "grabbing" the same free deployments and burning them (rate-limits). The last
   session that *successfully* served a free-dims deployment is remembered (an
@@ -425,6 +434,9 @@ template. The ones that matter most:
 | `cache_aware.context_truncation.on_deployment_switch` | true | trigger trimming when the cache is cold (no holder / different deployment) |
 | `cache_aware.context_truncation.switch_min_tokens` | 8000 | minimum context to apply the deployment-switch trigger |
 | `cache_aware.context_truncation.abs_headroom_ratio` | 0.8 | anti-churn hysteresis: the absolute trigger fires only within this fraction of the deployment window (0 disables) |
+| `cache_aware.context_truncation.reasoning_headroom_ratio` | 0.7 | extra-early absolute trigger for `effort_capable` (reasoning-only) deployments, reserving window for the thinking block (0 disables) |
+| `cache_aware.context_truncation.tool_args_max_chars` | 2000 | JSON-aware trim of oversized old `tool_calls` arguments (only long string values; output stays valid JSON); 0 = never touch args |
+| `request_coalescing_cache_sec` | 0 | also serve an identical non-stream payload arriving within this many seconds after the leader completed (credits/cost halved for tight retries/subagents); 0 = in-flight only |
 
 ## Security model
 

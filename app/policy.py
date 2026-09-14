@@ -282,6 +282,11 @@ class Policy:
     request_coalescing_enabled: bool = True
     request_coalescing_ttl_sec: float = 60.0
     request_coalescing_max_waiters: int = 10
+    # Finestra POST-risposta: un payload identico arrivato entro N secondi dal
+    # completamento del leader riceve la stessa risposta (deepcopy) senza
+    # ripetere la chiamata upstream (costo/crediti dimezzati nei retry e nei
+    # subagenti in rapida sequenza). 0 = spento (solo coalescing in-flight).
+    request_coalescing_cache_sec: float = 0.0
     # Sessioni anonime: se il client non invia alcun id di sessione ne'
     # `user`/`metadata.session_id`, il gateway deriva un id deterministico
     # `fq_<sha1(system+primo user+user-agent)>` dal prefisso della
@@ -508,6 +513,14 @@ class Policy:
     cache_ctx_tail_chars: int = 600
     cache_ctx_keep_tail_pct: float = 2.0
     cache_ctx_keep_error_outputs: bool = True
+    # Troncamento JSON-aware degli ARGOMENTI dei tool_calls vecchi (0 = mai
+    # toccare, comportamento storico). Il JSON resta valido: si tagliano solo
+    # valori stringa lunghi, con lo stesso head+tail deterministico degli stub.
+    cache_ctx_tool_args_max_chars: int = 2000
+    # Headroom ABSOLUTO anticipato per deployment reasoning-only (R1/Qwen
+    # thinking): la soglia assoluta scatta a una frazione MINORE della
+    # finestra cosi' restano token liberi per il reasoning block (0 = off).
+    cache_ctx_reasoning_headroom_ratio: float = 0.7
     # DEBUG SNIFF: scatola nera input/output su var/debug-sniff.log con
     # rotazione oraria e retention debug_sniff_retention_hours. Default OFF
     # (file con conversazione completa: solo per debug locale).
@@ -959,6 +972,14 @@ class Policy:
                 raise ValueError(
                     "request_coalescing_ttl_sec deve essere un numero >= 0") from None
         _set_int(p, raw, "request_coalescing_max_waiters", minimum=0)
+        _rc_cache = raw.get("request_coalescing_cache_sec")
+        if _rc_cache is not None:
+            try:
+                p.request_coalescing_cache_sec = max(0.0, float(_rc_cache))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "request_coalescing_cache_sec deve essere un "
+                    "numero >= 0") from None
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")
@@ -1501,7 +1522,9 @@ class Policy:
                                   ("min_ctx_tokens", "cache_ctx_min_ctx_tokens"),
                                   ("switch_min_tokens", "cache_ctx_switch_min_tokens"),
                                   ("head_chars", "cache_ctx_head_chars"),
-                                  ("tail_chars", "cache_ctx_tail_chars")):
+                                  ("tail_chars", "cache_ctx_tail_chars"),
+                                  ("tool_args_max_chars",
+                                   "cache_ctx_tool_args_max_chars")):
                     _v = ct.get(_k)
                     if _v is not None:
                         if isinstance(_v, bool) or not isinstance(_v, (int, float)):
@@ -1529,6 +1552,12 @@ class Policy:
                         raise ValueError("cache_aware.context_truncation."
                                          "abs_headroom_ratio deve essere un numero")
                     p.cache_ctx_abs_headroom_ratio = max(0.0, float(_ahr))
+                _rhr = ct.get("reasoning_headroom_ratio")
+                if _rhr is not None:
+                    if isinstance(_rhr, bool) or not isinstance(_rhr, (int, float)):
+                        raise ValueError("cache_aware.context_truncation."
+                                         "reasoning_headroom_ratio deve essere un numero")
+                    p.cache_ctx_reasoning_headroom_ratio = max(0.0, float(_rhr))
         # --- DEBUG (sniff input/output) ---
         _dbg = raw.get("debug")
         if _dbg is not None:

@@ -14,8 +14,10 @@ from app.policy import Policy
 @pytest.fixture(autouse=True)
 def _clear():
     M._inflight_coalesce.clear()
+    M._coalesce_cache.clear()
     yield
     M._inflight_coalesce.clear()
+    M._coalesce_cache.clear()
 
 
 def test_coalesce_key_deterministic_and_order_independent():
@@ -114,3 +116,89 @@ def test_stream_bypasses_coalescing():
 
     asyncio.run(main())
     assert calls["n"] == 2
+
+
+# ----------------------------------------------------------- CACHE POST-RISPOSTA
+def _pol_cache(sec):
+    return Policy.from_dict({"request_coalescing_enabled": True,
+                             "request_coalescing_cache_sec": sec})
+
+
+def test_cache_off_by_default_second_call_hits_factory():
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        return {"answer": calls["n"]}
+
+    async def main():
+        pol = Policy.from_dict({})
+        payload = {"messages": [{"role": "user", "content": "hi"}]}
+        a = await _forward_coalesced(pol, payload, "p", factory)
+        b = await _forward_coalesced(pol, payload, "p", factory)
+        return a, b
+
+    a, b = asyncio.run(main())
+    assert calls["n"] == 2 and a != b          # comportamento storico
+
+
+def test_cache_window_serves_repeat_without_factory():
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        return {"answer": 42, "data": ["x"]}
+
+    async def main():
+        pol = _pol_cache(30.0)
+        payload = {"messages": [{"role": "user", "content": "hi"}]}
+        a = await _forward_coalesced(pol, payload, "p", factory)
+        b = await _forward_coalesced(pol, payload, "p", factory)
+        return a, b
+
+    a, b = asyncio.run(main())
+    assert calls["n"] == 1
+    assert a == b
+    assert a is not b                          # deepcopy: niente aliasing
+
+
+def test_cache_does_not_follow_leader_mutations():
+    """Il leader dopo il ritorno muta il suo dict (model/nx_deployment): la
+    cache deve restare pulita (deepcopy al put)."""
+    async def factory():
+        return {"choices": [{"message": {"content": "ciao"}}]}
+
+    async def main():
+        pol = _pol_cache(30.0)
+        payload = {"messages": [{"role": "user", "content": "hi"}]}
+        a = await _forward_coalesced(pol, payload, "p", factory)
+        a["model"] = "MUTATO"                  # come fa il main post-fwd
+        b = await _forward_coalesced(pol, payload, "p", factory)
+        return b
+
+    b = asyncio.run(main())
+    assert "model" not in b
+
+
+def test_cache_expiry_rehits_factory():
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        return {"n": calls["n"]}
+
+    async def main():
+        pol = _pol_cache(0.01)
+        payload = {"messages": [{"role": "user", "content": "hi"}]}
+        await _forward_coalesced(pol, payload, "p", factory)
+        await asyncio.sleep(0.05)
+        return await _forward_coalesced(pol, payload, "p", factory)
+
+    r = asyncio.run(main())
+    assert calls["n"] == 2 and r["n"] == 2
+
+
+def test_cache_caps_size():
+    for i in range(80):
+        M._coalesce_cache_put(f"k{i}", {"i": i}, 1e12)
+    assert len(M._coalesce_cache) <= M._COALESCE_CACHE_MAX

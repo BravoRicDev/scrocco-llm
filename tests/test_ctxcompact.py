@@ -408,3 +408,272 @@ class TestEstimator:
             msgs, cfg, estimator=lambda ms: sum(len(str(m)) for m in ms) // 1000)
         assert rep["changed"] is False
         assert new == msgs
+
+
+# ============================================================= WATERMARK FRONTIERA
+class TestBoundaryFloor:
+    def _fat(self):
+        """6 messaggi di testa (user...) + 12 coppie asst/tool grosse: la
+        walk a budget strette stringe la frontiera FINO a 22, una finestra
+        enorme la riporta a 5 (keep_turns=1 = ultimo user)."""
+        corpo = "riga\n" * 1000                             # 4000 char
+        msgs = [{"role": "user", "content": f"u{i}"} for i in range(6)]
+        for k in range(12):
+            msgs.append({"role": "assistant", "content": "a", "tool_calls": [
+                {"id": f"q{k}", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]})
+            msgs.append({"role": "tool", "tool_call_id": f"q{k}",
+                         "content": corpo})
+        return msgs
+
+    def test_floor_non_rigredisce_la_frontiera(self):
+        """Finestra piccola: la walk pruna fino a 22. Rotazione su finestra
+        grande: senza floor la frontiera INDIETREGGIA (gli stub 6..21
+        tornerebbero originali: byte diversi a meta' prefisso). Con il floor
+        (watermark) i byte restano identici -> cache della famiglia salva."""
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        msgs = self._fat()
+        new1, rep1 = compact_tool_outputs(msgs, cfg, max_in=30_000)
+        assert rep1["changed"] and rep1["boundary"] == 22
+        # finestra enorme: la walk non morde, varrebbe solo keep_turns (=5)
+        bare, rep0 = compact_tool_outputs(msgs, cfg, max_in=1_000_000)
+        assert rep0["boundary"] < rep1["boundary"]
+        assert bare != new1                                 # il bug
+        # con il floor della sessione: niente regressione, byte identici
+        new2, rep2 = compact_tool_outputs(msgs, cfg, max_in=1_000_000,
+                                          boundary_floor=rep1["boundary"])
+        assert rep2["boundary"] == 22
+        assert new2 == new1
+
+    def test_floor_ignora_valori_stupidi(self):
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        new, rep = compact_tool_outputs(self._fat(), cfg, boundary_floor=0)
+        assert rep["boundary"] == 5                           # solo keep_turns
+        new, rep = compact_tool_outputs(self._fat(), cfg, boundary_floor=999)
+        assert rep["boundary"] == len(self._fat())            # clamp a len
+
+
+# ============================================================== RIMANDO STABILE
+class TestRimandoStabile:
+    CORPO = "doppione\n" * 1200
+
+    def _msgs(self, prefix=()):
+        return list(prefix) + [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "x1", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "content": self.CORPO},       # no tool_call_id!
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "x2", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "content": self.CORPO},        # no cid, identico
+            {"role": "user", "content": "u2"},
+        ]
+
+    def test_msg_ref_indipendente_dagli_indici(self):
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        _, rep_a = compact_tool_outputs(self._msgs(), cfg)
+        shifted = self._msgs(prefix=[{"role": "user", "content": "extra"},
+                                     {"role": "assistant", "content": "eh"},
+                                     {"role": "user", "content": "u0"}])
+        _, rep_b = compact_tool_outputs(shifted, cfg)
+        assert rep_a["deduped"] == rep_b["deduped"] == 1
+        ra = next(m["content"] for m in self._out(cfg) if str(m["content"]).startswith("[rimando"))
+        rb = self._out2(cfg, shifted)
+        assert ra == rb
+
+    # helper separati per estrarre il rimando
+    def _out(self, cfg):
+        new, _ = compact_tool_outputs(self._msgs(), cfg)
+        return new
+
+    def _out2(self, cfg, shifted):
+        new, _ = compact_tool_outputs(shifted, cfg)
+        return next(m["content"] for m in new
+                    if str(m["content"]).startswith("[rimando"))
+
+    def test_rimando_contiene_hash_non_indice(self):
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        new, _ = compact_tool_outputs(self._msgs(), cfg)
+        r = next(m["content"] for m in new
+                 if str(m["content"]).startswith("[rimando"))
+        assert "msg@" in r and "msg@5" not in r      # niente indice nudo
+
+
+# ============================================================= ERRORI (anchor)
+class TestErrorAnchors:
+    def _one(self, corpo):
+        return [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c", "content": corpo},
+            {"role": "user", "content": "u2"},
+        ]
+
+    def test_pytest_failed_e_git_fatal_protetti(self):
+        cfg = CtxCompactConfig(keep_turns=0, min_saved_tokens=0)
+        for corpo in ("FAILED tests/test_x.py::test_y\n" + "z" * 6000,
+                      "ERROR: network unreachable\n" + "z" * 6000,
+                      "fatal: not a git repository\n" + "z" * 6000):
+            new, rep = compact_tool_outputs(self._one(corpo), cfg)
+            assert rep["stubbed"] == 0, corpo[:20]
+
+    def test_parole_normali_non_anchorate_passano(self):
+        cfg = CtxCompactConfig(keep_turns=0, min_saved_tokens=0)
+        corpo = ("il test log FAILED e fatal: compaiono solo perche' il "
+                 "test e' passato\n" + "q" * 6000)
+        # "FAILED" e "fatal:" sono a meta' riga: NON anchor -> comprimibile
+        new, rep = compact_tool_outputs(self._one(corpo), cfg)
+        assert rep["stubbed"] == 1
+
+    def test_FAILED_a_inizio_riga_protetto(self):
+        cfg = CtxCompactConfig(keep_turns=0, min_saved_tokens=0)
+        corpo = "q" * 6000 + "\nFAILED hard\n" + "q" * 6000
+        new, rep = compact_tool_outputs(self._one(corpo), cfg)
+        assert rep["stubbed"] == 0
+
+
+# ==================================================================== ARGS (B)
+class TestArgsTruncation:
+    def _conv(self, args):
+        return [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "w1", "type": "function",
+                 "function": {"name": "write_file", "arguments": args}}]},
+            {"role": "tool", "tool_call_id": "w1", "content": "ok"},
+            {"role": "user", "content": "u2"},
+        ]
+
+    def _cfg(self, **kw):
+        k = dict(keep_turns=0, min_saved_tokens=0,
+                 tool_args_max_chars=500)
+        k.update(kw)
+        return CtxCompactConfig(**k)
+
+    def test_stringa_lunga_tagliata_json_valido(self):
+        import json
+        args = json.dumps({"path": "/tmp/x", "content": "CODICE\n" * 500})
+        new, rep = compact_tool_outputs(self._conv(args), self._cfg())
+        assert rep["args_trimmed"] == 1
+        out = new[1]["tool_calls"][0]["function"]["arguments"]
+        obj = json.loads(out)                       # JSON SEMPRE valido
+        assert obj["path"] == "/tmp/x"
+        assert "omessi" in obj["content"]
+        assert len(out) < len(args)
+        assert rep["tools"].get("write_file")
+
+    def test_non_parseable_intatto(self):
+        args = "{" + "x" * 4000                    # JSON spazzatura
+        new, rep = compact_tool_outputs(self._conv(args), self._cfg())
+        assert rep["args_trimmed"] == 0
+        assert new[1]["tool_calls"][0]["function"]["arguments"] == args
+
+    def test_solo_stringhe_corte_intatto(self):
+        import json
+        args = json.dumps({"a": "x" * 3000, "b": "y"})   # il campo > 500? no: soglia per-valore? 3000>500 -> taglia
+        # NB: soglia per-stringa = tool_args_max_chars -> "x"*3000 viene
+        # tagliata; qui verifichiamo che un args SOPRA soglia ma SENZA
+        # stringhe sopra soglia resti byte-identico (no re-dump inutile)
+        args2 = json.dumps({"a": ["z" * 100] * 10, "n": 42})
+        assert len(args2) > 500
+        new, rep = compact_tool_outputs(self._conv(args2), self._cfg())
+        assert rep["args_trimmed"] == 0
+        assert new[1]["tool_calls"][0]["function"]["arguments"] == args2
+
+    def test_idempotenza_args(self):
+        import json
+        args = json.dumps({"content": "print(1)\n" * 400})
+        cfg = self._cfg()
+        new1, r1 = compact_tool_outputs(self._conv(args), cfg)
+        new2, r2 = compact_tool_outputs(new1, cfg)
+        assert r1["args_trimmed"] == 1
+        assert r2["changed"] is False or new2[1] == new1[1]
+
+    def test_disattivato(self):
+        import json
+        args = json.dumps({"content": "C\n" * 3000})
+        new, rep = compact_tool_outputs(
+            self._conv(args), self._cfg(tool_args_max_chars=0))
+        assert rep["args_trimmed"] == 0 and new[1] is not None
+        assert new[1]["tool_calls"][0]["function"]["arguments"] == args
+
+
+# ================================================================= GIÀ COMPRESSO
+class TestRimandoOnesto:
+    def test_tag_gia_compresso(self):
+        corpo = "uguali\n" * 1500
+        msgs = [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a", "tool_calls": [
+                {"id": "t1", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "t1", "content": corpo},
+            {"role": "assistant", "content": "b", "tool_calls": [
+                {"id": "t2", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "t2", "content": corpo},
+            {"role": "user", "content": "u2"},
+        ]
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert "(già compresso)" in new[2]["content"]
+        assert "t2" in new[2]["content"]
+
+    def test_legacy_stub_secco_non_promette_compressione(self):
+        corpo = "uguali\n" * 1500
+        msgs = [
+            {"role": "user", "content": "u"},
+            {"role": "tool", "tool_call_id": "t1", "content": corpo},
+            {"role": "tool", "tool_call_id": "t2", "content": corpo},
+            {"role": "user", "content": "u2"},
+        ]
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1,
+                               head_chars=0, tail_chars=0)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert "(già compresso)" not in new[1]["content"]
+
+
+# ==================================================================== REPORT
+class TestReportV2:
+    def test_contatori_per_tool(self):
+        corpo = "lento\n" * 3000
+        msgs = _conv2([corpo, "altro\n" * 3000]) if False else None
+        # costruzione esplicita: due tool grandi di tool diversi
+        msgs = [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a", "tool_calls": [
+                {"id": "b1", "type": "function",
+                 "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "b1", "content": corpo},
+            {"role": "assistant", "content": "a", "tool_calls": [
+                {"id": "s1", "type": "function",
+                 "function": {"name": "search_files", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "s1", "content": "y" * 8000},
+            {"role": "user", "content": "u2"},
+        ]
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["stubbed"] == 2
+        assert rep["tools"].get("bash") == 1
+        assert rep["tools"].get("search_files") == 1
+
+
+# ========================================================== REASONING HEADROOM
+class TestReasoningHeadroom:
+    def test_compatta_prima_sui_modelli_che_pensano(self):
+        cfg = CtxCompactConfig(min_ctx_tokens=1, abs_headroom_ratio=0.8,
+                               reasoning_headroom_ratio=0.7)
+        # ctx = 0.75 della finestra: storico NO, reasoning SI'
+        assert should_compact(cfg, 7500, 10000)["compact"] is False
+        assert should_compact(cfg, 7500, 10000,
+                              reasoning=True)["compact"] is True
+
+    def test_ratio_a_zero_non_cambia_niente(self):
+        cfg = CtxCompactConfig(min_ctx_tokens=1, abs_headroom_ratio=0.8,
+                               reasoning_headroom_ratio=0.0)
+        assert should_compact(cfg, 7500, 10000, reasoning=True)["compact"] \
+            is False

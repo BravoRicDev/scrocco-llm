@@ -58,6 +58,12 @@ from app.constants import SCORING_WEIGHTS as SW
 
 # Latency-based routing parameters (configurable via env vars / gateway.yaml)
 LATENCY_ROTATE_THRESHOLD_MS = 90000   # 90 seconds default threshold
+# SOFT demote (C size-aware): un successo 60-90s su una richiesta PESANTE
+# (>30k token) marca il dep "lento soft" SOLO per le successive richieste
+# pesanti della stessa sessione; le leggere lo usano normalmente. Il hard
+# (> LATENCY_ROTATE_THRESHOLD_MS) vale invece per qualunque richiesta.
+SOFT_SLOW_LATENCY_MS = 60000
+SOFT_SLOW_CTX_MIN = 30000
 
 
 class ErrorKind:
@@ -394,13 +400,19 @@ class Router:
         # recenti vengono "rinfrescati" e restano suoi; 15 min di silenzio e
         # l'intero set decade (torna libero).
         self._session_deps: dict[str, set[str]] = {}
-        # SESSION-SLOW DEMOTE: session -> {unique: ts} dei free-dims serviti
-        # con SUCCESSO ma LENTO (TTFB > LATENCY_ROTATE_THRESHOLD_MS). Tali dep
-        # escono da caldi/sticky/cache e da OGNI selezione successiva della
-        # STESSA sessione, tornando pescabili solo all'ultimo scaglione
-        # (-fallback / ultima spiaggia). Un successo rapido li riabilita.
-        # In-memory, mai persistito. Lazy-init via _sess_slow().
-        self._session_slow: dict[str, dict[str, float]] = {}
+        # SESSION-SLOW DEMOTE: session -> {unique: (ts, hard)} dei free-dims
+        # serviti con SUCCESSO ma LENTO. hard (TTFB > LATENCY_ROTATE_MS) vale
+        # per qualunque richiesta della sessione; soft (TTFB > SOFT_SLOW_LATENCY
+        # con contesto > SOFT_SLOW_CTX_MIN) demotiva solo le richieste pesanti.
+        # Gli dep demotati escono da caldi/sticky/cache e dalle selezioni,
+        # tornando pescabili all'ultimo scaglione (-fallback). Un successo
+        # rapido li riabilita. In-memory, mai persistito. Lazy via _sess_slow().
+        self._session_slow: dict[str, dict[str, tuple]] = {}
+        # CTXCOMPACT WATERMARK: sessione -> (frontiera massima mai applicata,
+        # ts). La frontiera di compact_tool_outputs non regredisce mai dentro
+        # la sessione: uno stub scritto non torna mai contenuto pieno (byte
+        # stabili -> prompt-cache valida). Lazy via _ctx_frontiers().
+        self._ctx_frontier: dict[str, tuple[int, float]] = {}
         # COLD SPREAD: finestra ROLLING di 24h dei TENTATIVI per-deployment
         # (ok+fail, ESCLUSI i probe: quelli restano in autoprobe._probe_times).
         # Serve a NASCONDERE dai candidati il 20% (configurabile) piu' usato
@@ -609,6 +621,56 @@ class Router:
             self._session_slow = d
         return d
 
+    # ------------------------------------------ ctxcompact watermark
+    def ctx_boundary_floor(self, session_id: str | None) -> int:
+        """Frontiera MASSIMA gia' applicata (con stub/dedup reali) a questa
+        sessione: compact_tool_outputs non deve mai retrocedere sotto questo
+        valore, cosi' i byte di prefisso gia' compressi restano stabili
+        anche ruotando su un deployment con finestra piu' piccola.
+        TTL = guard di sessione; cap 4096 sessioni."""
+        if not session_id:
+            return 0
+        d = getattr(self, "_ctx_frontier", None)
+        if not d:
+            return 0
+        rec = d.get(session_id)
+        if rec is None:
+            return 0
+        b, ts = rec
+        if time.time() - ts > self._guard_sec():
+            d.pop(session_id, None)
+            return 0
+        return int(b)
+
+    def note_compact_boundary(self, session_id: str | None,
+                              boundary: int | None) -> None:
+        """Registra la frontiera APPLICATA (solo quando il report e'
+        changed=True): monotona in avanti per la sessione."""
+        if not session_id or not boundary:
+            return
+        try:
+            b = int(boundary)
+        except (TypeError, ValueError):
+            return
+        d = getattr(self, "_ctx_frontier", None)
+        if d is None:
+            d = {}
+            self._ctx_frontier = d
+        cur = d.get(session_id)
+        if cur is not None and cur[0] >= b:
+            d[session_id] = (cur[0], time.time())   # solo refresh TTL
+            return
+        d[session_id] = (b, time.time())
+        if len(d) > 4096:
+            _now = time.time()
+            _ttl = max(1.0, float(self._guard_sec()))
+            for sid, (bb, ts) in list(d.items()):
+                if _now - ts > _ttl:
+                    d.pop(sid, None)
+            while len(d) > 4096:
+                _oldest = min(d, key=lambda k: d[k][1])
+                d.pop(_oldest, None)
+
     # --------------------------------------------- cold usage spread
     _USAGE_WINDOW = 86400.0
 
@@ -799,15 +861,17 @@ class Router:
 
     def note_session_success(self, session_id: str | None,
                              unique: str | None,
-                             latency_ms: float | None = None) -> None:
+                             latency_ms: float | None = None,
+                             ctx_est: int | None = None) -> None:
         """Ricorda l'ultimo deployment che ha servito con SUCCESSO la
         sessione (detentore cache) + l'inverso per la SESSION-DEP GUARD.
-        Con `latency_ms` > soglia marca anche il dep come 'lento per la
-        sessione' (session-slow demote). In-memory."""
+        Con `latency_ms` sopra soglia marca il dep come 'lento per la
+        sessione' (hard); con latenza intermedia e `ctx_est` pesante marca
+        soft (demote solo per richieste pesanti). In-memory."""
         if not session_id or not unique:
             return
         self._note_dep_session(session_id, unique)
-        self._note_session_slow(session_id, unique, latency_ms)
+        self._note_session_slow(session_id, unique, latency_ms, ctx_est)
         if not getattr(self.policy, "cache_aware_enabled", True):
             return
         d = self._cache_ok()
@@ -849,7 +913,7 @@ class Router:
             return None
         if self.is_cooled_down(unique) or self.is_retired(unique):
             return None
-        if self._is_demoted_dep(unique, session_id):
+        if self._is_demoted_dep(unique, session_id, ctx):
             return None
         if not self._cap_fits(dep, ctx):
             return None
@@ -982,7 +1046,7 @@ class Router:
                 continue
             if self.other_session_recent(u):
                 continue
-            if self.is_slow_for_session(u):
+            if self.is_slow_for_session(u, ctx=ctx):
                 continue
             if not self._cap_fits(d, ctx):
                 continue
@@ -1822,15 +1886,21 @@ class Router:
         return avg is not None and float(avg) > LATENCY_ROTATE_THRESHOLD_MS
 
     def is_slow_for_session(self, unique: str,
-                            session_id: str | None = None) -> bool:
-        """True se QUESTA sessione ha avuto un successo LENTO (TTFB oltre
-        LATENCY_ROTATE_THRESHOLD_MS) su `unique` entro la finestra warm.
+                            session_id: str | None = None,
+                            ctx: int | None = None) -> bool:
+        """True se QUESTA sessione ha avuto un successo LENTO su `unique`
+        entro la finestra warm. Due severita':
 
-        Un key andato lento alla sessione esce da caldi/sticky/cache e dalle
-        selezioni successive (dim/ladder/prelast/-go) della STESSA sessione:
-        torna pescabile solo all'ultimo scaglione (-fallback/ultima spiaggia).
-        Un successo rapido ripulisce il marchio. Le ALTRE sessioni non sono
-        toccate (la latenza e' valutata per-sessione)."""
+        - HARD (TTFB > LATENCY_ROTATE_THRESHOLD_MS): vale per qualunque
+          richiesta della sessione (comportamento storico);
+        - SOFT (TTFB > SOFT_SLOW_LATENCY_MS su richiesta > SOFT_SLOW_CTX_MIN
+          token): demotiva SOLO le richieste pesanti; ctx ignoto = non
+          demotiva (il key declassato continua a servire il traffico leggero).
+
+        Un key demotato esce da caldi/sticky/cache e dalle selezioni della
+        STESSA sessione: torna pescabile solo all'ultimo scaglione
+        (-fallback/ultima spiaggia). Un successo rapido ripulisce il marchio.
+        Le ALTRE sessioni non sono toccate."""
         if not getattr(self.policy, "warm_pool_enabled", True):
             return False
         sid = session_id or current_session()
@@ -1839,19 +1909,34 @@ class Router:
         m = self._sess_slow().get(sid)
         if not m:
             return False
-        ts = m.get(unique)
-        if ts is None:
+        rec = m.get(unique)
+        if rec is None:
             return False
+        if isinstance(rec, tuple):
+            ts, hard = rec
+        else:                                   # formato storico (solo ts)
+            ts, hard = rec, True
         if time.time() - ts > self._warm_ttl():
             m.pop(unique, None)
             return False
+        if not hard:
+            try:
+                if ctx is None or int(ctx) <= SOFT_SLOW_CTX_MIN:
+                    return False
+            except (TypeError, ValueError):
+                return False
         return True
 
     def _note_session_slow(self, session_id: str | None, unique: str,
-                           latency_ms: float | None) -> None:
+                           latency_ms: float | None,
+                           ctx_est: int | None = None) -> None:
         """Marchia (o ripulisce) `unique` come 'lento per la sessione'. Solo
         free-dims (mai -go/-fallback ne' gruppi capacita'), come la warm
-        ownership: e' li' che la latenza e' un segnale utile."""
+        ownership: e' li' che la latenza e' un segnale utile. HARD oltre
+        LATENCY_ROTATE_THRESHOLD_MS (vale sempre); SOFT tra
+        SOFT_SLOW_LATENCY_MS e la soglia hard SOLO se la chiamata marcatrice
+        era pesante (ctx_est > SOFT_SLOW_CTX_MIN): demotera' solo le future
+        richieste pesanti della sessione."""
         if not session_id or not unique:
             return
         if not getattr(self.policy, "warm_pool_enabled", True):
@@ -1864,13 +1949,19 @@ class Router:
                 or self._is_renewal_bucket(g):
             return
         try:
-            slow = latency_ms is not None and \
-                float(latency_ms) > LATENCY_ROTATE_THRESHOLD_MS
+            lat = None if latency_ms is None else float(latency_ms)
         except (TypeError, ValueError):
-            slow = False
+            lat = None
+        try:
+            heavy = ctx_est is not None and int(ctx_est) > SOFT_SLOW_CTX_MIN
+        except (TypeError, ValueError):
+            heavy = False
         d = self._sess_slow()
-        if slow:
-            d.setdefault(session_id, {})[unique] = time.time()
+        hard = lat is not None and lat > LATENCY_ROTATE_THRESHOLD_MS
+        soft = (not hard) and lat is not None \
+            and lat > SOFT_SLOW_LATENCY_MS and heavy
+        if hard or soft:
+            d.setdefault(session_id, {})[unique] = (time.time(), hard)
         else:
             m = d.get(session_id)
             if m:
@@ -1881,19 +1972,22 @@ class Router:
             _ttl = self._warm_ttl() * 4
             _now = time.time()
             for sid, m in list(d.items()):
-                for u, ts in list(m.items()):
-                    if _now - ts > _ttl:
+                for u, rec in list(m.items()):
+                    _ts = rec[0] if isinstance(rec, tuple) else rec
+                    if _now - _ts > _ttl:
                         m.pop(u, None)
                 if not m:
                     d.pop(sid, None)
 
     def _is_demoted_dep(self, unique: str,
-                        session_id: str | None = None) -> bool:
+                        session_id: str | None = None,
+                        ctx: int | None = None) -> bool:
         """Dep fuori dai tier 'economici' per la sessione: EMA globale sopra
-        soglia OPPURE successo lento registrato per QUESTA sessione. Resta
+        soglia OPPURE successo lento registrato per QUESTA sessione (hard:
+        sempre; soft: solo con ctx pesante > SOFT_SLOW_CTX_MIN). Resta
         eleggibile nell'ultimo scaglione (-fallback/ultima spiaggia)."""
         return (self._is_slow_dep(unique)
-                or self.is_slow_for_session(unique, session_id))
+                or self.is_slow_for_session(unique, session_id, ctx))
 
     def first_content_deadline_ms(self, unique: str) -> int:
         """Finestra d'attesa del primo contenuto per `unique`.
@@ -3234,7 +3328,7 @@ class Router:
             # ultima spiaggia (vedi _walk_chain allow_slow).
             if self.config.group_caps.get(group_name) is None \
                     and not self._is_renewal_bucket(group_name) \
-                    and self.is_slow_for_session(d["unique"]):
+                    and self.is_slow_for_session(d["unique"], ctx=ctx):
                 return False
             if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
                 return False
@@ -3466,7 +3560,7 @@ class Router:
                 # cooldown "stantio": lo ri-consideriamo
             if self.other_session_recent(u):
                 return None
-            if not allow_slow and self.is_slow_for_session(u):
+            if not allow_slow and self.is_slow_for_session(u, ctx=ctx):
                 return None
             if u in _hidden:
                 return None
@@ -3540,7 +3634,7 @@ class Router:
                 continue
             if not self.other_session_recent(u):
                 continue
-            if self.is_slow_for_session(u):
+            if self.is_slow_for_session(u, ctx=ctx):
                 continue
             dep = self.config.deployment_by_unique(u)
             if dep is None or self.is_retired(u) or self.is_cooled_down(u):
@@ -3661,7 +3755,7 @@ class Router:
                 continue
             if self.is_cooled_down(u) or self._gemini_blocked(dep):
                 continue
-            if self._is_demoted_dep(u, sid):
+            if self._is_demoted_dep(u, sid, ctx):
                 log.debug("[warm] skip lento (ema>%.0fms o lento-sessione): %s",
                           LATENCY_ROTATE_THRESHOLD_MS, u)
                 continue
@@ -3749,7 +3843,7 @@ class Router:
                     and not self.is_cooled_down(sticky_dep) \
                     and not self._gemini_blocked(sd) \
                     and not self.other_session_recent(sticky_dep) \
-                    and not self._is_demoted_dep(sticky_dep, session_id) \
+                    and not self._is_demoted_dep(sticky_dep, session_id, ctx) \
                     and self._cap_fits(sd, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
@@ -3787,7 +3881,7 @@ class Router:
                    if getattr(self.policy, "initial_pick_cooldown_wakeup", True)
                    and self.is_cooled_down(d["unique"])
                    and not self._gemini_blocked(d)
-                   and not self.is_slow_for_session(d["unique"])
+                   and not self.is_slow_for_session(d["unique"], ctx=ctx)
                    and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
                    and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
                    and (need is None or self._dep_supports(d, need))
@@ -4004,7 +4098,7 @@ class Router:
             for u in _chronic_filter(dims, True):
                 if u in _tried_set or not self.is_cooled_down(u):
                     continue
-                if self.is_slow_for_session(u):
+                if self.is_slow_for_session(u, ctx=ctx):
                     continue
                 _cage = self.cooldown_age(u)
                 if _cage is None or _cage < age:
@@ -4076,7 +4170,7 @@ class Router:
                             if u != failed_unique
                             and not (tried and u in tried)
                             and _is_chronic(u)
-                            and not self.is_slow_for_session(u)
+                            and not self.is_slow_for_session(u, ctx=ctx)
                             and not self.is_retired(u)]
             # contesto/capacità compatibili e (Opzione A) testo puro -> text-only
             chronic_pool = _chronic_context(cfg, chronic_pool, need, ctx)

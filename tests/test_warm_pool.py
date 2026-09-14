@@ -368,3 +368,86 @@ def test_warm_allowed_floor_helper(router):
     assert _u(router, GROUP, "K-B") not in allowed
     assert _u(router, DIM200, "K-200") in allowed
     assert _u(router, DIM1000, "K-1000") in allowed
+
+
+# ================================================= SOFT DEMOTE (size-aware)
+def test_soft_mark_only_on_heavy_success(router):
+    """60-90s di TTFB: marca SOFT solo se la chiamata marcatrice era pesante;
+    la demozione vale solo per richieste sopra SOFT_SLOW_CTX_MIN."""
+    b = _u(router, GROUP, "K-B")
+    router.note_session_success("S-A", b, latency_ms=70000, ctx_est=5000)
+    assert router.is_slow_for_session(b, "S-A", ctx=None) is False
+    assert router._sess_slow().get("S-A") is None        # non marcato affatto
+    router.note_session_success("S-A", b, latency_ms=70000, ctx_est=40000)
+    assert router.is_slow_for_session(b, "S-A", ctx=40000) is True
+    assert router.is_slow_for_session(b, "S-A", ctx=10000) is False
+    # ctx ignoto = non demotiva (il traffico leggero non paga)
+    assert router.is_slow_for_session(b, "S-A") is False
+
+
+def test_hard_mark_vale_sempre(router):
+    b = _u(router, GROUP, "K-B")
+    router.note_session_success("S-A", b, latency_ms=95000, ctx_est=100)
+    assert router.is_slow_for_session(b, "S-A", ctx=100) is True
+    assert router.is_slow_for_session(b, "S-A", ctx=40000) is True
+
+
+def test_soft_rimosso_da_successo_leggero_o_veloce(router):
+    b = _u(router, GROUP, "K-B")
+    router.note_session_success("S-A", b, latency_ms=70000, ctx_est=40000)
+    assert router.is_slow_for_session(b, "S-A", ctx=40000) is True
+    router.note_session_success("S-A", b, latency_ms=70000, ctx_est=5000)
+    assert router.is_slow_for_session(b, "S-A", ctx=40000) is False
+
+
+def test_soft_demote_esce_dal_warm_pool_ma_non_dal_light(router):
+    c = _u(router, GROUP, "K-C")             # max_input 128000: regge il 40k
+    router.note_session_success("S-A", c, latency_ms=70000, ctx_est=40000)
+    assert router._warm_pool("S-A", _allowed(router), ctx=40000) == []
+    assert [d["unique"] for d in
+            router._warm_pool("S-A", _allowed(router), ctx=6000)] == [c]
+
+
+def test_soft_demote_pick_deployment_solo_pesante(router):
+    """La chiave soft-demoted NON viene scelta dalle richieste PESANTI; le
+    LEGGERE la vedono normalmente (e' l'intera differenza col marchio hard)."""
+    import time
+    c = _u(router, GROUP, "K-C")
+    a = _u(router, GROUP, "K-A")
+    b = _u(router, GROUP, "K-B")
+    set_current_session("S-A")
+    router.note_session_success("S-A", c, latency_ms=70000, ctx_est=40000)
+    router.mark_failed(a, seconds=600)          # fuori gioco a ogni peso
+    router.mark_failed(b, seconds=600)          # ...e non regge comunque 40k
+    assert router.pick_deployment(GROUP, ctx=40000) is None
+    got = router.pick_deployment(GROUP, ctx=6000)
+    assert got is not None and got["unique"] == c
+
+
+# ======================================================== CTX WATERMARK (router)
+def test_ctx_frontier_monotona(router):
+    assert router.ctx_boundary_floor("S-X") == 0
+    router.note_compact_boundary("S-X", 22)
+    assert router.ctx_boundary_floor("S-X") == 22
+    router.note_compact_boundary("S-X", 10)     # regressiva: ignorata
+    assert router.ctx_boundary_floor("S-X") == 22
+    router.note_compact_boundary("S-X", 30)
+    assert router.ctx_boundary_floor("S-X") == 30
+
+
+def test_ctx_frontier_scadenza_e_niente_id(router):
+    router.note_compact_boundary(None, 10)      # senza sessione: no-op
+    assert router.ctx_boundary_floor(None) == 0
+    router.note_compact_boundary("S-T", 12)
+    assert router._ctx_frontier["S-T"]
+    # forza scadenza
+    b, _ts = router._ctx_frontier["S-T"]
+    router._ctx_frontier["S-T"] = (b, __import__("time").time() - 99999)
+    assert router.ctx_boundary_floor("S-T") == 0
+    assert "S-T" not in router._ctx_frontier
+
+
+def test_ctx_frontier_cap(router):
+    for i in range(4200):
+        router.note_compact_boundary(f"S{i}", 5)
+    assert len(router._ctx_frontier) <= 4096
