@@ -1636,7 +1636,9 @@ def _buffered_answer_text(buffered) -> str:
 
 
 async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
-                       min_chars: int = 40):
+                       min_chars: int = 40, hold_until_finish: bool = False,
+                       hold_idle_ms: int = 120000,
+                       hold_max_bytes: int = 50 * 1024 * 1024):
     """Consuma `gen` finche' arriva CONTENUTO DI RISPOSTA sufficiente, oppure
     error / EOF / deadline.
 
@@ -1649,25 +1651,50 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
     Un finish_reason / [DONE] con 0 char -> 'empty_eof'. Un solo token seguito
     dalla morte dello stream NON impegna: -> 'timeout' -> rotazione.
 
+    Con `hold_until_finish` (hold mode) NON si committa a `min_chars`: si
+    consuma fino a una chiusura PULITA (finish_reason stop/tool_calls o
+    [DONE]) cosi' da non consegnare MAI una risposta a meta'. Chiusure non
+    pulite -> verdict 'truncated'; finish_reason=='length' con contenuto ->
+    'length_truncated' (il chiamante consegna solo se e' il cap del client).
+    Idle per-chunk = `hold_idle_ms`; cap buffer = `hold_max_bytes` (oltre il
+    cap si consegna il buffer accumulato come 'content').
+
     Ritorna (verdict, buffered, pending, meta) con verdict in
-    {'content','error','empty_eof','timeout'}; `pending` = task `__anext__` in
-    volo (SOLO se 'timeout'): NON cancellato qui, chi ruota chiama
-    _discard_stream(). meta = {'finish_reason': str|None}.
+    {'content','error','empty_eof','timeout','truncated','length_truncated'};
+    `pending` = task `__anext__` in volo (SOLO se 'timeout'): NON cancellato
+    qui, chi ruota chiama _discard_stream(). meta = {'finish_reason': str|None}.
     """
     buffered: list[bytes] = []
     meta = {"finish_reason": None, "saw_reasoning": False}
     answer_chars = 0
     saw_tool_calls = False
     saw_reasoning = False
+    saw_done = False
     buffered_bytes = 0
+    hold = bool(hold_until_finish)
     # FIX: cap difensivo anti-memoria. In condizioni normali si esce dopo
     # min_chars (40 char): il cap scatta SOLO su upstream patologici che
     # floodano stream reasoning-only senza contenuto di risposta.
-    # Valore predefinito generoso: 10MB, sovrapponibile da policy o chiamante.
+    # In hold mode il cap e' quello configurato (50MB): oltre il cap si
+    # consegna comunque il buffer (risposta enorme, ma NON troncata).
     MAX_PEEK_BUFFER_BYTES = 10 * 1024 * 1024  # 10MB prima di ruotare
+    if hold:
+        # in hold mode il cap e' quello configurato (default 50MB).
+        MAX_PEEK_BUFFER_BYTES = max(1024, int(hold_max_bytes))
 
     def _eof():
-        # fine stream senza risposta.
+        # fine stream senza una risposta impegnalbile.
+        if hold:
+            # chiusura PULITA (finish_reason o [DONE]) -> risposta completa.
+            if meta.get("finish_reason") or saw_done:
+                return "content", buffered, None, meta
+            if answer_chars or saw_tool_calls \
+                    or (include_reasoning and saw_reasoning):
+                # contenuto ma nessun terminatore pulito -> troncata.
+                return "truncated", buffered, None, meta
+            meta["saw_reasoning"] = saw_reasoning
+            meta["no_rotate"] = bool(meta.get("finish_reason"))
+            return "empty_eof", buffered, None, meta
         if answer_chars or saw_tool_calls or (include_reasoning and saw_reasoning):
             return "content", buffered, None, meta
         meta["saw_reasoning"] = saw_reasoning
@@ -1680,9 +1707,13 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
 
     deadline = time.monotonic() + max(0.0, first_content_ms) / 1000.0
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return "timeout", buffered, None, meta
+        if hold:
+            # idle timeout per-chunk: si resetta ad ogni chunk ricevuto.
+            remaining = max(0.001, hold_idle_ms / 1000.0)
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout", buffered, None, meta
         task = asyncio.ensure_future(gen.__anext__())
         done, _ = await asyncio.wait({task}, timeout=remaining)
         if not done:
@@ -1706,9 +1737,13 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
             log.warning("[peek] buffer %d byte senza contenuto sufficiente: "
                         "rotazione (answer_chars=%d)", buffered_bytes,
                         answer_chars)
+            if hold:
+                # risposta enorme: la consegniamo (non e' troncata).
+                return "content", buffered, None, meta
             if answer_chars or saw_tool_calls:
                 return "content", buffered, None, meta
             return "timeout", buffered, None, meta
+        saw_fr_here = False
         for obj in _sse_data_objs(chunk):
             if _obj_is_error(obj):
                 return "error", buffered, None, meta
@@ -1734,6 +1769,9 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
             fr = _chunk_finish_reason(obj)
             if fr:
                 meta["finish_reason"] = fr
+                saw_fr_here = True
+            if hold:
+                continue
             if saw_tool_calls or answer_chars >= max(1, min_chars):
                 return "content", buffered, None, meta
             if fr:
@@ -1742,8 +1780,19 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
             if include_reasoning and saw_reasoning:
                 return "content", buffered, None, meta
         if b"[DONE]" in chunk:
-            return ("content", buffered, None, meta) if answer_chars > 0 \
-                else _eof()
+            saw_done = True
+            if answer_chars > 0 or saw_tool_calls \
+                    or (include_reasoning and saw_reasoning):
+                return "content", buffered, None, meta
+            return _eof()
+        if hold and saw_fr_here:
+            frv = meta.get("finish_reason")
+            if frv == "length" and answer_chars > 0:
+                return "length_truncated", buffered, None, meta
+            if answer_chars > 0 or saw_tool_calls \
+                    or (include_reasoning and saw_reasoning):
+                return "content", buffered, None, meta
+            return _eof()
 
 
 def _actionable_upstream_error(err) -> bool:
@@ -1961,14 +2010,42 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             incl_reason = bool(getattr(qcp, "stream_commit_include_reasoning",
                                        False))
             min_ch = int(getattr(qcp, "stream_commit_min_chars", 40) or 0)
+            # HOLD-UNTIL-FINISH: attesa della chiusura PULITA dello stream
+            # prima di inviare byte (per-deployment dal CSV, o globale da
+            # policy). Cosi' una risposta troncata non arriva MAI al client:
+            # si ruota pre-byte come per gli altri errori.
+            hold = bool(dep.get("hold_until_finish")) or bool(
+                getattr(qcp, "stream_hold_until_finish", False))
+            hold_idle = int(getattr(qcp, "stream_hold_idle_ms", 120000)
+                            or 120000)
+            hold_maxb = int(getattr(qcp, "stream_hold_max_buffer_bytes",
+                                    52428800) or 52428800)
             verdict, prebuf, pending, meta = await _peek_stream(
-                gen, fc_ms, incl_reason, min_ch)
+                gen, fc_ms, incl_reason, min_ch,
+                hold_until_finish=hold, hold_idle_ms=hold_idle,
+                hold_max_bytes=hold_maxb)
             # FIX paracadute: sulla catena -go/-fallback (ULTIMO scaglione del
             # ladder) il timeout sul primo contenuto NON deve produrre un 503:
             # li' non c'e' piu' nessuno dietro a cui ruotare, quindi si
             # trasmette comunque quello che arriva (parametro opzionale
             # stream_parachute_no_timeout, default True).
             verdict = _parachute_verdict(verdict, qcp, dep, router.policy)
+            # HOLD: finish_reason=length -> risposta TRONCATA dal modello (non
+            # dal cap del client): si ruota pre-byte, non si consegna il
+            # parziale. Se invece il client ha chiesto max_tokens ed e' stato
+            # raggiunto (stima answer_chars/4) la risposta e' voluta -> content.
+            if verdict == "length_truncated":
+                _req_max = (payload.get("max_tokens")
+                            or payload.get("max_completion_tokens"))
+                _ans_chars = len(_buffered_answer_text(prebuf))
+                _capped = False
+                try:
+                    if _req_max and _ans_chars > 0:
+                        _capped = (_ans_chars / 4.0) >= float(_req_max) - 2
+                except (TypeError, ValueError):
+                    _capped = False
+                if _capped:
+                    verdict = "content"
             if (verdict == "content" and _tt.enabled
                     and payload.get("tools")):
                 _parsed = parse_text_toolcalls(

@@ -65,6 +65,10 @@ ORDER_LAST = 1_000_000_000
 # (vuoto/assente = attivo); false/0/no/off -> la riga RESTA nel CSV (chiave e
 # coppia provider/chiave conservate) ma e' esclusa da tutti i bucket di routing.
 ENABLED_HEADER = "enabled"
+# hold_until_finish: attesa di una chiusura PULITA dello stream prima di
+# consegnare al client (niente risposte a metà). Opt-in per deployment (CSV),
+# default false; true/1/yes/on = attivo.
+HOLD_UNTIL_HEADER = "hold_until_finish"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -250,6 +254,11 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     raw_md = (row.get(MEDIA_DEFER_HEADER) or "").strip().lower()
     media_defer = raw_md not in ("0", "false", "no", "n", "off")
 
+    # hold_until_finish: attendere la chiusura pulita dello stream prima di
+    # consegnare (nessuna risposta a metà). Opt-in: default false.
+    raw_hu = (row.get(HOLD_UNTIL_HEADER) or "").strip().lower()
+    hold_until_finish = raw_hu in ("1", "true", "yes", "on")
+
     # order: chiave di ordinamento esplicita (tier). Piu' basso = prima;
     # vuoto/assente/non numerico = ORDER_LAST (neutro, in coda).
     raw_order = (row.get(ORDER_HEADER) or "").strip()
@@ -287,6 +296,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         # limite FISSO di connessioni concorrenti (CSV, opzionale): vince
         # sempre sul limite dinamico appreso dal router.
         "concurrent_limit": _int_or_none(row.get("concurrent_limit")),
+        "hold_until_finish": hold_until_finish,
     }
 
 
@@ -404,6 +414,7 @@ _STANDARD_COLS = frozenset({
     "commento", "modello", "provider", "endpoint", "data", "context",
     "max_input", "priority", "caps", "effort_capable", "intelligence_score",
     "model_preference", "media_defer", "order", "enabled",
+    "hold_until_finish",
 })
 
 
@@ -757,6 +768,7 @@ class GatewayConfig:
                     "sort_key": float(meta.get("sort_key") or float("inf")),
                     "concurrent_limit": meta.get("concurrent_limit"),
                     "media_defer": bool(meta.get("media_defer", True)),
+                    "hold_until_finish": bool(meta.get("hold_until_finish")),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
                 })

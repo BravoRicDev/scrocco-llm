@@ -110,6 +110,16 @@ class QcJson:
     # (si trasmette quel che arriva). False = comportamento legacy (timeout ->
     # rotazione/503), utile solo se le catene hanno molti account validi.
     stream_parachute_no_timeout: bool = True
+    # HOLD-UNTIL-FINISH: se attivo (per-deployment via colonna CSV
+    # `hold_until_finish`, o globalmente qui) il gateway NON consegna al client
+    # finche' lo stream upstream non e' chiuso PULITAMENTE (finish_reason o
+    # [DONE]): niente risposte a meta'. Se lo stream si tronca (length non
+    # dovuto al cap del client, EOF senza finish_reason) si ruota su un altro
+    # deployment; se nessuno completa -> 503 ritentabile. Costo: si perde lo
+    # streaming incrementale (i byte partono a risposta completa).
+    stream_hold_until_finish: bool = False
+    stream_hold_idle_ms: int = 120000
+    stream_hold_max_buffer_bytes: int = 50 * 1024 * 1024
     # --- STRUCT-OUT (#5): enforcement output strutturato ---
     struct_out_enabled: bool = True
     rewrite_content: bool = True      # pulisci fence/prosa dal JSON consegnato
@@ -1484,6 +1494,24 @@ class Policy:
                 p.qc_json.stream_commit_include_reasoning = _coerce_bool(
                     qj["stream_commit_include_reasoning"],
                     "qc_json.stream_commit_include_reasoning")
+            if "stream_hold_until_finish" in qj:
+                p.qc_json.stream_hold_until_finish = _coerce_bool(
+                    qj["stream_hold_until_finish"],
+                    "qc_json.stream_hold_until_finish")
+            if "stream_hold_idle_ms" in qj:
+                v = qj["stream_hold_idle_ms"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (1000 <= int(v) <= 600000):
+                    raise ValueError("qc_json.stream_hold_idle_ms deve "
+                                     "essere 1000..600000")
+                p.qc_json.stream_hold_idle_ms = int(v)
+            if "stream_hold_max_buffer_bytes" in qj:
+                v = qj["stream_hold_max_buffer_bytes"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (1048576 <= int(v) <= 524288000):
+                    raise ValueError("qc_json.stream_hold_max_buffer_bytes "
+                                     "deve essere 1048576..524288000")
+                p.qc_json.stream_hold_max_buffer_bytes = int(v)
             if "stream_parachute_no_timeout" in qj:
                 p.qc_json.stream_parachute_no_timeout = _coerce_bool(
                     qj["stream_parachute_no_timeout"],
