@@ -1312,10 +1312,14 @@ async def chat_completions(request: Request):
         # ESPLICITO: nessun filtro (la lettera della richiesta vince); il retry
         # ruota solo nel gruppo. BASE: need+ctx con catena del mondo scelta da
         # initial_pick (dims per testo, cap-chain per -C).
+        # WARM POOL: attivo sul routing automatico e sui dim espliciti (-Nk);
+        # NON su -go/-fallback (escalation deliberata a pagamento).
+        _warm = (not explicit_req) or bool(re.search(r"-\d+k$", group_or_explicit))
         dep = router.initial_pick(auth.profile, group_or_explicit,
                                   None if explicit_req else need,
                                   ctx_est,
-                                  session_id=session_id)
+                                  session_id=session_id,
+                                  warm=_warm)
     if dep is None:
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment disponibile"

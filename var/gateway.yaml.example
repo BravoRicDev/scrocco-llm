@@ -627,6 +627,19 @@ session_dep_guard:
   enabled: true
   sec: 900
 
+# WARM POOL (tier "caldi") — PRIMA del -dim richiesto e della scala si
+# esauriscono i free-dims che QUESTA sessione ha gia' servito con SUCCESSO
+# (ancora vivi, non in cooldown, che reggono need + max_input). Ordine interno:
+# cache-holder di sessione, poi MRU (last_used), poi colonna `order`, poi
+# max_input crescente. Vale per il routing automatico e per i dim espliciti
+# (-Nk); NON per -go/-fallback (escalation deliberata a pagamento).
+# `ttl_sec: 0` -> usa session_dep_guard_sec; `max_attempts: 0` -> illimitato
+# (bounded dal set dei gia' tentati nella richiesta).
+warm_pool:
+  enabled: true
+  ttl_sec: 0
+  max_attempts: 0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DEBUG — scatola nera input/output (solo per debug locale)
 # Registra OGNI richiesta e risposta (SSE inclusa) in var/debug-sniff.log con

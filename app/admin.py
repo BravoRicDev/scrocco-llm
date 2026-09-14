@@ -592,6 +592,12 @@ async def state(request: Request):
                 "sec": int(getattr(pol, "session_dep_guard_sec", 900)),
                 "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
             },
+            "warm_pool": {
+                "enabled": bool(getattr(pol, "warm_pool_enabled", True)),
+                "ttl_sec": int(getattr(pol, "warm_pool_ttl_sec", 0) or 0),
+                "max_attempts": int(getattr(pol, "warm_pool_max_attempts", 0) or 0),
+                "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
+            },
             "cold_spread": {
                 "pct": float(getattr(pol, "cold_spread_pct", 0.20) or 0.0),
                 "min_pool": int(getattr(pol, "ladder_skip_after", 0) or 0),

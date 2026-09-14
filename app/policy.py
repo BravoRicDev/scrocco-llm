@@ -463,6 +463,16 @@ class Policy:
     # volta, poi la vincente tiene il deployment. In-memory, mai persistito.
     session_dep_guard_enabled: bool = True
     session_dep_guard_sec: int = 900
+    # WARM POOL (tier "caldi"): PRIMA del -dim richiesto e della scala, si
+    # esauriscono i FREE-dims che QUESTA sessione ha gia' servito con successo
+    # (ancora vivi, non in cooldown, che reggono need+max_input). Riusa la
+    # finestra di session_dep_guard_sec (rinnovata a ogni attivita'), cosi' e'
+    # coerente con _attached_unique. `ttl_sec=0` -> usa session_dep_guard_sec;
+    # `max_attempts=0` -> illimitato (bounded dal set `tried`). L'ordine
+    # interno e' cache-holder, poi MRU (last_used), poi order, poi max_input.
+    warm_pool_enabled: bool = True
+    warm_pool_ttl_sec: int = 0
+    warm_pool_max_attempts: int = 0
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
     cache_prefer_last_success: bool = True
@@ -1424,6 +1434,27 @@ class Policy:
                     raise ValueError(
                         f"session_dep_guard.sec non valido: {_v!r}")
                 p.session_dep_guard_sec = int(_v)
+
+        wp = raw.get("warm_pool")
+        if wp is not None:
+            if not isinstance(wp, dict):
+                raise ValueError("warm_pool deve essere una mappa")
+            if "enabled" in wp:
+                p.warm_pool_enabled = _coerce_bool(
+                    wp["enabled"], "warm_pool.enabled")
+            if wp.get("ttl_sec") is not None:
+                _v = wp["ttl_sec"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(f"warm_pool.ttl_sec non valido: {_v!r}")
+                p.warm_pool_ttl_sec = int(_v)
+            if wp.get("max_attempts") is not None:
+                _v = wp["max_attempts"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.max_attempts non valido: {_v!r}")
+                p.warm_pool_max_attempts = int(_v)
 
         ca = raw.get("cache_aware")
         if ca is not None:

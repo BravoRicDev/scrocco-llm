@@ -3408,10 +3408,101 @@ class Router:
                  max(0.0, time.time() - (ent[1] or 0.0)))
         return dep
 
+    # ---------------------------------------------------- warm pool (caldi)
+    def _group_profile(self, group_name: str) -> str | None:
+        """Nome PROFILO (modello base) di un gruppo TESTO: da `<prefix>pname`
+        o `<prefix>pname-Nk`/`-go`/`-fallback`. None per gruppi capacita' o
+        profili ignoti (il pool caldi e' solo free-dims testo)."""
+        cfg = self.config
+        for suf in (cfg.fallback_suffix, cfg.go_suffix):
+            if suf and group_name.endswith(suf):
+                base = group_name[:-len(suf)]
+                if base.startswith(cfg.proxy_prefix):
+                    p = base[len(cfg.proxy_prefix):]
+                    return p if p in cfg.profile_dims else None
+        m = self.DIM_SUFFIX_RE.search(group_name)
+        if m:
+            base = group_name[:m.start()]
+            if base.startswith(cfg.proxy_prefix):
+                p = base[len(cfg.proxy_prefix):]
+                return p if p in cfg.profile_dims else None
+        return None
+
+    def _warm_ttl(self) -> float:
+        """Finestra di validita' del pool caldi (0 = session_dep_guard_sec)."""
+        try:
+            v = float(getattr(self.policy, "warm_pool_ttl_sec", 0) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        return v if v > 0 else self._guard_sec()
+
+    def _warm_pool(self, session_id: str | None, allowed: set[str] | None,
+                   need: frozenset[str] | None = None,
+                   ctx: int | None = None,
+                   tried: set[str] | None = None,
+                   failed_unique: str | None = None) -> list[dict]:
+        """Tier "caldi": free-dims che QUESTA sessione ha gia' servito con
+        SUCCESSO entro la finestra warm, ancora vivi (no cooldown/retired/
+        draining) e compatibili con `need` + `max_input`/contesto (`_cap_fits`).
+
+        Lista ORDINATA: cache-holder di sessione, poi MRU (`last_used`), poi
+        `order`, poi `max_input` crescente. Vuota se disabilitato, senza
+        sessione, o senza candidati. `allowed` limita al MONDO richiesto
+        (catena del profilo); None = nessun filtro di mondo."""
+        if not getattr(self.policy, "warm_pool_enabled", True):
+            return []
+        sid = session_id or current_session()
+        if not sid:
+            return []
+        owned = self._sess_deps().get(sid)
+        if not owned:
+            return []
+        d = self._dep_sess()
+        ttl = self._warm_ttl()
+        now = time.time()
+        skip = tried or set()
+        holder = self.session_holder(sid)
+        out: list[dict] = []
+        for u in owned:
+            if u in skip or u == failed_unique:
+                continue
+            if allowed is not None and u not in allowed:
+                continue
+            ent = d.get(u)
+            if not ent or ent[0] != sid:
+                continue
+            if now - ent[1] > ttl:
+                continue
+            dep = self.config.deployment_by_unique(u)
+            if dep is None or self.is_retired(u) or self.is_draining(u):
+                continue
+            if self.is_cooled_down(u) or self._gemini_blocked(dep):
+                continue
+            if need and not self._dep_supports(dep, need):
+                continue
+            if not self._cap_fits(dep, ctx):
+                continue
+            out.append(dep)
+        if not out:
+            return []
+        out.sort(key=lambda dep: (
+            0 if holder and dep["unique"] == holder else 1,
+            -(self.stats_for(dep["unique"]).last_used or 0.0),
+            int(dep.get("order", ORDER_LAST)),
+            int(dep.get("max_input_tokens") or 0),
+        ))
+        max_n = max(0, int(getattr(self.policy, "warm_pool_max_attempts", 0) or 0))
+        if max_n > 0:
+            out = out[:max_n]
+        log.debug("[warm] pool=%d sid=%s: %s", len(out), sid,
+                  ",".join(d["unique"] for d in out[:6]))
+        return out
+
     def initial_pick(self, profile: str | None, group_name: str,
                      need: frozenset[str] | None = None,
                      ctx: int | None = None,
-                     session_id: str | None = None) -> dict | None:
+                     session_id: str | None = None,
+                     warm: bool = True) -> dict | None:
         """Prima selezione dentro un gruppo; nessun candidato vivo ->
         cammina la catena DEL MONDO del gruppo (cap-chain per -C, testo
         per dims/-go/-fallback). Sostituisce pick+fallback_after in main.
@@ -3420,7 +3511,33 @@ class Router:
         -Nk, cap groups primari) la sessione resta INCOLLATA alla stessa key
         finché è viva (cache calda). Se la richiesta cresce e supera il
         max_input dello sticky, si cerca lo STESSO modello+chiave nel nuovo
-        gruppo dim (crescita cache-preserving)."""
+        gruppo dim (crescita cache-preserving).
+
+        Con `warm=True` (default), PRIMA dello sticky/del pick si esaurisce
+        il pool "caldi" del profilo (free-dims gia' serviti con successo da
+        questa sessione, vivi e compatibili ctx/need). Vale anche per le
+        richieste esplicite su un -Nk; NON per -go/-fallback (escalation
+        deliberata: warm=False lì)."""
+        # --- WARM POOL (caldi propri): PRIMA del -dim e della scala -------
+        if warm and self.config.group_caps.get(group_name) is None:
+            _pname = self._group_profile(group_name)
+            if _pname:
+                _warm = self._warm_pool(session_id,
+                                        set(self.config.chains.get(_pname, [])),
+                                        need=need, ctx=ctx)
+                if _warm:
+                    _dep = _warm[0]
+                    log.info("[warm] initial_pick %s -> %s (caldo proprio: "
+                             "my_success, max_in=%s)", group_name, _dep["unique"],
+                             int(_dep.get("max_input_tokens") or 0))
+                    if session_id and not self._is_renewal_bucket(group_name):
+                        if getattr(self.policy,
+                                   "deployment_sticky_per_capability", False):
+                            self.dep_cap_sticky_set(session_id, need,
+                                                    _dep["unique"])
+                        elif self.policy.deployment_sticky:
+                            self.dep_sticky_set(session_id, _dep["unique"])
+                    return _dep
         # --- STICKY per-deployment (SOLO FREE, mai renewal/paid) ---------
         sticky_dep = None
         # Prima prova lo sticky per-capability se abilitato
@@ -3649,6 +3766,19 @@ class Router:
                 return [u for u in uniqs if u in kept]
             return uniqs
 
+        # 0) WARM POOL (caldi propri): esaurisci i free-dims GIA' serviti con
+        #    successo da QUESTA sessione (vivi, non in cooldown, compatibili
+        #    ctx/need) PRIMA di toccare qualsiasi altro deployment. `allowed`
+        #    = univoci della scala corrente: in `force_escalation` (solo
+        #    -go/-fallback) il pool e' vuoto di fatto -> nessun effetto.
+        _warm = self._warm_pool(current_session(), set(ladder), need, ctx,
+                                tried, failed_unique)
+        if _warm:
+            _dep = _warm[0]
+            log.info("[warm] ladder -> %s (caldo proprio, max_in=%s)",
+                     _dep["unique"], int(_dep.get("max_input_tokens") or 0))
+            return _dep
+
         # 1) dims vivi (max skip)
         nxt = self._walk_chain(dims, failed_unique, need, ctx,
                                limit=skip, tried=tried)
@@ -3862,7 +3992,28 @@ class Router:
         usa cur_dep["group"] (comportamento storico).
         """
         req_grp = requested_group or cur_dep["group"]
-        # --- CACHE HOLDER: failover cache-preserving (solo bucket FREE) --
+        # --- WARM POOL: failover verso i "caldi" propri (free-dims stesso
+        # mondo). Generalizza il vecchio cache-holder: esaurisce tutti i
+        # deployment gia' serviti con successo da questa sessione (il
+        # cache-holder e' il primo per costruzione). Esclusi i bucket
+        # rinnovo/pagato: li' l'escalation e' deliberata.
+        if not self._is_renewal_bucket(cur_dep.get("group", "")):
+            _pname = self._group_profile(cur_dep["group"])
+            if _pname:
+                _warm = self._warm_pool(
+                    None, set(self.config.chains.get(_pname, [])),
+                    need=need, ctx=ctx, tried=tried,
+                    failed_unique=cur_dep.get("unique"))
+                if _warm:
+                    _wd = _warm[0]
+                    log.info("[warm] fallback -> %s (caldo proprio, max_in=%s)",
+                             _wd["unique"],
+                             int(_wd.get("max_input_tokens") or 0))
+                    return _wd
+        # --- CACHE HOLDER: fallback cache-preserving (solo bucket FREE) --
+        # Rete di sicurezza storica quando il pool caldi non si applica (profilo
+        # non risolvibile / nessun caldo del mondo): riusa il detentore cache
+        # della sessione, se free e non gia' tentato.
         if (getattr(self.policy, "cache_aware_enabled", True)
                 and getattr(self.policy, "cache_prefer_last_success", True)):
             _holder = self.cache_holder(None, need, ctx)

@@ -107,6 +107,12 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   deployment free-dims se lo tiene (ownership rinnovata finché è viva); per le
   altre resta eleggibile solo nel tier pre-ultima-spiaggia, fra l'ultimo `-dim` e
   il `-go`. Dopo 15 minuti di silenzio l'intero set torna libero.
+- **Warm pool (tier "caldi").** Prima del `-dim` richiesto e di tutta la scala
+  vengono esauriti i free-dims che **questa sessione** ha già servito con
+  successo (ancora vivi, non in cooldown, compatibili con `need` e `max_input`).
+  Ordine: cache-holder di sessione, poi MRU, poi `order`, poi `max_input`
+  crescente. Vale per il routing automatico e per i dim espliciti (`-Nk`); mai
+  per `-go`/`-fallback` (escalation deliberata a pagamento). Tag log `[warm]`.
 - **L'autoprobe non insiste.** Un probe KO fa **almeno raddoppiare** il residuo
   del cooldown, moltiplicato per il numero di probe fatti su quel deployment
   nelle ultime 24h; i residui oltre 2 ore escono dai probe e li rivede la scala
@@ -119,7 +125,7 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   corrente sono sempre esentati; `-go`/`-fallback` e i gruppi capacità non sono
   toccati.
 
-<a name="test"></a>1081 test coprono queste logiche: molti sono nati da bug
+<a name="test"></a>Oltre 1100 test coprono queste logiche: molti sono nati da bug
 reali, non sono test scritti per riempire una percentuale.
 
 ## Cosa non è

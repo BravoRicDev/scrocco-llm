@@ -106,6 +106,14 @@ individual account limits instead of dying on the first 429.
   and capability groups are never claimed). The routing session id comes from
   `x-opencode-session`/`x-session-affinity`/`x-session-id`, then the body, then
   the anonymous fingerprint.
+- **Warm pool** (`warm_pool`, tier "caldi"): before the requested `-dim` and the
+  whole ladder, the session exhausts the free-dims it has already served
+  *successfully* (still alive, not cooling down, fitting `need` + `max_input`).
+  Internal order: session cache-holder, then MRU (`last_used`), then `order`,
+  then smallest `max_input`. Applies to automatic routing and explicit `-Nk`
+  dims; never to `-go`/`-fallback` (deliberate paid escalation). The window is
+  `session_dep_guard_sec` (or `ttl_sec`); `max_attempts` caps the pool (0 =
+  unlimited). Log tag `[warm]`.
 - **Multi-SDK upstreams** (`api_style` CSV column): the gateway always speaks
   and accepts OpenAI Chat Completions, but each deployment can declare its
   upstream's native protocol — `responses` (OpenAI Responses `/responses`),
@@ -364,6 +372,7 @@ template. The ones that matter most:
 | `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO residual at least doubles (min +grow, rotate targets); min gap between probes; probe timeout |
 | `cooldown_autoprobe_multiply_24h` / `cooldown_autoprobe_skip_over_sec` | true / 7200 | KO increment × probes in the last 24h (1×, 2×, 3×…); cooled > 2h excluded from probing (ladder wakeup / last resort / time will retry) |
 | `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 900 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |
+| `warm_pool.enabled` / `warm_pool.ttl_sec` / `warm_pool.max_attempts` | true / 0 / 0 | tier "caldi" prima del `-dim` e della scala: esaurisce i free-dims serviti con successo da QUESTA sessione (ordine: cache-holder, MRU, `order`, `max_input`); `ttl_sec=0` usa `session_dep_guard_sec`; `max_attempts=0` illimitato |
 | `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
