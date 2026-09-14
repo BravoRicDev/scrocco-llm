@@ -12,9 +12,12 @@ Due modalita':
 2) COOLED (fallback, come da sempre): se non ci sono freschi sonda i
    deployment dormienti piu' "pronti". Se il probe riesce il deployment
    viene risvegliato (cooldown azzerato); se fallisce si allunga il cooldown
-   di poco (`grow`). In questa modalita' NON chiama
-   note_result/mark_failed/note_start: il probe e' puramente ricognitivo e
-   non deve avvelenare la rotazione adattiva.
+   di `cooldown_autoprobe_grow_sec` (definitivi/429) o del MODESTO
+   `cooldown_autoprobe_transient_sec` (transitori): si ruota comunque via
+   dal dep flaky, con una "grazia" breve. In questa modalita' NON chiama
+   note_result/mark_failed/note_start (il probe e' puramente ricognitivo).
+   Dopo `probe_retire_after` KO consecutivi il cooldown sale al livello
+   `grow` (escalation): rotazione piu' lunga, MAI retire dall'autoprobe.
 """
 from __future__ import annotations
 
@@ -48,6 +51,8 @@ def _cfg(policy):
         float(getattr(policy, "cooldown_autoprobe_crisis_mult", 2.0) or 0.0),
         float(getattr(policy, "cooldown_autoprobe_fresh_age_sec",
                        86400.0) or 86400.0),
+        float(getattr(policy, "cooldown_autoprobe_transient_sec",
+                       30.0) or 0.0),
     )
 
 
@@ -193,9 +198,12 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
     global _running
     try:
         (_en, per_dim, min_age, grow, min_gap, max_total, timeout,
-         crisis_en, crisis_ratio, crisis_mult, fresh_age) = _cfg(router.policy)
+         crisis_en, crisis_ratio, crisis_mult, fresh_age,
+         transient_sec) = _cfg(router.policy)
         if per_dim <= 0 or max_total <= 0:
             return
+        _streak_cap = max(0, int(getattr(
+            router.policy, "probe_retire_after", 5) or 0))
         # --- MODO FRESH: sonda i MAI USATI (24h) con probe "normale" -----
         fresh = _select_fresh_targets(
             router, profile, per_dim, fresh_age, min_gap, max_total)
@@ -215,15 +223,19 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                     router.note_result(unique, lat)
                     log.info("[autoprobe] %s: probe OK -> promosso (%.0fms)",
                              unique, lat)
-                elif _probe_ko_is_cooldown(code, _body):
-                    router.mark_failed(unique, seconds=grow,
-                                       reason="autoprobe_fresh")
-                    log.info("[autoprobe] %s: probe KO (%s) -> cooldown %.0fs",
-                             unique, code or "timeout", grow)
                 else:
-                    log.info("[autoprobe] %s: probe KO (%s) -> skip, nessun "
-                             "cooldown (transitorio)",
-                             unique, code or "timeout")
+                    _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
+                    if _bump_probe_streak(router, unique, _streak_cap) > 0:
+                        _cd = max(_cd, grow)
+                        log.info("[autoprobe] %s: probe KO (%s) streak=%d -> "
+                                 "cooldown %.0fs (escalation)",
+                                 unique, code or "timeout",
+                                 router.stats_for(unique).probe_fail_streak, _cd)
+                    else:
+                        log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
+                                 "%.0fs", unique, code or "timeout", _cd)
+                    router.mark_failed(unique, seconds=_cd,
+                                       reason="autoprobe_fresh")
                 await asyncio.sleep(0.2)
             return
         # --- MODO COOLED (fallback): risveglio dormienti, come da sempre ----
@@ -245,15 +257,22 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
             if ok:
                 router.clear_cooldown(unique)
                 log.info("[autoprobe] %s: probe OK -> risvegliato", unique)
-            elif _probe_ko_is_cooldown(code, _body):
-                base = max(router._cooldown.get(unique, 0.0), time.time())
-                router._cooldown[unique] = base + grow
-                rem = max(0.0, router._cooldown[unique] - time.time())
-                log.info("[autoprobe] %s: probe KO (%s) -> cooldown +%.0fs "
-                         "(residuo %.0fs)", unique, code or "timeout", grow, rem)
             else:
-                log.info("[autoprobe] %s: probe KO (%s) -> skip, residuo "
-                         "invariato (transitorio)", unique, code or "timeout")
+                _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
+                if _bump_probe_streak(router, unique, _streak_cap) > 0:
+                    _cd = max(_cd, grow)
+                    log.info("[autoprobe] %s: probe KO (%s) streak=%d -> "
+                             "cooldown +%.0fs (escalation)",
+                             unique, code or "timeout",
+                             router.stats_for(unique).probe_fail_streak, _cd)
+                else:
+                    log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
+                             "+%.0fs", unique, code or "timeout", _cd)
+                base = max(router._cooldown.get(unique, 0.0), time.time())
+                router._cooldown[unique] = base + _cd
+                rem = max(0.0, router._cooldown[unique] - time.time())
+                log.info("[autoprobe] %s: residuo %.0fs",
+                         unique, rem)
             await asyncio.sleep(0.2)
     except Exception:  # noqa: BLE001
         log.debug("[autoprobe] pass terminato con errore", exc_info=True)
@@ -311,17 +330,30 @@ async def _probe_one(forwarder, dep: dict,
         return False, (time.monotonic() - t0) * 1000.0, 0, ""
 
 
-def _probe_ko_is_cooldown(code: int, body: str) -> bool:
-    """True se il KO del probe merita un cooldown:
-    - 429 rate-limit: SI' SEMPRE (120s, come richiesto: non si rimuove);
-    - 401/402/403 (auth/permission definitiva): SI';
-    - 400 con "no such model"/model inesistente/ritirato: SI' (definitivo);
-    - transitori (5xx, timeout/rete code=0, altri 4xx): NO -> skip, il pass
-      lo ritenta al giro successivo senza bruciare cooldown."""
+def _probe_ko_cooldown(code: int, body: str, grow: float,
+                       transient: float) -> float:
+    """Cooldown da applicare a un KO del probe:
+    - 429 rate-limit: SEMPRE `grow` (120s, come richiesto);
+    - 401/402/403 (auth/permission definitiva): `grow`;
+    - 400 con "no such model"/model inesistente/ritirato: `grow`;
+    - transitori (5xx, timeout/rete code=0, altri 4xx): `transient` MODESTO
+      (30s): si ruota comunque via dal dep flaky, senza bruciare il grow."""
     if code == 429:
-        return True
+        return max(1.0, float(grow))
     if code in (401, 402, 403):
-        return True
+        return max(1.0, float(grow))
     if code == 400 and _MODEL_MISSING_RE.search(body or ""):
-        return True
-    return False
+        return max(1.0, float(grow))
+    return max(1.0, float(transient))
+
+
+def _bump_probe_streak(router, unique: str, streak_cap: int) -> float:
+    """Incrementa probe_fail_streak del deployment e ritorna un'eventuale
+    escalation di cooldown: dopo `streak_cap` KO consecutivi il transitorio
+    sale al livello `grow` (rotazione piu' lunga, MAI retire dall'autoprobe).
+    Il reset dello streak avviene da note_result/clear_cooldown (successo)."""
+    s = router.stats_for(unique)
+    s.probe_fail_streak += 1
+    if streak_cap > 0 and s.probe_fail_streak >= streak_cap:
+        return 1.0     # multiplicatore: escalate il transitorio a grow
+    return 0.0

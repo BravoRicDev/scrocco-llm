@@ -213,6 +213,10 @@ class Policy:
     cooldown_autoprobe_max_total: int = 6
     cooldown_autoprobe_timeout_sec: float = 45.0
     cooldown_autoprobe_fresh_age_sec: float = 86400.0
+    # "Grazia" per i KO TRANSITORI del probe (5xx, timeout/rete, altri 4xx):
+    # cooldown MODESTO al posto dello skip (ruotiamo comunque, ma senza
+    # bruciare il grow pieno). I KO definitivi e i 429 usano sempre grow.
+    cooldown_autoprobe_transient_sec: float = 30.0
     # CRISIS MODE autoprobe: se la quota di deployment dim in cooldown supera
     # `cooldown_autoprobe_crisis_ratio`, il pass raddoppia `per_dim` e dimezza
     # `min_gap` per risvegliare il pool piu' in fretta sotto pressione.
@@ -818,7 +822,8 @@ class Policy:
                      "cooldown_autoprobe_grow_sec",
                      "cooldown_autoprobe_min_gap_sec",
                      "cooldown_autoprobe_timeout_sec",
-                     "cooldown_autoprobe_fresh_age_sec"):
+                     "cooldown_autoprobe_fresh_age_sec",
+                     "cooldown_autoprobe_transient_sec"):
             _val = raw.get(_fld)
             if _val is not None:
                 try:
