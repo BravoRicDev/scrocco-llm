@@ -1315,11 +1315,21 @@ async def chat_completions(request: Request):
         # WARM POOL: attivo sul routing automatico e sui dim espliciti (-Nk);
         # NON su -go/-fallback (escalation deliberata a pagamento).
         _warm = (not explicit_req) or bool(re.search(r"-\d+k$", group_or_explicit))
+        # CACHE PAGATA: SOLO su richiesta esplicita a -go/-fallback testo:
+        # riusa la stessa chiave della sessione (KV-cache calda) anche se sta
+        # su un tier di rinnovo peggiore; al 429 il holder si esclude da solo
+        # e la rotazione prosegue nell'ordine normale (crediti "sommati" un
+        # account alla volta). Auto-routing ed escalation interne non lo usano.
+        _go_suf = router.config.go_suffix or "-go"
+        _fb_suf = router.config.fallback_suffix or "-fallback"
+        _paid_holder = explicit_req and (group_or_explicit.endswith(_go_suf)
+                                         or group_or_explicit.endswith(_fb_suf))
         dep = router.initial_pick(auth.profile, group_or_explicit,
                                   None if explicit_req else need,
                                   ctx_est,
                                   session_id=session_id,
-                                  warm=_warm)
+                                  warm=_warm,
+                                  prefer_holder=_paid_holder)
     if dep is None:
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment disponibile"

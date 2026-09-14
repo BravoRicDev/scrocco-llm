@@ -119,6 +119,13 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   (`-fallback`/ultima spiaggia). Il pool caldi non pesca mai una dim
   **inferiore** a quella richiesta: con `...-200k` esplicito ignora i caldi
   `-64k` della stessa sessione (il `-Nk` è il minimo voluto dal client).
+- **Cache pagata su `-go`/`-fallback` espliciti.** Quando il client chiama
+  *esplicitamente* un gruppo testo `-go`/`-fallback`, il detentore cache della
+  sessione (l'ultima chiave che le ha dato successo) vince anche sul tier di
+  rinnovo: la sessione resta sull'identico account a scaldare la KV-cache e,
+  al 429, il holder si esclude da solo e la rotazione prosegue nell'ordine
+  normale — i crediti si sommano un account alla volta. Routing automatico ed
+  escalation interne NON lo usano: lì resta il random nel tier migliore.
 - **L'autoprobe non insiste.** Un probe KO fa **almeno raddoppiare** il residuo
   del cooldown, moltiplicato per il numero di probe fatti su quel deployment
   nelle ultime 24h; i residui oltre 2 ore escono dai probe e li rivede la scala

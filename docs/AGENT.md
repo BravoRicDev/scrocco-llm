@@ -90,7 +90,9 @@ that were slow for this session from warm/sticky/cache-holder and from the
 cheap selections — same session only, re-fished at `-fallback`),
 `[maxtok]` (`max_tokens` clamped to the window), `[autoprobe]`
 (cooldown probe / backoff), `[cache]` (session holder),
-`[fallback]` (failure + next hop).
+`[fallback]` (failure + next hop), `[pick-final]` (go/fallback pick; with an
+*explicit* `-go`/`-fallback` request the session cache-holder also beats the
+renewal tier — paid cache, never for auto routing).
 
 ## Invariants (do not break)
 

@@ -3202,7 +3202,8 @@ class Router:
                         exclude: str | None = None,
                         ctx: int | None = None,
                         restrict_model: str | None = None,
-                        *, live_only: bool = False) -> dict | None:
+                        *, live_only: bool = False,
+                        prefer_holder: bool = False) -> dict | None:
         """Selezione pesata dentro un gruppo, saltando i cooled-down.
 
         Con policy.adaptive_pick (default True): punteggio dinamico che
@@ -3291,6 +3292,17 @@ class Router:
                 and (group_name.endswith(self.config.go_suffix or "-go")
                      or group_name.endswith(self.config.fallback_suffix
                                             or "-fallback")):
+            # RICHIESTA ESPLICITA sul bucket: il detentore cache della
+            # sessione vince sul tier (stessa chiave = KV-cache calda, i
+            # crediti si "sommano" un account alla volta: al 429 il holder
+            # si esclude da solo e il pick prosegue nell'ordine normale).
+            if prefer_holder:
+                _ch = self.cache_holder(need=need, ctx=ctx)
+                if _ch and any(_ch["unique"] == d["unique"] for d in deps):
+                    log.info("[pick-final] %s chosen=%s (esplicito: detentore "
+                             "cache, tier scavalcato)", group_name,
+                             _ch["unique"])
+                    return _ch
             _key = lambda d: (float(d.get("sort_key", float("inf"))),
                               -int(d.get("model_preference", 0) or 0))
             best_key = min(_key(d) for d in deps)
@@ -3677,7 +3689,8 @@ class Router:
                      need: frozenset[str] | None = None,
                      ctx: int | None = None,
                      session_id: str | None = None,
-                     warm: bool = True) -> dict | None:
+                     warm: bool = True,
+                     prefer_holder: bool = False) -> dict | None:
         """Prima selezione dentro un gruppo; nessun candidato vivo ->
         cammina la catena DEL MONDO del gruppo (cap-chain per -C, testo
         per dims/-go/-fallback). Sostituisce pick+fallback_after in main.
@@ -3746,7 +3759,8 @@ class Router:
             self.dep_sticky_release(session_id)
 
         # --- PESCA NORMALE (adaptive_pick + recency) ---------------------
-        dep = self.pick_deployment(group_name, need=need, ctx=ctx)
+        dep = self.pick_deployment(group_name, need=need, ctx=ctx,
+                                   prefer_holder=prefer_holder)
         # Se lo sticky era su un gruppo dim più piccolo e ora serve un gruppo
         # più grande: stesso provider+modello nella stessa sessione (crescita
         # cache-preserving). Il pick normale ha già scelto; se matcha

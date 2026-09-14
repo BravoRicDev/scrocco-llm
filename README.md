@@ -121,6 +121,13 @@ individual account limits instead of dying on the first 429.
   warm pool never picks a dim **smaller** than the requested one: for an
   explicit `...-200k` it ignores warm `-64k` deps of the same session (the
   `-Nk` is the client's *minimum*).
+- **Paid cache on explicit `-go`/`-fallback`.** When the client *explicitly*
+  calls a text `-go`/`-fallback` group, the session's cache holder (the key
+  that last served it) wins even over the renewal tier: the session stays on
+  the same account to keep its KV-cache warm, and on a 429 the holder drops
+  out by itself and rotation continues in normal order — credits are summed
+  one account at a time. Automatic routing and internal escalations do NOT
+  use it: random-within-best-tier stays there.
 - **Multi-SDK upstreams** (`api_style` CSV column): the gateway always speaks
   and accepts OpenAI Chat Completions, but each deployment can declare its
   upstream's native protocol — `responses` (OpenAI Responses `/responses`),
