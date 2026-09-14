@@ -46,6 +46,7 @@ import httpx
 from urllib.parse import urlsplit
 
 from . import metrics
+from . import protocols as proto
 from .qc import check_response
 from .router import inject_identity, ErrorKind
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
@@ -1262,6 +1263,11 @@ truncation_hook=None,
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
+        _style = proto.style_of(dep)
+        if _style != proto.CHAT:
+            _up = proto.translate_request(_style, body, dep)
+        else:
+            _up = body
         # senza include_usage i provider non mandano mai il chunk usage ->
         # il summary per-richiesta resta usage:null. Iniettato
         # SOLO sui provider che lo supportano sicuramente (gli altri restano
@@ -1272,17 +1278,19 @@ truncation_hook=None,
             so = dict(body.get("stream_options") or {})
             so.setdefault("include_usage", True)
             body["stream_options"] = so
-        headers = {
+            if _style == proto.CHAT:
+                _up["stream_options"] = so
+        headers = proto.apply_auth(dep, {
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
             **_session_headers(dep, profile=profile, client_ip=client_ip,
                                session=session, attribution=attribution),
-        }
-        url = f"{dep['api_base']}/chat/completions"
-        log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
+        })
+        url = proto.build_url(dep, stream=True)
+        log.debug("[upstream] %s POST %s (stream=%s, google=%s, style=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google, _style)
         try:
             _cli = self._client_for(url, dep.get("api_key", ""))
-            req = _cli.build_request("POST", url, json=body, headers=headers,
+            req = _cli.build_request("POST", url, json=_up, headers=headers,
                                      **_timeout_kw(dep))
             resp = await _cli.send(req, stream=True)
         except httpx.TimeoutException as exc:
@@ -1338,6 +1346,16 @@ truncation_hook=None,
                 except Exception:
                     pass
                 adapted = _json_to_sse(raw)
+                if _style != proto.CHAT:
+                    try:
+                        _o = json.loads(raw)
+                        adapted = (None if (isinstance(_o, dict) and _o.get(
+                            "error") and not _o.get("candidates")
+                            and not _o.get("output"))
+                            else proto.chat_obj_to_sse(
+                                proto.translate_response(_style, _o, dep)))
+                    except Exception:
+                        adapted = None
                 if adapted is None:
                     raise UpstreamError(
                         503, "upstream ignored stream:true, body non "
@@ -1375,6 +1393,12 @@ truncation_hook=None,
                 await resp.aclose()
 
         raw_gen = gen()
+
+        # ---- TRADUZIONE PROTOCOLLO nativo -> SSE OpenAI ----
+        # Cosi' i filtri a valle (loop guard, tool repair, truncation) e il
+        # client vedono sempre Chat Completions.
+        if _style != proto.CHAT:
+            raw_gen = proto.stream_translator(_style, raw_gen, dep)
 
         # ---- STREAMING LOOP DETECTOR (kill precoce) ----
         # Buffer circolare delle ultime parole di contenuto, check n-gram a
@@ -1440,16 +1464,19 @@ truncation_hook=None,
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
-        headers = {
+        _style = proto.style_of(dep)
+        _up = (body if _style == proto.CHAT
+               else proto.translate_request(_style, body, dep))
+        headers = proto.apply_auth(dep, {
             "Authorization": f"Bearer {dep['api_key']}",
             "Content-Type": "application/json",
             **_session_headers(dep, profile=profile, client_ip=client_ip,
                                session=session, attribution=attribution),
-        }
-        url = f"{dep['api_base']}/chat/completions"
-        log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
+        })
+        url = proto.build_url(dep, stream=False)
+        log.debug("[upstream] %s POST %s (stream=%s, google=%s, style=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google, _style)
         try:
-            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body,
+            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=_up,
                                                     headers=headers,
                                                     **_timeout_kw(dep))
         except httpx.TimeoutException as exc:
@@ -1478,6 +1505,8 @@ truncation_hook=None,
         if _google:
             _capture_sigs_from_obj(data)
             log.debug("[thought_sig-capture] non-streaming capture, sigs_stored=%d", len(THOUGHT_SIGS))
+        if _style != proto.CHAT:
+            data = proto.translate_response(_style, data, dep)
         return data
 
     async def call_images(self, dep: dict, payload: dict, *,

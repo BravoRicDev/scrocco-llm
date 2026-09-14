@@ -31,6 +31,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 from .capabilities import ROUTING_CAPS, GEN_CAPS, canonical_family
+from .protocols import normalize_style
 
 log = logging.getLogger("nx.config")
 
@@ -69,6 +70,11 @@ ENABLED_HEADER = "enabled"
 # consegnare al client (niente risposte a metà). Opt-in per deployment (CSV),
 # default false; true/1/yes/on = attivo.
 HOLD_UNTIL_HEADER = "hold_until_finish"
+# api_style: protocollo nativo dell'upstream per questo deployment. Default
+# "chat" (OpenAI Chat Completions). Altri valori gestiti da app/protocols.py:
+# "responses" (OpenAI Responses /res/v1), "messages" (Anthropic), "google"
+# (Gemini generateContent). scrocco-llm traduce da/verso Chat Completions.
+API_STYLE_HEADER = "api_style"
 
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
@@ -259,6 +265,9 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     raw_hu = (row.get(HOLD_UNTIL_HEADER) or "").strip().lower()
     hold_until_finish = raw_hu in ("1", "true", "yes", "on")
 
+    # api_style: protocollo nativo upstream (chat/responses/messages/google).
+    api_style = normalize_style(row.get(API_STYLE_HEADER))
+
     # order: chiave di ordinamento esplicita (tier). Piu' basso = prima;
     # vuoto/assente/non numerico = ORDER_LAST (neutro, in coda).
     raw_order = (row.get(ORDER_HEADER) or "").strip()
@@ -297,6 +306,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         # sempre sul limite dinamico appreso dal router.
         "concurrent_limit": _int_or_none(row.get("concurrent_limit")),
         "hold_until_finish": hold_until_finish,
+        "api_style": api_style,
     }
 
 
@@ -414,7 +424,7 @@ _STANDARD_COLS = frozenset({
     "commento", "modello", "provider", "endpoint", "data", "context",
     "max_input", "priority", "caps", "effort_capable", "intelligence_score",
     "model_preference", "media_defer", "order", "enabled",
-    "hold_until_finish",
+    "hold_until_finish", "api_style",
 })
 
 
@@ -771,6 +781,7 @@ class GatewayConfig:
                     "hold_until_finish": bool(meta.get("hold_until_finish")),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
+                    "api_style": normalize_style(meta.get("api_style")),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap
