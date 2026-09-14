@@ -1055,6 +1055,7 @@ def _emit_summary(**f) -> None:
             "tries": f.get("tries"), "fb": f.get("fb"),
             "dur_ms": f.get("dur_ms"), "stream": f.get("stream", False),
             "qc": f.get("qc", False), "wd": f.get("wd"),
+            "fr": f.get("fr"),
             "ttfb_ms": f.get("ttfb_ms"), "kind": f.get("kind", "chat"),
             "status": f.get("status"),
             "usage": f.get("usage") if isinstance(f.get("usage"), dict)
@@ -1575,6 +1576,25 @@ def _chunk_finish_reason(obj):
         if fr:
             return fr
     return None
+
+
+def _length_truncated_should_fail(finish_len, answer_total, req_max, comp,
+                                  enabled):
+    """True se la risposta e' TRONCATA dal modello (finish_reason=length) pur
+    avendo contenuto: va trattata come un fallimento (cooldown + rotazione alle
+    richieste successive, come gli altri errori). False se la feature e'
+    disattivata, se non c'e' contenuto (0 char: gia' gestito dallo zero-answer)
+    o se il modello si e' fermato esattamente sul max_tokens CHIESTO dal client
+    (cap del client: ruotare non cambierebbe l'esito)."""
+    if not enabled or not finish_len or answer_total <= 0:
+        return False
+    if req_max and comp is not None:
+        try:
+            if float(comp) >= float(req_max) - 2:
+                return False                  # cap del client
+        except (TypeError, ValueError):
+            pass
+    return True
 
 
 def _tool_calls_sse(tool_calls, model) -> list[bytes]:
@@ -2285,7 +2305,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         req_has_input = not _payload_text_empty(payload)   # D2/C
         finish_len = False                 # finish_reason == "length" (D2/C)
         saw_finish_reason = False          # QUALSIASI finish_reason non nullo
+        last_finish_reason: str | None = None  # ultimo finish_reason visto
         had_tool_calls = False             # tool_calls visti (D2/C)
+        req_max_tokens = (payload.get("max_tokens")
+                          or payload.get("max_completion_tokens"))
 
         def _summary(dur_ms: int) -> None:
             nonlocal sum_sent
@@ -2296,14 +2319,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                           dep=dep["unique"], tries=len(attempts),
                           fb=max(0, len(attempts) - 1), dur_ms=dur_ms,
                           stream=True, qc=False, wd=wd, ttfb_ms=ttfb_ms,
-                          usage=usage_final)
+                          fr=last_finish_reason, usage=usage_final)
 
         # corpo del loop fattorizzato: aggiorna lo stato watchdog ed emette
         # il chunk invariato. Condiviso da prebuffer e dal flusso residuo.
         def _ingest(chunk: bytes) -> bytes:
             nonlocal chunks, seen_done, seen_error, usage_final
             nonlocal answer_total, finish_len, had_tool_calls, sent_first
-            nonlocal saw_finish_reason
+            nonlocal saw_finish_reason, last_finish_reason
             if sniffer is not None:
                 sniffer.feed(chunk)
             chunks += 1
@@ -2345,6 +2368,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     fr = ch.get("finish_reason")
                     if fr:
                         saw_finish_reason = True
+                        last_finish_reason = fr
                         if fr == "length":
                             finish_len = True
                     d = ch.get("delta") or ch.get("message") or {}
@@ -2496,6 +2520,25 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.info("[watchdog] tier2 %s: finish_reason presente, "
                              "nessun [DONE] (provider senza sentinel)",
                              dep["unique"])
+                elif _length_truncated_should_fail(
+                        finish_len, answer_total, req_max_tokens,
+                        (usage_final or {}).get("completion_tokens"),
+                        router.policy.qc_sanity.rotate_on_length_truncated):
+                    # risposta TRONCATA dal modello (finish_reason=length) ma
+                    # con contenuto: come un errore -> cooldown del dep, cosi'
+                    # le prossime richieste ruotano su un altro modello.
+                    # (La risposta corrente e' gia' partita: non e' ritraibile.)
+                    wd = "length-truncated"
+                    metrics.inc("nx_qc_watchdog_total",
+                                (dep["unique"], "length_truncated"))
+                    log.warning("[watchdog] risposta TRONCATA (finish_reason="
+                                "length) da %s (chunk=%d, answer=%d, "
+                                "completion=%s, req_max=%s): cooldown + "
+                                "rotazione", dep["unique"], chunks, answer_total,
+                                (usage_final or {}).get("completion_tokens"),
+                                req_max_tokens)
+                    _fail(dep["unique"], seconds=_soft_cd(
+                        router.stats_for(dep["unique"]).fail_count_24h))
                 elif (answer_total == 0 and req_has_input and not had_tool_calls
                       and not (finish_len and not
                                router.policy.qc_sanity.rotate_on_length_empty)):

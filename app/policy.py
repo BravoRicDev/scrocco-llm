@@ -67,6 +67,13 @@ class QcSanity:
                                           # length -> risposta "notice" subito
                                           # (niente giro di catena). True: ruota
                                           # come qualsiasi altro output vuoto.
+    rotate_on_length_truncated: bool = False  # True: risposta CON contenuto ma
+                                              # finish_reason=length -> cooldown
+                                              # del dep + fallback alle richieste
+                                              # successive. Se il client ha
+                                              # chiesto max_tokens e il modello
+                                              # si e' fermato Esattamente lì, e'
+                                              # il cap del client: nessun cooldown.
 
 
 @dataclass
@@ -1677,6 +1684,10 @@ class Policy:
                 p.qc_sanity.rotate_on_length_empty = _coerce_bool(
                     qs["rotate_on_length_empty"],
                     "qc_sanity.rotate_on_length_empty")
+            if "rotate_on_length_truncated" in qs:
+                p.qc_sanity.rotate_on_length_truncated = _coerce_bool(
+                    qs["rotate_on_length_truncated"],
+                    "qc_sanity.rotate_on_length_truncated")
 
         return p
 
