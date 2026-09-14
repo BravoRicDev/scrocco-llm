@@ -388,6 +388,11 @@ class Router:
         # ultimi session_dep_guard_sec (lo rende eleggibile solo nel tier
         # pre-ultima-spiaggia). In-memory, mai persistito.
         self._dep_last_session: dict[str, tuple[str, float]] = {}
+        # SESSION-DEP GUARD: indice inverso session -> set(unique) posseduti.
+        # Finché la sessione e' VIVA (fa richieste) tutti i suoi deployment
+        # recenti vengono "rinfrescati" e restano suoi; 15 min di silenzio e
+        # l'intero set decade (torna libero).
+        self._session_deps: dict[str, set[str]] = {}
         # Modalita' COMPATTA sticky per-sessione (troncamento cache-aware)
         self._session_compact: dict[str, float] = {}
         # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
@@ -572,6 +577,51 @@ class Router:
             self._dep_last_session = d
         return d
 
+    def _sess_deps(self) -> dict:
+        """Accessor lazy dell'indice inverso session -> set(unique) posseduti
+        (protetto per i Router 'nudi' dei test)."""
+        d = getattr(self, "_session_deps", None)
+        if d is None:
+            d = {}
+            self._session_deps = d
+        return d
+
+    def _refresh_session(self, session_id: str, now: float | None = None) -> None:
+        """Rinnova l'ownership di TUTTI i deployment ancora posseduti dalla
+        sessione: finché la sessione e' viva i suoi dep recenti non decadono.
+        Un dep gia' scaduto (o preso da un'altra sessione) NON viene
+        resuscitato: esce dal set (dopo 15 min di silenzio tutto torna libero)."""
+        if not getattr(self.policy, "session_dep_guard_enabled", True):
+            return
+        if not session_id:
+            return
+        now = time.time() if now is None else now
+        guard = self._guard_sec()
+        owned = self._sess_deps().get(session_id)
+        if not owned:
+            return
+        d = self._dep_sess()
+        for u in list(owned):
+            ent = d.get(u)
+            if not ent or ent[0] != session_id:
+                owned.discard(u)          # preso da altri/rimosso
+                continue
+            if now - ent[1] > guard:
+                owned.discard(u)          # già decaduto: non resuscitare
+                continue
+            d[u] = (session_id, now)
+        if not owned:
+            self._sess_deps().pop(session_id, None)
+
+    def note_session_activity(self, session_id: str | None) -> None:
+        """Segnala che la sessione ha USATO il servizio (richiesta in arrivo):
+        rinfresca l'ownership di tutti i suoi dep, cosi' una sessione lunga
+        che ruota/va in cooldown/si risveglia se li tiene 'tutti in tasca'
+        invece di lasciarli decadere dopo il singolo uso."""
+        if not session_id:
+            return
+        self._refresh_session(session_id)
+
     def _note_dep_session(self, session_id: str, unique: str) -> None:
         """Registra l'ultima sessione che ha servito con SUCCESSO `unique`.
         SOLO bucket free-dims (mai -go/-fallback ne' gruppi capacita'): la
@@ -585,13 +635,16 @@ class Router:
         if self.config.group_caps.get(g) is not None \
                 or self._is_renewal_bucket(g):
             return
+        now = time.time()
         d = self._dep_sess()
-        d[unique] = (session_id, time.time())
+        d[unique] = (session_id, now)
+        self._sess_deps().setdefault(session_id, set()).add(unique)
+        # rinnova anche gli altri dep posseduti: la sessione e' viva.
+        self._refresh_session(session_id, now)
         if len(d) > 8192:
             _ttl = self._guard_sec() * 4
-            _now = time.time()
             for k, (_s, ts) in list(d.items()):
-                if _now - ts > _ttl:
+                if now - ts > _ttl:
                     d.pop(k, None)
 
     def _guard_sec(self) -> float:
@@ -1855,6 +1908,14 @@ class Router:
         _ds = self._dep_sess()
         for u in [u for u, (_s, ts) in _ds.items() if now - ts > _gttl]:
             _ds.pop(u, None)
+        # Indice session -> dep posseduti: tieni solo i dep ancora tracciati.
+        _sd = self._sess_deps()
+        for s in list(_sd):
+            live = {u for u in _sd[s] if u in _ds}
+            if live:
+                _sd[s] = live
+            else:
+                _sd.pop(s, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
         for u in dead_cd:
             self._cooldown.pop(u, None)

@@ -1228,6 +1228,10 @@ async def chat_completions(request: Request):
     # non solo dopo il pick come in passato.
     from .router import set_current_session
     set_current_session(session_id)
+    # SESSION-DEP GUARD: la sessione ha USATO il servizio -> rinnova
+    # l'ownership di tutti i suoi deployment (restano suoi finché e' viva;
+    # 15 min di silenzio e l'intero set torna libero).
+    router.note_session_activity(session_id)
     _sniff_headers(request, logger=_api_log,
                    body_size=len(request._body) if hasattr(request, "_body")
                    else 0, session_id=session_id)

@@ -129,3 +129,53 @@ def test_prelast_shared_respects_disabled(router):
     router.note_session_success("S-A", a)
     set_current_session("S-B")
     assert router.prelast_shared([a], None) is None
+
+
+def test_activity_refreshes_owned_deps(router):
+    """Finché la sessione e' viva, i suoi dep restano suoi: l'attivita' ne
+    rinnova l'ownership invece di lasciarli decadere dopo il singolo uso."""
+    a = _u(router, GROUP, "K-A")
+    set_current_session("S-A")
+    router.note_session_success("S-A", a)
+    router._dep_last_session[a] = ("S-A", time.time() - 800)   # quasi scaduto
+    router.note_session_activity("S-A")                        # sessione viva
+    assert time.time() - router._dep_last_session[a][1] < 5    # rinfrescato
+    set_current_session("S-B")
+    assert router.other_session_recent(a) is True
+
+
+def test_success_keeps_all_owned_deps_alive(router):
+    """Un nuovo successo rinfresca anche gli ALTRI dep posseduti: una sessione
+    lunga se li tiene 'tutti in tasca'."""
+    a = _u(router, GROUP, "K-A")
+    b = _u(router, GROUP, "K-B")
+    set_current_session("S-A")
+    router.note_session_success("S-A", a)
+    router._dep_last_session[a] = ("S-A", time.time() - 800)
+    router.note_session_success("S-A", b)                      # successo su b
+    assert time.time() - router._dep_last_session[a][1] < 5    # a rinfrescato
+    set_current_session("S-B")
+    assert router.other_session_recent(a) is True
+
+
+def test_activity_does_not_revive_expired(router):
+    """Dopo 15 min di silenzio il dep e' decaduto e NON viene resuscitato."""
+    a = _u(router, GROUP, "K-A")
+    set_current_session("S-A")
+    router.note_session_success("S-A", a)
+    router._dep_last_session[a] = ("S-A", time.time() - 1000)  # oltre la finestra
+    router.note_session_activity("S-A")
+    set_current_session("S-B")
+    assert router.other_session_recent(a) is False
+    assert a not in router._session_deps.get("S-A", set())
+
+
+def test_activity_without_success_grants_nothing(router):
+    """L'attivita' da sola NON crea ownership: solo un SUCCESSO la conferisce."""
+    a = _u(router, GROUP, "K-A")
+    set_current_session("S-A")
+    router.note_session_activity("S-A")
+    assert a not in router._dep_last_session
+    assert not router._session_deps
+    set_current_session("S-B")
+    assert router.other_session_recent(a) is False
