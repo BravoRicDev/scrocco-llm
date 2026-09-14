@@ -181,8 +181,9 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
             log.info("[autoprobe] CRISIS: cooled %.0f%% (%d/%d) -> per_dim "
                      "x%.1f, min_gap /%.1f", (cooled_dim / total_dim) * 100,
                      cooled_dim, total_dim, _mult, _mult)
-    for unique, exp in list(router._cooldown.items()):
-        if exp <= now:
+    for unique in list(router._cooldown.keys()):
+        resid = router.cooldown_residual(unique)
+        if resid <= 0:
             continue
         try:
             dep = router.config.deployment_by_unique(unique)
@@ -202,7 +203,7 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
             continue           # appena messo in cooldown: non insistere
         if now - _last_probe.get(unique, 0.0) < min_gap:
             continue
-        by_group.setdefault(grp, []).append((exp - now, unique))
+        by_group.setdefault(grp, []).append((resid, unique))
     targets: list[tuple[str, str]] = []
     for grp, items in by_group.items():
         items.sort(key=lambda x: (_probe_count_24h(x[1], now), x[0]))
@@ -287,9 +288,16 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 else:
                     log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
                              "+%.0fs", unique, code or "timeout", _cd)
-                base = max(router._cooldown.get(unique, 0.0), time.time())
-                router._cooldown[unique] = base + _cd
-                rem = max(0.0, router._cooldown[unique] - time.time())
+                now2 = time.time()
+                base = max(router._cooldown.get(unique, 0.0), now2)
+                new_exp = base + _cd
+                since = router._cooldown_since.get(unique)
+                if since is None:
+                    since = now2
+                    router._cooldown_since[unique] = since
+                router._cooldown[unique] = new_exp
+                router._cooldown_full_map()[unique] = float(new_exp - since)
+                rem = router.cooldown_residual(unique)
                 log.info("[autoprobe] %s: residuo %.0fs",
                          unique, rem)
             await asyncio.sleep(0.2)

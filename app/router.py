@@ -1507,15 +1507,65 @@ class Router:
                         "evidence": st.get("evidence", "")})
         return out
 
+    def _pref_for(self, unique: str) -> int:
+        """model_preference del deployment (0 se non disponibile)."""
+        try:
+            dep = self.config.deployment_by_unique(unique)
+        except Exception:  # noqa: BLE001
+            dep = None
+        if not dep:
+            return 0
+        try:
+            return int(dep.get("model_preference") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _pref_cooldown_factor(self, raw_full: float, pref: int) -> float:
+        """Fattore >0 da applicare alla durata GREZZA del cooldown: >1 allunga
+        (preferenza negativa = riposa di piu'), <1 accorcia (positiva = ritenta
+        prima). Sotto i 60s (dato grezzo) nessuna modifica. Ampiezza max
+        +/-50%, pari a preferenza/2."""
+        if raw_full <= 60.0:
+            return 1.0
+        pct = max(-50.0, min(50.0, float(pref) / 2.0))
+        return 1.0 - pct / 100.0
+
+    def _effective_cooldown_full(self, unique: str, full: float) -> float:
+        """Durata efficace = durata grezza scalata dalla preferenza del
+        deployment, clampata a [1, max_cooldown_sec]."""
+        factor = self._pref_cooldown_factor(full, self._pref_for(unique))
+        _pol = getattr(self, "policy", None)
+        _mx = float(getattr(_pol, "max_cooldown_sec", 18000) or 18000)
+        return max(1.0, min(_mx, full * factor))
+
+    def cooldown_residual(self, unique: str) -> float:
+        """Residuo (secondi) del cooldown RESIDUO, scalato dalla preferenza del
+        deployment. Lo storage resta GREZZO: qui si applica solo il fattore."""
+        exp = self._cooldown.get(unique)
+        if exp is None:
+            return 0.0
+        now = time.time()
+        since = self._cooldown_since.get(unique)
+        full = self._cooldown_full_map().get(unique) or 0.0
+        if full > 0 and since is not None:
+            return max(0.0, since + self._effective_cooldown_full(unique, full)
+                       - now)
+        return max(0.0, exp - now)
+
     def is_cooled_down(self, unique: str) -> bool:
         exp = self._cooldown.get(unique)
         if exp is None:
             return False
+        if self.cooldown_residual(unique) > 0.0:
+            return True
+        # Residuo efficace esaurito: pota l'entry solo se anche il grezzo e'
+        # passato; se il cooldown e' stato accorciato dalla preferenza lascio
+        # il dato grezzo fino alla sua scadenza.
         if time.time() > exp:
             self._cooldown.pop(unique, None)
             self._cooldown_since.pop(unique, None)
-            return False
-        return True
+            self._cooldown_full_map().pop(unique, None)
+        return False
 
     def cooldown_age(self, unique: str) -> float | None:
         """Da quanti secondi e' in cooldown questo deployment (None se non lo e'
@@ -1526,16 +1576,16 @@ class Router:
     def cooldown_progress(self, unique: str) -> float | None:
         """Frazione di cooldown TRASCORSA (0..1); None se non in cooldown o se
         la durata totale non e' nota."""
-        exp = self._cooldown.get(unique)
-        if exp is None:
+        if self._cooldown.get(unique) is None:
             return None
-        now = time.time()
-        if now >= exp:
+        full = self._cooldown_full_map().get(unique) or 0.0
+        if full <= 0:
+            return None
+        resid = self.cooldown_residual(unique)
+        if resid <= 0.0:
             return 1.0
-        total = self._cooldown_full_map().get(unique) or 0.0
-        if total <= 0:
-            return None
-        return max(0.0, min(1.0, 1.0 - (exp - now) / total))
+        eff = self._effective_cooldown_full(unique, full)
+        return max(0.0, min(1.0, 1.0 - resid / max(1e-6, eff)))
 
     def _cooldown_full_map(self) -> dict:
         """Mappa unique -> durata totale del cooldown (lazy: alcuni test
@@ -3044,11 +3094,10 @@ class Router:
                    and (need is None or self._dep_supports(d, need))
                    and self._cap_fits(d, ctx)]
         if _cooled:
-            _now = time.time()
             _cooled.sort(
-                key=lambda d: max(0, self._cooldown.get(d["unique"], 0) - _now))
+                key=lambda d: self.cooldown_residual(d["unique"]))
             _wake = _cooled[0]
-            _rem = max(0, int(self._cooldown.get(_wake["unique"], 0) - _now))
+            _rem = int(self.cooldown_residual(_wake["unique"]))
             log.info("[cooldown-wakeup] %s: provo lo stantio meno raffreddato: "
                      "%s (residuo %ds)", group_name, _wake["unique"], _rem)
             return _wake
@@ -3221,13 +3270,12 @@ class Router:
                     continue                       # cooldown fresco: non svegliare
                 _cooled_dims.append(u)
         if _cooled_dims:
-            _now = time.time()
             _cooled_dims.sort(
-                key=lambda u: max(0, self._cooldown.get(u, 0) - _now))
+                key=lambda u: self.cooldown_residual(u))
             _wake_u = _cooled_dims[0]
             _wake = cfg.deployment_by_unique(_wake_u)
             if _wake is not None:
-                _rem = max(0, int(self._cooldown.get(_wake_u, 0) - _now))
+                _rem = int(self.cooldown_residual(_wake_u))
                 log.info("[ladder] dims cooldown-wakeup (%d/%d): residuo %ds "
                          "-> %s", _woken + 1, _max_wake, _rem, _wake_u)
                 return _wake
@@ -3283,8 +3331,7 @@ class Router:
             if chronic_pool:
                 chronic_pool.sort(
                     key=lambda u: (self.stats_for(u).fail_count_24h,
-                                   self._cooldown.get(u, time.time())
-                                   - time.time()))
+                                   self.cooldown_residual(u)))
                 for u in chronic_pool[:ladder_chronic_max]:
                     d = cfg.deployment_by_unique(u)
                     if d is None:
@@ -3327,7 +3374,7 @@ class Router:
                 continue
             if not self._cap_fits(d, ctx):
                 continue
-            remaining = self._cooldown.get(u, now) - now
+            remaining = self.cooldown_residual(u)
             cooled.append((remaining, u, d))
         cooled.sort(key=lambda x: x[0])
         if cooled:
