@@ -111,6 +111,13 @@ fa, come lo fa e perché. Alcune scelte che vale la pena raccontare:
   del cooldown, moltiplicato per il numero di probe fatti su quel deployment
   nelle ultime 24h; i residui oltre 2 ore escono dai probe e li rivede la scala
   che risveglia i cooldown o l'ultima spiaggia.
+- **Cold spread (carico distribuito).** Quando la scelta è "a freddo" (nessun
+  deployment della sessione in gioco) i dims vivi con **più tentativi** nelle
+  ultime 24h (ok+fail) vengono nascosti dal pool per una quota configurabile
+  (`cold_spread_pct`, default 20%), così anche i provider poco usati ricevono
+  traffico a prescindere dalla colonna `order`. I deployment della sessione
+  corrente sono sempre esentati; `-go`/`-fallback` e i gruppi capacità non sono
+  toccati.
 
 <a name="test"></a>1081 test coprono queste logiche: molti sono nati da bug
 reali, non sono test scritti per riempire una percentuale.

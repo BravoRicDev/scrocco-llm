@@ -63,6 +63,18 @@ def _probe_count_24h(unique: str, now: float) -> int:
     return len(dq)
 
 
+def note_probe_time(unique: str, ts: float) -> None:
+    """Registra un probe avvenuto a `ts` (usato dal bootstrap dai log per
+    ricostruire `_probe_times` al riavvio). Potatura >24h relativa a `ts`."""
+    if not unique:
+        return
+    dq = _probe_times.setdefault(unique, deque())
+    dq.append(ts)
+    cutoff = ts - 86400.0
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+
 def _scale_probe_cd(unique: str, base_cd: float, now: float,
                     multiply: bool) -> float:
     """MOLTIPLICA l'incremento di cooldown di un KO del probe per il numero di

@@ -31,6 +31,7 @@ import math
 import random
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -393,6 +394,12 @@ class Router:
         # recenti vengono "rinfrescati" e restano suoi; 15 min di silenzio e
         # l'intero set decade (torna libero).
         self._session_deps: dict[str, set[str]] = {}
+        # COLD SPREAD: finestra ROLLING di 24h dei TENTATIVI per-deployment
+        # (ok+fail, ESCLUSI i probe: quelli restano in autoprobe._probe_times).
+        # Serve a NASCONDERE dai candidati il 20% (configurabile) piu' usato
+        # quando si pesca a freddo, distribuendo il carico a prescindere
+        # dall'`order`. In-memory; ricostruita dai log all'avvio.
+        self._usage_times: dict[str, "deque[float]"] = {}
         # Modalita' COMPATTA sticky per-sessione (troncamento cache-aware)
         self._session_compact: dict[str, float] = {}
         # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
@@ -585,6 +592,108 @@ class Router:
             d = {}
             self._session_deps = d
         return d
+
+    # --------------------------------------------- cold usage spread
+    _USAGE_WINDOW = 86400.0
+
+    def _usage(self) -> dict:
+        d = getattr(self, "_usage_times", None)
+        if d is None:
+            d = {}
+            self._usage_times = d
+        return d
+
+    def note_usage(self, unique: str, ts: float | None = None) -> None:
+        """Registra un TENTATIVO (ok o fail, NON un probe) nella finestra
+        rolling 24h usata dallo spread a freddo."""
+        if not unique:
+            return
+        d = self._usage()
+        dq = d.get(unique)
+        if dq is None:
+            dq = deque()
+            d[unique] = dq
+        now = time.time() if ts is None else ts
+        dq.append(now)
+        cut = now - self._USAGE_WINDOW
+        while dq and dq[0] < cut:
+            dq.popleft()
+
+    def usage_count_24h(self, unique: str, now: float | None = None) -> int:
+        dq = self._usage().get(unique)
+        if not dq:
+            return 0
+        now = time.time() if now is None else now
+        cut = now - self._USAGE_WINDOW
+        while dq and dq[0] < cut:
+            dq.popleft()
+        return len(dq)
+
+    def _attached_unique(self, unique: str) -> bool:
+        """True se `unique` e' 'attaccato' alla sessione CORRENTE (successo
+        recente entro session_dep_guard_sec): resta prioritario e non viene
+        mai nascosto dallo spread (rispetto della cache)."""
+        sid = current_session()
+        if not sid:
+            return False
+        ent = self._dep_sess().get(unique)
+        if not ent or ent[0] != sid:
+            return False
+        return (time.time() - ent[1]) < self._guard_sec()
+
+    def _spread_hide(self, deps: list[dict]) -> list[dict]:
+        """COLD SPREAD: nasconde i deployment col MAGGIOR numero di tentativi
+        nelle ultime 24h (tie: last_used piu' recente), cosi' il carico si
+        distribuisce anche su `order` diversi. Non tocca i dep 'attaccati'
+        alla sessione corrente (cache). `min_pool` = ladder_skip_after: sotto
+        quella soglia non si taglia nulla; se tutti a 0 usi -> nessun taglio."""
+        if not deps:
+            return deps
+        pct = float(getattr(self.policy, "cold_spread_pct", 0.20) or 0.0)
+        if pct <= 0.0:
+            return deps
+        min_pool = int(getattr(self.policy, "ladder_skip_after", 10) or 10)
+        pool = [d for d in deps if not self._attached_unique(d["unique"])]
+        n = len(pool)
+        if n < max(1, min_pool):
+            return deps
+        counts = {d["unique"]: self.usage_count_24h(d["unique"]) for d in pool}
+        if max(counts.values()) <= 0:
+            return deps
+        k = min(int(n * pct), n - 1)
+        if k <= 0:
+            return deps
+        ranked = sorted(
+            pool,
+            key=lambda d: (counts[d["unique"]],
+                           self.stats_for(d["unique"]).last_used or 0.0),
+            reverse=True)
+        hide = {d["unique"] for d in ranked[:k]}
+        kept = [d for d in deps if d["unique"] not in hide]
+        log.info("[spread] hidden=%d/%d (%.0f%%) kept=%d: %s", len(hide), n,
+                 pct * 100, len(kept), ",".join(sorted(hide)[:6]))
+        return kept
+
+    def _spread_hidden_chain(self, chain: list[str]) -> set[str]:
+        """Set degli univoci da nascondere per lo spread su una catena piatta:
+        raggruppa i dims per gruppo (esclusi -go/-fallback e capacita') e
+        applica il taglio per-gruppo."""
+        by_group: dict[str, list[dict]] = {}
+        for u in chain:
+            dep = self.config.deployment_by_unique(u)
+            if dep is None:
+                continue
+            g = dep.get("group", "")
+            if self.config.group_caps.get(g) is not None \
+                    or self._is_renewal_bucket(g):
+                continue
+            by_group.setdefault(g, []).append(dep)
+        hide: set[str] = set()
+        for deps in by_group.values():
+            kept = {d["unique"] for d in self._spread_hide(deps)}
+            hide |= {d["unique"] for d in deps} - kept
+        return hide
+
 
     def _refresh_session(self, session_id: str, now: float | None = None) -> None:
         """Rinnova l'ownership di TUTTI i deployment ancora posseduti dalla
@@ -2143,6 +2252,8 @@ class Router:
                 self._gen_last_model[dep["group"]] = dep["model"]
         # [Blocco 1] Registra tentativo per reputation scoring
         self.record_attempt(unique)
+        # COLD SPREAD: il tentativo entra nella finestra rolling 24h
+        self.note_usage(unique)
 
     def note_result(self, unique: str, latency_ms: float,
                     quality: float = 1.0) -> None:
@@ -3053,6 +3164,12 @@ class Router:
                          "pref, tier=%s, %d chiavi)", group_name,
                          chosen["unique"], best_key, len(best))
             return chosen
+        # COLD SPREAD: nasconde il 20% piu' usato (finestra 24h) PRIMA del
+        # filtro `order`, cosi' il carico si distribuisce anche su order
+        # diversi senza dipendere dalla gerarchia. Solo mondo testo dims.
+        if deps and self.config.group_caps.get(group_name) is None \
+                and self.DIM_SUFFIX_RE.search(group_name):
+            deps = self._spread_hide(deps)
         # TIER esplicito (colonna `order`): nei gruppi TESTO dims si prova
         # prima il tier col valore minimo tra i vivi; se e' tutto in cooldown
         # si scende automaticamente al tier successivo. Dentro il tier resta
@@ -3160,6 +3277,9 @@ class Router:
         # del singolo step, per non escludere un gruppo a soglie incoerenti.
         exhausted_groups: set[str] = set()
         _live_walk = (min_cooldown_age is None and not ignore_cooldown)
+        # COLD SPREAD: sul solo walk VIVO nascondi il 20% piu' usato (24h)
+        # per-gruppo, cosi' anche la scala piatta spalma il carico.
+        _hidden = self._spread_hidden_chain(chain) if _live_walk else set()
         if tried and limit > 0 and _live_walk:
             _skip_after = max(1, int(getattr(self.policy,
                                              "ladder_skip_after", 4) or 4))
@@ -3187,6 +3307,8 @@ class Router:
                     return None
                 # cooldown "stantio": lo ri-consideriamo
             if self.other_session_recent(u):
+                return None
+            if u in _hidden:
                 return None
             if self.is_retired(u):
                 return None

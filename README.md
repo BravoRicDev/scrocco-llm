@@ -355,6 +355,7 @@ template. The ones that matter most:
 | `max_cooldown_sec` | 18000 | cooldown ceiling (5 h) |
 | `timeout_cooldown_mult` | 10 | multiplier applied to a *timeout* failure |
 | `ladder_skip_after` / `ladder_stale_max` / `ladder_cooldown_wakeups` | 10 / 3 / 3 | attempts per dim before climbing / stale revivals / cooled-dim wakeup probes per request before `-go` |
+| `cold_spread_pct` | 0.20 | cold-pick load spreading: hide the top % most-attempted dims (last 24h, ok+fail) so under-used providers get traffic regardless of `order`; session-owned deps are always exempt; also sets `min_pool = ladder_skip_after` |
 | `initial_pick_cooldown_wakeup` | true | retry a stale cooled dim at the very first pick (before esc-win/ladder) |
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |

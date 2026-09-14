@@ -422,6 +422,15 @@ ladder_stale_max: 3
 # PRIMA di salire a -go (0 = nessuno, come prima).
 ladder_cooldown_wakeups: 3
 
+# COLD SPREAD — sui soli dims vivi (esclusi -go/-fallback e gruppi capacita'):
+# nasconde dal pool la quota TOP per numero di tentativi (ok+fail) nelle ultime
+# 24h, cosi' il carico si distribuisce ANCHE sui provider poco usati a
+# prescindere dalla colonna `order`. I deployment della sessione corrente
+# (successi recenti, entro session_dep_guard_sec) sono sempre esentati.
+# Attivo solo se il pool "a freddo" ha >= ladder_skip_after candidati e almeno
+# un candidato ha gia' tentativi. 0.0 = disattivato.
+cold_spread_pct: 0.20
+
 # Risveglio di un dim in cooldown gia' alla PRIMA scelta (initial_pick), non
 # solo lungo la scala: un dim stantio (age >= stale_cooldown_retry_sec) con il
 # residuo minore viene riprovato prima di esc-win/ladder.

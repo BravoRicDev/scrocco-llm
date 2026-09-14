@@ -336,6 +336,28 @@ def _load_cooldowns() -> None:
         log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
 
 
+def _bootstrap_runtime_from_logs() -> None:
+    """All'avvio: ricostruisce le finestre rolling-24h (uso + probe) dal log,
+    cosi' il cold-spread e il moltiplicatore dell'autoprobe non ripartono
+    'a freddo'. Scansiona solo `gateway.log` (nessun ruotato). La scansione e'
+    in `app.logboot.scan_log`. Mai bloccare lo startup."""
+    from . import autoprobe as _ap
+    from .logboot import scan_log
+    path = os.environ.get("GATEWAY_LOG_FILE", str(VAR_DIR / "gateway.log"))
+    try:
+        usage, probes = scan_log(path, time.time() - 86400.0)
+    except Exception as exc:                 # mai bloccare lo startup
+        log.warning("[bootstrap] scan log fallito (%s)", exc)
+        return
+    for u, ts in usage:
+        router.note_usage(u, ts)
+    for u, ts in probes:
+        _ap.note_probe_time(u, ts)
+    if usage or probes:
+        log.info("[bootstrap] finestre 24h da log: %d tentativi, %d probe",
+                 len(usage), len(probes))
+
+
 def _maybe_save_cooldowns(force: bool = False) -> None:
     """Salvataggio atomico throttled (max ogni 60s) dei cooldown attivi."""
     global _last_cooldown_save
@@ -493,6 +515,7 @@ async def lifespan(_app: FastAPI):
     global _watch_task
     _load_adaptive_stats()                  # F4: ripristino EMA/cooldown
     _load_cooldowns()                       # cooldown NON scaduti (since/full)
+    _bootstrap_runtime_from_logs()          # finestre 24h uso/probe dal log
     _load_thought_sigs()                    # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))

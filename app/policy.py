@@ -584,6 +584,13 @@ class Policy:
     # Numero di risvegli di dim in cooldown (stantii) tentati PRIMA di
     # escalare a -go (oltre a quello del dim sticky/esplicito). 0 = nessuno.
     ladder_cooldown_wakeups: int = 3
+    # COLD SPREAD: a ogni pick "a freddo" nascondi dai candidati il `pct`
+    # dei deployment col MAGGIOR numero di tentativi (ok+fail) nelle ultime
+    # 24h, cosi' il carico si distribuisce anche su `order`/provider diversi.
+    # I dep 'attaccati' alla sessione corrente (successo entro
+    # session_dep_guard_sec) non vengono mai nascosti. min_pool =
+    # ladder_skip_after (sotto quella soglia non si taglia nulla). 0 = off.
+    cold_spread_pct: float = 0.20
 
     # Risveglio del dim CORRENTE in `initial_pick`: se il pick non trova nulla
     # di vivo, prova il dep cooled da >= stale_cooldown_retry_sec prima di
@@ -1676,6 +1683,15 @@ class Policy:
         _set_int(p, raw, "ladder_skip_after", minimum=1)
         _set_int(p, raw, "ladder_stale_max", minimum=0)
         _set_int(p, raw, "ladder_cooldown_wakeups", minimum=0)
+        _csp = raw.get("cold_spread_pct")
+        if _csp is not None:
+            try:
+                _v = float(_csp)
+            except (TypeError, ValueError):
+                raise ValueError(f"cold_spread_pct non valido: {_csp!r}")
+            if not 0.0 <= _v <= 1.0:
+                raise ValueError("cold_spread_pct deve essere in [0,1]")
+            p.cold_spread_pct = _v
         _ipw = raw.get("initial_pick_cooldown_wakeup")
         if _ipw is not None:
             p.initial_pick_cooldown_wakeup = _coerce_bool(
