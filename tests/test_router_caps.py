@@ -217,3 +217,11 @@ def test_pick_deployment_exclude(router):
         nxt = router.pick_deployment(g, None, exclude=first["unique"])
         if nxt is not None:
             assert nxt["unique"] != first["unique"]
+
+
+def test_pick_deployment_respects_ctx_max_input(router):
+    """Il ctx va SEMPRE passato al pick: un ctx oltre max_input esclude i dep
+    (fix richieste esplicite che bypassavano max_input)."""
+    g = "scrocco-llm-test-128k"
+    assert router.pick_deployment(g, ctx=7000) is not None     # sotto 8000
+    assert router.pick_deployment(g, ctx=9000) is None         # oltre 8000

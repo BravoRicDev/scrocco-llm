@@ -1291,7 +1291,7 @@ async def chat_completions(request: Request):
         # initial_pick (dims per testo, cap-chain per -C).
         dep = router.initial_pick(auth.profile, group_or_explicit,
                                   None if explicit_req else need,
-                                  None if explicit_req else ctx_est,
+                                  ctx_est,
                                   session_id=session_id)
     if dep is None:
         return JSONResponse(status_code=503, content={

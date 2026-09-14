@@ -48,7 +48,7 @@ from urllib.parse import urlsplit
 from . import metrics
 from . import protocols as proto
 from .qc import check_response
-from .router import inject_identity, ErrorKind
+from .router import inject_identity, ErrorKind, estimate_tokens
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
@@ -122,6 +122,36 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
              dep.get("unique", "?"), effort, capable,
              body.get("reasoning_effort"), body.get("temperature"))
     return body
+
+
+def clamp_max_tokens(body: dict, dep: dict) -> None:
+    """Riduce `max_tokens` perche' input+output non superi il context window
+    del deployment.
+
+    L'upstream conta (input stimato + max_output) contro il context window:
+    un client che riserva 32000 token di output su un modello 32k fa fallire
+    ogni richiesta con >768 token di input (errore -400/-413). Qui il tetto
+    viene portato a `max(1, max_input_tokens - ctx)` quando entrambi noti.
+    """
+    mi = int(dep.get("max_input_tokens") or 0)
+    if mi <= 0:
+        return
+    if body.get("max_completion_tokens") is not None:
+        key = "max_completion_tokens"
+    elif body.get("max_tokens") is not None:
+        key = "max_tokens"
+    else:
+        return
+    try:
+        mt = int(body[key])
+    except (TypeError, ValueError):
+        return
+    ctx = estimate_tokens(body.get("messages") or [], tools=body.get("tools"))
+    room = max(1, mi - ctx)
+    if mt > room:
+        body[key] = room
+        log.info("[maxtok] %s clamp %s %d->%d (ctx≈%d max_in=%d)",
+                 dep.get("unique", "?"), key, mt, room, ctx, mi)
 
 
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
@@ -1263,6 +1293,7 @@ truncation_hook=None,
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
+        clamp_max_tokens(body, dep)
         _style = proto.style_of(dep)
         if _style != proto.CHAT:
             _up = proto.translate_request(_style, body, dep)
@@ -1464,6 +1495,7 @@ truncation_hook=None,
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
+        clamp_max_tokens(body, dep)
         _style = proto.style_of(dep)
         _up = (body if _style == proto.CHAT
                else proto.translate_request(_style, body, dep))
