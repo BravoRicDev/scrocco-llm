@@ -92,7 +92,11 @@ cheap selections — same session only, re-fished at `-fallback`),
 (cooldown probe / backoff), `[cache]` (session holder),
 `[fallback]` (failure + next hop), `[pick-final]` (go/fallback pick; with an
 *explicit* `-go`/`-fallback` request the session cache-holder also beats the
-renewal tier — paid cache, never for auto routing).
+renewal tier — paid cache, never for auto routing), `[ctxcompact]` (cold-cache
+context trim: old large tool outputs → deterministic head+tail stub with
+`[tool] N char, M righe[, exit X]` summary, duplicates → `[rimando: ...]`;
+error outputs are NEVER rewritten; tail protected while it fits
+`keep_tail_pct`% of the window).
 
 ## Invariants (do not break)
 

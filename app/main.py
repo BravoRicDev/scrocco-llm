@@ -1409,12 +1409,15 @@ async def chat_completions(request: Request):
     if _do_compact and session_id:
         router.mark_session_compact(session_id)
     if _do_compact:
-        _cmsgs, _crep = compact_tool_outputs(payload.get("messages"), _cc)
+        _cmsgs, _crep = compact_tool_outputs(payload.get("messages"), _cc,
+                                             max_in=_max_in,
+                                             estimator=lambda ms: estimate_tokens(ms))
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
             metrics.inc("nx_ctxcompact_total", ("stubbed",))
-            log.info("[ctxcompact] ses=%s stubbed=%d saved≈%dtok reason=%s",
-                     session_id, _crep["stubbed"],
+            log.info("[ctxcompact] ses=%s stubbed=%d dedup=%d saved≈%dtok "
+                     "reason=%s", session_id, _crep["stubbed"],
+                     _crep.get("deduped", 0),
                      _crep["saved_tokens_est"], _dec["reason"])
     log.info("[cache] ses=%s holder=%s family=%s same_fam=%s compact=%s "
              "cold=%s reason=%s ctx≈%d max_in=%d", session_id, _holder or "-",

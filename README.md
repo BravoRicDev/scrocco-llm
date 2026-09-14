@@ -91,9 +91,13 @@ individual account limits instead of dying on the first 429.
 - **Cache-aware routing & context trimming** (`cache_aware`): remembers
   the last deployment that served a session successfully and prefers it
   on failover (free buckets only, cache-preserving). Context is compacted
-  (old tool outputs stubbed) only when the request would not fit the
-  chosen deployment, and the session stays compacted so the provider
-  prefix remains cacheable.
+  (old tool outputs replaced by a *deterministic* head+tail stub: summary
+  line `[{tool}] N char, M righe[, exit X]` + first/last `head_chars`/
+  `tail_chars` cut at line boundaries; identical duplicates become a
+  back-reference to the newest call) only when the request would not fit
+  the chosen deployment, and the session stays compacted so the provider
+  prefix remains cacheable. Error outputs (Traceback/…Error/Exception/
+  exit≠0) are never touched, not even on overflow.
 - **Session-dep guard** (`session_dep_guard`): stops concurrent sessions from
   "grabbing" the same free deployments and burning them (rate-limits). The last
   session that *successfully* served a free-dims deployment is remembered (an
@@ -407,6 +411,9 @@ template. The ones that matter most:
 | `cache_aware.skip_probe_when_holder` | true | skip the escalation-pin probe when the pinned winner is the holder |
 | `cache_aware.context_truncation.enabled` | true | stub old tool outputs (overflow / absolute / cache-cold switch triggers) |
 | `cache_aware.context_truncation.keep_turns` | 4 | number of most recent user turns kept intact |
+| `cache_aware.context_truncation.head_chars` / `tail_chars` | 600 / 600 | fixed head/tail chars kept (line-boundary cut) inside each old tool output; 0/0 = bare legacy stub |
+| `cache_aware.context_truncation.keep_tail_pct` | 2.0 | dynamic frontier: the message tail is protected while it fits in this % of the deployment window (tightens inside `keep_turns` on huge windows; 0 = off; floor 8 msgs) |
+| `cache_aware.context_truncation.keep_error_outputs` | true | tool outputs containing Traceback/…Error/Exception or exit≠0 are never rewritten (overflow included) |
 | `cache_aware.context_truncation.min_ctx_tokens` | 50000 | absolute context threshold that also triggers trimming |
 | `cache_aware.context_truncation.on_deployment_switch` | true | trigger trimming when the cache is cold (no holder / different deployment) |
 | `cache_aware.context_truncation.switch_min_tokens` | 8000 | minimum context to apply the deployment-switch trigger |

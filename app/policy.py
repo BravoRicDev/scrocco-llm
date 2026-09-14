@@ -499,6 +499,15 @@ class Policy:
     # solo entro questa frazione della finestra del deployment scelto
     # (0 = disabilitata, comportamento storico).
     cache_ctx_abs_headroom_ratio: float = 0.8
+    # Stub "head+tail": caratteri FISSI di inizio/fine conservati nei tool
+    # output vecchi (min 600 di default, configurabili; head=tail=0 -> stub
+    # secco legacy). Frontiera dinamica: protegge la coda finche' sta in
+    # keep_tail_pct% della finestra del deployment (0 = solo keep_turns).
+    # Output con errori (Traceback/...Error/Exception/exit != 0) MAI toccati.
+    cache_ctx_head_chars: int = 600
+    cache_ctx_tail_chars: int = 600
+    cache_ctx_keep_tail_pct: float = 2.0
+    cache_ctx_keep_error_outputs: bool = True
     # DEBUG SNIFF: scatola nera input/output su var/debug-sniff.log con
     # rotazione oraria e retention debug_sniff_retention_hours. Default OFF
     # (file con conversazione completa: solo per debug locale).
@@ -1490,12 +1499,24 @@ class Policy:
                                   ("max_tool_output_chars", "cache_ctx_max_tool_output_chars"),
                                   ("min_saved_tokens", "cache_ctx_min_saved_tokens"),
                                   ("min_ctx_tokens", "cache_ctx_min_ctx_tokens"),
-                                  ("switch_min_tokens", "cache_ctx_switch_min_tokens")):
+                                  ("switch_min_tokens", "cache_ctx_switch_min_tokens"),
+                                  ("head_chars", "cache_ctx_head_chars"),
+                                  ("tail_chars", "cache_ctx_tail_chars")):
                     _v = ct.get(_k)
                     if _v is not None:
                         if isinstance(_v, bool) or not isinstance(_v, (int, float)):
                             raise ValueError(f"cache_aware.context_truncation.{_k} deve essere un intero")
                         setattr(p, _attr, int(_v))
+                _ktp = ct.get("keep_tail_pct")
+                if _ktp is not None:
+                    if isinstance(_ktp, bool) or not isinstance(_ktp, (int, float)):
+                        raise ValueError("cache_aware.context_truncation."
+                                         "keep_tail_pct deve essere un numero")
+                    p.cache_ctx_keep_tail_pct = max(0.0, float(_ktp))
+                if "keep_error_outputs" in ct:
+                    p.cache_ctx_keep_error_outputs = _coerce_bool(
+                        ct["keep_error_outputs"],
+                        "cache_aware.context_truncation.keep_error_outputs")
                 if "on_deployment_switch" in ct:
                     p.cache_ctx_on_deployment_switch = _coerce_bool(
                         ct["on_deployment_switch"],

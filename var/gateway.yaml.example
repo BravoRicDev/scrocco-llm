@@ -612,6 +612,14 @@ cache_aware:
     keep_turns: 4
     max_tool_output_chars: 2000
     min_saved_tokens: 500
+    # stub deterministico head+tail (0/0 = stub secco legacy)
+    head_chars: 600
+    tail_chars: 600
+    # frontiera dinamica: protegge la coda finche' sta in keep_tail_pct%
+    # della finestra del deployment scelto (0 = vale solo keep_turns)
+    keep_tail_pct: 2.0
+    # output con errori (Traceback/...Error/Exception/exit != 0): MAI toccati
+    keep_error_outputs: true
     # nuovi inneschi (oltre a max_input): soglia assoluta e cache fredda
     min_ctx_tokens: 50000
     on_deployment_switch: true
