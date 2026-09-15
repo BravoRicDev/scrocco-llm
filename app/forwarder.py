@@ -201,17 +201,22 @@ def set_adaptive_timeout(*, enabled=None, floor_sec=None, multiplier=None,
 
 
 def set_latency_lookup(fn) -> None:
-    """Registra la lookup `unique -> latenza media (ms)` usata dal timeout."""
+    """Registra la lookup `(unique, ctx_est) -> latenza media (ms)` usata dal
+    timeout (il Router passa l'EMA PER BUCKET DI CONTESTO con fallback
+    globale)."""
     global _LATENCY_LOOKUP
     _LATENCY_LOOKUP = fn
 
 
-def _timeout_for(dep: dict) -> httpx.Timeout | None:
+def _timeout_for(dep: dict, ctx_est=None) -> httpx.Timeout | None:
     """Timeout httpx per-deployment, o None per usare il default del client."""
     if not ADAPTIVE_TIMEOUT or _LATENCY_LOOKUP is None:
         return None
     try:
-        ms = _LATENCY_LOOKUP(dep.get("unique", ""))
+        try:
+            ms = _LATENCY_LOOKUP(dep.get("unique", ""), ctx_est)
+        except TypeError:                      # lookup legacy a 1 arg
+            ms = _LATENCY_LOOKUP(dep.get("unique", ""))
     except Exception:                          # mai bloccare la chiamata
         return None
     if not ms or ms <= 0:
@@ -230,9 +235,10 @@ def _timeout_for(dep: dict) -> httpx.Timeout | None:
                          pool=base.pool)
 
 
-def _timeout_kw(dep: dict) -> dict:
-    """kwargs httpx con `timeout` per-deployment solo se valorizzato."""
-    t = _timeout_for(dep)
+def _timeout_kw(dep: dict, ctx_est=None) -> dict:
+    """kwargs httpx con `timeout` per-deployment solo se valorizzato (EMA nel
+    bucket di contesto della richiesta, fallback globale)."""
+    t = _timeout_for(dep, ctx_est)
     return {} if t is None else {"timeout": t}
 
 # ANTI-STALL (mid-stream): se dopo l'avvio dello stream l'upstream non manda
@@ -1266,6 +1272,7 @@ class Forwarder:
     # ------------------------------------------------------------- request
     async def stream_response(self, dep: dict, payload: dict,
                               *, profile: str = "",
+                              ctx_est=None,
                               client_ip: str = "",
                               session: str | None = None,
                               attribution: dict | None = None,
@@ -1322,7 +1329,7 @@ truncation_hook=None,
         try:
             _cli = self._client_for(url, dep.get("api_key", ""))
             req = _cli.build_request("POST", url, json=_up, headers=headers,
-                                     **_timeout_kw(dep))
+                                     **_timeout_kw(dep, ctx_est))
             resp = await _cli.send(req, stream=True)
         except httpx.TimeoutException as exc:
             # Headers mai arrivati entro il read-timeout: l'upstream ha
@@ -1478,6 +1485,7 @@ truncation_hook=None,
 
     async def call(self, dep: dict, payload: dict, *,
                    profile: str = "",
+                   ctx_est=None,
                    client_ip: str = "",
                    session: str | None = None,
                    attribution: dict | None = None,
@@ -1510,7 +1518,7 @@ truncation_hook=None,
         try:
             resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=_up,
                                                     headers=headers,
-                                                    **_timeout_kw(dep))
+                                                    **_timeout_kw(dep, ctx_est))
         except httpx.TimeoutException as exc:
             # L'upstream ha APPESO (read/connect timeout): danno reale (tempo
             # perso) -> marker distinto, il fallback lo classifica "timeout"
@@ -1909,6 +1917,7 @@ truncation_hook=None,
                                     (cur,))
                 data = await self.call(dep, payload,
                                profile=profile or "",
+                               ctx_est=ctx,
                                client_ip=client_ip, session=session,
                                attribution=attribution,
                                rate_hook=lambda u, rl: router.note_rate_limit(
@@ -2060,7 +2069,7 @@ truncation_hook=None,
                                 503, "catena esaurita, nessun output utile",
                                  final=True)
                         router.note_result(cur, (time.monotonic() - t0) * 1000,
-                                           quality=0.5)
+                                           quality=0.5, ctx_est=ctx)
                         return data, dep, qc_failed
                 # ---- L2 #5 non conforme: retry correttivo/rotazione ----
                 if _so_rep.get("status") == "invalid" \
@@ -2140,7 +2149,7 @@ truncation_hook=None,
                 if collect_qc_failures and qc_failed:
                     _q = min(_q, 0.5)
                 router.note_result(cur, (time.monotonic() - t0) * 1000,
-                                   quality=_q)
+                                   quality=_q, ctx_est=ctx)
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"],
                                             (time.monotonic() - t0) * 1000,

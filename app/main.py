@@ -27,6 +27,7 @@ passive stream watchdog; per-request summary logs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -170,7 +171,7 @@ forwarder = Forwarder(keepalive_pool=policy.http_keepalive_pool)
 set_retry_after_floors(policy.retry_after_min_sec,
                        policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
-set_latency_lookup(router._get_avg_latency)
+set_latency_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx))
 set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
                      floor_sec=policy.adaptive_timeout_floor_sec,
                      multiplier=policy.adaptive_timeout_multiplier,
@@ -189,6 +190,14 @@ _last_stats_save = 0.0
 # probe/decay ripartono con l'eta' reale e la durata totale.
 _cooldown_file = VAR_DIR / "cooldown_state.json"
 _last_cooldown_save = 0.0
+# WARM-START DI ROUTING (var/routing_state.json): holder cache, sticky,
+# ownership warm, demote per-sessione, pin escalation e watermark ctxcompact.
+# Senza questo, ogni deploy ripartiva freddo: ri-rotazioni, ri-escalations e
+# — per il ctxcompact — frontiera regredita che ri-invalidava le cache.
+_routing_file = VAR_DIR / "routing_state.json"
+_last_routing_save = 0.0
+# i TEST settano GATEWAY_PERSIST_ROUTING=0: nessuna contaminazione col live
+PERSIST_ROUTING = os.environ.get("GATEWAY_PERSIST_ROUTING", "1") != "0"
 # job video asincroni (OR-style): job_id -> snapshot deployment per poll/content.
 # MAPPING IN MEMORIA con TTL: al restart i job in corso si perdono -> 404 con hint.
 _videos_jobs: dict[str, dict] = {}
@@ -369,6 +378,38 @@ def _load_cooldowns() -> None:
         log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
 
 
+def _maybe_save_routing_state(force: bool = False) -> None:
+    """Snapshot throttled (max ogni 60s + force allo shutdown) dello stato di
+    routing legato alle sessioni: il restart non deve azzerare il pool caldo."""
+    global _last_routing_save
+    if not PERSIST_ROUTING:
+        return
+    now = time.time()
+    if not force and now - _last_routing_save < 60:
+        return
+    _last_routing_save = now
+    try:
+        if not _save_json(_routing_file, router.dump_routing_state()):
+            log.debug("[warmstart] save fallito")
+    except Exception as exc:                 # noqa: BLE001
+        log.debug("[warmstart] save errore (%s)", exc)
+
+
+def _load_routing_state() -> None:
+    """All'avvio: ripristina lo stato di routing NON scaduto (validazione e
+    TTL dentro load_routing_state)."""
+    if not PERSIST_ROUTING:
+        return
+    try:
+        data = _load_json(_routing_file, dict)
+        if data:
+            rep = router.load_routing_state(data)
+            if any(rep.values()):
+                log.info("[warmstart] ripristinato %s", rep)
+    except Exception as exc:                 # mai bloccare lo startup
+        log.warning("[warmstart] load fallito (%s): riparto freddo", exc)
+
+
 def _bootstrap_runtime_from_logs() -> None:
     """All'avvio: ricostruisce le finestre rolling-24h (uso + probe) dal log,
     cosi' il cold-spread e il moltiplicatore dell'autoprobe non ripartono
@@ -443,6 +484,7 @@ async def _watcher(interval: float) -> None:
             router.purge_draining()     # draining scaduti oltre il TTL
             _maybe_save_adaptive_stats()
             _maybe_save_cooldowns()     # cooldown attivi su disco
+            _maybe_save_routing_state()  # warm-start sessioni
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
@@ -548,6 +590,7 @@ async def lifespan(_app: FastAPI):
     global _watch_task
     _load_adaptive_stats()                  # F4: ripristino EMA/cooldown
     _load_cooldowns()                       # cooldown NON scaduti (since/full)
+    _load_routing_state()                   # warm-start: holder/sticky/warm/pin/frontiere
     _bootstrap_runtime_from_logs()          # finestre 24h uso/probe dal log
     _load_thought_sigs()                    # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
@@ -586,6 +629,7 @@ async def lifespan(_app: FastAPI):
         await forwarder.aclose()
         _maybe_save_adaptive_stats(force=True)   # F4: salva allo shutdown
         _maybe_save_cooldowns(force=True)        # cooldown: salva allo shutdown
+        _maybe_save_routing_state(force=True)  # warm-start: stato sessioni
         _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
         _rows = LEDGER.flush_sync()              # ledger: nessuna riga persa
         log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
@@ -1425,7 +1469,8 @@ async def chat_completions(request: Request, response: Response):
                          "empty_assistant", "dup_system")})
     # ---- cache-aware: detentore sessione + troncamento contesto ----
     from .ctxcompact import (ctxcompact_config_from_policy,
-                             compact_tool_outputs, should_compact)
+                             compact_tool_outputs, should_compact,
+                             frontier_boundary)
     _cc = ctxcompact_config_from_policy(router.policy)
     _holder = router.session_holder(session_id)
     _max_in = int(dep.get("max_input_tokens") or 0)
@@ -1459,6 +1504,27 @@ async def chat_completions(request: Request, response: Response):
                      "saved≈%dtok reason=%s", session_id, _crep["stubbed"],
                      _crep.get("deduped", 0), _crep.get("args_trimmed", 0),
                      _crep["saved_tokens_est"], _dec["reason"])
+    # AUDIT DEL PREFISSO (F4): prima di spendere la cache a monte, impronta
+    # il prefisso [1:frontier] e dice perche' e' cambiato (se e' cambiato).
+    # 'identity' = colpa nostra (system/inject), 'prefix' = ctxcompact,
+    # histnorm o riscrittura del client. Solo osservabilita': nessun effetto
+    # sulla scelta del deployment.
+    if getattr(router.policy, "cache_prefix_audit", True) and session_id:
+        _bnd = (_crep.get("boundary")
+                if (_do_compact and _crep.get("changed")) else None)
+        if _bnd is None:
+            try:
+                _bnd = frontier_boundary(payload.get("messages") or [],
+                                         _cc, _max_in,
+                                         router.ctx_boundary_floor(session_id))
+            except Exception:                 # noqa: BLE001
+                _bnd = None
+        _aud = router.audit_prefix(session_id,
+                                   payload.get("messages") or [], _bnd)
+        metrics.inc("nx_cache_audit_total", (_aud,))
+        if _aud in ("identity", "prefix"):
+            log.info("[cache-audit] ses=%s prefisso MUTATO (%s, boundary=%s): "
+                     "cache upstream riparte da li'", session_id, _aud, _bnd)
     log.info("[cache] ses=%s holder=%s family=%s same_fam=%s compact=%s "
              "cold=%s reason=%s ctx≈%d max_in=%d", session_id, _holder or "-",
              dep.get("family") or "-", _same_family,
@@ -1499,6 +1565,7 @@ async def chat_completions(request: Request, response: Response):
             hook=_strike_hook(explicit_req, need),
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
+            cold=bool(_dec.get("cold")),
             ses=session_id, req=raw_model,
             session=_sess, client_ip=_cip, request=request,
             attribution=_attr, requested_group=group_or_explicit,
@@ -1999,6 +2066,135 @@ def _parachute_verdict(verdict: str, qcp, dep: dict, policy) -> str:
     return verdict
 
 
+async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
+                      hold_idle, hold_maxb, *, payload, profile, need,
+                      scope, ctx, tried_set, attempts, requested_group,
+                      session, client_ip, attribution, hedge_ms,
+                      _tr_cfg, _tct_cfg):
+    """F3 HEDGE sul primo contenuto (SOLO catena fredda, SOLO 1° tentativo,
+    SOLO pre-commit): A e' gia' aperto; se dopo `hedge_ms` non ha ancora un
+    verdetto, si apre il canary B (candidato successivo di fallback_next,
+    MAI un bucket pagato -go/-fallback) e i due peek corrono. Vince chi
+    IMPEGNA contenuto; il perdente viene annullato senza punizione (li'
+    abbiamo abortiti noi, non e' prova di upstream rotto) e nessun byte era
+    partito verso il client. Ritorna i valori di (dep, gen, t_att, verdict,
+    prebuf, pending, meta) del vincente."""
+    def _peek(g, fcm):
+        return _peek_stream(g, fcm, incl_reason, min_ch,
+                            hold_until_finish=False,
+                            hold_idle_ms=hold_idle,
+                            hold_max_bytes=hold_maxb)
+    futA = asyncio.ensure_future(_peek(gen, fc_ms))
+    done, _ = await asyncio.wait({futA}, timeout=max(0.05,
+                                                     hedge_ms / 1000.0))
+    if done:
+        return dep, gen, t_att, *await futA
+    try:
+        B = router.fallback_next(profile, dep, need, scope, ctx=ctx,
+                                 tried=tried_set,
+                                 requested_group=requested_group)
+    except Exception:
+        B = None
+    _paid = ""
+    if B is None or B.get("unique") in tried_set:
+        _paid = "nessun candidato"
+    else:
+        _grp = str(B.get("group") or "")
+        if _grp.endswith(router.config.go_suffix or "-go") \
+                or _grp.endswith(router.config.fallback_suffix
+                                 or "-fallback"):
+            _paid = "bucket pagato"
+    if _paid:
+        log.debug("[hedge] %s: niente canary (%s)", dep.get("unique"), _paid)
+        return dep, gen, t_att, *await futA
+    tB = time.monotonic()
+    p2 = dict(payload)
+    inject_identity(p2, B, router=router)
+
+    def _hookB(_salvaged, _u=B["unique"]):
+        metrics.inc("nx_truncated_toolcall_total",
+                    (_u, "salvaged" if _salvaged else "dropped"))
+        router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
+                           reason="truncated_toolcall")
+
+    router.note_start(B["unique"])
+    genB = None
+    try:
+        genB = await forwarder.stream_response(
+            B, p2, profile=profile or "", ctx_est=ctx,
+            client_ip=client_ip, session=session, attribution=attribution,
+            tool_repair_config=_tr_cfg, truncation_config=_tct_cfg,
+            truncation_hook=_hookB,
+            rate_hook=lambda u, rl: router.note_rate_limit(u, rl))
+        if router.is_cooled_down(B["unique"]):
+            router.clear_cooldown(B["unique"])
+        futB = asyncio.ensure_future(
+            _peek(genB, router.first_content_deadline_ms(B["unique"], ctx)))
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:
+        if genB is not None:
+            await _discard_stream(genB, None)
+        try:
+            router.note_end(B["unique"])
+        except Exception:
+            pass
+        log.info("[hedge] canary %s non disponibile (%s): attendo A",
+                 B.get("unique"), type(exc).__name__)
+        return dep, gen, t_att, *await futA
+    log.info("[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
+             dep.get("unique"), hedge_ms, B.get("unique"))
+    results: dict = {}
+    winner = None
+    running = {futA, futB}
+    while running:
+        completed, running = await asyncio.wait(
+            running, return_when=asyncio.FIRST_COMPLETED)
+        f = completed.pop()
+        try:
+            results[f] = f.result()
+        except BaseException:
+            results[f] = ("error", [], None, {})
+        if results[f][0] == "content":
+            winner = f
+            break
+    if winner is None:
+        for f in tuple(running):
+            try:
+                results[f] = await f
+            except BaseException:
+                results[f] = ("error", [], None, {})
+        winner = futA          # nessuno dei due impegna: rotazione col verdetto di A
+    if winner is futB:
+        futA.cancel()
+        with contextlib.suppress(BaseException):
+            await futA
+        await _discard_stream(gen, None)
+        attempts.append(B["unique"])
+        tried_set.add(B["unique"])
+        log.info("[hedge] vince %s (A=%s annullato, non punito)",
+                 B.get("unique"), dep.get("unique"))
+        return B, genB, tB, *results[futB]
+    # vince A (contenuto o verdetto di rotazione): B annullato senza punizione
+    if not futB.done():
+        futB.cancel()
+    with contextlib.suppress(BaseException):
+        await futB
+    _rB = results.get(futB)
+    await _discard_stream(genB, _rB[2] if _rB and len(_rB) > 2 else None)
+    try:
+        router.note_end(B["unique"])
+    except Exception:
+        pass
+    _rA = results.get(futA)
+    if _rA is None:
+        try:
+            _rA = await futA
+        except BaseException:
+            _rA = ("timeout", [], None, {})
+    return dep, gen, t_att, *_rA
+
+
 async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 payload: dict, need: frozenset[str] = frozenset(),
                                 hook=None, scope: str = "chain",
@@ -2010,6 +2206,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 request: "Request | None" = None,
                                 attribution: dict | None = None,
                                 requested_group: str | None = None,
+                                cold: bool = False,
                                 sniffer=None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
@@ -2043,6 +2240,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _sm = sampling_config_from_policy(router.policy)
     _synth: list[bytes] = []
     t_req = time.monotonic()
+    try:
+        _hedge_ms = int(getattr(router.policy.qc_json,
+                                "stream_hedge_delay_ms", 0) or 0)
+    except Exception:
+        _hedge_ms = 0
     attempts: list[str] = []
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
     # Gemini 3 tool replay: una history con tool_call prive di firma rende Gemini
@@ -2082,6 +2284,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                        reason="truncated_toolcall")
             gen = await forwarder.stream_response(dep, payload,
                                                   profile=profile or "",
+                                                  ctx_est=ctx,
                                                   client_ip=client_ip,
                                                   session=session,
                                                   attribution=attribution,
@@ -2107,7 +2310,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # dep scelto, con pavimento e tetto. Un dep normalmente veloce che
             # stalla non trattiene la richiesta per il cap; un dep lento ha un
             # margine proporzionato (mai oltre il cap). EMA ignota -> cap.
-            fc_ms = router.first_content_deadline_ms(dep["unique"])
+            fc_ms = router.first_content_deadline_ms(dep["unique"], ctx)
             incl_reason = bool(getattr(qcp, "stream_commit_include_reasoning",
                                        False))
             min_ch = int(getattr(qcp, "stream_commit_min_chars", 40) or 0)
@@ -2121,10 +2324,25 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             or 120000)
             hold_maxb = int(getattr(qcp, "stream_hold_max_buffer_bytes",
                                     52428800) or 52428800)
-            verdict, prebuf, pending, meta = await _peek_stream(
-                gen, fc_ms, incl_reason, min_ch,
-                hold_until_finish=hold, hold_idle_ms=hold_idle,
-                hold_max_bytes=hold_maxb)
+            # --- peek + HEDGE (F3): solo catena FREDDA, primo tentativo,
+            # mai in hold-mode. Il loser viene annullato SENZA punirlo:
+            # l'abbiamo interrotto noi, non e' prova di upstream rotto. ---
+            if cold and tried == 1 and not hold and _hedge_ms > 0:
+                (dep, gen, t_att, verdict, prebuf, pending,
+                 meta) = await _hedge_peek(
+                    dep, gen, t_att, fc_ms, incl_reason, min_ch,
+                    hold_idle, hold_maxb, payload=payload,
+                    profile=profile, need=need, scope=scope, ctx=ctx,
+                    tried_set=tried_set, attempts=attempts,
+                    requested_group=requested_group, session=session,
+                    client_ip=client_ip, attribution=attribution,
+                    hedge_ms=_hedge_ms, _tr_cfg=_tr_cfg,
+                    _tct_cfg=_tct_cfg)
+            else:
+                verdict, prebuf, pending, meta = await _peek_stream(
+                    gen, fc_ms, incl_reason, min_ch,
+                    hold_until_finish=hold, hold_idle_ms=hold_idle,
+                    hold_max_bytes=hold_maxb)
             # FIX paracadute: sulla catena -go/-fallback (ULTIMO scaglione del
             # ladder) il timeout sul primo contenuto NON deve produrre un 503:
             # li' non c'e' piu' nessuno dietro a cui ruotare, quindi si
@@ -2180,11 +2398,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # scorciatoia per le prossime richieste di QUEL bucket.
                 router.note_result(dep["unique"],
                                    (time.monotonic() - t_att) * 1000,
-                                   quality=_quality)
+                                   quality=_quality, ctx_est=ctx,
+                                   kind="ttft")
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"],
                                             (time.monotonic() - t_att) * 1000,
-                                            ctx_est=ctx)
+                                            ctx_est=ctx, kind="ttft")
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)
@@ -2632,6 +2851,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 monitor.cancel()
             dur_ms = int((time.monotonic() - t_req) * 1000)
             router.note_end(dep["unique"])
+            if not aborted:
+                # F1: durata TOTALE del tentativo vincente nel bucket di
+                # contesto (il commit ha gia' registrato il TTFT).
+                router.note_stream_end(dep["unique"],
+                                       (time.monotonic() - t_att) * 1000, ctx)
             # NB (fix): il watchdog NON inietta mai nulla nello stream verso il
             # client (un `data:` non-conforme viene renderizzato come testo da
             # opencode & simili). L'unica reazione automatica e' il cooldown del

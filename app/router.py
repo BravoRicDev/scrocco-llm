@@ -25,6 +25,7 @@ multimodal last resort for pure text; explicit floors escalate upward.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import math
@@ -64,6 +65,26 @@ LATENCY_ROTATE_THRESHOLD_MS = 90000   # 90 seconds default threshold
 # (> LATENCY_ROTATE_THRESHOLD_MS) vale invece per qualunque richiesta.
 SOFT_SLOW_LATENCY_MS = 60000
 SOFT_SLOW_CTX_MIN = 30000
+# BUCKET DI CONTESTO per le EMA di latenza: un dep che vola su 5k token non e'
+# lo stesso dep che stalla su 100k. Bordi DESTRI: ctx < 8000 -> 0;
+# 8000..31999 -> 1; 32000..127999 -> 2; >=128000 -> 3.
+CTX_BUCKETS = (8000, 32000, 128000)
+# Demote per-sessione SOLO se la chiamata e' lenta sia in termini ASSOLUTI sia
+# RELATIVI alla baseline del dep nello STESSO bucket (>2x): chi ha sempre
+# servito i contesti grossi non viene punito per la sua natura.
+SLOW_REL_BASELINE_MULT = 2.0
+
+
+def _ctx_bucket(ctx_est) -> int:
+    """Indice di bucket per la stima token del contesto; -1 = ignoto."""
+    try:
+        c = int(ctx_est)
+    except (TypeError, ValueError):
+        return -1
+    for i, edge in enumerate(CTX_BUCKETS):
+        if c < edge:
+            return i
+    return len(CTX_BUCKETS)
 
 
 class ErrorKind:
@@ -413,6 +434,15 @@ class Router:
         # la sessione: uno stub scritto non torna mai contenuto pieno (byte
         # stabili -> prompt-cache valida). Lazy via _ctx_frontiers().
         self._ctx_frontier: dict[str, tuple[int, float]] = {}
+        # AUDIT PREFISSO (F4): session -> (h_body, h_sys, ts). L'impronta del
+        # prefisso [1:frontier] dice PERCHE' la cache upstream si e' spenta.
+        self._prefix_fp: dict[str, tuple[str, str, float]] = {}
+        # SOFT-PER-CHIAVE (F6/F7): tag sha(api_key)[:12] -> snapshot header
+        # (ts, remaining) e blocco 429 (until_ts). Skip a pick, ZERO cooldown
+        # e ZERO strike: la twin deployment sulla stessa chiave non e'
+        # "rotta", e' solo saziata adesso.
+        self._key_hints: dict[str, tuple[float, float]] = {}
+        self._key_soft: dict[str, float] = {}
         # COLD SPREAD: finestra ROLLING di 24h dei TENTATIVI per-deployment
         # (ok+fail, ESCLUSI i probe: quelli restano in autoprobe._probe_times).
         # Serve a NASCONDERE dai candidati il 20% (configurabile) piu' usato
@@ -434,6 +464,10 @@ class Router:
         self._provider_scores: dict[str, float] = {}   # provider_model -> group score
         self._key_scores: dict[str, float] = {}        # api_key -> group score
         self._avg_latencies: dict[str, float] = {}     # unique -> average latency
+        # EMA PER BUCKET DI CONTESTO (vedi CTX_BUCKETS): totali e TTFT separate.
+        # unique -> [e0,e1,e2,e3]; 0.0 = nessun campione per quel bucket.
+        self._lat_buckets: dict[str, list] = {}
+        self._ttft_buckets: dict[str, list] = {}
         # Time-decay dei punteggi di reputazione (halflife da policy).
         self._scores_decay_ts: float = time.time()
         self._scores_decay_log_ts: float = time.time()
@@ -671,6 +705,55 @@ class Router:
                 _oldest = min(d, key=lambda k: d[k][1])
                 d.pop(_oldest, None)
 
+    # ------------------------------------------------- audit del prefisso (F4)
+    def audit_prefix(self, session_id: str | None, messages,
+                     boundary: int | None) -> str:
+        """Impronta SHA-256 (16 hex) del PREFISSO canonico [1:boundary] e del
+        system message [0], confrontata con la richiesta precedente della
+        stessa sessione. Motivi: 'new' (prima vista), 'ok' (prefisso identico:
+        la cache a monte E' riusabile), 'identity' (cambiato SOLO il system:
+        siamo noi, rotazione/inject_identity), 'prefix' (cambiato il corpo:
+        ctxcompact/histnorm o riscrittura del client), 'skip' (non calcolabile).
+        Funzione pura dei byte: nessun effetto su routing/pick."""
+        if not session_id or not isinstance(messages, list) \
+                or boundary is None or boundary < 2 or len(messages) < 2:
+            return "skip"
+        try:
+            body = json.dumps(messages[1:boundary], sort_keys=True,
+                              separators=(",", ":"), default=str)
+            sysm = messages[0] if isinstance(messages[0], dict) else None
+            sysb = json.dumps(sysm, sort_keys=True, separators=(",", ":"),
+                              default=str)
+        except Exception:                       # noqa: BLE001
+            return "skip"
+        h_body = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16]
+        h_sys = hashlib.sha256(sysb.encode("utf-8", errors="replace")).hexdigest()[:16]
+        now = time.time()
+        reg = getattr(self, "_prefix_fp", None)
+        if reg is None:
+            reg = {}
+            self._prefix_fp = reg
+        prev = reg.get(session_id)
+        if prev is not None and now - prev[2] > self._guard_sec():
+            prev = None
+        if prev is None:
+            reason = "new"
+        elif prev[0] == h_body and prev[1] == h_sys:
+            reason = "ok"
+        elif prev[0] == h_body:
+            reason = "identity"
+        else:
+            reason = "prefix"
+        reg[session_id] = (h_body, h_sys, now)
+        if len(reg) > 4096:
+            for s in [s for s, (_b, _y, t) in reg.items()
+                      if now - t > self._guard_sec()]:
+                reg.pop(s, None)
+            while len(reg) > 4096:
+                _oldest = min(reg, key=lambda k: reg[k][2])
+                reg.pop(_oldest, None)
+        return reason
+
     # --------------------------------------------- cold usage spread
     _USAGE_WINDOW = 86400.0
 
@@ -862,16 +945,19 @@ class Router:
     def note_session_success(self, session_id: str | None,
                              unique: str | None,
                              latency_ms: float | None = None,
-                             ctx_est: int | None = None) -> None:
+                             ctx_est: int | None = None,
+                             kind: str = "total") -> None:
         """Ricorda l'ultimo deployment che ha servito con SUCCESSO la
         sessione (detentore cache) + l'inverso per la SESSION-DEP GUARD.
         Con `latency_ms` sopra soglia marca il dep come 'lento per la
         sessione' (hard); con latenza intermedia e `ctx_est` pesante marca
-        soft (demote solo per richieste pesanti). In-memory."""
+        soft (demote solo per richieste pesanti). `kind` dice COSA vale
+        quella latenza ('total' o 'ttft') per il confronto relativo col
+        bucket. In-memory."""
         if not session_id or not unique:
             return
         self._note_dep_session(session_id, unique)
-        self._note_session_slow(session_id, unique, latency_ms, ctx_est)
+        self._note_session_slow(session_id, unique, latency_ms, ctx_est, kind)
         if not getattr(self.policy, "cache_aware_enabled", True):
             return
         d = self._cache_ok()
@@ -1294,11 +1380,93 @@ class Router:
                     unique, _tag, int(seconds), esc, s.fail_streak,
                     s.fail_count_24h)
 
+        # F7: il 429 e' quasi sempre un fatto di CHIAVE/account, non del
+        # singolo deployment: bloccare soft (skip a pick, zero strike/zero
+        # cooldown) TUTTE le twin sulla stessa api_key per il Retry-After.
+        if reason == "http_429" and \
+                getattr(pol, "key_soft_429_enabled", True):
+            _d429 = self.config.deployment_by_unique(unique)
+            _k429 = (_d429 or {}).get("api_key")
+            if isinstance(_k429, str) and _k429:
+                _tag429 = hashlib.sha256(
+                    _k429.encode("utf-8", errors="replace")).hexdigest()[:12]
+                _cap = max(10.0, float(getattr(pol, "key_soft_max_sec",
+                                               900) or 900))
+                _until = _now + min(float(seconds), _cap)
+                _sd = getattr(self, "_key_soft", None)
+                if _sd is None:
+                    _sd = {}
+                    self._key_soft = _sd
+                if float(_sd.get(_tag429, 0.0)) < _until:
+                    _sd[_tag429] = _until
+                    log.info("[key-soft] chiave %s*: skip soft %ds "
+                             "(429 su %s)", _tag429[:6],
+                             int(min(float(seconds), _cap)), unique)
+
         # --- Circuit Breaker (hybrid: dep sempre, key solo errori di chiave) ---
         self._update_circuit_breaker_on_failure(
             unique, key_level=self._is_key_level_failure(status, reason))
 
         return seconds
+
+    # ------------------------------- soft skip PER-CHIAVE (F6/F7, zero colpa)
+    def _key_tag(self, unique: str) -> str | None:
+        """Tag stabile (hash, mai la chiave in chiaro) della api_key del
+        deployment; None se ignota."""
+        dep = self.config.deployment_by_unique(unique)
+        if not dep:
+            return None
+        k = dep.get("api_key")
+        if not isinstance(k, str) or not k:
+            return None
+        return hashlib.sha256(k.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+    def _key_fault_blocked(self, unique: str) -> bool:
+        """Vero se la CHIAVE del deployment e' momentaneamente sazia:
+        - F7: 429 appena preso -> blocco soft per tutto il Retry-After
+          (tetto key_soft_max_sec) sull'INTERA chiave: le twin sulla stessa
+          account rifarebbero solo un altro 429;
+        - F6: header X-RateLimit-Requests-remaining fresco (ttl) e basso.
+        Nessuna punizione: niente cooldown reale, niente strike, niente
+        reputazione. Vale SOLO sul free-world (gruppi dims/cap): i bucket
+        pagati -go/-fallback sono la RISERVA a cui si chiede comunque il
+        possibile. Altra sessione, stessa chiave: bloccata uguale (e' verita'
+        del provider, non della sessione)."""
+        if not getattr(self.policy, "rate_hint_skip_enabled", True):
+            return False
+        dep = self.config.deployment_by_unique(unique)
+        if not dep:
+            return False
+        g = dep.get("group", "")
+        try:
+            if self.config.group_caps.get(g) is not None \
+                    or self._is_renewal_bucket(g):
+                return False
+        except Exception:                       # noqa: BLE001
+            return False
+        k = dep.get("api_key")
+        if not isinstance(k, str) or not k:
+            return False
+        tag = hashlib.sha256(k.encode("utf-8", errors="replace")).hexdigest()[:12]
+        now = time.time()
+        if not getattr(self.policy, "key_soft_429_enabled", True):
+            soft = {}
+        else:
+            soft = getattr(self, "_key_soft", None) or {}
+        if float(soft.get(tag, 0.0)) > now:
+            return True
+        if not getattr(self.policy, "rate_hint_skip_enabled", True):
+            return False
+        rec = (getattr(self, "_key_hints", None) or {}).get(tag)
+        if not rec:
+            return False
+        ts, rem = rec
+        ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec",
+                                     20.0) or 20.0))
+        if now - ts > ttl:
+            return False
+        cap = int(getattr(self.policy, "rate_hint_remaining_max", 5) or 5)
+        return rem <= cap
 
     def note_rate_limit(self, unique: str, rl: dict) -> None:
         """Hint quota dagli header X-RateLimit-*: se le richieste rimanenti
@@ -1306,6 +1474,26 @@ class Router:
         Il budget guard dosera' lo scoring (deprioritizzazione) senza bisogno
         di un cooldown. Solo-riduzione: il cap puo' solo scendere con gli hint,
         poi si ri-apprende dai 429 reali."""
+        # F6: snapshot SEMPRE (indipendente dal budget guard): alimenta il
+        # soft skip per-chiave di durata ttl, senza alcuna punizione.
+        if getattr(self.policy, "rate_hint_skip_enabled", True):
+            try:
+                _rem = float((rl or {}).get("requests_remaining"))
+            except (TypeError, ValueError):
+                _rem = -1.0
+            if _rem >= 0:
+                tag = self._key_tag(unique)
+                if tag:
+                    d = getattr(self, "_key_hints", None)
+                    if d is None:
+                        d = {}
+                        self._key_hints = d
+                    d[tag] = (time.time(), _rem)
+                    if len(d) > 8192:
+                        _now = time.time()
+                        for k in [k for k, (t, _r) in d.items()
+                                  if _now - t > 3600]:
+                            d.pop(k, None)
         bg = self.policy.budget_guard or {}
         if not bg.get("enabled"):
             return
@@ -1684,12 +1872,19 @@ class Router:
         log.debug("[rep-attempt] %s provider+=%d key+=%d", unique, SW["ATTEMPT_PROVIDER"], SW["ATTEMPT_KEY"])
 
     def record_success(self, unique: str, latency_ms: float,
-                       quality: float = 1.0) -> None:
+                       quality: float = 1.0, ctx_est=None,
+                       kind: str = "total") -> None:
         """Registra un successo: decrementa i punteggi per deployment, provider, chiave.
 
         `quality` in [0.1, 1.0] scala l'alpha dell'EMA di latenza: una risposta
         "sporca" (tool_repair, fake tool-call, QC fallita, stallo) pesa meno e
-        degrada l'EMA piu' lentamente."""
+        degrada l'EMA piu' lentamente.
+
+        `ctx_est` + `kind` attivano le EMA PER BUCKET DI CONTESTO: 'total' e'
+        la durata del giro completo (non-stream e fine-stream), 'ttft' e' il
+        tempo al primo contenuto (commit dello stream). L'EMA globale
+        `_avg_latencies` resta mista per compatibilita' (timeout adattivo,
+        tie-breaker); i consumatori sensibili al contesto leggono i bucket."""
         if not hasattr(self, 'config') or self.config is None:
             return
         dep = self.config.deployment_by_unique(unique)
@@ -1713,10 +1908,66 @@ class Router:
             log.info("[latency-cross] %s ema superata soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg or 0, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
         elif old_avg and old_avg >= LATENCY_ROTATE_THRESHOLD_MS and ema_new < LATENCY_ROTATE_THRESHOLD_MS:
             log.info("[latency-cross] %s ema rientrata sotto soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
+        # --- EMA per bucket di contesto (F1) + history per il p95 dinamico ---
+        self._note_latency_sample(unique, latency_ms, ctx_est, kind, alpha)
         log.debug("[rep-success] %s dep+=%d provider+=%d key+=%d ema=%.0fms", unique, SW["SUCCESS_DEPLOYMENT"], SW["SUCCESS_PROVIDER"], SW["SUCCESS_KEY"], latency_ms)
 
         # --- Circuit Breaker: success updates ---
         self._update_circuit_breaker_on_success(unique)
+
+    def _note_latency_sample(self, unique: str, latency_ms: float,
+                             ctx_est, kind: str, alpha: float) -> None:
+        """Aggiorna l'EMA del bucket giusto (total o ttft) e, per i totali con
+        contesto noto, la history usata dal p95 del dynamic scoring."""
+        try:
+            lat = float(latency_ms)
+        except (TypeError, ValueError):
+            return
+        if lat <= 0:
+            return
+        b = _ctx_bucket(ctx_est)
+        if b < 0:
+            return
+        table = getattr(self, "_ttft_buckets" if kind == "ttft"
+                        else "_lat_buckets", None)
+        if not isinstance(table, dict):
+            return
+        v = table.get(unique)
+        if v is None:
+            v = [0.0] * len(CTX_BUCKETS)
+            table[unique] = v
+        while len(v) < len(CTX_BUCKETS):
+            v.append(0.0)
+        old = v[b]
+        v[b] = lat if old <= 0 else old * (1 - alpha) + lat * alpha
+        if kind != "ttft":
+            s = self.stats_for(unique)
+            if s is not None:
+                h = s.latency_history
+                if h is None:
+                    h = s.latency_history = []
+                h.append((b, lat))
+                if len(h) > 20:
+                    del h[:-20]
+
+    def bucket_latency_ms(self, unique: str, ctx_est=None,
+                          kind: str = "total") -> float | None:
+        """EMA del deployment nel bucket di contesto della richiesta; se il
+        bucket non ha campioni, ripiega sull'EMA globale (compat)."""
+        b = _ctx_bucket(ctx_est)
+        table = getattr(self, "_ttft_buckets" if kind == "ttft"
+                        else "_lat_buckets", None)
+        if b >= 0 and isinstance(table, dict):
+            v = table.get(unique)
+            if v and len(v) > b and v[b] > 0:
+                return float(v[b])
+        return getattr(self, "_avg_latencies", {}).get(unique)
+
+    def note_stream_end(self, unique: str, dur_ms: float, ctx_est=None) -> None:
+        """Durata TOTALE di uno stream committed: alimenta solo i bucket
+        'total' (il punteggio di reputazione e l'EMA globale li ha gia'
+        contati il commit sul primo contenuto)."""
+        self._note_latency_sample(unique, dur_ms, ctx_est, "total", 0.1)
 
     def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:
         """Registra un fallimento: incrementa i punteggi per deployment, provider, chiave."""
@@ -1736,7 +1987,8 @@ class Router:
             self._key_scores[self._api_key_str(dep)] = self._key_scores.get(self._api_key_str(dep), 0) + SW["FAIL_KEY"]
         log.debug("[rep-fail] %s dep+=%d provider+=%d key+=%d is_key=%s", unique, SW["FAIL_DEPLOYMENT"], SW["FAIL_PROVIDER"], SW["FAIL_KEY"], is_key_fail)
 
-    def _reputation_score(self, unique: str, dep: dict) -> float:
+    def _reputation_score(self, unique: str, dep: dict,
+                          ctx_est=None) -> float:
         """Calcola il punteggio di reputazione per un deployment."""
         if not hasattr(self, 'config') or self.config is None:
             return 0.0
@@ -1796,9 +2048,10 @@ class Router:
         score += key_score
 
         # NEW: Latency penalty — annuls success advantage for slow deployments
-        # Uses _avg_latencies[unique] which is PER-DEPLOYMENT scoped,
-        # so other deployments sharing the same provider/key are NOT affected
-        ema = self._avg_latencies.get(unique, 0)
+        # Uses the deployment's latency EMA IN THE CONTEXT BUCKET of this very
+        # request (per-deployment scoped: altri dep sulla stessa chiave non
+        # vengono toccati), con fallback all'EMA globale.
+        ema = self.bucket_latency_ms(unique, ctx_est) or 0
         if ema > LATENCY_ROTATE_THRESHOLD_MS:
             over_seconds = (ema - LATENCY_ROTATE_THRESHOLD_MS) / 1000.0
             penalty = over_seconds * LATENCY_PENALTY_PER_SEC  # e.g., 0.5 per second
@@ -1839,12 +2092,31 @@ class Router:
             stats = self._stats[unique]
             hist = stats.latency_history or []
             if hist and len(hist) >= 3:
-                # p95 latency
-                sorted_hist = sorted(hist)
-                p95_idx = max(0, int(len(sorted_hist) * 0.95) - 1)
-                p95_latency = sorted_hist[p95_idx]
-                p95_weight = getattr(self.policy, "dynamic_scoring_latency_p95_weight", 1.0)
-                score += (p95_latency / 1000.0) * p95_weight  # ms -> sec * weight
+                # F1: i campioni sono (bucket, latenza). p95 SUL BUCKET della
+                # richiesta corrente quando ci sono >=3 campioni li', altrimenti
+                # su tutti i campioni. Cap di sicurezza sul penalty (il blocco
+                # era morto fino a ora: non deve dominare il punteggio SW).
+                b = _ctx_bucket(ctx_est)
+
+                def _sample(x):
+                    if isinstance(x, (tuple, list)) and len(x) == 2:
+                        return int(x[0]), float(x[1])
+                    return -1, float(x)
+
+                pairs = [_sample(x) for x in hist]
+                if b >= 0:
+                    samples = [lat for bb, lat in pairs if bb == b]
+                else:
+                    samples = [lat for _, lat in pairs]
+                if len(samples) < 3:
+                    samples = [lat for _, lat in pairs]
+                if samples and len(samples) >= 3:
+                    # p95 latency
+                    sorted_hist = sorted(samples)
+                    p95_idx = max(0, int(len(sorted_hist) * 0.95) - 1)
+                    p95_latency = sorted_hist[p95_idx]
+                    p95_weight = getattr(self.policy, "dynamic_scoring_latency_p95_weight", 1.0)
+                    score += min(25.0, (p95_latency / 1000.0) * p95_weight)
 
                 # error_rate in recent window
                 recent_attempts = stats.recent_attempts or 0
@@ -1875,14 +2147,18 @@ class Router:
             return None
         return self._avg_latencies.get(unique)
 
-    def _is_slow_dep(self, unique: str) -> bool:
-        """True se la latenza media storica del deployment supera la soglia di
-        rotazione (LATENCY_ROTATE_THRESHOLD_MS, 90s di default).
+    def _is_slow_dep(self, unique: str, ctx_est=None) -> bool:
+        """True se la latenza del deployment supera la soglia di rotazione
+        (LATENCY_ROTATE_THRESHOLD_MS, 90s di default).
+
+        Con `ctx_est` noto usa l'EMA nel BUCKET DI CONTESTO giusto (un key
+        velocissimo su 5k non e' velocissimo su 100k); senza dati nel bucket
+        ripiega sull'EMA globale, come prima.
 
         Serve a NON tenere un key lento nel tier "caldi"/sticky: una latenza
         sopra soglia lo fa USCIIRE dal pool caldo e dallo sticky, ma resta
         eleggibile nel ladder come riserva (non lo mettiamo in quarantena)."""
-        avg = getattr(self, "_avg_latencies", {}).get(unique)
+        avg = self.bucket_latency_ms(unique, ctx_est)
         return avg is not None and float(avg) > LATENCY_ROTATE_THRESHOLD_MS
 
     def is_slow_for_session(self, unique: str,
@@ -1901,6 +2177,8 @@ class Router:
         STESSA sessione: torna pescabile solo all'ultimo scaglione
         (-fallback/ultima spiaggia). Un successo rapido ripulisce il marchio.
         Le ALTRE sessioni non sono toccate."""
+        if self._key_fault_blocked(unique):
+            return True
         if not getattr(self.policy, "warm_pool_enabled", True):
             return False
         sid = session_id or current_session()
@@ -1929,14 +2207,20 @@ class Router:
 
     def _note_session_slow(self, session_id: str | None, unique: str,
                            latency_ms: float | None,
-                           ctx_est: int | None = None) -> None:
+                           ctx_est: int | None = None,
+                           kind: str = "total") -> None:
         """Marchia (o ripulisce) `unique` come 'lento per la sessione'. Solo
         free-dims (mai -go/-fallback ne' gruppi capacita'), come la warm
         ownership: e' li' che la latenza e' un segnale utile. HARD oltre
         LATENCY_ROTATE_THRESHOLD_MS (vale sempre); SOFT tra
         SOFT_SLOW_LATENCY_MS e la soglia hard SOLO se la chiamata marcatrice
         era pesante (ctx_est > SOFT_SLOW_CTX_MIN): demotera' solo le future
-        richieste pesanti della sessione."""
+        richieste pesanti della sessione.
+
+        Novita' F1: la demote scatta solo se la chiamata e' lenta ANCHE
+        RELATIVAMENTE alla baseline del dep nello STESSO bucket di contesto
+        e dello STESSO tipo di misura (`kind`, > SLOW_REL_BASELINE_MULT *):
+        un dep che serve abitualmente 100k in 95s non e' 'lento', e' cosi'."""
         if not session_id or not unique:
             return
         if not getattr(self.policy, "warm_pool_enabled", True):
@@ -1957,9 +2241,16 @@ class Router:
         except (TypeError, ValueError):
             heavy = False
         d = self._sess_slow()
-        hard = lat is not None and lat > LATENCY_ROTATE_THRESHOLD_MS
+        # Baseline del dep nel bucket/tipo DI QUESTA chiamata (include il
+        # campione corrente: l'alpha 0.3 lascia comunque vincere gli outlier).
+        base = self.bucket_latency_ms(unique, ctx_est,
+                                      kind="ttft" if kind == "ttft" else "total")
+        relative_ok = base is None or base <= 0 or lat is None \
+            or lat > SLOW_REL_BASELINE_MULT * float(base)
+        hard = (lat is not None and lat > LATENCY_ROTATE_THRESHOLD_MS
+                and relative_ok)
         soft = (not hard) and lat is not None \
-            and lat > SOFT_SLOW_LATENCY_MS and heavy
+            and lat > SOFT_SLOW_LATENCY_MS and heavy and relative_ok
         if hard or soft:
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
         else:
@@ -1986,23 +2277,27 @@ class Router:
         soglia OPPURE successo lento registrato per QUESTA sessione (hard:
         sempre; soft: solo con ctx pesante > SOFT_SLOW_CTX_MIN). Resta
         eleggibile nell'ultimo scaglione (-fallback/ultima spiaggia)."""
-        return (self._is_slow_dep(unique)
+        return (self._is_slow_dep(unique, ctx)
                 or self.is_slow_for_session(unique, session_id, ctx))
 
-    def first_content_deadline_ms(self, unique: str) -> int:
+    def first_content_deadline_ms(self, unique: str, ctx_est=None) -> int:
         """Finestra d'attesa del primo contenuto per `unique`.
 
         Fissa se `stream_first_content_adaptive` e' False; altrimenti:
-            min(cap, max(floor, mult * EMA_latenza_dep))
-        con `cap = stream_first_content_ms`. EMA ignota/0 -> cap. Cosi' un dep
-        normalmente veloce che stalla ruota presto, mentre un dep lento mantiene
-        un margine proporzionato (mai oltre il cap)."""
+            min(cap, max(floor, mult * TTFT_EMA_del_bucket))
+        con `cap = stream_first_content_ms`. Il segnale e' il TEMPO AL PRIMO
+        CONTENUTO (cio' che il peek aspetta davvero), nel bucket di contesto
+        della richiesta; senza campioni TTFT ripiega sull'EMA globale, EMA
+        ignota/0 -> cap. Cosi' un dep normalmente veloce che stalla ruota
+        presto, mentre un dep lento mantiene un margine proporzionato (mai
+        oltre il cap)."""
         qcp = getattr(self.policy, "qc_json", None)
         cap = max(2000, int(getattr(qcp, "stream_first_content_ms", 20000)
                             or 20000))
         if not bool(getattr(qcp, "stream_first_content_adaptive", True)):
             return cap
-        ema = float(self._get_avg_latency(unique) or 0.0)
+        ema = float(self.bucket_latency_ms(unique, ctx_est,
+                                           kind="ttft") or 0.0)
         if ema <= 0:
             return cap
         mult = float(getattr(qcp, "stream_first_content_mult", 3.0) or 3.0)
@@ -2257,6 +2552,23 @@ class Router:
                 _sd[s] = live
             else:
                 _sd.pop(s, None)
+        # AUDIT prefisso: le impronte vecchie come la guard non servono.
+        _pf = getattr(self, "_prefix_fp", None)
+        if isinstance(_pf, dict):
+            for s in [s for s, (_b, _y, t) in _pf.items() if now - t > _gttl]:
+                _pf.pop(s, None)
+        # SOFT-PER-CHIAVE: hint scaduti (ttl x2) e blocchi oltre la scadenza.
+        _kh = getattr(self, "_key_hints", None)
+        if isinstance(_kh, dict):
+            _kttl = max(120.0, float(getattr(self.policy, "rate_hint_ttl_sec",
+                                             20.0) or 20.0) * 2)
+            for tag in [t for t, (ts, _r) in _kh.items()
+                        if now - ts > _kttl]:
+                _kh.pop(tag, None)
+        _ks = getattr(self, "_key_soft", None)
+        if isinstance(_ks, dict):
+            for tag in [t for t, until in _ks.items() if until <= now]:
+                _ks.pop(tag, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
         for u in dead_cd:
             self._cooldown.pop(u, None)
@@ -2297,6 +2609,8 @@ class Router:
             for u in stale_base:
                 self._base_scores.pop(u, None)
                 self._avg_latencies.pop(u, None)
+                getattr(self, "_lat_buckets", {}).pop(u, None)
+                getattr(self, "_ttft_buckets", {}).pop(u, None)
             # Cleanup provider/key scores vecchi: mantieni solo chiavi attive
             active_providers = set()
             active_keys = set()
@@ -2488,7 +2802,8 @@ class Router:
         self.note_usage(unique)
 
     def note_result(self, unique: str, latency_ms: float,
-                    quality: float = 1.0) -> None:
+                    quality: float = 1.0, ctx_est=None,
+                    kind: str = "total") -> None:
         """Risposta ricevuta: aggiorna l'EMA di latenza (non tocca inflight:
         per lo streaming chiude la nota_end al termine del flusso).
         Resetta anche lo streak di fallimenti e aggiorna il tasso successo.
@@ -2510,7 +2825,8 @@ class Router:
         s.ok_count += 1
         s.last_success_ts = time.time()
         # [Blocco 1] Registra successo per reputation scoring
-        self.record_success(unique, latency_ms, quality=q)
+        self.record_success(unique, latency_ms, quality=q,
+                            ctx_est=ctx_est, kind=kind)
         # Dynamic concurrency limit: successo a saturazione -> il limite sale
         self._learn_concurrency(unique)
 
@@ -2610,6 +2926,10 @@ class Router:
             "provider_scores": dict(self._provider_scores),
             "key_scores": dict(self._key_scores),
             "avg_latencies": dict(self._avg_latencies),
+            "ctx_lat": {u: list(v) for u, v in
+                        getattr(self, "_lat_buckets", {}).items()},
+            "ctx_ttft": {u: list(v) for u, v in
+                         getattr(self, "_ttft_buckets", {}).items()},
             "saved_at": time.time(),
         }
 
@@ -2676,6 +2996,20 @@ class Router:
                 self._key_scores[str(ak)] = float(score)
             for u, lat in (data.get("avg_latencies") or {}).items():
                 self._avg_latencies[str(u)] = float(lat)
+            for key, attr in (("ctx_lat", "_lat_buckets"),
+                              ("ctx_ttft", "_ttft_buckets")):
+                table = getattr(self, attr, None)
+                if not isinstance(table, dict):
+                    continue
+                for u, v in (data.get(key) or {}).items():
+                    try:
+                        fv = [float(x) for x in list(v or [])]
+                    except (TypeError, ValueError):
+                        continue
+                    if not fv or any(x < 0 for x in fv):
+                        continue
+                    fv = (fv + [0.0] * len(CTX_BUCKETS))[:len(CTX_BUCKETS)]
+                    table[str(u)] = fv
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
@@ -2734,6 +3068,149 @@ class Router:
         if n:
             log.info("[cooldown] ripristinati %d cooldown da disco", n)
         return n
+
+    # ------------------------------------------- warm-start stato di routing
+    def dump_routing_state(self) -> dict:
+        """Snapshot delle mappe LEGATE ALLE SESSIONI (holder cache, sticky,
+        ownership warm, demote, pin escalation, watermark ctxcompact): prima
+        morivano tutte a ogni restart, costringendo a re-rotazione e
+        re-apprendimento a ogni deploy. I timestamp sono gia' epoch ovunque;
+        si scrivono solo le voci NON scadute secondo il TTL di ciascuna
+        famiglia (validato anche al caricamento)."""
+        now = time.time()
+        p = self.policy
+        sticky_ttl = float(getattr(p, "sticky_ttl_sec", 3600) or 3600)
+        holder_ttl = float(getattr(p, "cache_holder_ttl_sec", 3600) or 3600)
+        guard = self._guard_sec()
+        slow_ttl = self._warm_ttl()
+        esc_ttl = float(getattr(p, "escalation_pin_ttl_sec", 300) or 300)
+
+        def _pairs(d, ttl):
+            out = {}
+            for k, v in (d or {}).items():
+                try:
+                    if isinstance(v, tuple) and len(v) == 2 \
+                            and now - float(v[1]) <= ttl:
+                        out[str(k)] = [v[0], float(v[1])]
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        deps_map = _pairs(getattr(self, "_dep_last_session", None), guard)
+        dsl = self._sess_slow()
+        session_slow = {}
+        for sid, m in (dsl or {}).items():
+            keep = {}
+            for u, rec in (m or {}).items():
+                try:
+                    ts, hard = (rec if isinstance(rec, tuple) else (rec, True))
+                    if now - float(ts) <= slow_ttl:
+                        keep[str(u)] = [float(ts), bool(hard)]
+                except (TypeError, ValueError):
+                    continue
+            if keep:
+                session_slow[str(sid)] = keep
+        return {
+            "saved_at": now,
+            "sticky": _pairs(getattr(self, "_sticky", None), sticky_ttl),
+            "session_group": _pairs(getattr(self, "_session_group", None),
+                                     sticky_ttl),
+            "sticky_dep": _pairs(getattr(self, "_sticky_dep", None),
+                                  sticky_ttl),
+            "session_last_ok": _pairs(getattr(self, "_session_last_ok", None),
+                                       holder_ttl),
+            "dep_last_session": deps_map,
+            "session_deps": {
+                sid: sorted(u for u, (s2, _t) in deps_map.items()
+                            if s2 == sid)
+                for sid in {str(v[0]) for v in deps_map.values()}},
+            "session_slow": session_slow,
+            "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
+                                   guard),
+            "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
+        }
+
+    def load_routing_state(self, data: dict) -> dict:
+        """Ripristina il warm-start al boot: TTL riverificati, tipi validati,
+        mai crash su file sporco. Ritorna {famiglia: n} per il log."""
+        if not isinstance(data, dict):
+            return {}
+        now = time.time()
+        p = self.policy
+        sticky_ttl = float(getattr(p, "sticky_ttl_sec", 3600) or 3600)
+        holder_ttl = float(getattr(p, "cache_holder_ttl_sec", 3600) or 3600)
+        guard = self._guard_sec()
+        slow_ttl = self._warm_ttl()
+        esc_ttl = float(getattr(p, "escalation_pin_ttl_sec", 300) or 300)
+        report: dict[str, int] = {}
+
+        def _load_pairs(key, table, ttl, report_name):
+            n = 0
+            for k, v in (data.get(key) or {}).items():
+                try:
+                    if not isinstance(v, (list, tuple)) or len(v) != 2:
+                        continue
+                    ts = float(v[1])
+                    if now - ts > ttl or now < ts:
+                        continue
+                    table[str(k)] = (v[0], ts)
+                    n += 1
+                except (TypeError, ValueError):
+                    continue
+            report[report_name] = n
+
+        _load_pairs("sticky", self._sticky, sticky_ttl, "sticky")
+        _load_pairs("session_group", self._session_group, sticky_ttl,
+                    "session_group")
+        _load_pairs("sticky_dep", self._sticky_dep, sticky_ttl, "sticky_dep")
+        _load_pairs("session_last_ok", self._cache_ok(), holder_ttl, "holder")
+        _load_pairs("esc_win", self._esc(), esc_ttl, "esc_win")
+        dls = getattr(self, "_dep_last_session", None)
+        if not isinstance(dls, dict):
+            dls = {}
+            self._dep_last_session = dls
+        n = 0
+        for u, v in (data.get("dep_last_session") or {}).items():
+            try:
+                sid, ts = str(v[0]), float(v[1])
+                if now - ts > guard or now < ts:
+                    continue
+                dls[str(u)] = (sid, ts)
+                self._sess_deps().setdefault(sid, set()).add(str(u))
+                n += 1
+            except (TypeError, ValueError, IndexError):
+                continue
+        report["warm_owner"] = n
+        dslow = self._sess_slow()
+        n = 0
+        for sid, m in (data.get("session_slow") or {}).items():
+            if not isinstance(m, dict):
+                continue
+            for u, rec in m.items():
+                try:
+                    ts, hard = float(rec[0]), bool(rec[1])
+                    if now - ts > slow_ttl or now < ts:
+                        continue
+                    dslow.setdefault(str(sid), {})[str(u)] = (ts, hard)
+                    n += 1
+                except (TypeError, ValueError, IndexError):
+                    continue
+        report["session_slow"] = n
+        df = getattr(self, "_ctx_frontier", None)
+        if not isinstance(df, dict):
+            df = {}
+            self._ctx_frontier = df
+        n = 0
+        for sid, v in (data.get("ctx_frontier") or {}).items():
+            try:
+                b, ts = int(v[0]), float(v[1])
+                if b > 0 and now - ts <= guard and now >= ts:
+                    df[str(sid)] = (b, ts)
+                    n += 1
+            except (TypeError, ValueError, IndexError):
+                continue
+        report["ctx_frontier"] = n
+        return report
 
     def _score(self, dep: dict, now: float | None = None) -> float:
         """Punteggio adattivo: base priority × freschezza × velocità ÷ saturazione.
@@ -3158,7 +3635,25 @@ class Router:
         minuto corrente (minute_calls) includono gia' quelle in volo; l'inflight
         viene preso col max per coprire il rollover di minuto (quando
         minute_calls riparte da 0 ma esistono ancora richieste in volo).
+
+        F8: con `budget_guard.suppress_with_headers` una chiave che MANDA
+        header X-RateLimit-* (snapshot visto di recente) non paga i cap
+        appresi: gli header live sono la verità, il tetto imparato a forza
+        di 429 era la versione buia della stessa informazione.
         """
+        if (self.policy.budget_guard or {}).get("suppress_with_headers", True) \
+                and getattr(self.policy, "rate_hint_skip_enabled", True):
+            k = dep.get("api_key")
+            if isinstance(k, str) and k:
+                tag = hashlib.sha256(
+                    k.encode("utf-8", errors="replace")).hexdigest()[:12]
+                rec = (getattr(self, "_key_hints", None) or {}).get(tag)
+                proven = max(0.0, float(getattr(self.policy,
+                                                "rate_hint_proven_sec",
+                                                900.0) or 0.0))
+                if rec and proven > 0 \
+                        and time.time() - rec[0] <= proven:
+                    return False
         s = self.stats_for(dep["unique"])
         minute_used = s.minute_calls
         if count_inflight:
@@ -3451,7 +3946,8 @@ class Router:
         now = time.time()
         if self.policy.adaptive_pick:
             # [Blocco 1] Reputation scoring: calcola punteggio per ogni deployment
-            rep_scores = [(self._reputation_score(d["unique"], d), d) for d in deps]
+            rep_scores = [(self._reputation_score(d["unique"], d, ctx), d)
+                          for d in deps]
             # Trova il punteggio MINIMO (lower is better)
             min_rep = min(s for s, _ in rep_scores)
             # Filtra solo i candidati con punteggio minimo

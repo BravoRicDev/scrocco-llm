@@ -107,6 +107,43 @@ individual account limits instead of dying on the first 429.
   too — JSON-aware (only long string values, output stays valid JSON).
   A `X-Ctxcompact-Saved` response header and a per-tool
   `nx_ctxcompact_tool_total` counter expose how much was reclaimed.
+  `cache_aware.prefix_audit` closes the loop from the other side: a content
+  hash of the (pre-body) conversation prefix is kept per session and, when it
+  mutates between requests, `[cache-audit]` logs `identity` (system/identity
+  changed) or `prefix` — free forensics against phantom cache invalidation.
+  Old assistant `reasoning_content` is trimmed too by history normalization
+  (`history_normalize.reasoning_content_max_chars`: 0 strips, N keeps a
+  deterministic head, -1 never touches; the last `reasoning_keep_recent`
+  turns are spared) — R1/Qwen thinking can burn 5-15k tokens per turn and
+  earns little once past the frontier.
+- **Routing warm-start** (`var/routing_state.json`): cache holders, sticky
+  targets, warm-dim ownership, per-session slow demotes, escalation pins and
+  the ctxcompact frontier watermark are snapshotted (atomic, throttled 60 s +
+  forced at shutdown) and restored on boot with TTLs revalidated — a deploy
+  is no longer a cold reset of every session's routing memory.
+  Kill-switch: `GATEWAY_PERSIST_ROUTING=0`.
+- **Context-bucket latency + TTFT**: each deployment keeps two tables of
+  four EMAs (buckets <8k / 8-32k / 32-128k / >128k context: one for total
+  duration, one for time-to-first-content). Slow-demote is **absolute AND
+  relative** (bucket EMA > 90 s *and* > 2× that bucket's baseline, so a dep
+  that merely served a huge context is not punished); the adaptive httpx
+  timeout and the first-content deadline read the *current request's* bucket
+  (TTFT table for first-content); the once-dead `dynamic_scoring` p95 leg is
+  alive, fed by per-bucket samples.
+- **First-content hedge** (`qc_json.stream_hedge_delay_ms`, default 1500,
+  0 = off): on the FIRST attempt of a cache-COLD streaming chain, if the
+  chosen upstream has no content after the delay, ONE canary opens on the
+  next candidate and whoever commits first wins — everything is pre-byte, so
+  the loser is cancelled without punishment and paid buckets (`-go`/
+  `-fallback`) are never eligible canaries.
+- **Soft key blackout, zero blame**: fresh `X-RateLimit-*` snapshots and
+  429-with-Retry-After are tracked per API-KEY HASH (never plaintext):
+  near-the-wall keys only *skip* the row among the free dims (other rows of
+  the same deployment, paid buckets and last-resort stages stay reachable);
+  a 429 soft-blackouts every row sharing that key for the upstream-advertised
+  seconds (capped by `key_soft_max_sec`). No cooldown record, no strikes, no
+  reputation loss. While a key's headers stay fresh, the budget-guard's
+  learned caps are suppressed for it — headers beat guesses.
 - **Session-dep guard** (`session_dep_guard`): stops concurrent sessions from
   "grabbing" the same free deployments and burning them (rate-limits). The last
   session that *successfully* served a free-dims deployment is remembered (an
@@ -411,9 +448,14 @@ template. The ones that matter most:
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
-| `qc_json.stream_first_content_adaptive` / `stream_first_content_mult` / `stream_first_content_floor_ms` | true / 3.0 / 20000 | adaptive first-content deadline: `min(stream_first_content_ms, max(floor, mult * latency EMA))`; unknown EMA -> the cap. Avoids holding a 180s window on a normally-fast dep that stalled |
+| `qc_json.stream_first_content_adaptive` / `stream_first_content_mult` / `stream_first_content_floor_ms` | true / 3.0 / 20000 | adaptive first-content deadline: `min(stream_first_content_ms, max(floor, mult * latency EMA))`; unknown EMA -> the cap. Avoids holding a 180s window on a normally-fast dep that stalled; the EMA used is the bucket of the CURRENT request (TTFT table) |
+| `qc_json.stream_hedge_delay_ms` | 1500 | cold-chain first-content hedge: wait N ms, then ONE canary on the next candidate, commit whoever answers first (stream only, pre-byte, never paid buckets); 0 = off |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |
 | `retry_after_floor_by_provider` | `{}` | per-provider Retry-After floor (provider -> seconds), overrides `retry_after_min_sec` |
+| `rate_hint_skip_enabled` / `rate_hint_ttl_sec` / `rate_hint_remaining_max` / `rate_hint_proven_sec` | true / 20 / 5 / 900 | soft key skip from fresh rate headers (free dims only, zero blame); while headers stay this fresh, `budget_guard.suppress_with_headers` ignores the learned caps |
+| `key_soft_429_enabled` / `key_soft_max_sec` | true / 900 | 429 -> soft blackout of ALL rows sharing that api_key for Retry-After seconds (capped); no strikes, no reputation damage |
+| `cache_aware.prefix_audit` | true | per-session prefix content-hash audit: `[cache-audit]` logs `identity`/`prefix` when the conversation prefix mutates unexpectedly |
+| `history_normalize.reasoning_content_max_chars` / `reasoning_keep_recent` | 0 / 1 | trim (N>0) or strip (0) OLD assistant `reasoning_content`; -1 = never touch; the last keep_recent turns are spared |
 | `anon_session_fingerprint` | true | derive a deterministic `fq_<hash>` session id for anonymous clients (system + first user + user-agent) so sticky/cache apply (e.g. Hermes); false = stay anonymous |
 | `anon_session_fp_system_chars` | 768 | anonymous fingerprint hashes only the first N chars of the system prompt (0 = whole prompt), tolerating per-turn appended context |
 | `provider_models_ttl_sec` | 300 | in-memory TTL for the once-per-endpoint `GET /models` cache (0 = no cache) |

@@ -107,7 +107,16 @@ removed per the row's `effort_capable`). Thinking crosses the translator
 boundary: upstream reasoning (Responses summaries, Anthropic `thinking`
 blocks, Gemini `thought` parts) is delivered to the client as
 `message.reasoning_content` / `delta.reasoning_content`, exactly like the
-pass-through `chat` style — non-stream final answers included.
+pass-through `chat` style — non-stream final answers included),
+`[warmstart]` (routing state — holders, stickies, warm ownership, slow
+demotes, esc pins, ctxcompact frontiers — restored at boot from
+`var/routing_state.json`, TTLs revalidated), `[cache-audit]` (why a session's
+conversation prefix CHANGED between requests: `identity`/`prefix` verdicts),
+`[hedge]` (cold-chain first-content race: one canary, pre-commit only, the
+loser is cancelled unpunished, never toward paid buckets), `[key-soft]`
+(per-api-key 429 blackout for Retry-After seconds: soft skip of every row
+sharing the key — no strikes, no reputation loss; near-exhausted rate
+headers do the same, TTL `rate_hint_ttl_sec`).
 
 ## Invariants (do not break)
 

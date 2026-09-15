@@ -105,6 +105,13 @@ class QcJson:
     stream_first_content_adaptive: bool = True
     stream_first_content_mult: float = 3.0   # deadline = mult * EMA del dep
     stream_first_content_floor_ms: int = 20000  # pavimento (>=2000)
+    # HEDGE sul primo contenuto (SOLO stream, SOLO catena FREDDA, solo 1
+    # volta, mai verso bucket pagati -go/-fallback): se dopo questo ritardo
+    # l'upstream scelto non ha ancora dato contenuto, si lancia in parallelo
+    # un canary sul candidato successivo e impegna chi dei DUE produce
+    # contenuto per primo (l'altro viene cancellato pre-byte, nessuna quota
+    # di risposta sprecata oltre l'avvio). 0 = spento.
+    stream_hedge_delay_ms: int = 1500
     stream_commit_min_chars: int = 40      # caratteri di RISPOSTA minimi per
                                            # impegnare lo stream (evita di
                                            # committare su 1 token poi morto);
@@ -416,6 +423,9 @@ class Policy:
     history_normalize_drop_dangling_tool_calls: bool = True
     history_normalize_drop_empty_assistant: bool = True
     history_normalize_dedupe_system: bool = True
+    # Frontiera lazy del reasoning (histnorm): -1 mai, 0 rimuovi, >0 tronca.
+    history_normalize_reasoning_content_max_chars: int = 0
+    history_normalize_reasoning_keep_recent: int = 1
 
     # SAMPLING_DEFAULTS (#2A): default a basso rischio, client vince sempre.
     sampling_enabled: bool = True
@@ -489,6 +499,9 @@ class Policy:
     warm_pool_max_attempts: int = 0
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
+    # AUDIT prefisso (F4): impronta del prefisso canonico per sessione, per
+    # dire PERCHE' la cache upstream si e' spenta (identity vs prefix).
+    cache_prefix_audit: bool = True
     cache_prefer_last_success: bool = True
     cache_holder_ttl_sec: int = 3600
     cache_skip_probe_when_holder: bool = True
@@ -683,7 +696,24 @@ class Policy:
         # rate_hint_threshold: se X-RateLimit-Requests-Remaining del provider
         # scende sotto questa soglia, il budget guard abbassa il cap appreso
         # PRIMA del 429 (anticipo di 2-3 richieste).
-        "rate_hint_threshold": 3})
+        "rate_hint_threshold": 3,
+        # suppress_with_headers (F8): una chiave i cui header X-RateLimit-*
+        # sono visti di recente NON paga i cap appresi (la verità live degli
+        # header batte il tetto imparato a fatica dai 429). Chi non manda
+        # header mantiene il comportamento storico.
+        "suppress_with_headers": True})
+    # --- Rate-hint skip senza colpa (F6) + soft 429 per-CHIAVE (F7) ---
+    # Snapshot breve degli header: se Requests-Remaining e' <= remaining_max
+    # e l'header e' fresco (ttl), le twin deployment sulla STESSA api_key
+    # vengono solo SALTATE a pick (niente cooldown, niente strike, niente
+    # penalita' di reputazione). Un 429 blocca soft la chiave per il
+    # Retry-After (tetto key_soft_max_sec).
+    rate_hint_skip_enabled: bool = True
+    rate_hint_ttl_sec: float = 20.0
+    rate_hint_remaining_max: int = 5
+    rate_hint_proven_sec: float = 900.0
+    key_soft_429_enabled: bool = True
+    key_soft_max_sec: int = 900
     # cap a 5 ORE: i free-tier si rinnovano su finestre giornaliere/orarie,
     # seppellire una chiave per un intero giorno la toglie dal giro anche
     # quando il limite era solo orario. Il budget_guard (router) dosa PRIMA
@@ -980,6 +1010,32 @@ class Policy:
                 raise ValueError(
                     "request_coalescing_cache_sec deve essere un "
                     "numero >= 0") from None
+        if "rate_hint_skip_enabled" in raw:
+            p.rate_hint_skip_enabled = _coerce_bool(
+                raw["rate_hint_skip_enabled"], "rate_hint_skip_enabled")
+        _rh = raw.get("rate_hint_ttl_sec")
+        if _rh is not None:
+            try:
+                v = float(_rh)
+            except (TypeError, ValueError):
+                raise ValueError("rate_hint_ttl_sec: numero richiesto") from None
+            if not (0.0 <= v <= 300.0):
+                raise ValueError("rate_hint_ttl_sec: 0..300")
+            p.rate_hint_ttl_sec = v
+        _set_int(p, raw, "rate_hint_remaining_max", minimum=0, maximum=100000)
+        _rp = raw.get("rate_hint_proven_sec")
+        if _rp is not None:
+            try:
+                v = float(_rp)
+            except (TypeError, ValueError):
+                raise ValueError("rate_hint_proven_sec: numero richiesto") from None
+            if not (0.0 <= v <= 86400.0):
+                raise ValueError("rate_hint_proven_sec: 0..86400")
+            p.rate_hint_proven_sec = v
+        if "key_soft_429_enabled" in raw:
+            p.key_soft_429_enabled = _coerce_bool(
+                raw["key_soft_429_enabled"], "key_soft_429_enabled")
+        _set_int(p, raw, "key_soft_max_sec", minimum=10, maximum=86400)
         if "anon_session_fingerprint" in raw:
             p.anon_session_fingerprint = _coerce_bool(
                 raw["anon_session_fingerprint"], "anon_session_fingerprint")
@@ -1305,6 +1361,22 @@ class Policy:
                 if _k in _hn:
                     setattr(p, _attr, _coerce_bool(
                         _hn[_k], f"history_normalize.{_k}"))
+            if "reasoning_content_max_chars" in _hn:
+                v = _hn["reasoning_content_max_chars"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (-1 <= int(v) <= 200000):
+                    raise ValueError(
+                        "history_normalize.reasoning_content_max_chars "
+                        "deve essere -1..200000")
+                p.history_normalize_reasoning_content_max_chars = int(v)
+            if "reasoning_keep_recent" in _hn:
+                v = _hn["reasoning_keep_recent"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= int(v) <= 20):
+                    raise ValueError(
+                        "history_normalize.reasoning_keep_recent "
+                        "deve essere 0..20")
+                p.history_normalize_reasoning_keep_recent = int(v)
 
         # --- SAMPLING_DEFAULTS (#2A) + LOOP_DETECTOR (#2B) ---
         _sd = raw.get("sampling_defaults")
@@ -1501,6 +1573,9 @@ class Policy:
                 raise ValueError("cache_aware deve essere una mappa")
             if "enabled" in ca:
                 p.cache_aware_enabled = _coerce_bool(ca["enabled"], "cache_aware.enabled")
+            if "prefix_audit" in ca:
+                p.cache_prefix_audit = _coerce_bool(
+                    ca["prefix_audit"], "cache_aware.prefix_audit")
             if "prefer_last_success" in ca:
                 p.cache_prefer_last_success = _coerce_bool(
                     ca["prefer_last_success"], "cache_aware.prefer_last_success")
@@ -1636,6 +1711,13 @@ class Policy:
                     raise ValueError("qc_json.stream_first_content_floor_ms "
                                      "deve essere 0..900000")
                 p.qc_json.stream_first_content_floor_ms = int(v)
+            if "stream_hedge_delay_ms" in qj:
+                v = qj["stream_hedge_delay_ms"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= int(v) <= 60000):
+                    raise ValueError("qc_json.stream_hedge_delay_ms deve "
+                                     "essere 0..60000")
+                p.qc_json.stream_hedge_delay_ms = int(v)
             if "stream_commit_min_chars" in qj:
                 v = qj["stream_commit_min_chars"]
                 if isinstance(v, bool) or not isinstance(v, (int, float)) \
@@ -1851,6 +1933,10 @@ class Policy:
                     raise ValueError(
                         "budget_guard.rate_hint_threshold: >= 1 richiesto")
                 merged["rate_hint_threshold"] = v
+            if "suppress_with_headers" in bg:
+                merged["suppress_with_headers"] = _coerce_bool(
+                    bg["suppress_with_headers"],
+                    "budget_guard.suppress_with_headers")
             p.budget_guard = merged
 
         # gruppi capacità strutturali

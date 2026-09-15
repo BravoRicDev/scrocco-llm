@@ -400,6 +400,33 @@ def _trim_args_json(args: str, cfg: CtxCompactConfig) -> str | None:
     return out
 
 
+def frontier_boundary(messages, cfg: CtxCompactConfig, max_in: int = 0,
+                      boundary_floor: int = 0):
+    """Frontiera corrente (stessa regola di compact_tool_outputs, cosi' la
+    compressione e l'audit del prefisso usano lo STESSO confine): indice da
+    cui la lista e' protetta. None = niente turni utente (non toccare)."""
+    user_idx = [i for i, m in enumerate(messages)
+                if isinstance(m, dict) and m.get("role") == "user"]
+    if not user_idx:
+        return None
+    keep_n = max(0, cfg.keep_turns)
+    if keep_n <= 0:
+        boundary = len(messages)
+    else:
+        boundary = user_idx[-keep_n] if len(user_idx) >= keep_n else user_idx[0]
+    # Frontiera dinamica: il budget token puo' stringere DENTRO i keep_turns
+    # (finestre enormi: l'ultimo turno da solo puo' valere piu' del budget),
+    # mai allargarle oltre se il budget e' generoso: max() delle due.
+    boundary = max(boundary, _walk_boundary(messages, max_in,
+                                            cfg.keep_tail_pct))
+    # Watermark per-sessione: mai rigressioni.
+    try:
+        boundary = max(boundary, int(boundary_floor))
+    except (TypeError, ValueError):
+        pass
+    return min(boundary, len(messages))
+
+
 def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
                          estimator=None, boundary_floor: int = 0):
     """Ritorna (nuova_lista, report). Non muta l'input.
@@ -423,26 +450,9 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
     if not cfg.enabled or not messages:
         return messages, rep
 
-    user_idx = [i for i, m in enumerate(messages)
-                if isinstance(m, dict) and m.get("role") == "user"]
-    if not user_idx:
+    boundary = frontier_boundary(messages, cfg, max_in, boundary_floor)
+    if boundary is None:
         return messages, rep               # niente turni utente: non toccare
-    keep_n = max(0, cfg.keep_turns)
-    if keep_n <= 0:
-        boundary = len(messages)
-    else:
-        boundary = user_idx[-keep_n] if len(user_idx) >= keep_n else user_idx[0]
-    # Frontiera dinamica: il budget token puo' stringere DENTRO i keep_turns
-    # (finestre enormi: l'ultimo turno da solo puo' valere piu' del budget),
-    # mai allargarle oltre se il budget e' generoso: max() delle due.
-    boundary = max(boundary, _walk_boundary(messages, max_in,
-                                            cfg.keep_tail_pct))
-    # Watermark per-sessione: mai rigressioni (vedi docstring).
-    try:
-        boundary = max(boundary, int(boundary_floor))
-    except (TypeError, ValueError):
-        pass
-    boundary = min(boundary, len(messages))
     rep["boundary"] = boundary
 
     labels = _tool_labels(messages)

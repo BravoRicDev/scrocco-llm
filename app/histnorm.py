@@ -9,8 +9,10 @@ Mosse ammesse (tutte strutturali):
  - rimozione dei messaggi `tool` orfani (tool_call_id senza chiamata);
  - tool_calls pendenti senza risultato -> si tiene il content, si toglie la
    chiamata (o si scarta il messaggio se vuoto);
- - scarto dei messaggi assistant vuoti (senza contenuto e senza tool_calls);
- - collasso di messaggi `system` consecutivi identici.
+  - scarto dei messaggi assistant vuoti (senza contenuto e senza tool_calls);
+  - collasso di messaggi `system` consecutivi identici;
+  - la frontiera LAZY del reasoning: `reasoning_content` rimosso/troncato nei
+    turni assistant vecchi (fuori dai `reasoning_keep_recent` piu' recenti).
 
 Niente mosse semantiche: non si sintetizzano risultati, non si fondono
 system diversi.
@@ -33,6 +35,16 @@ class HistNormConfig:
     drop_dangling_tool_calls: bool = True
     drop_empty_assistant: bool = True
     dedupe_system: bool = True
+    # REASONING LAZY: il thinking dei turni vecchi e' PROCESSO, non
+    # informazione: l'upstream non ne ha bisogno e pesa migliaia di token per
+    # turno (R1/Qwen-thinking). -1 = mai toccare (comportamento storico);
+    # 0 = rimosso del tutto dai turni "vecchi"; >0 = troncato a N char (head,
+    # con marker deterministico). "Vecchio" = fuori dai ultimi
+    # `reasoning_keep_recent` messaggi assistant con reasoning: la frontiera
+    # avanza monotona col dialogo (stessa lista -> stessi byte), esattamente
+    # come lo stub del ctxcompact.
+    reasoning_content_max_chars: int = 0
+    reasoning_keep_recent: int = 1
 
 
 def create_hist_config(policy_dict: dict | None = None) -> HistNormConfig:
@@ -49,6 +61,18 @@ def create_hist_config(policy_dict: dict | None = None) -> HistNormConfig:
                       ("dedupe_system", "dedupe_system")):
         if key in blk:
             setattr(cfg, attr, bool(blk[key]))
+    _rmax = blk.get("reasoning_content_max_chars")
+    if _rmax is not None:
+        try:
+            cfg.reasoning_content_max_chars = int(_rmax)
+        except (TypeError, ValueError):
+            pass
+    _rkeep = blk.get("reasoning_keep_recent")
+    if _rkeep is not None:
+        try:
+            cfg.reasoning_keep_recent = max(0, int(_rkeep))
+        except (TypeError, ValueError):
+            pass
     return cfg
 
 
@@ -64,6 +88,10 @@ def hist_config_from_policy(policy) -> HistNormConfig:
         drop_empty_assistant=bool(
             getattr(policy, "history_normalize_drop_empty_assistant", True)),
         dedupe_system=bool(getattr(policy, "history_normalize_dedupe_system", True)),
+        reasoning_content_max_chars=int(
+            getattr(policy, "history_normalize_reasoning_content_max_chars", 0)),
+        reasoning_keep_recent=max(0, int(
+            getattr(policy, "history_normalize_reasoning_keep_recent", 1))),
     )
 
 
@@ -84,6 +112,48 @@ def _assistant_tool_ids(msgs) -> set[str]:
                 if isinstance(tc, dict) and tc.get("id"):
                     ids.add(tc["id"])
     return ids
+
+
+_RC_MARKER = "…[troncato "          # sentinella di idempotenza del troncamento
+
+
+def _trim_reasoning(msgs, cfg: HistNormConfig, report: dict):
+    """Frontiera LAZY del reasoning: fuori dagli ultimi
+    `reasoning_keep_recent` assistant con reasoning, il `reasoning_content`
+    viene rimosso (max_chars=0) o troncato head+marker (>0). Funzione PURA
+    della lista: a parita' di history byte identici, e la frontiera avanza
+    monotona col dialogo (mai rigressioni di prefisso)."""
+    maxc = int(cfg.reasoning_content_max_chars)
+    if maxc < 0:
+        return msgs
+    idxs = [i for i, m in enumerate(msgs)
+            if isinstance(m, dict) and m.get("role") == "assistant"
+            and isinstance(m.get("reasoning_content"), str)
+            and m.get("reasoning_content")]
+    if not idxs:
+        return msgs
+    keep_n = max(0, int(cfg.reasoning_keep_recent))
+    keep = set(idxs[len(idxs) - keep_n:]) if keep_n else set()
+    cut = [i for i in idxs if i not in keep]
+    if not cut:
+        return msgs
+    out = list(msgs)
+    for i in cut:
+        m = dict(out[i])
+        rc = m.get("reasoning_content") or ""
+        if maxc > 0 and _RC_MARKER in rc:
+            continue                          # gia' troncato da noi: byte-stabile
+        if maxc == 0:
+            m.pop("reasoning_content", None)
+        elif len(rc) > maxc:
+            m["reasoning_content"] = (
+                rc[:maxc] + "\n" + _RC_MARKER + "{:,} char di reasoning]".format(
+                    len(rc) - maxc))
+        else:
+            continue
+        out[i] = m
+        report["reasoning_trimmed"] = report.get("reasoning_trimmed", 0) + 1
+    return out
 
 
 def normalize_messages(messages, cfg: HistNormConfig | None = None):
@@ -184,7 +254,9 @@ def normalize_messages(messages, cfg: HistNormConfig | None = None):
         tail = new_tail
 
     out = head + tail
+    out = _trim_reasoning(out, cfg, report)
     report["changed"] = (
         report["shown_orphan_tool"] or report["dangling_tool_calls"]
-        or report["empty_assistant"] or report["dup_system"])
+        or report["empty_assistant"] or report["dup_system"]
+        or report.get("reasoning_trimmed", 0))
     return out, report

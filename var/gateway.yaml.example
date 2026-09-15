@@ -59,6 +59,25 @@ sticky_ttl_sec: 3600
 # request_coalescing_max_waiters: 10
 # request_coalescing_cache_sec: 0
 
+# --- SOFT-SKIP PER CHIAVE DAI RATE HEADERS (zero colpa) -------------------
+# rate_hint_*: l'ultimo snapshot (TTL breve) dei rate headers X-RateLimit-*
+# viaggia per CHIAVE (hash, mai in chiaro). Se una chiave e' quasi al muro
+# (remaining <= rate_hint_remaining_max) il deployment che la usa viene solo
+# SALTATO nella scelta dei free-dim: nessun cooldown, nessuna penalita' di
+# reputazione, le altre chiavi della stessa riga restano eleggibili.
+# key_soft_429: un 429 con Retry-After R oscura SOFTMENTE tutte le righe che
+# condividono quella api_key per max(R, ...) <= key_soft_max_sec secondi
+# (durata reale del muro dell'upstream, non il cooldown classico).
+# rate_hint_proven_sec/budget_guard.suppress_with_headers: se la chiave
+# MANDA header di quota freschi, i cap appresi dal budget_guard vengono
+# ignorati (l'header e' la fonte di verita', l'apprendimento era un ripiego).
+rate_hint_skip_enabled: true
+rate_hint_ttl_sec: 20.0
+rate_hint_remaining_max: 5
+rate_hint_proven_sec: 900.0
+key_soft_429_enabled: true
+key_soft_max_sec: 900
+
 # Al failover verso un deployment della STESSA FAMIGLIA, sposta lo sticky sul
 # nuovo deployment (prompt cache calda preservata).
 sticky_handoff_same_family: true
@@ -321,6 +340,12 @@ history_normalize:
   drop_dangling_tool_calls: true
   drop_empty_assistant: true
   dedupe_system: true
+  # reasoning_content dei turni VECCHI (sopra la frontiera del ctxcompact
+  # concettuale: tutto tranne gli ultimi reasoning_keep_recent assistant):
+  # 0 = rimosso del tutto, >0 = tagliato a N char con marker, -1 = mai toccare.
+  # I thinking di R1/Qwen pesano 5-15k token a turno: dopo servono a poco.
+  reasoning_content_max_chars: 0
+  reasoning_keep_recent: 1
 sampling_defaults:
   enabled: true
   allow_providers: ["*"]
@@ -463,6 +488,11 @@ qc_json:
   stream_first_content_adaptive: true
   stream_first_content_mult: 3.0        # deadline = mult * EMA del dep
   stream_first_content_floor_ms: 20000  # pavimento (>= 2000)
+  # hedge (SOLO stream, SOLO catena fredda al 1o tentativo, SOLO pre-commit):
+  # se dopo tot ms A non ha ancora contenuto, si apre UN canary sul candidato
+  # successivo e impegna chi dei due risponde primo; il perdente e' annullato
+  # senza punizione, mai verso bucket pagati (-go/-fallback). 0 = spento.
+  stream_hedge_delay_ms: 1500
 
   # Deadline totale in ms per l'INTERO stream (960000 = 16 minuti).
   stream_total_deadline_ms: 960000
@@ -617,6 +647,10 @@ cache_aware:
   prefer_last_success: true
   holder_ttl_sec: 3600
   skip_probe_when_holder: true
+  # prefix_audit: logga perche' il prefisso della conversazione E' CAMBIATO
+  # tra due richieste della stessa sessione (identity/prefix): audit gratuito
+  # contro le invalidazioni fantasma della cache (histnorm/ctxcompact/chiavi).
+  prefix_audit: true
   context_truncation:
     enabled: true
     keep_turns: 4
