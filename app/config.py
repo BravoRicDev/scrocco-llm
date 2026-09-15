@@ -75,6 +75,12 @@ ENABLED_HEADER = "enabled"
 # consegnare al client (niente risposte a metà). Opt-in per deployment (CSV),
 # default false; true/1/yes/on = attivo.
 HOLD_UNTIL_HEADER = "hold_until_finish"
+# thinking_replay: il provider esige che i turni assistant con tool_calls
+# riportino il campo `reasoning_content` (modalita' thinking). true/1/yes/on =
+# attivo: prima di OGNI invio il gateway rimette il reasoning (quello VERO se
+# disponibile, altrimenti un segnaposto) cosi' il primo tentativo e' gia'
+# corretto. Viene scritta in automatico quando un deployment lo "impara".
+THINKING_REPLAY_HEADER = "thinking_replay"
 # api_style: protocollo nativo dell'upstream per questo deployment. Default
 # "chat" (OpenAI Chat Completions). Altri valori gestiti da app/protocols.py:
 # "responses" (OpenAI Responses /res/v1), "messages" (Anthropic), "google"
@@ -277,6 +283,11 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     raw_hu = (row.get(HOLD_UNTIL_HEADER) or "").strip().lower()
     hold_until_finish = raw_hu in ("1", "true", "yes", "on")
 
+    # thinking_replay: il provider esige il replay del reasoning_content nei
+    # turni assistant con tool_calls (modalita' thinking). Opt-in: default off.
+    raw_tp = (row.get(THINKING_REPLAY_HEADER) or "").strip().lower()
+    thinking_replay = raw_tp in ("1", "true", "yes", "on")
+
     # api_style: protocollo nativo upstream (chat/responses/messages/google).
     api_style = normalize_style(row.get(API_STYLE_HEADER))
 
@@ -318,6 +329,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         # sempre sul limite dinamico appreso dal router.
         "concurrent_limit": _int_or_none(row.get("concurrent_limit")),
         "hold_until_finish": hold_until_finish,
+        "thinking_replay": thinking_replay,
         "api_style": api_style,
     }
 
@@ -436,7 +448,7 @@ _STANDARD_COLS = frozenset({
     "commento", "modello", "provider", "endpoint", "data", "context",
     "max_input", "priority", "caps", "effort_capable", "intelligence_score",
     "model_preference", "media_defer", "order", "enabled",
-    "hold_until_finish", "api_style",
+    "hold_until_finish", "api_style", "thinking_replay",
 })
 
 
@@ -791,6 +803,7 @@ class GatewayConfig:
                     "concurrent_limit": meta.get("concurrent_limit"),
                     "media_defer": bool(meta.get("media_defer", True)),
                     "hold_until_finish": bool(meta.get("hold_until_finish")),
+                    "thinking_replay": bool(meta.get("thinking_replay")),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
                     "api_style": normalize_style(meta.get("api_style")),

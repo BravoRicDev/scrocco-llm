@@ -77,6 +77,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         repair_reasoning_replay, _REASONING_REPLAY_RE,
                         restore_reasoning, is_unclear_error,
                         QUOTA_MIN_COOLDOWN_S)
+from .csvlearn import learn_thinking_replay
 from .health import health_loop
 from .policy import Policy, refill_out_budget
 from .qc import annotate_reasoning
@@ -1693,10 +1694,11 @@ async def chat_completions(request: Request, response: Response):
                      {k: _nr.get(k) for k in (
                          "shown_orphan_tool", "dangling_tool_calls",
                          "empty_assistant", "dup_system")})
-        # Il taglio del reasoning e' un'ottimizzazione di TOKEN: se un modello
-        # reasoning fallisce con un errore NON chiaro, si ritenta UNA volta lo
-        # stesso deployment con la history ORIGINALE (reasoning intatto).
-        if _nr.get("reasoning_trimmed"):
+        # Il taglio del reasoning e' un'ottimizzazione di TOKEN: la history
+        # originale serve (a) ai deployment con `thinking_replay` per rimettere
+        # il reasoning VERO prima dell'invio, (b) al retry una-tantum dopo un
+        # errore "oscuro". Teniamo il riferimento sempre che esista.
+        if _orig_msgs:
             _orig_for_retry = _orig_msgs
     # ---- cache-aware: detentore sessione + troncamento contesto ----
     from .ctxcompact import (ctxcompact_config_from_policy,
@@ -2964,6 +2966,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 else:
                     router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
                                        reason="truncated_toolcall")
+            if dep.get("thinking_replay") and orig_messages:
+                _tpr = restore_reasoning(payload, orig_messages)
+                if _tpr:
+                    metrics.inc("nx_thinking_replay_total", ("proactive",))
+                    log.info("[thinking-replay] %s: %d campi reasoning "
+                             "rimessi PRIMA dell'invio (proattivo)",
+                             dep["unique"], _tpr)
             gen = await forwarder.stream_response(dep, payload,
                                                   profile=profile or "",
                                                   ctx_est=ctx,
@@ -3278,6 +3287,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             "tool_calls senza reasoning_content -> riparati, "
                             "ritento lo stesso deployment", dep["unique"],
                             _nfix)
+                learn_thinking_replay(router, dep.get("model"))
                 continue
             # ERRORE "OSCURO" su richiesta reasoning: il taglio del reasoning
             # (histnorm) e' un'ottimizzazione di token; se il provider non ci
@@ -3286,14 +3296,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # chiaro (quota/auth/ban/schema/...) il tentativo non serve.
             if (orig_messages is not None and not _rsn_restored
                     and is_unclear_error(err.status, detail)):
-                _rsn_restored = True
                 _nres = restore_reasoning(payload, orig_messages)
-                metrics.inc("nx_reasoning_replay_total", ("restored",))
-                log.warning("[reasoning-restore] %s: errore non chiaro (%s) "
-                            "-> history originale (%d messaggi, reasoning "
-                            "intatto), ritento lo stesso deployment",
-                            dep["unique"], (detail or "")[:90], _nres)
-                continue
+                if _nres:
+                    _rsn_restored = True
+                    metrics.inc("nx_reasoning_replay_total", ("restored",))
+                    log.warning("[reasoning-restore] %s: errore non chiaro (%s) "
+                                "-> reasoning ripristinato (%d campi), ritento "
+                                "lo stesso deployment",
+                                dep["unique"], (detail or "")[:90], _nres)
+                    continue
             # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
             # Service): quarantena dell'HOST 24h, cosi' la rotazione non
             # brucia una chiave dietro l'altra dello stesso provider.

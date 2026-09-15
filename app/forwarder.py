@@ -49,6 +49,7 @@ from urllib.parse import urlsplit
 
 from . import metrics
 from . import protocols as proto
+from .csvlearn import learn_thinking_replay
 from .policy import refill_out_budget
 from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
@@ -735,6 +736,23 @@ def restore_reasoning(body: dict, orig: list | None) -> int:
             m["reasoning_content"] = lst.pop(0)
             n += 1
     return n
+
+
+def apply_thinking_replay(body: dict, dep: dict,
+                          orig: list | None = None) -> int:
+    """Riparazione PROATTIVA per i deployment con `thinking_replay` attivo:
+    il provider esige il campo `reasoning_content` sui turni assistant con
+    tool_calls, quindi lo rimettiamo PRIMA dell'invio (niente 400 al primo
+    colpo).
+
+    Ordine: prima il reasoning VERO (se abbiamo la history originale del
+    client, es. quando histnorm l'aveva tagliato per risparmiare token),
+    poi il segnaposto sui turni che restano scoperti (probe/canary/sveglia,
+    che non hanno una history originale). Ritorna i campi sistemati."""
+    if not isinstance(dep, dict) or not dep.get("thinking_replay"):
+        return 0
+    n = restore_reasoning(body, orig) if orig else 0
+    return n + repair_reasoning_replay(body)
 
 
 def is_unclear_error(status: int | None, detail: str | None) -> bool:
@@ -1788,6 +1806,11 @@ truncation_hook=None,
         """
         body = dict(payload)
         body["model"] = dep["model"]
+        _tp = apply_thinking_replay(body, dep)
+        if _tp:
+            log.info("[thinking-replay] %s: %d turni assistant riparati "
+                     "PRIMA dell'invio (proattivo, stream)",
+                     dep.get("unique", "?"), _tp)
         apply_effort_policy(body, dep)
         _dg = downgrade_response_format(body, dep, _SCHEMAOUT_CFG)
         if _dg:
@@ -2020,6 +2043,11 @@ truncation_hook=None,
         # along with stream = true" se arriva su una richiesta non-stream.
         if not body.get("stream"):
             body.pop("stream_options", None)
+        _tp = apply_thinking_replay(body, dep)
+        if _tp:
+            log.info("[thinking-replay] %s: %d turni assistant riparati "
+                     "PRIMA dell'invio (proattivo)", dep.get("unique", "?"),
+                     _tp)
         apply_effort_policy(body, dep)
         _dg = downgrade_response_format(body, dep, _SCHEMAOUT_CFG)
         if _dg:
@@ -2452,6 +2480,10 @@ truncation_hook=None,
             # l'identità DEVE riflettere il deployment CHE PROVA ORA: dopo un
             # fallback il system message nominerebbe il modello sbagliato.
             inject_identity(payload, dep)
+            _tp = apply_thinking_replay(payload, dep, orig_messages)
+            if _tp:
+                log.info("[thinking-replay] %s: %d campi reasoning rimessi "
+                         "PRIMA dell'invio (proattivo)", cur, _tp)
             router.note_start(cur, ctx)     # rotazione adattiva (peso token)
             t0 = time.monotonic()
             try:
@@ -2882,6 +2914,9 @@ truncation_hook=None,
                                 "tool_calls senza reasoning_content -> "
                                 "riparati, ritento lo stesso deployment",
                                 cur, _nfix)
+                    # IMPARA: d'ora in poi il flag e' nel CSV per questo
+                    # modello (tutti i gemelli) e la richiesta parte corretta.
+                    learn_thinking_replay(router, dep.get("model"))
                     continue
                 # ERRORE "OSCURO" su richiesta reasoning: il taglio del
                 # reasoning (histnorm) e' un'ottimizzazione di token; senza una
@@ -2889,14 +2924,15 @@ truncation_hook=None,
                 # history ORIGINALE (reasoning intatto).
                 if (orig_messages is not None and not _rsn_restored
                         and is_unclear_error(err.status, detail)):
-                    _rsn_restored = True
                     _nres = restore_reasoning(payload, orig_messages)
-                    metrics.inc("nx_reasoning_replay_total", ("restored",))
-                    log.warning("[reasoning-restore] %s: errore non chiaro "
-                                "(%s) -> history originale (%d messaggi), "
-                                "ritento lo stesso deployment", cur,
-                                (detail or "")[:90], _nres)
-                    continue
+                    if _nres:
+                        _rsn_restored = True
+                        metrics.inc("nx_reasoning_replay_total", ("restored",))
+                        log.warning("[reasoning-restore] %s: errore non chiaro "
+                                    "(%s) -> reasoning ripristinato (%d campi), "
+                                    "ritento lo stesso deployment", cur,
+                                    (detail or "")[:90], _nres)
+                        continue
                 _kind_default = classify_error(err.status, None, detail)
                 # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
                 # "usage limit reached" / "Resets in N days"), a prescindere

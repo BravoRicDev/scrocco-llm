@@ -329,3 +329,42 @@ def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
     assert b"RIPRISTINATO" in body
     assert a["unique"] not in SM.router._cooldown
     assert b["unique"] not in [c[0] for c in calls]
+
+
+# ------------------------- PROATTIVO: flag `thinking_replay` sul deployment --
+def test_streaming_proattivo_flag_prima_del_primo_invio(SM, monkeypatch):
+    """Con `thinking_replay` attivo il reasoning vero viene rimesso PRIMA del
+    primo invio: un solo tentativo, nessun 400."""
+    a = SM.config.groups[f"{BASE}-32k"][0]
+    a["thinking_replay"] = True
+    seen = []
+
+    async def sr(dep, payload, **kw):
+        seen.append([dict(m) for m in payload["messages"]])
+        if not _has_reasoning(payload):
+            raise UpstreamError(-400, ERR)
+
+        async def gen():
+            yield b'data: {"choices":[{"delta":{"content":"VERO"}}]}\n\n'
+            yield (b'data: {"choices":[{"delta":{},'
+                   b'"finish_reason":"stop"}]}\n\n')
+            yield b"data: [DONE]\n\n"
+        return gen()
+    monkeypatch.setattr(SM.forwarder, "stream_response", sr)
+    payload = _payload()
+    payload["stream"] = True
+
+    async def go():
+        resp = await SM._stream_with_fallback(
+            "test", a, payload, scope="chain", session="s1", ses="s1",
+            ctx=100, orig_messages=ORIG)
+        body = b""
+        if hasattr(resp, "body_iterator"):
+            async for c in resp.body_iterator:
+                body += c
+        return resp, body
+    resp, body = asyncio.run(go())
+    assert len(seen) == 1                        # gia' corretto al primo colpo
+    assert b"VERO" in body
+    asst = [m for m in seen[0] if m.get("role") == "assistant"][0]
+    assert asst["reasoning_content"] == "penso passo"    # reasoning VERO

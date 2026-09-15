@@ -27,7 +27,8 @@ from pathlib import Path
 from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      DATA_HEADER, CONTEXT_HEADER, MAX_INPUT_HEADER,
                      PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER,
-                     MEDIA_DEFER_HEADER, ENABLED_HEADER, GatewayConfig)
+                     MEDIA_DEFER_HEADER, ENABLED_HEADER,
+                     THINKING_REPLAY_HEADER, GatewayConfig)
 
 # campi gestiti dall'API (il resto delle colonne passa trasparente)
 PAYLOAD_FIELDS = {
@@ -40,6 +41,7 @@ PAYLOAD_FIELDS = {
     "caps": CAPS_HEADER,
     "tool_repair": TOOL_REPAIR_HEADER,
     "media_defer": MEDIA_DEFER_HEADER,
+    "thinking_replay": THINKING_REPLAY_HEADER,
     "enabled": ENABLED_HEADER,
 }
 
@@ -187,6 +189,16 @@ def ensure_enabled_column(header: list[str]) -> list[str]:
     return header
 
 
+def ensure_flag_column(header: list[str]) -> list[str]:
+    """Garantisce la colonna 'thinking_replay' (replay del reasoning).
+
+    Serve al writer automatico che impara il flag da un 400 del provider:
+    se la colonna non esiste ancora va creata prima di save_table."""
+    if THINKING_REPLAY_HEADER not in header:
+        header.append(THINKING_REPLAY_HEADER)
+    return header
+
+
 def apply_payload(row: dict, payload: dict, prefix: str,
                   current_profile: str | None = None) -> str:
     """Applica i campi del payload a una riga (merge parziale, in place).
@@ -248,6 +260,18 @@ def apply_payload(row: dict, payload: dict, prefix: str,
                 continue
             if payload_key == "media_defer":
                 v = payload["media_defer"]
+                if isinstance(v, bool):
+                    row[header_name] = "true" if v else "false"
+                elif v is None:
+                    row[header_name] = ""
+                else:
+                    s = str(v).strip().lower()
+                    row[header_name] = "" if s == "" else (
+                        "false" if s in ("0", "false", "no", "n", "off")
+                        else "true")
+                continue
+            if payload_key == "thinking_replay":
+                v = payload["thinking_replay"]
                 if isinstance(v, bool):
                     row[header_name] = "true" if v else "false"
                 elif v is None:
