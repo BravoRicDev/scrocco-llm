@@ -2800,21 +2800,23 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                                  or _races_done < _races_max)
                            and router.hunt_allowed(session, ctx))
                 if _legacy or _refill:
-                    # F13: ritardo calibrato sul bucket (TTFT fisiologico).
-                    try:
-                        _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
-                    except Exception:
-                        _h_ms = _hedge_ms
-                    if _refill and _h_ms <= 0:
+                    if _refill:
+                        # la cascata parte SUBITO e con il proprio picker:
+                        # indipendente dalla lentezza di A (regola utente).
                         _h_ms = 1
+                    else:
+                        # F13: ritardo calibrato sul bucket (TTFT fisiologico).
+                        try:
+                            _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
+                        except Exception:
+                            _h_ms = _hedge_ms
                     _fresh_only = bool(_h_u and _h_u == dep["unique"])
             if _h_ms > 0:
                 _races_done += 1
-                _only_refill = _refill and not _legacy
-                if _only_refill:
+                if _refill:
                     _refill_rounds += 1
                 _dep_before = dep["unique"]
-                _hh_k = 1 if _only_refill else (
+                _hh_k = 1 if _refill else (
                     max(1, int(getattr(qcp, "stream_hedge_tiers", 1) or 1))
                     if bool(getattr(qcp, "stream_hedge_cross_tier", True))
                     else 1)
@@ -2831,7 +2833,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     client_ip=client_ip, attribution=attribution,
                     hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
                     _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only,
-                    hold=hold, refill=_only_refill,
+                    hold=hold, refill=_refill,
                     out_tokens=_need_out or None, raced=_raced)
                 if _legacy:
                     # backoff "il buono non esiste": solo la gara legacy
