@@ -14,6 +14,7 @@ import pytest
 
 from app.config import GatewayConfig
 from app.forwarder import (UpstreamError, repair_reasoning_replay,
+                           restore_reasoning, is_unclear_error,
                            _REASONING_REPLAY_RE)
 from app.policy import Policy
 from app.router import Router
@@ -180,3 +181,151 @@ def test_streaming_ripara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
     assert b"RIPARATO" in body
     assert a["unique"] not in SM.router._cooldown
     assert b["unique"] not in calls
+
+
+# ------------------------- errore OSCURO: retry con history NON tagliata ----
+ORIG = [
+    {"role": "user", "content": "leggi /tmp/a.txt"},
+    {"role": "assistant", "content": "", "reasoning_content": "penso passo",
+     "tool_calls": [{"id": "call_1", "type": "function",
+                     "function": {"name": "read", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+]
+WEIRD = '{"error":{"message":"upstream hiccup zzz","type":"oops"}}'
+
+
+def _trimmed_payload():
+    import copy
+    msgs = copy.deepcopy(ORIG)
+    for m in msgs:
+        m.pop("reasoning_content", None)      # come dopo histnorm max_chars=0
+    return {"model": "m", "stream": False, "max_tokens": 64, "messages": msgs}
+
+
+def _has_reasoning(payload):
+    return any(m.get("reasoning_content")
+               for m in payload.get("messages", [])
+               if m.get("role") == "assistant")
+
+
+def test_is_unclear_error():
+    assert is_unclear_error(-400, WEIRD)
+    assert is_unclear_error(-400, "")                     # vuoto = oscuro
+    assert not is_unclear_error(-429, "quota exhausted")
+    assert not is_unclear_error(-404, "model not found")
+    assert not is_unclear_error(-400, ERR)                # replay: chiaro
+    assert not is_unclear_error(-503, "bad gateway")
+
+
+def test_restore_reasoning_tocca_solo_il_campo():
+    body = {"messages": [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        {"role": "assistant", "content": "altro turno"},   # non in ORIG
+    ]}
+    assert restore_reasoning(body, ORIG) == 1
+    msgs = body["messages"]
+    assert msgs[0]["reasoning_content"] == "penso passo"    # solo il campo
+    assert "reasoning_content" not in msgs[1]
+    assert "reasoning_content" not in msgs[2]
+    assert len(msgs) == 3                                   # lista intatta
+    assert restore_reasoning(body, None) == 0
+    assert restore_reasoning(body, ORIG) == 0               # idempotente
+
+
+def test_restore_reasoning_dopo_histnorm_che_scarta():
+    """History normalizzata piu' corta (turni scartati): il match per firma
+    ritrova comunque l'assistant giusto."""
+    normalized = {"messages": [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+    ]}
+    assert restore_reasoning(normalized, ORIG) == 1
+    assert normalized["messages"][0]["reasoning_content"] == "penso passo"
+
+
+def test_nonstream_errore_oscuro_ripristina_e_ritenta(FW, monkeypatch):
+    import app.forwarder as F
+    a = FW.config.groups[f"{BASE}-32k"][0]
+    calls = []
+
+    async def fake_call(self, dep, payload, **kw):
+        calls.append((dep["unique"], _has_reasoning(payload)))
+        if not _has_reasoning(payload):
+            raise UpstreamError(-400, WEIRD)
+        return _resp("RIPRISTINATO")
+    monkeypatch.setattr(F.Forwarder, "call", fake_call)
+    fwd = F.Forwarder()
+
+    async def go():
+        return await fwd.call_with_fallback(
+            FW, "test", a, _trimmed_payload(), need=frozenset(),
+            scope="chain", ctx=100, attempts_box=[], session="s1", ses="s1",
+            client_ip="", attribution=None, requested_group=None,
+            orig_messages=ORIG)
+    data, used = asyncio.run(go())
+    assert used["unique"] == a["unique"]          # stesso dep, mai ruotato
+    assert calls == [(a["unique"], False), (a["unique"], True)]
+    assert data["choices"][0]["message"]["content"] == "RIPRISTINATO"
+    assert a["unique"] not in FW._cooldown
+
+
+def test_nonstream_errore_CHIARO_non_ripristina(FW, monkeypatch):
+    """Errore chiaro (quota 429): nessun tentativo con history originale."""
+    import app.forwarder as F
+    a = FW.config.groups[f"{BASE}-32k"][0]
+    seen = []
+
+    async def fake_call(self, dep, payload, **kw):
+        seen.append(_has_reasoning(payload))
+        raise UpstreamError(-429, '{"error":{"message":"quota exhausted"}}')
+    monkeypatch.setattr(F.Forwarder, "call", fake_call)
+    fwd = F.Forwarder()
+
+    async def go():
+        try:
+            return await fwd.call_with_fallback(
+                FW, "test", a, _trimmed_payload(), need=frozenset(),
+                scope="chain", ctx=100, attempts_box=[], session="s1",
+                ses="s1", client_ip="", attribution=None,
+                requested_group=None, orig_messages=ORIG)
+        except UpstreamError:
+            return None
+    asyncio.run(go())
+    assert seen and not any(seen)      # mai ripristinata
+
+
+def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
+    a = SM.config.groups[f"{BASE}-32k"][0]
+    b = SM.config.groups[f"{BASE}-200k"][0]
+    calls = []
+
+    async def sr(dep, payload, **kw):
+        calls.append((dep["unique"], _has_reasoning(payload)))
+        if not _has_reasoning(payload):
+            raise UpstreamError(-400, WEIRD)
+
+        async def gen():
+            yield b'data: {"choices":[{"delta":{"content":"RIPRISTINATO"}}]}\n\n'
+            yield (b'data: {"choices":[{"delta":{},'
+                   b'"finish_reason":"stop"}]}\n\n')
+            yield b"data: [DONE]\n\n"
+        return gen()
+    monkeypatch.setattr(SM.forwarder, "stream_response", sr)
+    payload = _trimmed_payload()
+    payload["stream"] = True
+
+    async def go():
+        resp = await SM._stream_with_fallback(
+            "test", a, payload, scope="chain", session="s1", ses="s1",
+            ctx=100, orig_messages=ORIG)
+        body = b""
+        if hasattr(resp, "body_iterator"):
+            async for c in resp.body_iterator:
+                body += c
+        return resp, body
+    resp, body = asyncio.run(go())
+    assert calls == [(a["unique"], False), (a["unique"], True)]
+    assert b"RIPRISTINATO" in body
+    assert a["unique"] not in SM.router._cooldown
+    assert b["unique"] not in [c[0] for c in calls]

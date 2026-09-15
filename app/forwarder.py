@@ -698,6 +698,67 @@ def repair_reasoning_replay(body: dict) -> int:
         n += 1
     return n
 
+
+def restore_reasoning(body: dict, orig: list | None) -> int:
+    """Re-inietta SOLO il `reasoning_content` che histnorm aveva tagliato.
+
+    La history in uscita resta quella NORMALIZZATA (orfani/chiusure/assistant
+    vuoti gia' sistemati): si rimette solo il campo, abbinando i messaggi per
+    firma (role assistant + id dei tool_calls + content) perche' la lista
+    normalizzata puo' essere piu' corta dell'originale. Ritorna quanti campi
+    sono stati ripristinati (0 = niente da fare)."""
+    if not isinstance(body, dict) or not isinstance(orig, list) or not orig:
+        return 0
+    store: dict[tuple, list[str]] = {}
+    for m in orig:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        rc = m.get("reasoning_content")
+        if not (isinstance(rc, str) and rc.strip()):
+            continue
+        ids = tuple(t.get("id") for t in (m.get("tool_calls") or [])
+                    if isinstance(t, dict))
+        store.setdefault((ids, str(m.get("content") or "")), []).append(rc)
+    if not store:
+        return 0
+    n = 0
+    for m in body.get("messages") or []:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        rc = m.get("reasoning_content")
+        if isinstance(rc, str) and rc.strip():
+            continue                      # gia' presente: non toccare
+        ids = tuple(t.get("id") for t in (m.get("tool_calls") or [])
+                    if isinstance(t, dict))
+        lst = store.get((ids, str(m.get("content") or "")))
+        if lst:
+            m["reasoning_content"] = lst.pop(0)
+            n += 1
+    return n
+
+
+def is_unclear_error(status: int | None, detail: str | None) -> bool:
+    """True se l'errore upstream NON rientra in una firma NOTA (quota, auth,
+    ban/ToS, modello mancante, schema, modalita'/media, replay reasoning,
+    transitorio del provider): solo per questi casi 'oscuri', con una history
+    a cui abbiamo tagliato il reasoning, vale UN ritentativo con la history
+    originale (se l'errore e' chiaro, invece, il tentativo non serve)."""
+    d = detail or ""
+    st = abs(int(status)) if status else 0
+    if st in (401, 402, 403, 404, 413, 429):
+        return False
+    if st >= 500:
+        return False
+    if not d:
+        return True
+    return not (_MODEL_MISSING_RE.search(d) or _PAYLOAD_SCHEMA_RE.search(d)
+                or _THOUGHT_SIG_RE.search(d)
+                or _QUOTA_EXHAUSTED_RE.search(d)
+                or _PROVIDER_TRANSIENT_RE.search(d)
+                or _REASONING_REPLAY_RE.search(d)
+                or media_reject_signature(d) or is_provider_fault_body(d)
+                or ban_signature_hit(d))
+
 # Errore TRANSITORIO del provider/router a monte (non del client, non del
 # modello): l'upstream del provider e' giu', non ha endpoint validi ora, ecc.
 # Arriva come 4xx col body d'errore ma NON e' un problema della richiesta ->
@@ -2266,7 +2327,8 @@ truncation_hook=None,
                                  ses: str | None = None,
                                  client_ip: str = "",
                                  attribution: dict | None = None,
-                                 requested_group: str | None = None
+                                 requested_group: str | None = None,
+                                 orig_messages: list | None = None
                                  ) -> tuple[dict, dict] | tuple[dict, dict, list]:
         """Prova i deployment lungo la catena finché uno risponde.
 
@@ -2306,6 +2368,7 @@ truncation_hook=None,
         _tt = text_config_from_policy(router.policy)
         _corrected: set[str] = set()
         _rsn_repaired: set[str] = set()      # replay reasoning gia' riparato
+        _rsn_restored = False                # history originale gia' riprovata
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
         last_err: UpstreamError | None = None
@@ -2814,6 +2877,20 @@ truncation_hook=None,
                                 "tool_calls senza reasoning_content -> "
                                 "riparati, ritento lo stesso deployment",
                                 cur, _nfix)
+                    continue
+                # ERRORE "OSCURO" su richiesta reasoning: il taglio del
+                # reasoning (histnorm) e' un'ottimizzazione di token; senza una
+                # firma chiara si ritenta UNA volta lo STESSO deployment con la
+                # history ORIGINALE (reasoning intatto).
+                if (orig_messages is not None and not _rsn_restored
+                        and is_unclear_error(err.status, detail)):
+                    _rsn_restored = True
+                    _nres = restore_reasoning(payload, orig_messages)
+                    metrics.inc("nx_reasoning_replay_total", ("restored",))
+                    log.warning("[reasoning-restore] %s: errore non chiaro "
+                                "(%s) -> history originale (%d messaggi), "
+                                "ritento lo stesso deployment", cur,
+                                (detail or "")[:90], _nres)
                     continue
                 _kind_default = classify_error(err.status, None, detail)
                 # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /

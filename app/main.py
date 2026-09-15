@@ -75,6 +75,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         maybe_host_transient_cooldown,
                         note_context_limit,
                         repair_reasoning_replay, _REASONING_REPLAY_RE,
+                        restore_reasoning, is_unclear_error,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy, refill_out_budget
@@ -1679,6 +1680,8 @@ async def chat_completions(request: Request, response: Response):
     _hn = hist_config_from_policy(router.policy)
     _sm = sampling_config_from_policy(router.policy)
     _so = schemaout_config_from_policy(router.policy)
+    _orig_msgs = payload.get("messages")          # pre-normalizzazione
+    _orig_for_retry = None
     if _hn.enabled:
         _nm, _nr = normalize_messages(payload.get("messages"), _hn,
                                       tail_floor=router.ctx_boundary_floor(
@@ -1690,6 +1693,11 @@ async def chat_completions(request: Request, response: Response):
                      {k: _nr.get(k) for k in (
                          "shown_orphan_tool", "dangling_tool_calls",
                          "empty_assistant", "dup_system")})
+        # Il taglio del reasoning e' un'ottimizzazione di TOKEN: se un modello
+        # reasoning fallisce con un errore NON chiaro, si ritenta UNA volta lo
+        # stesso deployment con la history ORIGINALE (reasoning intatto).
+        if _nr.get("reasoning_trimmed"):
+            _orig_for_retry = _orig_msgs
     # ---- cache-aware: detentore sessione + troncamento contesto ----
     from .ctxcompact import (ctxcompact_config_from_policy,
                              compact_tool_outputs, should_compact,
@@ -1815,6 +1823,7 @@ async def chat_completions(request: Request, response: Response):
             ses=session_id, req=raw_model,
             session=_sess, client_ip=_cip, request=request,
             attribution=_attr, requested_group=group_or_explicit,
+            orig_messages=_orig_for_retry,
             sniffer=_sniffer)
         if _ctx_saved_hdr:
             _sresp.headers["X-Ctxcompact-Saved"] = str(_ctx_saved_hdr)
@@ -1835,6 +1844,7 @@ async def chat_completions(request: Request, response: Response):
                 attempts_box=attempts_box,
                 session=_sess, ses=session_id, client_ip=_cip,
                 attribution=_attr,
+                orig_messages=_orig_for_retry,
                 requested_group=group_or_explicit)
         res = await _forward_coalesced(router.policy, payload, profile,
                                        _fwd_once)
@@ -2863,6 +2873,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 requested_group: str | None = None,
                                 cold: bool = False,
                                 prefix_reason: str | None = None,
+                                orig_messages: list | None = None,
                                 sniffer=None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
@@ -2872,6 +2883,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     tried = 0
     tried_set: set[str] = set()
     _rsn_repaired: set[str] = set()      # replay reasoning gia' riparato
+    _rsn_restored = False                # history originale gia' riprovata
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
                      or 128)
@@ -3266,6 +3278,21 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             "tool_calls senza reasoning_content -> riparati, "
                             "ritento lo stesso deployment", dep["unique"],
                             _nfix)
+                continue
+            # ERRORE "OSCURO" su richiesta reasoning: il taglio del reasoning
+            # (histnorm) e' un'ottimizzazione di token; se il provider non ci
+            # da' una firma chiara, si ritenta UNA volta lo STESSO deployment
+            # con la history ORIGINALE (reasoning intatto). Se l'errore e'
+            # chiaro (quota/auth/ban/schema/...) il tentativo non serve.
+            if (orig_messages is not None and not _rsn_restored
+                    and is_unclear_error(err.status, detail)):
+                _rsn_restored = True
+                _nres = restore_reasoning(payload, orig_messages)
+                metrics.inc("nx_reasoning_replay_total", ("restored",))
+                log.warning("[reasoning-restore] %s: errore non chiaro (%s) "
+                            "-> history originale (%d messaggi, reasoning "
+                            "intatto), ritento lo stesso deployment",
+                            dep["unique"], (detail or "")[:90], _nres)
                 continue
             # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
             # Service): quarantena dell'HOST 24h, cosi' la rotazione non
