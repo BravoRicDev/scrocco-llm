@@ -313,6 +313,7 @@ def ML(tmp_path, monkeypatch):
     owned = dict(_M.router._dep_last_session)
     sdeps = {k: set(v) for k, v in _M.router._session_deps.items()}
     slok = dict(_M.router._session_last_ok)
+    probes = {k: dict(v) for k, v in _M.router._probes().items()}
     _M.config.csv_path = csv
     _M.config.reload()
     qj.stream_hedge_delay_ms = 50
@@ -335,6 +336,8 @@ def ML(tmp_path, monkeypatch):
     _M.router._session_deps.update(sdeps)
     _M.router._session_last_ok.clear()
     _M.router._session_last_ok.update(slok)
+    _M.router._probes().clear()
+    _M.router._probes().update(probes)
 
 
 def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
@@ -509,9 +512,124 @@ def test_scrub_assistant_vuote_anche_in_testa():
 def test_policy_knob_warm_refill():
     p = Policy.from_dict({"warm_pool": {"refill_enabled": False,
                                         "ready_min": 5,
-                                        "refill_default_out_tokens": 1000}})
+                                        "refill_default_out_tokens": 1000,
+                                        "max_inflight": 2}})
     assert p.warm_refill_enabled is False
     assert p.warm_ready_min == 5
     assert p.warm_refill_default_out_tokens == 1000
+    assert p.warm_refill_max_inflight == 2
     d = Policy.from_dict({})
     assert d.warm_refill_enabled is True and d.warm_ready_min == 3
+    assert d.warm_refill_max_inflight == 4
+
+
+# ----------------------------------------------- tetto 4 in volo PER SESSIONE
+def test_registro_probe_in_volo(router):
+    import time as _t
+    r = router
+    assert r.probes_in_flight("s1") == 0
+    r.note_probe_started("s1", "u-a")
+    r.note_probe_started("s1", "u-b")
+    r.note_probe_started("s1", "u-a")          # idempotente: stesso uniq
+    assert r.probes_in_flight("s1") == 2
+    assert r.probes_in_flight("s2") == 0
+    r.note_probe_done("s1", "u-a")
+    assert r.probes_in_flight("s1") == 1
+    r._probes_flight["s1"]["u-b"] = _t.time() - 2000   # rete TTL
+    assert r.probes_in_flight("s1") == 0
+
+
+def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
+    """Con 4 probe gia' in volo per la sessione il gate NON accende il
+    canario (anche se i validi sono 1/3): A viene servita da sola, e i
+    registri restanti si liberano con note_probe_done."""
+    from app.router import set_current_session
+    small = ML.config.groups[f"{BASE}-32k"][0]
+    big = ML.config.groups[f"{BASE}-1000k"][0]
+    ML.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
+    for i in range(4):
+        ML.router.note_probe_started("rf-sess", f"phantom-{i}")
+    calls = []
+
+    async def sr(dep, payload, **kw):
+        calls.append(dep["unique"])
+
+        async def gen():
+            yield SLOW
+            yield STOP
+        return gen()
+    monkeypatch.setattr(ML.forwarder, "stream_response", sr)
+
+    async def go():
+        set_current_session("rf-sess")
+        try:
+            payload = {"model": small["model"],
+                       "messages": [{"role": "user", "content": "ciao"}]}
+            resp = await ML._stream_with_fallback(
+                "test", small, payload, scope="chain", session="rf-sess",
+                ses="rf-sess", ctx=100)
+            body = b""
+            if hasattr(resp, "body_iterator"):
+                async for c in resp.body_iterator:
+                    body += c
+            await _join_probes(ML)
+            return resp, body
+        finally:
+            set_current_session(None)
+    resp, body = asyncio.run(go())
+    assert isinstance(resp, ML.StreamingResponse)
+    assert b"LENTO" in body
+    assert calls == [small["unique"]]           # nessun canario: tetto saturo
+    assert ML.router.probes_in_flight("rf-sess") == 4   # phantom non toccati
+    ML.router.note_probe_done("rf-sess", "phantom-0")
+    assert ML.router.probes_in_flight("rf-sess") == 3
+
+
+def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
+                                                                   monkeypatch):
+    """0 phantom, 1 valido -> puo' riaccedere FINO a 4 in volo: il gate spara
+    a ogni round finche' il tetto non e' saturo; il probe di A si scarica da
+    solo nel finally (contatore a 0 a gara finita)."""
+    from app.router import set_current_session
+    small = ML.config.groups[f"{BASE}-32k"][0]
+    mid = ML.config.groups[f"{BASE}-200k"][0]
+    big = ML.config.groups[f"{BASE}-1000k"][0]
+    ML.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
+    calls = []
+
+    async def sr(dep, payload, **kw):
+        calls.append(dep["unique"])
+        u = dep["unique"]
+
+        async def gen():
+            if u == small["unique"]:
+                yield SLOW
+                await asyncio.sleep(0.3)
+                yield STOP
+            else:
+                yield FAST
+                yield STOP
+        return gen()
+    monkeypatch.setattr(ML.forwarder, "stream_response", sr)
+
+    async def go():
+        set_current_session("rf-sess")
+        try:
+            payload = {"model": small["model"],
+                       "messages": [{"role": "user", "content": "ciao"}]}
+            resp = await ML._stream_with_fallback(
+                "test", small, payload, scope="chain", session="rf-sess",
+                ses="rf-sess", ctx=100)
+            body = b""
+            if hasattr(resp, "body_iterator"):
+                async for c in resp.body_iterator:
+                    body += c
+            await _join_probes(ML)
+            return resp, body
+        finally:
+            set_current_session(None)
+    resp, body = asyncio.run(go())
+    assert b"VELOCE" in body
+    assert sorted(calls) == sorted([small["unique"], mid["unique"]])
+    # probe conclusi -> registro vuoto (nessun contatore perso)
+    assert ML.router.probes_in_flight("rf-sess") == 0

@@ -33,6 +33,7 @@ because some free tiers count calls, not tokens.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -240,6 +241,8 @@ _NS_PROBES: set = set()
 
 def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses) -> None:
     u = dep.get("unique", "?")
+    with contextlib.suppress(Exception):
+        router.note_probe_started(ses, u)
 
     async def _run():
         ok = False
@@ -285,6 +288,10 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses) -> None:
                       "in warm" if ok else
                       ("cooldown" if raised is not None else "vuoto, inerme"))
         finally:
+            try:
+                router.note_probe_done(ses, u)
+            except Exception:
+                pass
             try:
                 router.note_end(u, ctx)
             except Exception:
@@ -2111,6 +2118,8 @@ truncation_hook=None,
                       and bool(getattr(_pol, "warm_pool_enabled", True))
                       and bool(ses) and bool(profile))
         _ready_min = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
+        _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
+                                     4) or 0))
         _raced: set[str] = set()
         _raced_keys: set[str] = set()
         _refill_rounds = 0
@@ -2180,7 +2189,12 @@ truncation_hook=None,
                 _fB = None
                 _B = None
                 _tB = t0
-                if (_refill_on and _ready_min and _refill_rounds < _ready_min
+                try:
+                    _fly = router.probes_in_flight(ses)
+                except Exception:
+                    _fly = 0
+                if (_refill_on and _ready_min and _refill_rounds < _maxif
+                        and _fly < _maxif
                         and (not _deadline_ms
                              or (time.monotonic() - _t0) * 1000
                              < _deadline_ms)):
@@ -2193,9 +2207,10 @@ truncation_hook=None,
                         _nv = _ready_min
                     if _nv < _ready_min:
                         _refill_rounds += 1
-                        log.info("[refill] ns %s: warm validi %d/%d (ctx=%s, "
-                                 "out=%s) -> 2 alla volta", cur, _nv,
-                                 _ready_min, ctx, _outb)
+                        log.info("[refill] ns %s: warm validi %d/%d, in volo "
+                                 "%d/%d (ctx=%s, out=%s) -> 2 alla volta",
+                                 cur, _nv, _ready_min, _fly, _maxif, ctx,
+                                 _outb)
                         _raced.add(cur)
                         _raced_keys.add(str(dep.get("api_key") or ""))
                         # chiavi gia' rappresentate nel warm: non si rimette
@@ -2231,6 +2246,8 @@ truncation_hook=None,
                                 session=session, attribution=attribution,
                                 rate_hook=lambda u2, rl:
                                 router.note_rate_limit(u2, rl)))
+                            with contextlib.suppress(Exception):
+                                router.note_probe_started(ses, _B["unique"])
                         else:
                             log.info("[refill] ns %s: nessun canario free "
                                      "consegnabile (chiavi escluse=%d)",
@@ -2290,6 +2307,8 @@ truncation_hook=None,
                         log.info("[refill] consegna %s (piu' veloce di %s, "
                                  "che finisce come probe senza penale)",
                                  _B["unique"], cur)
+                        with contextlib.suppress(Exception):
+                            router.note_probe_done(ses, _B["unique"])
                         dep = _B
                         cur = _B["unique"]
                         t0 = _tB

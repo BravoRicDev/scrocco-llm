@@ -598,6 +598,12 @@ class Policy:
     warm_refill_enabled: bool = True
     warm_ready_min: int = 3
     warm_refill_default_out_tokens: int = 4096
+    # TETTO DI SPECULATIVO IN VOLO PER SESSIONE: canari refill/legacy e
+    # A/loser staccati come probe contano TUTTI; il gate del refill non
+    # accende un altro canario se la sessione ne ha gia' `max_inflight` in
+    # corsa. Nel caso migliore il warm si trova anche 6-7 caldi transienti
+    # (nessun vero spreco: se arrivano tutti buoni "durera' di piu'").
+    warm_refill_max_inflight: int = 4
     # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
     # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
@@ -1785,6 +1791,13 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.refill_default_out_tokens non valido: {_v!r}")
                 p.warm_refill_default_out_tokens = int(_v)
+            if wp.get("max_inflight") is not None:
+                _v = wp["max_inflight"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.max_inflight non valido: {_v!r}")
+                p.warm_refill_max_inflight = int(_v)
 
         ca = raw.get("cache_aware")
         if ca is not None:

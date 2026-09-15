@@ -5233,6 +5233,54 @@ class Router:
         except Exception:                              # noqa: BLE001
             return False
 
+    # ------------------------------------------- PROBES IN VOLO (tetto 4/sess)
+    # Contiamo TUTTO lo speculativo ancora in corsa per la sessione (canari
+    # refill e legacy, A/loser staccati come probe): il gate del refill si
+    # ferma a `warm_refill_max_inflight` in volo per non riaccendere a ogni
+    # turno una tempesta di chiamate che poi prende 429. Il cleanup VERO
+    # avviene nel finally di ogni probe (che e' bounded: drain cap / wait_for
+    # 900s); il TTL qui sotto e' solo la rete di sicurezza.
+    def _probes(self) -> dict:
+        d = getattr(self, "_probes_flight", None)
+        if d is None:
+            d = self._probes_flight = {}
+        return d
+
+    def note_probe_started(self, session_id: str | None,
+                           unique: str | None) -> None:
+        if not session_id or not unique:
+            return
+        now = time.time()
+        m = self._probes().setdefault(session_id, {})
+        m[unique] = now
+        if len(m) > 64:                       # rete: spazza i dimenticati
+            for u, ts in list(m.items()):
+                if now - ts > 950:
+                    m.pop(u, None)
+
+    def note_probe_done(self, session_id: str | None,
+                        unique: str | None) -> None:
+        if not session_id or not unique:
+            return
+        m = self._probes().get(session_id)
+        if m:
+            m.pop(unique, None)
+            if not m:
+                self._probes().pop(session_id, None)
+
+    def probes_in_flight(self, session_id: str | None = None) -> int:
+        sid = session_id or current_session()
+        if not sid:
+            return 0
+        m = self._probes().get(sid)
+        if not m:
+            return 0
+        now = time.time()
+        for u, ts in list(m.items()):
+            if now - ts > 950:
+                m.pop(u, None)
+        return len(m)
+
     def warm_valid_for(self, session_id: str | None, profile: str | None,
                        group_name: str | None,
                        need: frozenset[str] | None, ctx: int | None,

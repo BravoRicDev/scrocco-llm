@@ -2417,6 +2417,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 router.clear_cooldown(_bu)
             futB = asyncio.ensure_future(
                 _peek(genB, router.first_content_deadline_ms(_bu, ctx)))
+            with contextlib.suppress(Exception):
+                router.note_probe_started(session, _bu)
             canaries.append({"dep": B, "gen": genB, "t0": tB, "fut": futB})
         except asyncio.CancelledError:
             if genB is not None:
@@ -2491,6 +2493,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     # ------------------------------------------------- canary vince ---------
     metrics.inc("nx_hedge_total", ("won_b",))
     w = futs[winner]
+    with contextlib.suppress(Exception):
+        router.note_probe_done(session, w["dep"]["unique"])
     # A NON viene annullata: finisce la sua risposta in background come probe
     # reale (se consegna pulita entra in warm, altrimenti si scarta).
     _spawn_probe(dep, gen, futA, results.get(futA), session, ctx, hold)
@@ -2551,6 +2555,8 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
     registra warm. Nota: `hold` e' solo contestuale al log/diagnosi."""
     u = dep.get("unique", "?")
     cap = _probe_drain_cap_sec()
+    with contextlib.suppress(Exception):
+        router.note_probe_started(session, u)
 
     async def _run():
         ok = False
@@ -2604,6 +2610,8 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
             log.info("[probe] %s: %s (verdetto=%s)", u,
                       "in warm" if ok else "gestito di solito", v)
         finally:
+            with contextlib.suppress(Exception):
+                router.note_probe_done(session, u)
             with contextlib.suppress(Exception):
                 router.note_end(u, ctx)
     t = asyncio.ensure_future(_run())
@@ -2665,7 +2673,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     attempts: list[str] = []
     _races_done = 0
     # WARM-REFILL a cascata: candidati gia' sonciati in QUESTA richiesta
-    # (uniq + api_key) e round gia' consumati (budget = warm_ready_min).
+    # (uniq + api_key) e round gia' consumati (budget per-richiesta =
+    # warm_refill_max_inflight; il tetto GLOBALE e' il registro in volo per
+    # sessione nel router).
     _raced: dict = {}
     _refill_rounds = 0
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
@@ -2772,8 +2782,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     and bool(getattr(_pol, "warm_refill_enabled", True))
                     and bool(getattr(_pol, "warm_pool_enabled", True))):
                 _ready = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
+                _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
+                                            4) or 0))
                 _need_out = refill_out_budget(payload, _pol)
-                if _ready and _refill_rounds < _ready:
+                try:
+                    _fly = router.probes_in_flight(session)
+                except Exception:
+                    _fly = 0
+                if _ready and _refill_rounds < _maxif and _fly < _maxif:
                     try:
                         _nv = len(router.warm_valid_for(
                             session, profile,
@@ -2783,10 +2799,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         _nv = _ready
                     _refill = _nv < _ready
                     if _refill:
-                        log.info("[refill] %s: warm validi %d/%d (ctx=%s, "
-                                 "out=%s) -> canario extra in gara",
-                                 dep.get("unique"), _nv, _ready, ctx,
-                                 _need_out)
+                        log.info("[refill] %s: warm validi %d/%d, in volo "
+                                 "%d/%d (ctx=%s, out=%s) -> canario extra "
+                                 "in gara",
+                                 dep.get("unique"), _nv, _ready, _fly,
+                                 _maxif, ctx, _need_out)
             if _hedge_ms > 0 or _refill:
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
