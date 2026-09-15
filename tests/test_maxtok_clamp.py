@@ -65,18 +65,52 @@ def _dep_eff(mi=32768):
     return {"unique": "d1", "max_input_tokens": mi, "effort_capable": True}
 
 
-def test_reasoning_reserve_only_for_effort_capable():
-    """Un modello che pensa brucia output: si lascia libero ~30% di finestra."""
-    msgs = [{"role": "user", "content": "x" * 4000}]
+def test_riserva_cedevole_non_affama_output():
+    """REGRESSION viemmegi 2026-09-15: ctx ~80% della finestra su modello
+    thinking. La riserva del 30% NON deve piu' clampare a 512 (risposta
+    monca: il reasoning si mangiava tutto il budget): se input + richiesta
+    entrano nella finestra niente clamp."""
+    msgs = [{"role": "user", "content": "x" * 2_800_000}]      # ctx = 700k
     ctx = _ctx(msgs)
+    assert ctx == 700_000
+    mi = 1_049_000
+    room0 = mi - ctx - int(mi * 0.05)
+    assert room0 > 32000                                        # c'e' spazio
+    body = {"messages": msgs, "max_tokens": 32000}
+    clamp_max_tokens(body, _dep_eff(mi))
+    assert body["max_tokens"] == 32000                          # nessun clamp
+
+
+def test_riserva_mangia_solo_il_surplus():
+    """La riserva puo' ridursi fino ad azzerarsi, ma mai toccare il
+    max_tokens chiesto quando c'e' spazio; quando lo spazio manca il clamp
+    va a room0 (senza riserva), come per i modelli non-thinking."""
+    msgs = [{"role": "user", "content": "x" * 4000}]            # ctx = 1000
+    ctx = _ctx(msgs)
+    mi = 100_000
+    body = {"messages": msgs, "max_tokens": 95_000}             # > room0
+    clamp_max_tokens(body, _dep_eff(mi))
+    room0 = mi - ctx - int(mi * 0.05)
+    assert body["max_tokens"] == room0          # riserva ceduta, clamp a room0
+    assert body["max_tokens"] > mi - ctx - int(mi * 0.30) - int(mi * 0.05)
+
+
+def test_effort_capable_clamp_uguale_quando_non_c_e_spazio():
+    msgs = [{"role": "user", "content": "x" * 4000}]
     b1 = {"messages": msgs, "max_tokens": 32000}
-    clamp_max_tokens(b1, _dep())                    # no reasoning
+    clamp_max_tokens(b1, _dep())
     b2 = {"messages": msgs, "max_tokens": 32000}
-    clamp_max_tokens(b2, _dep_eff())                # reasoning: riserva 30%
-    assert b2["max_tokens"] < b1["max_tokens"]
-    reserve = int(32768 * 0.30)
-    assert b1["max_tokens"] == 32768 - ctx - _safety()
-    assert b2["max_tokens"] == 32768 - ctx - reserve - _safety()
+    clamp_max_tokens(b2, _dep_eff())
+    assert b1["max_tokens"] == b2["max_tokens"] == 32768 - _ctx(msgs) - _safety()
+
+
+def test_floor_4096_sopra_la_riserva():
+    """Se la riserva affamava tutto (vecchio caso 512), oggi il floor e'
+    4096: una risposta utilizabile, non un moncone."""
+    msgs = [{"role": "user", "content": "x" * 380_000}]         # ctx = 95k
+    body = {"messages": msgs, "max_tokens": 32000}
+    clamp_max_tokens(body, _dep_eff(100_000))
+    assert body["max_tokens"] == 4096
 
 
 def test_floor_512_when_room_is_tiny():
@@ -89,11 +123,34 @@ def test_floor_512_when_room_is_tiny():
     assert body["max_tokens"] <= max(1, 32768 - _ctx(msgs))
 
 
+def test_clamp_non_alza_mai_sopra_la_richiesta():
+    # room negativissimo ma cap>mt: il floor 4096 non deve MAI alzare il
+    # max_tokens chiesto dal client (vecchio bug: min(cap, max(512, room))
+    # su richieste minuscole lo riportava sopra).
+    body = {"messages": [{"role": "user", "content": "x" * 384_000}],
+            "max_tokens": 100}
+    clamp_max_tokens(body, _dep(100_000))       # cap=4000 > 100
+    assert body["max_tokens"] == 100
+
+
 def test_reasoning_reserve_not_applied_when_no_clamp_needed():
     msgs = [{"role": "user", "content": "ciao"}]
     body = {"messages": msgs, "max_tokens": 100}
     clamp_max_tokens(body, _dep_eff())
     assert body["max_tokens"] == 100
+
+
+def test_hook_chiamata_sul_clamp():
+    seen = []
+    msgs = [{"role": "user", "content": "x" * 4000}]
+    clamp_max_tokens({"messages": msgs, "max_tokens": 32000}, _dep_eff(),
+                     hook=lambda old, new: seen.append((old, new)))
+    assert seen == [(32000, 32768 - _ctx(msgs) - _safety())]
+    seen.clear()
+    clamp_max_tokens({"messages": [{"role": "user", "content": "ciao"}],
+                      "max_tokens": 100}, _dep_eff(),
+                     hook=lambda old, new: seen.append((old, new)))
+    assert seen == []
 
 
 def test_metric_incremented():

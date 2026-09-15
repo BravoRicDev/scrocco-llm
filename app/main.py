@@ -2483,12 +2483,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     attempts: list[str] = []
     _races_done = 0
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
+    # Clamp max_tokens GATEWAY-side dell'attempt corrente (via maxtok_hook):
+    # se il modello esaurisce il NOSTRO budget ridotto, la troncatura e'
+    # auto-inflitta -> il watchdog non deve punire il deployment.
+    _maxtok: dict = {}
     # Gemini 3 tool replay: una history con tool_call prive di firma rende Gemini
     # inutilizzabile. L'esclusione avviene A MONTE nel router (set_avoid_gemini in
     # chat_completions -> _gemini_blocked in pick_deployment/_walk_chain), quindi
     # qui non serve più alcun salto o tentativo finto.
     while True:
         tried += 1
+        _maxtok.clear()
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])
         _was_dormant = router.is_cooled_down(dep["unique"])
@@ -2526,9 +2531,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                                   attribution=attribution,
                                                   tool_repair_config=_tr_cfg,
                                                   truncation_config=_tct_cfg,
-                                                  truncation_hook=_trunc_hook,
-                                                  rate_hook=lambda u, rl:
-                                                  router.note_rate_limit(u, rl))
+                                                   truncation_hook=_trunc_hook,
+                                                   maxtok_hook=lambda old, new:
+                                                   _maxtok.update(
+                                                       cap=new, old=old),
+                                                   rate_hook=lambda u, rl:
+                                                   router.note_rate_limit(u, rl))
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe
@@ -2683,7 +2691,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # (tutto il gruppo si comporterebbe uguale) -> 503 retryable diretto.
             no_rotate = (verdict == "empty_eof" and meta.get("no_rotate")
                          and not rot_len)
-            if not no_rotate:
+            # Clamp GATEWAY-side: se il modello ha esaurito il max_tokens che
+            # GLI ABBIAMO TAGLIATO NOI (fr=length + cap nostro), la troncatura
+            # e' auto-inflitta: ruotare va bene (il dim dopo ha piu' spazio) ma
+            # NON declassare il deployment (non e' colpa sua).
+            _gw_clamp_trunc = bool(_maxtok.get("cap") and fr == "length")
+            if _gw_clamp_trunc:
+                log.info("[maxtok] %s: stream vuoto perche' ha esaurito il "
+                         "clamp gateway (%s->%s): nessuna penale, ruoto",
+                         dep["unique"], _maxtok.get("old"),
+                         _maxtok.get("cap"))
+            elif not no_rotate:
                 # TIMEOUT (upstream che appende): danno REALE (tempo perso) ->
                 # cooldown lungo (timeout_cooldown_mult x classico). Vuoto/
                 # troncato: fallimento SOFT -> cooldown corto con escalation
@@ -3212,6 +3230,22 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.info("[watchdog] tier2 %s: finish_reason presente, "
                              "nessun [DONE] (provider senza sentinel)",
                              dep["unique"])
+                elif (finish_len and _maxtok.get("cap")
+                      and (usage_final or {}).get("completion_tokens") is not None
+                      and int((usage_final or {}).get("completion_tokens"))
+                          >= int(_maxtok["cap"]) - 2):
+                    # Troncatura AUTO-INFLITTA: il gateway ha clampato
+                    # max_tokens e il modello ha esaurito ESATTAMENTE quel
+                    # budget (finish_reason=length). Non e' colpa del
+                    # deployment: nessuna penale, solo log (i byte sono gia'
+                    # partiti). Serve a non far scattare il cooldown
+                    # zero-answer/length-truncated su risposte monche nostre.
+                    wd = "clamp-truncated"
+                    log.info("[watchdog] %s: risposta troncata dal clamp "
+                             "gateway (max_tokens %s->%s, completion=%s): "
+                             "nessuna penale", dep["unique"],
+                             _maxtok.get("old"), _maxtok["cap"],
+                             (usage_final or {}).get("completion_tokens"))
                 elif _length_truncated_should_fail(
                         finish_len, answer_total, req_max_tokens,
                         (usage_final or {}).get("completion_tokens"),

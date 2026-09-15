@@ -124,7 +124,7 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
     return body
 
 
-def clamp_max_tokens(body: dict, dep: dict) -> None:
+def clamp_max_tokens(body: dict, dep: dict, hook=None) -> None:
     """Riduce `max_tokens` perche' input+output non superi il context window
     del deployment.
 
@@ -137,7 +137,18 @@ def clamp_max_tokens(body: dict, dep: dict) -> None:
     reasoning block (solo modelli `effort_capable`) e un margine di sicurezza
     del 5%. Cosi' non si chiede piu' output di quanto entra nella finestra —
     la classe di 503 piu' stupida ("provider morto" quando in realta' era
-    "hai chiesto troppo output"). Floor 512 token, mai sopra lo spazio reale.
+    "hai chiesto troppo output").
+
+    RISERVA CEDEVOLE (fix viemmegi 2026-09-15): la riserva NON deve mai
+    affamare l'output. Con ctx all'80% della finestra su un thinking model la
+    riserva del 30% portava `room` sotto zero e il clamp a 512: il modello
+    spendeva tutto in reasoning e la risposta partiva gia' troncata
+    (finish_reason=length, 0 caratteri utili). Ora la riserva si riduce al
+    massimo fino a lasciare intatto il `max_tokens` chiesto dal client, e
+    quando non c'e' davvero spazio il floor e' MIN_OUTPUT_FLOOR (4096), non
+    512. `hook(old, new)` (opzionale) viene chiamato solo se il valore e'
+    stato ridotto: il watchdog lo usa per non punire il modello per una
+    troncatura auto-inflitta dal gateway.
     """
     mi = int(dep.get("max_input_tokens") or 0)
     if mi <= 0:
@@ -154,23 +165,32 @@ def clamp_max_tokens(body: dict, dep: dict) -> None:
         return
     ctx = estimate_tokens(body.get("messages") or [], _EST_DIVISOR,
                           _EST_IMAGE_TOKENS, tools=body.get("tools"))
+    safety = int(mi * 0.05)
+    room0 = mi - ctx - safety
     reserve = 0
     if dep.get("effort_capable") and _REASONING_RESERVE_FRAC > 0:
-        reserve = int(mi * _REASONING_RESERVE_FRAC)
-    safety = int(mi * 0.05)
-    room = max(1, mi - ctx - reserve - safety)
+        # La riserva mangia solo il SURPLUS sopra la richiesta: mai il
+        # max_tokens chiesto dal client.
+        reserve = min(int(mi * _REASONING_RESERVE_FRAC), max(0, room0 - mt))
+    room = max(1, room0 - reserve)
     if mt > room:
         cap = max(1, mi - ctx)
-        new_mt = min(cap, max(512, room))
-        body[key] = new_mt
-        try:
-            metrics.inc("nx_max_tokens_clamped", ())
-        except Exception:
-            pass
-        log.info("[maxtok] %s clamp %s %d->%d (ctx=%d max_in=%d "
-                 "riserva_reasoning=%d sicurezza=%d)",
-                 dep.get("unique", "?"), key, mt, new_mt, ctx, mi,
-                 reserve, safety)
+        new_mt = min(cap, max(MIN_OUTPUT_FLOOR, room))
+        if new_mt < mt:
+            body[key] = new_mt
+            try:
+                metrics.inc("nx_max_tokens_clamped", ())
+            except Exception:
+                pass
+            log.info("[maxtok] %s clamp %s %d->%d (ctx=%d max_in=%d "
+                     "riserva_reasoning=%d sicurezza=%d)",
+                     dep.get("unique", "?"), key, mt, new_mt, ctx, mi,
+                     reserve, safety)
+            if hook is not None:
+                try:
+                    hook(mt, new_mt)
+                except Exception:                   # mai rompere la richiesta
+                    pass
 
 
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
@@ -202,6 +222,10 @@ _LATENCY_LOOKUP = None
 # F16: frazione della finestra riservata al reasoning block sui modelli
 # `effort_capable` (0 = nessuna riserva). 1 - reasoning_headroom_ratio.
 _REASONING_RESERVE_FRAC = 0.30
+# Floor minimo di max_tokens dopo il clamp: 512 era di fatto una troncatura
+# garantita (su un modello thinking 512 token sono solo reasoning, zero
+# risposta). Sotto questo valore meglio None che una risposta monca.
+MIN_OUTPUT_FLOOR = 4096
 
 
 def set_reasoning_reserve(frac=None) -> None:
@@ -1409,6 +1433,7 @@ class Forwarder:
                               truncation_config: TruncationConfig | None = None,
 truncation_hook=None,
                                rate_hook=None,
+                               maxtok_hook=None,
                                loop_config=None,
                                loop_stream_words=0,
                                ) -> AsyncIterator[bytes]:
@@ -1429,7 +1454,7 @@ truncation_hook=None,
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
-        clamp_max_tokens(body, dep)
+        clamp_max_tokens(body, dep, hook=maxtok_hook)
         _style = proto.style_of(dep)
         if _style != proto.CHAT:
             _up = proto.translate_request(_style, body, dep)
@@ -1639,9 +1664,10 @@ truncation_hook=None,
                    profile: str = "",
                    ctx_est=None,
                    client_ip: str = "",
-                   session: str | None = None,
-                   attribution: dict | None = None,
-                   rate_hook=None) -> dict:
+                    session: str | None = None,
+                    attribution: dict | None = None,
+                    rate_hook=None,
+                    maxtok_hook=None) -> dict:
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
@@ -1655,7 +1681,7 @@ truncation_hook=None,
         if _google:
             log.info("[thought_sig] Google provider, injecting for request")
             _inject_thought_signatures(body)
-        clamp_max_tokens(body, dep)
+        clamp_max_tokens(body, dep, hook=maxtok_hook)
         _style = proto.style_of(dep)
         _up = (body if _style == proto.CHAT
                else proto.translate_request(_style, body, dep))
