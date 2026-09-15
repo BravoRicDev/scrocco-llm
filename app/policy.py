@@ -586,6 +586,18 @@ class Policy:
     warm_pool_enabled: bool = True
     warm_pool_ttl_sec: int = 0
     warm_pool_max_attempts: int = 0
+    # WARM-REFILL A CASCATA: finche' la sessione ha MENO di `warm_ready_min`
+    # caldi che possono EFFETTIVAMENTE servire la richiesta (need + ctx +
+    # output assicurato: dep_deliverable), ogni richiesta reale lancia una
+    # gara 2-alla-volta (A + 1 canary NUOVO, solo free-dims, libero da
+    # qualsiasi sessione, api_key diversa, stesso tier CSV `order` prioritario)
+    # consegnando sempre il piu' veloce e SENZA MAI CANCELLARE i perdenti:
+    # finiscono in background come PROBE REALI e ogni risposta completa pulita
+    # entra in warm. 0 = feature off. `default_out_tokens` = budget output
+    # presunto quando il client non lo chiede.
+    warm_refill_enabled: bool = True
+    warm_ready_min: int = 3
+    warm_refill_default_out_tokens: int = 4096
     # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
     # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
@@ -1756,6 +1768,23 @@ class Policy:
             if "allow_slow" in wp:
                 p.warm_pool_allow_slow = _coerce_bool(
                     wp["allow_slow"], "warm_pool.allow_slow")
+            if "refill_enabled" in wp:
+                p.warm_refill_enabled = _coerce_bool(
+                    wp["refill_enabled"], "warm_pool.refill_enabled")
+            if wp.get("ready_min") is not None:
+                _v = wp["ready_min"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.ready_min non valido: {_v!r}")
+                p.warm_ready_min = int(_v)
+            if wp.get("refill_default_out_tokens") is not None:
+                _v = wp["refill_default_out_tokens"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v <= 0:
+                    raise ValueError(
+                        f"warm_pool.refill_default_out_tokens non valido: {_v!r}")
+                p.warm_refill_default_out_tokens = int(_v)
 
         ca = raw.get("cache_aware")
         if ca is not None:
@@ -2277,3 +2306,18 @@ def _set_int(obj: Policy, raw: dict, key: str, minimum: int = 0,
             or (maximum is not None and v > maximum):
         raise ValueError(f"{key} non valido: {v!r}")
     setattr(obj, key, int(v))
+
+
+def refill_out_budget(payload: dict, policy) -> int:
+    """Budget di output con cui si valuta la DELIVERABILITY nel warm-refill:
+    il max_tokens chiesto dal client, o il default di policy quando il client
+    non lo chiede (un caldo che non puo' consegnare questi token NON conta
+    nei "pronti-caldi")."""
+    try:
+        v = int(payload.get("max_tokens")
+                or payload.get("max_completion_tokens") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    if v <= 0:
+        v = int(getattr(policy, "warm_refill_default_out_tokens", 4096) or 4096)
+    return v

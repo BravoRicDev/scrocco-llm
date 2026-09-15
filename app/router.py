@@ -5189,6 +5189,142 @@ class Router:
                   ",".join(d["unique"] for d in out[:6]))
         return out
 
+    # ---------------------------------------------------- WARM REFILL (cascata)
+    def _reasoning_reserve_frac(self) -> float:
+        """Frazione di finestra riservate al reasoning dei modelli
+        effort_capable: stesso numero usato dal clamp (1 - headroom_ratio)."""
+        try:
+            return max(0.0, 1.0 - float(getattr(
+                self.policy, "cache_ctx_reasoning_headroom_ratio", 0.7)))
+        except Exception:                              # noqa: BLE001
+            return 0.30
+
+    def dep_deliverable(self, dep: dict, need: frozenset[str] | None,
+                        ctx: int | None, out_tokens: int | None) -> bool:
+        """Il dep puo' DAVVERO consegnare la risposta con QUESTI token:
+        capacita' `need` + `ctx + safety(5%) + output(+riserva reasoning se
+        effort_capable)` dentro la finestra. E' il criterio di validita' del
+        warm-refill: '3 in warm' conta solo candidati che possono servire, non
+        semplici reduci. max_input<=0 = nessun guardo (come _cap_fits)."""
+        if need and not self._dep_supports(dep, need):
+            return False
+        mi = int(dep.get("max_input_tokens") or 0)
+        if mi <= 0:
+            return True
+        room = mi - int(ctx or 0) - int(mi * 0.05)
+        try:
+            out = int(out_tokens or 0)
+        except (TypeError, ValueError):
+            out = 0
+        if out > 0 and dep.get("effort_capable"):
+            frac = self._reasoning_reserve_frac()
+            if frac > 0:
+                room -= int(mi * frac)
+        return room >= max(0, out)
+
+    def _owned_by_any_session(self, unique: str) -> bool:
+        """True se il dep ha un OWNER vivo (UNA qualsivoglia sessione): un
+        candidato del refill deve essere LIBERO, non rubato a chi lo usa gia'."""
+        ent = self._dep_sess().get(unique)
+        if not ent:
+            return False
+        try:
+            return (time.time() - ent[1]) < self._guard_sec()
+        except Exception:                              # noqa: BLE001
+            return False
+
+    def warm_valid_for(self, session_id: str | None, profile: str | None,
+                       group_name: str | None,
+                       need: frozenset[str] | None, ctx: int | None,
+                       out_tokens: int | None,
+                       tried: set[str] | None = None,
+                       failed_unique: str | None = None) -> list[dict]:
+        """I caldi della sessione che possono EFFETTIVAMENTE servire questa
+        richiesta (need + ctx + output assicurato): e' COSI' che si contano i
+        "3 pronti-caldi" del refill, non il numero grezzo del pool."""
+        if not profile:
+            return []
+        allowed = self._warm_allowed(profile, group_name)
+        pool = self._warm_pool(session_id, allowed, need, ctx, tried,
+                               failed_unique)
+        return [d for d in pool
+                if self.dep_deliverable(d, need, ctx, out_tokens)]
+
+    def warm_api_keys(self, session_id: str | None, pname: str | None,
+                      group_name: str | None) -> set[str]:
+        """Chiavi api gia' rappresentate (stessa api_key) dai deployment nel
+        warm della
+        sessione: un probe di refill NON deve testare una chiave che abbiamo
+        gia' nel parco dei caldi."""
+        if not pname:
+            return set()
+        try:
+            pool = self._warm_pool(session_id,
+                                   self._warm_allowed(pname, group_name))
+        except Exception:                          # noqa: BLE001
+            return set()
+        return {str(d.get("api_key") or "") for d in pool
+                if d.get("api_key")}
+
+    def warm_fill_canary(self, profile: str | None, cur_dep: dict,
+                         need: frozenset[str] | None, ctx: int | None,
+                         out_tokens: int | None,
+                         tried: set[str] | None = None,
+                         requested_group: str | None = None,
+                         exclude_keys: set[str] | None = None,
+                         exclude_uniq: set[str] | None = None) -> dict | None:
+        """UN candidato probe per il warm-refill: percorre il ladder -dim
+        ASCENDENTE partendo dal gruppo corrente (se nel -dim corrente non c'e'
+        niente di buono si sale al -dim superiore) fermandosi ai FREE: i bucket
+        -go/-fallback NON sono mai candidati. Esclusioni: api_key di dep gia'
+        in warm, dep assegnati a UNA qualsivoglia sessione (owner vivo), dep
+        gia' tentati/sondati in QUESTA richiesta, dep che non possono
+        effettivamente consegnare (need + ctx + output assicurato).
+        Ritorna il primo candidato che passa; None = esauriti."""
+        cur = cur_dep.get("unique")
+        ex: set[str] = set(tried or ())
+        if cur:
+            ex.add(cur)
+        for u in (exclude_uniq or ()):
+            if u:
+                ex.add(u)
+        keys = {str(k) for k in (exclude_keys or ()) if k}
+        floor = 0
+        if requested_group:
+            try:
+                floor = int(self._group_min_dim(requested_group) or 0)
+            except Exception:                          # noqa: BLE001
+                floor = 0
+        go_suf = self.config.go_suffix or "-go"
+        fb_suf = self.config.fallback_suffix or "-fallback"
+        for u in self._ladder_for_group(cur_dep.get("group") or ""):
+            if u in ex:
+                continue
+            d = self.config.deployment_by_unique(u)
+            if not d:
+                continue
+            g = str(d.get("group") or "")
+            if g.endswith(go_suf) or g.endswith(fb_suf):
+                continue                               # FREE only: qui si ferma
+            if self.is_retired(u) or self.is_draining(u):
+                continue
+            if self.is_cooled_down(u) or self._gemini_blocked(d):
+                continue
+            if self._is_known_nonstream(u):
+                continue
+            if self._owned_by_any_session(u):
+                continue                               # occupato da qualcuno
+            mxi = int(d.get("max_input_tokens") or 0)
+            if floor and mxi and mxi < floor * 1000:
+                continue
+            if not self.dep_deliverable(d, need, ctx, out_tokens):
+                continue
+            k = str(d.get("api_key") or "")
+            if k and k in keys:
+                continue                               # chiave gia' in warm
+            return d
+        return None
+
     def initial_pick(self, profile: str | None, group_name: str,
                      need: frozenset[str] | None = None,
                      ctx: int | None = None,

@@ -240,17 +240,6 @@ def normalize_messages(messages, cfg: HistNormConfig | None = None,
             new_tail.append(m)
         tail = new_tail
 
-    if cfg.drop_empty_assistant:
-        new_tail = []
-        for m in tail:
-            if (isinstance(m, dict) and m.get("role") == "assistant"
-                    and not m.get("tool_calls")
-                    and not _text_of(m.get("content")).strip()):
-                report["empty_assistant"] += 1
-                continue
-            new_tail.append(m)
-        tail = new_tail
-
     if cfg.dedupe_system:
         new_tail = []
         prev_sys = None
@@ -265,6 +254,21 @@ def normalize_messages(messages, cfg: HistNormConfig | None = None,
         tail = new_tail
 
     out = head + tail
+    if cfg.drop_empty_assistant:
+        # Passata GLOBALE (testa inclusa): un assistant senza contenuto ne'
+        # tool_calls e' INVALIDO per i provider severi ("Assistant message
+        # must have either content or tool_calls" -> 400 bloccante l'intera
+        # richiesta, cache o non cache). La validita' batte la protezione del
+        # prefisso: un turno del genere non ha mai servito nulla.
+        new_out = []
+        for m in out:
+            if (isinstance(m, dict) and m.get("role") == "assistant"
+                    and not m.get("tool_calls")
+                    and not _text_of(m.get("content")).strip()):
+                report["empty_assistant"] += 1
+                continue
+            new_out.append(m)
+        out = new_out
     out = _trim_reasoning(out, cfg, report)
     report["changed"] = (
         report["shown_orphan_tool"] or report["dangling_tool_calls"]

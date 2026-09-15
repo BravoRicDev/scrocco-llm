@@ -47,6 +47,7 @@ from urllib.parse import urlsplit
 
 from . import metrics
 from . import protocols as proto
+from .policy import refill_out_budget
 from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
@@ -226,6 +227,71 @@ _REASONING_RESERVE_FRAC = 0.30
 # garantita (su un modello thinking 512 token sono solo reasoning, zero
 # risposta). Sotto questo valore meglio None che una risposta monca.
 MIN_OUTPUT_FLOOR = 4096
+
+# ------------------------------------------------------- PROBE (warm-refill)
+# Il perdente della gara non-streaming NON viene MAI cancellato: finisce la
+# chiamata in volo come probe reale; se consegna una risposta piena e pulita
+# (contenuto vero, niente finish_reason=length) entra nel warm della sessione.
+# Se sbaglia (eccezione/timeout) va in cooldown CON LE SOLITE LOGICHE
+# (mark_failed; il 429 lo ha gia' messo il rate_hook dentro self.call); il
+# vuoto pulito non e' colpa della chiave: nessuna penale.
+_NS_PROBES: set = set()
+
+
+def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses) -> None:
+    u = dep.get("unique", "?")
+
+    async def _run():
+        ok = False
+        raised = None
+        try:
+            try:
+                d = await asyncio.wait_for(fut, timeout=900.0)
+            except BaseException as exc:
+                d = None
+                raised = exc
+            if isinstance(d, dict):
+                try:
+                    ch0 = (d.get("choices") or [{}])[0]
+                except (AttributeError, IndexError, TypeError):
+                    ch0 = {}
+                if isinstance(ch0, dict):
+                    msg = ch0.get("message") or {}
+                    txt = msg.get("content")
+                    ok = (isinstance(txt, str) and bool(txt.strip())
+                          and ch0.get("finish_reason") != "length")
+            if ok:
+                try:
+                    router.note_result(
+                        u, (time.monotonic() - t0) * 1000, ctx_est=ctx)
+                    router.note_warm_owner(ses, u)
+                except Exception:
+                    pass
+                metrics.inc("nx_hedge_total", ("probe_ok",))
+            elif raised is not None:
+                try:
+                    _sec = getattr(raised, "retry_after", None)
+                    if isinstance(_sec, (int, float)) and _sec > 0:
+                        router.mark_failed(u, seconds=_sec,
+                                           reason="probe_error")
+                    else:
+                        router.mark_failed(u, reason="probe_error")
+                except Exception:
+                    pass
+                metrics.inc("nx_hedge_total", ("probe_fail",))
+            else:
+                metrics.inc("nx_hedge_total", ("probe_drop",))
+            log.debug("[probe-ns] %s: %s", u,
+                      "in warm" if ok else
+                      ("cooldown" if raised is not None else "vuoto, inerme"))
+        finally:
+            try:
+                router.note_end(u, ctx)
+            except Exception:
+                pass
+    _t = asyncio.ensure_future(_run())
+    _NS_PROBES.add(_t)
+    _t.add_done_callback(_NS_PROBES.discard)
 
 
 def set_reasoning_reserve(frac=None) -> None:
@@ -2035,6 +2101,23 @@ truncation_hook=None,
                                    "stream_total_deadline_ms", 180000) or 0)
         _t0 = time.monotonic()
         _kind_default: str | None = None
+        # ---- WARM-REFILL a cascata (non-streaming): finche' la sessione ha
+        # meno di warm_ready_min caldi "deliverable" (need + ctx + output
+        # assicurato), ogni tentativo corsia UN canary nuovo in parallelo
+        # (2 alla volta, free-only, api_key diversa, libero da ogni sessione):
+        # consegna il piu' veloce, l'altro finisce come probe reale -> warm.
+        _pol = router.policy
+        _refill_on = (bool(getattr(_pol, "warm_refill_enabled", True))
+                      and bool(getattr(_pol, "warm_pool_enabled", True))
+                      and bool(ses) and bool(profile))
+        _ready_min = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
+        _raced: set[str] = set()
+        _raced_keys: set[str] = set()
+        _refill_rounds = 0
+        try:
+            _outb = refill_out_budget(payload, _pol)
+        except Exception:
+            _outb = 4096
 
         def _pick(*a, **k):
             # Fallback + warm sticky handoff: se il prossimo deployment e' della
@@ -2094,13 +2177,115 @@ truncation_hook=None,
                             payload, dep, _so)):
                         metrics.inc("nx_resp_format_injected_total",
                                     (cur,))
-                data = await self.call(dep, payload,
-                               profile=profile or "",
-                               ctx_est=ctx,
-                               client_ip=client_ip, session=session,
-                               attribution=attribution,
-                               rate_hook=lambda u, rl: router.note_rate_limit(
-                                   u, rl))
+                _fB = None
+                _B = None
+                _tB = t0
+                if (_refill_on and _ready_min and _refill_rounds < _ready_min
+                        and (not _deadline_ms
+                             or (time.monotonic() - _t0) * 1000
+                             < _deadline_ms)):
+                    try:
+                        _nv = len(router.warm_valid_for(
+                            ses, profile,
+                            requested_group or dep.get("group"),
+                            need, ctx, _outb, tried=tried | _raced))
+                    except Exception:
+                        _nv = _ready_min
+                    if _nv < _ready_min:
+                        _refill_rounds += 1
+                        _raced.add(cur)
+                        _raced_keys.add(str(dep.get("api_key") or ""))
+                        # chiavi gia' rappresentate nel warm: non si rimette
+                        # alla prova la STESSA api_key di un caldo
+                        try:
+                            _raced_keys |= router.warm_api_keys(
+                                ses, profile,
+                                requested_group or dep.get("group"))
+                        except Exception:
+                            pass
+                        try:
+                            _B = router.warm_fill_canary(
+                                profile, dep, need, ctx, _outb,
+                                tried=tried | _raced,
+                                requested_group=requested_group,
+                                exclude_keys=_raced_keys,
+                                exclude_uniq=_raced)
+                        except Exception:
+                            _B = None
+                        if _B is not None:
+                            _raced.add(_B["unique"])
+                            _raced_keys.add(str(_B.get("api_key") or ""))
+                            pB = dict(payload)
+                            inject_identity(pB, _B)
+                            router.note_start(_B["unique"], ctx)
+                            _tB = time.monotonic()
+                            _fB = asyncio.ensure_future(self.call(
+                                _B, pB, profile=profile or "",
+                                ctx_est=ctx, client_ip=client_ip,
+                                session=session, attribution=attribution,
+                                rate_hook=lambda u2, rl:
+                                router.note_rate_limit(u2, rl)))
+                if _fB is None:
+                    data = await self.call(dep, payload,
+                                   profile=profile or "",
+                                   ctx_est=ctx,
+                                   client_ip=client_ip, session=session,
+                                   attribution=attribution,
+                                   rate_hook=lambda u, rl: router.note_rate_limit(
+                                       u, rl))
+                else:
+                    # GARA 2-alla-volta: vince chi risponde PER PRIMO con
+                    # successo; l'altro resta in volo come probe (mai
+                    # cancellato) e se consegna entra in warm.
+                    _A = dep
+                    _tA = t0
+                    futA = asyncio.ensure_future(self.call(
+                        _A, payload, profile=profile or "",
+                        ctx_est=ctx, client_ip=client_ip,
+                        session=session, attribution=attribution,
+                        rate_hook=lambda u3, rl:
+                        router.note_rate_limit(u3, rl)))
+                    data = None
+                    served_A = None
+                    errA = None
+                    errB = None
+                    _pend = {futA, _fB}
+                    while _pend:
+                        _cmp, _pend = await asyncio.wait(
+                            _pend, return_when=asyncio.FIRST_COMPLETED)
+                        _f = _cmp.pop()
+                        try:
+                            _r = _f.result()
+                        except BaseException as exc:
+                            if _f is futA:
+                                errA = exc
+                            else:
+                                errB = exc
+                            continue
+                        data = _r
+                        served_A = (_f is futA)
+                        break
+                    if data is None:
+                        # entrambi giu': A finisce nell'handler errori
+                        # esistente (penali solite); B riceve la sua da probe
+                        # (il future e' gia' completato con l'eccezione).
+                        if _B is not None and errB is not None:
+                            _spawn_ns_probe(router, _B, _fB, _tB, ctx, ses)
+                        raise errA if errA is not None else errB
+                    _spawn_ns_probe(router,
+                                    _B if served_A else _A,
+                                    _fB if served_A else futA,
+                                    _tB if served_A else _tA, ctx, ses)
+                    if not served_A:
+                        log.info("[refill] consegna %s (piu' veloce di %s, "
+                                 "che finisce come probe senza penale)",
+                                 _B["unique"], cur)
+                        dep = _B
+                        cur = _B["unique"]
+                        t0 = _tB
+                        _was_dormant = False
+                        if attempts_box is not None:
+                            attempts_box.append(cur)
                 if _was_dormant:
                     router.clear_cooldown(cur)
                     metrics.observe_latency_ms(cur, (time.monotonic() - t0) * 1000)

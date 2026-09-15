@@ -299,11 +299,15 @@ DEP_B = {"unique": "B__m2__1", "group": "scrocco-t-32k", "model": "m2"}
 
 def _fake_router(B=None):
     from types import SimpleNamespace
-    notes = {"start": [], "fail": [], "canary": 0}
+    notes = {"start": [], "fail": [], "canary": 0, "end": [], "warm": []}
     r = SimpleNamespace(
         config=SimpleNamespace(go_suffix="-go", fallback_suffix="-fallback"),
+        policy=SimpleNamespace(qc_json=SimpleNamespace(
+            watchdog_cooldown_sec=90, stream_total_deadline_ms=180000)),
+        stats_for=lambda u: SimpleNamespace(fail_count_24h=0),
+        escalate_cooldown=lambda base, f: base,
         note_start=lambda u, ctx=None: notes["start"].append(u),
-        note_end=lambda u, ctx=None: None,
+        note_end=lambda u, ctx=None: notes["end"].append(u),
         is_cooled_down=lambda u: False,
         clear_cooldown=lambda u: None,
         first_content_deadline_ms=lambda u, ctx=None: 5000,
@@ -312,9 +316,14 @@ def _fake_router(B=None):
         hedge_canaries=(lambda *a, **k: (notes.__setitem__(
             "canary", notes["canary"] + 1), [B] if B else [])[1]),
         _sess_deps=lambda: {},
-        note_warm_owner=lambda sid, u: None,
+        note_warm_owner=lambda sid, u: notes["warm"].append(u),
     )
     return r, notes
+
+
+async def _join_probes(M):
+    while M._PROBE_TASKS:
+        await asyncio.gather(*list(M._PROBE_TASKS), return_exceptions=True)
 
 
 def _drive_hedge(M, monkeypatch, genA, stream_response, router, *,
@@ -322,13 +331,15 @@ def _drive_hedge(M, monkeypatch, genA, stream_response, router, *,
     import time as _t
 
     async def go():
-        return await M._hedge_peek(
+        out = await M._hedge_peek(
             DEP_A(), genA, _t.monotonic(), fc, False, 40, 60000, 2048,
             payload={}, profile=None, need=frozenset(), scope="chain",
             ctx=1, tried_set=set(), attempts=[], requested_group=None,
             session=None, client_ip="", attribution=None,
             hedge_ms=hedge_ms, _tr_cfg=None,
             _tct_cfg=None, hold=hold)
+        await _join_probes(M)
+        return out
     monkeypatch.setattr(M, "router", router)
     monkeypatch.setattr(M, "forwarder",
                         __import__("types").SimpleNamespace(
@@ -344,8 +355,9 @@ async def _genA_slow_then_finish():
 
 
 async def _genA_mute():
-    await asyncio.sleep(5)
-    yield CONTENT
+    await asyncio.sleep(0.35)
+    raise ConnectionError("monta-gna: upstream muto e poi crepato")
+    yield  # pragma: no cover (serve a renderlo un async generator)
 
 
 async def _streamB_ok(dep, payload, **kwargs):
@@ -371,12 +383,13 @@ def test_hedge_hold_non_gareggia_su_A_che_fluisce(M, monkeypatch):
 
 
 def test_hedge_hold_gareggia_su_A_muto_e_vince_canary(M, monkeypatch):
-    """Hold: A muto oltre il ritardo hedge -> gara hold-aware; il canary che
-    chiude pulito vince e A viene scartato senza punizione."""
+    """Hold: A muto oltre il ritardo hedge -> gara; il canary che chiude
+    pulito vince e consegna. A NON viene cancellata: finisce come probe
+    reale e, essendoci davvero morta, prende il cooldown solito."""
     r, notes = _fake_router(B=DEP_B)
     out = _drive_hedge(M, monkeypatch, _genA_mute(),
-                       _streamB_ok, r, hedge_ms=30)
+                       _streamB_ok, r, hedge_ms=30, fc=300)
     dep, gen, t_att, verdict, prebuf, pending, meta = out
     assert verdict == "content" and dep["unique"] == "B__m2__1"
     assert notes["canary"] >= 1
-    assert "A__m1__0" not in notes["fail"]     # perdente non punito
+    assert notes["fail"] == ["A__m1__0"]      # probe: timeout -> cooldown

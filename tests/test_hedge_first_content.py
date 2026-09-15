@@ -1,7 +1,10 @@
 """F3 — hedge del primo contenuto (main._hedge_peek): gara A/B SOLO pre-
-commit, SOLO catena fredda, mai verso bucket pagati; il perdente e' annullato
-senza punizione. Tutto monkeypatchato: niente rete, niente router vero.
-Convenzione del repo: test sincroni che guidano coroutine con asyncio.run."""
+commit, SOLO catena fredda, mai verso bucket pagati. Il perdente NON viene
+annullato: finisce in volo come PROBE REALE (mai cancellato) e le sue
+penali seguono le SOLITE logiche (timeout/errore -> cooldown; vuoto pulito
+o length da budget -> nessuna punizione). Tutto monkeypatchato: niente
+rete, niente router vero. Convenzione del repo: test sincroni che guidano
+coroutine con asyncio.run."""
 import asyncio
 import time
 from types import SimpleNamespace
@@ -16,8 +19,7 @@ ERROR = ("error", [], None, {})
 
 
 class FakeGen:
-    """Solo aclose tracciata: un async-gen MAI avviato non esegue il finally
-    alla aclose(), e il test deve vedere lo scarto del perdente."""
+    """Non iterabile (il probe lo scopre e muore bene) + aclose tracciata."""
     def __init__(self, name, closed):
         self.name, self.closed = name, closed
         self.disposed = False
@@ -32,9 +34,13 @@ DEP_B = lambda: {"unique": "B__m2__1", "group": "scrocco-t-64k", "model": "m2"}
 
 
 def _fake_router(B=None):
-    notes = {"start": [], "end": [], "fail": [], "cool": []}
+    notes = {"start": [], "end": [], "fail": [], "cool": [], "warm": []}
     r = SimpleNamespace(
         config=SimpleNamespace(go_suffix="-go", fallback_suffix="-fallback"),
+        policy=SimpleNamespace(qc_json=SimpleNamespace(
+            watchdog_cooldown_sec=90, stream_total_deadline_ms=180000)),
+        stats_for=lambda u: SimpleNamespace(fail_count_24h=0),
+        escalate_cooldown=lambda base, f: base,
         note_start=lambda u, ctx=None: notes["start"].append(u),
         note_end=lambda u, ctx=None: notes["end"].append(u),
         is_cooled_down=lambda u: False,
@@ -45,25 +51,34 @@ def _fake_router(B=None):
         # nuovo picker dei canary (tier crescenti) + warm ownership
         hedge_canaries=(lambda *a, **k: ([B] if B else [])),
         _sess_deps=lambda: {},
-        note_warm_owner=lambda sid, u: None,
+        note_warm_owner=lambda sid, u: notes["warm"].append(u),
     )
     return r, notes
 
 
+async def _join_probes():
+    while main._PROBE_TASKS:
+        await asyncio.gather(*list(main._PROBE_TASKS),
+                             return_exceptions=True)
+
+
 def _run_peek(peek, stream_response, router, *, closed_tag="A",
               hedge_ms=60):
-    """Patcha i nomi di modulo attorno a _hedge_peek e lo esegue."""
+    """Patcha i nomi di modulo attorno a _hedge_peek e lo esegue, poi
+    lascia FINIRE i probe distaccati (determinismo per gli assert)."""
     closed = []
     genA = FakeGen(closed_tag, closed)
 
     async def go():
-        return await main._hedge_peek(
+        out = await main._hedge_peek(
             DEP_A(), genA, time.monotonic(), 500, False, 40, 1000, 2048,
             payload={}, profile=None, need=frozenset(), scope="chain",
             ctx=1, tried_set=set(), attempts=[], requested_group=None,
             session=None, client_ip="", attribution=None,
             hedge_ms=hedge_ms, _tr_cfg=None,
             _tct_cfg=SimpleNamespace(cooldown_sec=1))
+        await _join_probes()
+        return out
     old = (main._peek_stream, main.router, main.forwarder,
            main.inject_identity)
     main._peek_stream = peek
@@ -116,12 +131,12 @@ def test_a_lento_b_vince_gara():
     assert out[0]["unique"] == "B__m2__1"
     assert out[3] == "content"
     assert created == ["B__m2__1"]
-    assert "A" in closed                       # genA scartato, non punito
+    # A NON viene annullata: finisce come probe reale. MA il suo timeout e'
+    # un fallimento vero: cooldown con le solite logiche, contabilita' chiusa.
+    assert closed == []
     assert notes["start"] == ["B__m2__1"]
-    # A e' annullato e la sua contabilita' CHIUSA (niente inflight leak);
-    # B resta aperto: impegna lui la risposta.
     assert notes["end"] == ["A__m1__0"]
-    assert notes["fail"] == []
+    assert notes["fail"] == ["A__m1__0"]
 
 
 def test_bucket_pagato_mai_in_gara():
@@ -160,7 +175,8 @@ def test_canary_impossibile_attende_A():
 
 def test_nessun_contenuto_verdetto_di_A():
     """B produce solo 'error': vince comunque il verdetto di A (rotazione
-    normale), B e' annullato e la sua contabilita' chiusa, nessuno punito."""
+    normale). B non viene annullato: finisce come probe e il suo errore
+    prende il cooldown solito (penale soft)."""
     B = DEP_B()
     r, notes = _fake_router(B=B)
 
@@ -179,4 +195,4 @@ def test_nessun_contenuto_verdetto_di_A():
     assert out[0]["unique"] == "A__m1__0"
     assert out[3] == "timeout"
     assert notes["end"] == ["B__m2__1"]
-    assert notes["fail"] == []
+    assert notes["fail"] == ["B__m2__1"]
