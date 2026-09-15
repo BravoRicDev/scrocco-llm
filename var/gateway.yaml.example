@@ -158,6 +158,10 @@ cooldown_autoprobe_multiply_24h: true
 # Esclude del tutto dai probe i deployment con cooldown residuo > N sec (2h):
 # li rivedra' il tempo o l'ULTIMA SPIAGGIA. 0 = nessuna esclusione.
 cooldown_autoprobe_skip_over_sec: 7200
+# La stessa CHIAVE (anche su deployment diversi, i "gemelli") non torna in
+# sonda prima di questo gap: l'autoprobe non martella lo stesso conto.
+# 0 = nessun vincolo per-chiave.
+cooldown_autoprobe_key_gap_sec: 300
 # Time-decay dei punteggi di reputazione (halflife in secondi; 0 = off).
 reputation_decay_halflife_sec: 129600
 # Timeout upstream adattivo per-deployment (solo percorso chat):
@@ -471,6 +475,16 @@ cooldown_linear_mult_min: 30     # incremento per fallimento consecutivo
 error_class_cooldowns: true
 cooldown_transient_sec: 15
 cooldown_timeout_sec: 60
+
+# CIRCUIT BREAKER PROATTIVO PER MODELLO (5xx sistematici su piu' chiavi).
+# Se >= model_circuit_keys chiavi DISTINTE dello stesso provider|modello
+# falliscono con 5xx entro model_circuit_window_sec, il modello intero viene
+# saltato (soft skip, nessuna penale) per model_circuit_open_sec. I breaker
+# per-chiave e per-deployment restano invariati.
+model_circuit_enabled: true
+model_circuit_keys: 3
+model_circuit_window_sec: 60
+model_circuit_open_sec: 60
 
 # TIMEOUT = DANNO REALE: un modello che "appende" senza rispondere (né errore
 # né contenuto) fa perdere tempo (fino a stream_first_content_ms per richiesta).

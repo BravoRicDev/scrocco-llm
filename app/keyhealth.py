@@ -55,15 +55,27 @@ class KeyHealth:
     # ------------------------------------------------------------ observe --
     def observe(self, unique: str, *, fail_streak: int,
                 success_ema: float | None, is_cooled: bool,
+                reason: str | None = None, status: int | None = None,
                 now: float | None = None) -> str | None:
         """Aggiorna l'evidenza di UN deployment; ritorna lo stato calcolato.
 
         Stati: 'healthy' (nessun record), 'dead_suspect', 'retired'.
         Una chiamata riuscita (fail_streak==0) ripulisce tutto: il successo
         e' l'unica prova che conta.
+
+        F30: un 429/quota NON e' "chiave rotta" ma "chiave satura" (tipico coi
+        gemelli a burst): non deve far avanzare verso dead_suspect/retired, o
+        una free-key con quota giornaliera bassa verrebbe ritirata per sempre
+        solo perche' saturata un giorno. Solo 401/403/5xx veri contano.
         """
         now = now if now is not None else time.time()
         rec = self.data.get(unique)
+        _r = (reason or "").lower()
+        _quota = (status == 429 or "429" in _r or "quota" in _r
+                  or "rate_limit" in _r)
+        if _quota and fail_streak > 0:
+            # evidenza NON valida: stato invariato, nessun avanzamento
+            return (rec or {}).get("state") if rec else None
         if fail_streak == 0 or (
                 success_ema is not None and success_ema > SUCCESS_EMA_FLOOR):
             if rec:

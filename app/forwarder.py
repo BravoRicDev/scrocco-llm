@@ -1565,9 +1565,21 @@ truncation_hook=None,
         _tr_filter = ToolRepairSSEFilter(_tr_cfg, dep)
         if _tr_filter.level != "off" and payload.get("tools"):
             async def _repaired_gen() -> AsyncIterator[bytes]:
-                async for chunk in raw_gen:
-                    for repaired in _tr_filter.feed(chunk):
-                        yield repaired
+                try:
+                    async for chunk in raw_gen:
+                        for repaired in _tr_filter.feed(chunk):
+                            yield repaired
+                except (GeneratorExit, asyncio.CancelledError):
+                    raise
+                except BaseException:
+                    # F23: stream morto a metà (stall/timeout/upstream rotto)
+                    # con un tool-call in buffer: NON lasciare al client un
+                    # JSON di argomenti troncato. Si emette la chiusura
+                    # sintattica (JSON valido + finish_reason) e poi si
+                    # ri-solleva, così il chiamante applica il cooldown.
+                    for fixed in _tr_filter.abort_finalize():
+                        yield fixed
+                    raise
                 for repaired in _tr_filter.finalize():
                     yield repaired
             base_gen: AsyncIterator[bytes] = _repaired_gen()
@@ -1584,9 +1596,19 @@ truncation_hook=None,
                 on_truncation=truncation_hook)
 
             async def _tct_gen() -> AsyncIterator[bytes]:
-                async for chunk in base_gen:
-                    for guarded in _tct_filter.feed(chunk):
+                try:
+                    async for chunk in base_gen:
+                        for guarded in _tct_filter.feed(chunk):
+                            yield guarded
+                except (GeneratorExit, asyncio.CancelledError):
+                    raise
+                except BaseException:
+                    # F23: anche il tag testuale resta aperto a metà stream:
+                    # salva/scarta la tool-call e chiudi pulito prima di
+                    # propagare l'errore.
+                    for guarded in _tct_filter.finalize():
                         yield guarded
+                    raise
                 for guarded in _tct_filter.finalize():
                     yield guarded
             return _tct_gen()
@@ -1978,7 +2000,8 @@ truncation_hook=None,
         # ---- L1 #1: normalizzazione STRUTTURALE della history (coda) ----
         if _hn.enabled:
             _new_msgs, _hn_rep = normalize_messages(
-                (payload or {}).get("messages"), _hn)
+                (payload or {}).get("messages"), _hn,
+                tail_floor=router.ctx_boundary_floor(ses))
             if _hn_rep.get("changed"):
                 payload["messages"] = _new_msgs
                 metrics.inc("nx_histnorm_total", ("changed",))

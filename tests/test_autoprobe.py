@@ -17,6 +17,7 @@ from app.router import Router
 def _reset_probe_state():
     """Stato module-level di autoprobe isolato per test."""
     autoprobe._last_probe.clear()
+    autoprobe._key_last_probe.clear()
     autoprobe._probe_times.clear()
     yield
 
@@ -61,9 +62,11 @@ class _Fwd:
 @pytest.fixture(autouse=True)
 def _reset():
     autoprobe._last_probe.clear()
+    autoprobe._key_last_probe.clear()
     autoprobe._running = False
     yield
     autoprobe._last_probe.clear()
+    autoprobe._key_last_probe.clear()
     autoprobe._running = False
 
 
@@ -396,6 +399,9 @@ def test_probe_ko_transient_escalates_on_streak(router):
     router.policy.probe_retire_after = 2
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 1 -> +30
+    # F32: il gap per-chiave fermerebbe il secondo giro nella stessa manciata
+    # di secondi; qui si testa la streak, non il gap -> azzera il registro.
+    autoprobe._key_last_probe.clear()
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 2 -> +240
     rem = router._cooldown[d["unique"]] - time.time()
     assert 250.0 <= rem <= 300.0       # 5 + 30 + 240 = 275

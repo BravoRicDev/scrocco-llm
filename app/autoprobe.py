@@ -45,6 +45,38 @@ _DIM_RE = re.compile(r"-(\d+)k$")
 _PROBE_PROMPT = "Reply with the single letter A"
 _running = False
 _last_probe: dict[str, float] = {}
+# F32: ultimo probe per CHIAVE (non per deployment). Lo stesso conto non deve
+# essere martellato dall'autoprobe anche se il probe gira su un altro
+# deployment della stessa chiave: quota giornaliera / rate-limit sono per
+# chiave, non per unique.
+_key_last_probe: dict[str, float] = {}
+
+
+def _key_of(dep: dict) -> str:
+    """Tag della chiave API del deployment ('' se assente)."""
+    try:
+        return str(dep.get("api_key") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _key_gap_ok(dep: dict, now: float, key_gap: float) -> bool:
+    """False se la CHIAVE di `dep` e' stata sondata meno di `key_gap` fa."""
+    if key_gap <= 0:
+        return True
+    k = _key_of(dep)
+    if not k:
+        return True
+    last = _key_last_probe.get(k)
+    if last is None:
+        return True
+    return (now - last) >= key_gap
+
+
+def _note_key_probe(dep: dict, ts: float) -> None:
+    k = _key_of(dep)
+    if k:
+        _key_last_probe[k] = ts
 # Storico dei timestamp di ogni probe (fino a 24h), per ordinare i target
 # dal MENO tentato: si spalma il carico di probing su tutto il pool e si
 # evita che due chiavi vicine siano martellate in continuazione.
@@ -105,6 +137,7 @@ def _cfg(policy):
         float(getattr(policy, "cooldown_autoprobe_skip_over_sec",
                        7200.0) or 0.0),
         bool(getattr(policy, "cooldown_autoprobe_multiply_24h", True)),
+        float(getattr(policy, "cooldown_autoprobe_key_gap_sec", 300.0) or 0.0),
     )
 
 
@@ -152,7 +185,8 @@ def _is_fresh(router, unique: str, now: float, fresh_age: float) -> bool:
 
 
 def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
-                          min_gap: float, max_total: int) -> list[tuple[str, str]]:
+                          min_gap: float, max_total: int,
+                          key_gap: float = 0.0) -> list[tuple[str, str]]:
     """Bersagli FRESCHI: deployment dim mai usati nelle ultime 24h (o mai
     usati affatto), NON in cooldown (niente insistenza sui falliti), ordinati
     per attivita' piu' vecchia prima (i piu' vergini vengono sondati per
@@ -175,6 +209,8 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
                 continue
             if now - _last_probe.get(unique, 0.0) < min_gap:
                 continue
+            if not _key_gap_ok(d, now, key_gap):
+                continue       # F32: stessa chiave sondata troppo di recente
             s = router._stats.get(unique)
             last_act = 0.0 if s is None else max(
                 s.last_used, s.last_success_ts, s.last_fail_ts)
@@ -190,7 +226,8 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
 def _select_targets(router, profile: str, per_dim: int, min_age: float,
                     min_gap: float, max_total: int,
                     crisis: tuple[bool, float, float] | None = None,
-                    skip_over: float = 0.0) -> list[tuple[str, str]]:
+                    skip_over: float = 0.0,
+                    key_gap: float = 0.0) -> list[tuple[str, str]]:
     now = time.time()
     pfx = f"{getattr(router.config, 'proxy_prefix', 'scrocco-llm-')}{profile}-"
     by_group: dict[str, list[tuple[float, str]]] = {}
@@ -241,6 +278,8 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
             continue           # appena messo in cooldown: non insistere
         if now - _last_probe.get(unique, 0.0) < min_gap:
             continue
+        if not _key_gap_ok(dep, now, key_gap):
+            continue           # F32: stessa chiave sondata troppo di recente
         by_group.setdefault(grp, []).append((resid, unique))
     targets: list[tuple[str, str]] = []
     for grp, items in by_group.items():
@@ -255,14 +294,15 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
     try:
         (_en, per_dim, min_age, grow, min_gap, max_total, timeout,
          crisis_en, crisis_ratio, crisis_mult, fresh_age,
-         transient_sec, skip_over, multiply) = _cfg(router.policy)
+         transient_sec, skip_over, multiply, key_gap) = _cfg(router.policy)
         if per_dim <= 0 or max_total <= 0:
             return
         _streak_cap = max(0, int(getattr(
             router.policy, "probe_retire_after", 5) or 0))
         # --- MODO FRESH: sonda i MAI USATI (24h) con probe "normale" -----
         fresh = _select_fresh_targets(
-            router, profile, per_dim, fresh_age, min_gap, max_total)
+            router, profile, per_dim, fresh_age, min_gap, max_total,
+            key_gap=key_gap)
         if fresh:
             log.info("[autoprobe] fresh: %d deployment mai usati in %.0fh -> "
                      "probe normale", len(fresh), fresh_age / 3600.0)
@@ -275,6 +315,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                     continue
                 _last_probe[unique] = time.time()
                 _probe_times.setdefault(unique, deque()).append(_last_probe[unique])
+                _note_key_probe(dep, _last_probe[unique])
                 ok, lat, code, _body = await _probe_one(forwarder, dep, timeout)
                 if ok:
                     router.note_result(unique, lat)
@@ -299,7 +340,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
         targets = _select_targets(
             router, profile, per_dim, min_age, min_gap, max_total,
             crisis=(crisis_en, crisis_ratio, crisis_mult),
-            skip_over=skip_over)
+            skip_over=skip_over, key_gap=key_gap)
         if not targets:
             return
         log.info("[autoprobe] pass: %d deployment cooled da sondare", len(targets))
@@ -312,6 +353,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 continue
             _last_probe[unique] = time.time()
             _probe_times.setdefault(unique, deque()).append(_last_probe[unique])
+            _note_key_probe(dep, _last_probe[unique])
             ok, _lat, code, _body = await _probe_one(forwarder, dep, timeout)
             if ok:
                 router.clear_cooldown(unique)
@@ -358,6 +400,8 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                                 15.0) or 15.0)
         _cd = float(getattr(router.policy, "hotreload_probe_cooldown_sec",
                             300.0) or 300.0)
+        _key_gap = float(getattr(router.policy,
+                                 "cooldown_autoprobe_key_gap_sec", 300.0) or 0.0)
         for unique in uniques:
             try:
                 dep = router.config.deployment_by_unique(unique)
@@ -365,6 +409,9 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                 dep = None
             if not dep:
                 continue
+            if not _key_gap_ok(dep, time.time(), _key_gap):
+                continue       # F32: chiave gia' sondata poco fa
+            _note_key_probe(dep, time.time())
             ok, lat, _code, _body = await _probe_one(forwarder, dep, timeout)
             if ok:
                 router.note_result(unique, lat)

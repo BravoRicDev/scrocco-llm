@@ -78,7 +78,7 @@ individual account limits instead of dying on the first 429.
   streaming and non-streaming. Levels `safe`/`aggressive`, per-deployment via
   the `tool_repair` CSV column, Google/Gemini off by default. Never changes
   tool names or semantics.
-- **History normalize** (`history_normalize`): structural, cache-safe tail cleanup of the outgoing message copy. Handles both orphan `tool` results and **inverse orphans**: an `assistant` with `tool_calls` missing the matching `tool` result (even only for some ids) has the dangling calls stripped (content preserved), so strict providers never reject the chain. No synthesized results.
+- **History normalize** (`history_normalize`): structural, cache-safe tail cleanup of the outgoing message copy; the tail frontier never moves behind the session's ctxcompact watermark (`tail_floor`), so a tool loop without intermediate user turns cannot rewrite an already-cached prefix. Handles both orphan `tool` results and **inverse orphans**: an `assistant` with `tool_calls` missing the matching `tool` result (even only for some ids) has the dangling calls stripped (content preserved), so strict providers never reject the chain. No synthesized results.
 - **Sampling defaults** (`sampling_defaults`) + **loop detector** (`loop`): low-risk provider defaults (client wins) and n-gram/tool-call loop escalation to the next dim.
 - **Corrective retry** (`corrective_retry`): one non-streaming retry on invalid/empty/JSON/schema content (no repair model).
 - **Structured output** (`qc_json.struct_out_*`): fence/prose cleanup, JSON-Schema subset validation, schema-driven repair, optional `response_format` injection. **Gentle downgrade**: if the client asks for `json_schema` but the target provider is not in `native_schema_providers` (default `openai`, `azure`), the field is stripped and the schema is injected as a prompt instruction instead — no 400, uniform behaviour across heterogeneous free providers.
@@ -302,9 +302,23 @@ individual account limits instead of dying on the first 429.
   `cooldown_autoprobe_min_gap_sec` (60) avoids re-probing the same deployment,
   and `cooldown_autoprobe_skip_over_sec` (7200) excludes anything already cooled
   > 2h — the *stale-cooldown wakeup* in the ladder (between `-dim` and `-go`) or
-  the last-resort pass retries those, never the autoprobe. The live path is
-  never slowed down (fresh probes use `note_result`/`mark_failed`; cooled probes
-  stay purely reconnaissance).
+  the last-resort pass retries those, never the autoprobe. The same API KEY —
+  even on *different* deployments (the "twins") — is never probed again before
+  `cooldown_autoprobe_key_gap_sec` (300 s), so the probe never hammers one
+  upstream account (daily quota or per-key rate limit); hot-reloaded rows obey
+  the same gap. The live path is never slowed down (fresh probes use
+  `note_result`/`mark_failed`; cooled probes stay purely reconnaissance).
+- **Per-model circuit breaker & input-overflow fail-fast.** When
+  `model_circuit_keys` (3) *distinct* API keys of the same `provider|model`
+  return 5xx inside `model_circuit_window_sec` (60 s) the whole model is
+  soft-skipped for `model_circuit_open_sec` (60 s): no reputation damage, and
+  the per-key/per-deployment breakers keep handling the rest. Symmetrically, a
+  payload whose estimated context exceeds the `max_input` of **every**
+  deployment of the requested group no longer burns the chain: the gateway
+  force-compacts once (ignoring `min_saved_tokens`) and, if the estimate is
+  still above 105 % of the group window, answers a synthetic `400
+  context_length_exceeded` before touching any upstream
+  (`nx_ctx_overflow_total`, `nx_ctx_compacted_forced`).
 - **Quality-weighted EMA, coalescing & error classification**: `note_result()`
   accepts a `quality` (1.0 clean; lower for tool-repair/text-parse/QC/fake
   tool-call) that scales the latency/success EMA update rate, so broken-but-alive

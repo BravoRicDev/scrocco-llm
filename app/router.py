@@ -41,6 +41,7 @@ from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
+from . import metrics
 
 log = logging.getLogger("nx.router")
 
@@ -464,7 +465,7 @@ class Router:
         # Serve a NASCONDERE dai candidati il 20% (configurabile) piu' usato
         # quando si pesca a freddo, distribuendo il carico a prescindere
         # dall'`order`. In-memory; ricostruita dai log all'avvio.
-        self._usage_times: dict[str, "deque[float]"] = {}
+        self._usage_times: dict[str, "deque[tuple[float, float]]"] = {}
         # Modalita' COMPATTA sticky per-sessione (troncamento cache-aware)
         self._session_compact: dict[str, float] = {}
         # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
@@ -512,6 +513,11 @@ class Router:
         # Breaker per-DEPLOYMENT (unique): evita il danno collaterale tra modelli
         # che condividono la stessa chiave API.
         self._dep_circuit_breakers: dict[str, dict] = {}
+        # F25: breaker PROATTIVO per provider|modello. Se lo stesso modello da'
+        # 5xx sistematici (>= model_circuit_keys chiavi DIVERSE entro la
+        # finestra) il problema e' il modello/provider, non la singola chiave:
+        # lo si salta per tutti i deployment per model_circuit_open_sec.
+        self._model_cb: dict[str, dict] = {}
         # Config defaults
         self._circuit_breaker_threshold = 5  # consecutive failures to open
         self._circuit_breaker_timeout = 60.0  # seconds before half-open
@@ -787,9 +793,13 @@ class Router:
             self._usage_times = d
         return d
 
-    def note_usage(self, unique: str, ts: float | None = None) -> None:
+    def note_usage(self, unique: str, ts: float | None = None,
+                   ctx_est: int | None = None) -> None:
         """Registra un TENTATIVO (ok o fail, NON un probe) nella finestra
-        rolling 24h usata dallo spread a freddo."""
+        rolling 24h usata dallo spread a freddo. F28: il peso e' il PREFILL
+        reale (ctx_est/8000), non 1: 10 chiamate da 80k pesano come 100 da 2k,
+        che e' quello che vede il provider sul rate-limit a token/minuto.
+        Senza ctx (es. ricostruzione dai log) si pesa 1.0."""
         if not unique:
             return
         d = self._usage()
@@ -798,10 +808,25 @@ class Router:
             dq = deque()
             d[unique] = dq
         now = time.time() if ts is None else ts
-        dq.append(now)
+        try:
+            w = max(1.0, float(int(ctx_est)) / 8000.0) if ctx_est else 1.0
+        except (TypeError, ValueError):
+            w = 1.0
+        dq.append((now, w))
         cut = now - self._USAGE_WINDOW
-        while dq and dq[0] < cut:
+        while dq and dq[0][0] < cut:
             dq.popleft()
+
+    def usage_weight_24h(self, unique: str, now: float | None = None) -> float:
+        """Somma dei pesi (token/8000) dei tentativi nelle ultime 24h."""
+        dq = self._usage().get(unique)
+        if not dq:
+            return 0.0
+        now = time.time() if now is None else now
+        cut = now - self._USAGE_WINDOW
+        while dq and dq[0][0] < cut:
+            dq.popleft()
+        return float(sum(w for _t, w in dq))
 
     def usage_count_24h(self, unique: str, now: float | None = None) -> int:
         dq = self._usage().get(unique)
@@ -809,7 +834,7 @@ class Router:
             return 0
         now = time.time() if now is None else now
         cut = now - self._USAGE_WINDOW
-        while dq and dq[0] < cut:
+        while dq and dq[0][0] < cut:
             dq.popleft()
         return len(dq)
 
@@ -841,7 +866,7 @@ class Router:
         n = len(pool)
         if n < max(1, min_pool):
             return deps
-        counts = {d["unique"]: self.usage_count_24h(d["unique"]) for d in pool}
+        counts = {d["unique"]: self.usage_weight_24h(d["unique"]) for d in pool}
         if max(counts.values()) <= 0:
             return deps
         k = min(int(n * pct), n - 1)
@@ -1457,6 +1482,8 @@ class Router:
         # --- Circuit Breaker (hybrid: dep sempre, key solo errori di chiave) ---
         self._update_circuit_breaker_on_failure(
             unique, key_level=self._is_key_level_failure(status, reason))
+        # F25: 5xx sistematici su chiavi diverse -> breaker di MODELLO
+        self._note_model_failure(self._dep_of(unique), status)
 
         return seconds
 
@@ -1763,6 +1790,67 @@ class Router:
         blocked_dep = self._cb_block_or_transition(
             self._dep_cb_store(), unique, "dep", unique)
         return blocked_key or blocked_dep
+
+    # --- F25: circuit breaker proattivo per provider|modello ---
+    @staticmethod
+    def _model_cb_key(dep: dict) -> str:
+        return f"{dep.get('provider', '')}|{dep.get('model', '')}"
+
+    def _key_tag_of(self, dep: dict) -> str:
+        ak = self._api_key_str(dep)
+        if not ak:
+            return ""
+        return hashlib.sha256(ak.encode()).hexdigest()[:12]
+
+    def _note_model_failure(self, dep: dict | None, status=None) -> None:
+        """F25: accumula i 5xx per provider|modello. Quando arrivano da
+        almeno `model_circuit_keys` CHIAVI diverse nella finestra si apre il
+        breaker di modello (skip nel pick, zero penale reputazionale)."""
+        if not dep:
+            return
+        if not getattr(self.policy, "model_circuit_enabled", True):
+            return
+        try:
+            st = abs(int(status)) if status else 0
+        except (TypeError, ValueError):
+            st = 0
+        if st < 500:
+            return
+        if not dep.get("model"):
+            return
+        now = time.time()
+        win = float(getattr(self.policy, "model_circuit_window_sec", 60) or 60)
+        need = int(getattr(self.policy, "model_circuit_keys", 3) or 3)
+        store = getattr(self, "_model_cb", None)
+        if store is None:
+            store = {}
+            self._model_cb = store
+        mkey = self._model_cb_key(dep)
+        ent = store.get(mkey)
+        if ent is None or now - ent.get("ts", 0.0) > win:
+            ent = {"tags": set(), "ts": now, "opened": 0.0}
+            store[mkey] = ent
+        tag = self._key_tag_of(dep)
+        if tag:
+            ent["tags"].add(tag)
+        if len(ent["tags"]) >= need and not ent.get("opened"):
+            ent["opened"] = now
+            log.warning("[model-cb] %s APERTO: %d chiavi distinte in 5xx in "
+                        "%.0fs", mkey, len(ent["tags"]), win)
+
+    def _model_blocked(self, dep: dict | None) -> bool:
+        """F25: True se il modello del dep e' in breaker aperto (soft skip)."""
+        if not dep or not getattr(self.policy, "model_circuit_enabled", True):
+            return False
+        if not dep.get("model"):
+            return False
+        ent = getattr(self, "_model_cb", {}).get(self._model_cb_key(dep))
+        if not ent or not ent.get("opened"):
+            return False
+        open_sec = float(getattr(self.policy, "model_circuit_open_sec", 60) or 60)
+        if time.time() - ent["opened"] > open_sec:
+            return False     # finestra chiusa: si riprova (half-open implicito)
+        return True
 
     def mark_failed_double_residual(self, unique: str,
                                      reason: str | None = None,
@@ -2800,6 +2888,16 @@ class Router:
         if isinstance(_ks, dict):
             for tag in [t for t, until in _ks.items() if until <= now]:
                 _ks.pop(tag, None)
+        # F25: breaker di modello — dimentica le aperture molto scadute.
+        _mcb = getattr(self, "_model_cb", None)
+        if isinstance(_mcb, dict):
+            _mttl = max(300.0, float(getattr(self.policy,
+                                             "model_circuit_open_sec",
+                                             60) or 60) * 4)
+            for k in [k for k, e in _mcb.items()
+                      if now - max(e.get("opened") or 0.0,
+                                   e.get("ts") or 0.0) > _mttl]:
+                _mcb.pop(k, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
         for u in dead_cd:
             self._cooldown.pop(u, None)
@@ -3038,7 +3136,7 @@ class Router:
         # [Blocco 1] Registra tentativo per reputation scoring
         self.record_attempt(unique)
         # COLD SPREAD: il tentativo entra nella finestra rolling 24h
-        self.note_usage(unique)
+        self.note_usage(unique, ctx_est=ctx_est)
 
     def note_result(self, unique: str, latency_ms: float,
                     quality: float = 1.0, ctx_est=None,
@@ -4125,6 +4223,9 @@ class Router:
                 return False
             if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
                 return False
+            # F25: modello in breaker aperto (5xx da piu' chiavi) -> skip
+            if self._model_blocked(d):
+                return False
             if restrict_model and d.get("model") != restrict_model:
                 return False
             if need and not self._dep_supports(d, need):
@@ -4139,6 +4240,20 @@ class Router:
 
         deps = [d for d in self.config.groups.get(group_name, [])
                 if not self.is_cooled_down(d["unique"]) and _ok(d)]
+        if not deps and ctx:
+            # F31: se il ctx non entra in NESSUN deployment del gruppo (tutti
+            # con max_input dichiarato minore) l'"ultima spiaggia" sarebbe un
+            # 413/400 PAGATO e deterministico (3-5s di prefill per tentativo).
+            # Fail-fast: None -> il chiamante risponde 400 context_length_exceeded.
+            _grp_all = self.config.groups.get(group_name) or []
+            _tok = [int(d.get("max_input_tokens") or 0) for d in _grp_all]
+            if _tok and all(t > 0 and t < int(ctx) for t in _tok):
+                metrics.inc("nx_ctx_overflow_total", (group_name,))
+                log.info("[ctx-overflow] %s: ctx=%d oltre il max_input di "
+                         "tutti i %d deployment del gruppo (max=%d): "
+                         "fail-fast senza catena", group_name, ctx,
+                         len(_grp_all), max(_tok))
+                return None
         if not deps and not live_only:
             # Nessun vivo: ULTIMA SPIAGGIA con PROBE PASSIVO. Se esistono
             # dormienti "maturi" (>= cooldown_probe_after_ratio del cooldown
@@ -4353,6 +4468,9 @@ class Router:
                     return None
                 # cooldown "stantio": lo ri-consideriamo
             if self.other_session_recent(u):
+                return None
+            # F25: modello in breaker aperto -> skip (anche nel walk della scala)
+            if self._model_blocked(dep):
                 return None
             if not allow_slow and self.is_slow_for_session(u, ctx=ctx):
                 return None

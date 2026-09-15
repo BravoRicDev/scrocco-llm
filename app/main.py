@@ -376,6 +376,22 @@ def _maybe_save_adaptive_stats(force: bool = False) -> None:
         log.debug("[stats] save fallito")
 
 
+def _maybe_save_all(force: bool = False) -> None:
+    """F26: stats adattive (EMA per bucket, prefill-rate, calibration) e stato
+    di routing (holder/sticky/warm/frontier) sono due viste DELLO STESSO
+    istante. Salvandole con timer indipendenti, un crash nel mezzo lasciava
+    holder freschi con EMA vecchie (o viceversa). Qui il throttle e' unico:
+    o si flushano insieme, o nessuna delle due."""
+    global _last_stats_save, _last_routing_save
+    now = time.time()
+    if not force and now - min(_last_stats_save, _last_routing_save) < 60:
+        return
+    _last_stats_save = now
+    _last_routing_save = now
+    _maybe_save_adaptive_stats(force=True)
+    _maybe_save_routing_state(force=True)
+
+
 def _load_cooldowns() -> None:
     """All'avvio: ripristina i cooldown NON scaduti dal file dedicato."""
     if not PERSIST_STATS:
@@ -494,9 +510,8 @@ async def _watcher(interval: float) -> None:
         try:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
             router.purge_draining()     # draining scaduti oltre il TTL
-            _maybe_save_adaptive_stats()
+            _maybe_save_all()           # F26: stats+routing, stesso istante
             _maybe_save_cooldowns()     # cooldown attivi su disco
-            _maybe_save_routing_state()  # warm-start sessioni
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
@@ -507,7 +522,9 @@ async def _watcher(interval: float) -> None:
                     cooled = router._cooldown.get(u, 0) > now
                     KEYHEALTH.observe(u, fail_streak=s.fail_streak,
                                       success_ema=s.success_ema,
-                                      is_cooled=cooled, now=now)
+                                      is_cooled=cooled,
+                                      reason=getattr(s, "last_reason", None),
+                                      now=now)
                 new_retired = KEYHEALTH.apply_retirement(
                     policy.retire_after_days)
                 if new_retired:
@@ -652,9 +669,8 @@ async def lifespan(_app: FastAPI):
         except Exception:                       # noqa: BLE001
             pass
         await forwarder.aclose()
-        _maybe_save_adaptive_stats(force=True)   # F4: salva allo shutdown
+        _maybe_save_all(force=True)              # F26: stats+routing insieme
         _maybe_save_cooldowns(force=True)        # cooldown: salva allo shutdown
-        _maybe_save_routing_state(force=True)  # warm-start: stato sessioni
         _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
         _rows = LEDGER.flush_sync()              # ledger: nessuna riga persa
         log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
@@ -1411,12 +1427,62 @@ async def chat_completions(request: Request, response: Response):
 
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
+        # F31 fail-fast ingresso: se il ctx non entra nel gruppo (max_input di
+        # tutti i dep < ctx) si compatta FORZANDO il gate min_saved e si
+        # ricalcola; se resta sopra si risponde 400 sintetico senza toccare
+        # l'upstream. Evita 2-3 tentativi di catena e 10-15s di prefill inutile.
+        _max_grp = 0
+        try:
+            _max_grp = max((int(d.get("max_input_tokens") or 0)
+                            for d in (router.config.groups.get(
+                                group_or_explicit) or [])), default=0)
+        except Exception:
+            _max_grp = 0
+        if _max_grp > 0 and ctx_est and ctx_est > int(_max_grp * 1.05):
+            from .ctxcompact import (compact_tool_outputs,
+                                     ctxcompact_config_from_policy)
+            import dataclasses as _dc
+            _ccf = _dc.replace(ctxcompact_config_from_policy(router.policy),
+                               min_saved_tokens=0)
+            _img = getattr(router.policy, "image_token_estimate", 0) or 0
+            _forced, _frep = compact_tool_outputs(
+                payload.get("messages") or [], _ccf, max_in=_max_grp,
+                estimator=lambda ms: estimate_tokens(
+                    ms, router.policy.estimate_divisor, _img))
+            if _frep.get("changed"):
+                payload["messages"] = _forced
+                metrics.inc("nx_ctx_compacted_forced")
+                log.info("[ctx-overflow] compattazione forzata per %s: %s",
+                         group_or_explicit,
+                         {k: _frep.get(k) for k in (
+                             "stubbed", "deduped", "args_trimmed",
+                             "saved_chars")})
+            ctx_est = estimate_tokens(payload.get("messages") or [],
+                                      router.policy.estimate_divisor, _img,
+                                      tools=payload.get("tools"))
+            if ctx_est > int(_max_grp * 1.05):
+                metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
+                return JSONResponse(status_code=400, content={
+                    "error": {"code": "context_length_exceeded",
+                              "message": "ctx ~%d oltre il max_input %d del "
+                                         "gruppo %s, anche dopo la "
+                                         "compattazione" % (
+                                             ctx_est, _max_grp,
+                                             group_or_explicit),
+                              "type": "invalid_request_error"}})
         # ESPLICITO: nessun filtro (la lettera della richiesta vince); il retry
         # ruota solo nel gruppo. BASE: need+ctx con catena del mondo scelta da
         # initial_pick (dims per testo, cap-chain per -C).
-        # WARM POOL: attivo sul routing automatico e sui dim espliciti (-Nk);
-        # NON su -go/-fallback (escalation deliberata a pagamento).
-        _warm = (not explicit_req) or bool(re.search(r"-\d+k$", group_or_explicit))
+        # WARM POOL: attivo sul routing automatico e sui dim espliciti (m0204:
+        # il client vuole ANCHE la cache calda, ma con floor della dim
+        # richiesta); NON su -go/-fallback (escalation deliberata a pagamento).
+        # F27: niente regex sul nome (fragile: "llama-70b" non matcha,
+        # "qwen-32k" matcha per caso). Verita' canonica = config.group_caps:
+        # se il gruppo NON e' una capacita' ed e' un bucket -dim/apice, il warm
+        # resta valido anche esplicito.
+        _grp_is_dim = (router.config.group_caps.get(group_or_explicit) is None
+                       and not router._is_renewal_bucket(group_or_explicit))
+        _warm = (not explicit_req) or _grp_is_dim
         # CACHE PAGATA: SOLO su richiesta esplicita a -go/-fallback testo:
         # riusa la stessa chiave della sessione (KV-cache calda) anche se sta
         # su un tier di rinnovo peggiore; al 429 il holder si esclude da solo
@@ -1433,6 +1499,23 @@ async def chat_completions(request: Request, response: Response):
                                   warm=_warm,
                                   prefer_holder=_paid_holder)
     if dep is None:
+        # F31: se il motivo e' l'overflow (tutti i dep del gruppo hanno
+        # max_input < ctx) NON e' un disservizio ma un errore del client:
+        # 400 context_length_exceeded invece del 503 "nessun deployment".
+        try:
+            _mx = max((int(d.get("max_input_tokens") or 0)
+                       for d in (router.config.groups.get(
+                           group_or_explicit) or [])), default=0)
+        except Exception:
+            _mx = 0
+        if _mx > 0 and ctx_est and ctx_est > _mx:
+            metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
+            return JSONResponse(status_code=400, content={
+                "error": {"code": "context_length_exceeded",
+                          "message": "ctx ~%d oltre il max_input %d del "
+                                     "gruppo %s" % (ctx_est, _mx,
+                                                    group_or_explicit),
+                          "type": "invalid_request_error"}})
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment disponibile"
                       + (" per le capacità richieste" if not explicit_req else ""),
@@ -1484,7 +1567,9 @@ async def chat_completions(request: Request, response: Response):
     _sm = sampling_config_from_policy(router.policy)
     _so = schemaout_config_from_policy(router.policy)
     if _hn.enabled:
-        _nm, _nr = normalize_messages(payload.get("messages"), _hn)
+        _nm, _nr = normalize_messages(payload.get("messages"), _hn,
+                                      tail_floor=router.ctx_boundary_floor(
+                                          session_id))
         if _nr.get("changed"):
             payload["messages"] = _nm
             metrics.inc("nx_histnorm_total", ("changed",))

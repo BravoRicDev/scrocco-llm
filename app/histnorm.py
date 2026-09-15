@@ -156,8 +156,16 @@ def _trim_reasoning(msgs, cfg: HistNormConfig, report: dict):
     return out
 
 
-def normalize_messages(messages, cfg: HistNormConfig | None = None):
-    """Ritorna (nuova_lista, report). La COPIA e' modificata; l'input resta intatto."""
+def normalize_messages(messages, cfg: HistNormConfig | None = None,
+                       tail_floor: int = 0):
+    """Ritorna (nuova_lista, report). La COPIA e' modificata; l'input resta intatto.
+
+    `tail_floor` = frontiera ctxcompact della sessione (watermark): in un tool
+    loop senza user intermedi (assistant/tool ripetuti) l'ultimo `user` puo'
+    stare molti turni indietro e la normalizzazione finirebbe dentro il
+    prefisso GIA' IN CACHE, invalidandola. Con il floor la coda protetta non
+    risale mai oltre cio' che e' stato davvero stubbato.
+    """
     cfg = cfg or HistNormConfig()
     if not cfg.enabled or not isinstance(messages, list):
         return messages, {"enabled": False}
@@ -170,6 +178,9 @@ def normalize_messages(messages, cfg: HistNormConfig | None = None):
             if isinstance(m, dict) and m.get("role") == "user":
                 tail_start = i
                 break
+        if tail_floor > 0:
+            # F29: mai tornare indietro oltre la frontiera della sessione
+            tail_start = max(tail_start, min(int(tail_floor), len(msgs)))
     else:
         tail_start = 0                    # noqa: F841  (esplicito)
 

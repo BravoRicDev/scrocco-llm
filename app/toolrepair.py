@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .thought_sig import is_gemini_deployment
+from . import metrics
 from .texttoolparse import (TruncationConfig, has_unclosed_toolcall,
                             partial_opener_at_end, salvage_truncated_toolcall,
                             unclosed_toolcall_index)
@@ -584,6 +585,7 @@ class ToolRepairSSEFilter:
         self._repaired_count = 0
         self._total_moves: list[str] = []
         self._choice_index: int = 0           # choice index dall'upstream
+        self._saw_finish = False              # finish_reason visto (F23)
 
     # ------------------------------------------------------------ helpers
     @staticmethod
@@ -679,6 +681,7 @@ class ToolRepairSSEFilter:
                 if fn.get("arguments"):
                     tc_obj["arguments"] += fn["arguments"]
             if finish_reason:
+                self._saw_finish = True
                 out = self._flush_buffers()
                 finish_event = {
                     "choices": [{
@@ -692,14 +695,21 @@ class ToolRepairSSEFilter:
             return []                       # bufferizzato: non emettere ora
 
         if finish_reason or delta.get("content") or delta.get("reasoning_content"):
+            if finish_reason:
+                self._saw_finish = True
             out = self._flush_buffers()
             out.extend(passthrough)
             return out
 
         return passthrough
 
-    def _flush_buffers(self) -> list[bytes]:
-        """Ripara e emette i tool-call bufferizzati (formato OpenAI)."""
+    def _flush_buffers(self, force_close: bool = False) -> list[bytes]:
+        """Ripara e emette i tool-call bufferizzati (formato OpenAI).
+
+        Con `force_close=True` (F23, stream interrotto a metà) si applica
+        SEMPRE la chiusura del JSON parziale: si aggiungono soltanto i token
+        di chiusura mancanti (mai una riscrittura dei dati già emessi) così il
+        parser del client non esplode e può usare il payload parziale."""
         output: list[bytes] = []
         for idx in sorted(self._buffers.keys()):
             tc_obj = self._buffers[idx]
@@ -716,6 +726,25 @@ class ToolRepairSSEFilter:
                     args, self.level, self.config)
                 if did_change:
                     repaired_args = candidate
+                if force_close:
+                    fixed, did2 = _close_truncated_json(repaired_args)
+                    if did2:
+                        repaired_args = fixed
+                        moves.append("abort_close_json")
+                    parsed = False
+                    try:
+                        json.loads(repaired_args)
+                        parsed = True
+                    except (ValueError, TypeError):
+                        parsed = False
+                    if not parsed:
+                        # Nemmeno la chiusura basta (es. escape/unicode
+                        # troncato): meglio un oggetto VUOTO e valido che un
+                        # turno dell'agente andato in crash sul parse.
+                        repaired_args = "{}"
+                        moves.append("abort_args_emptied")
+                    metrics.inc("nx_toolrepair_truncated_total",
+                                (name or "?",))
 
             chunk = {
                 "id": "chatcmpl-toolrepair",
@@ -739,6 +768,24 @@ class ToolRepairSSEFilter:
 
         self._buffers.clear()
         return output
+
+    def abort_finalize(self) -> list[bytes]:
+        """F23: lo stream è morto a metà (stall/timeout/rotto) con un
+        tool-call ancora in buffer. Chiude il JSON parziale, emette un
+        finish_reason sintetico `tool_calls` e il [DONE], così il client
+        riceve una tool-call VALIDA (parziale) invece di un JSON rotto."""
+        if self._done:
+            return []
+        out: list[bytes] = []
+        if self._buffers:
+            out.extend(self._flush_buffers(force_close=True))
+            if not self._saw_finish:
+                _chunk = _sse_builder(self.dep.get("model", ""))
+                out.append(_chunk({}, "tool_calls"))
+                self._saw_finish = True
+        out.append(b"data: [DONE]\n\n")
+        self._done = True
+        return out
 
     @property
     def stats(self) -> dict:

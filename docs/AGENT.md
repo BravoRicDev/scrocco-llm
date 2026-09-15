@@ -128,7 +128,14 @@ headers do the same, TTL `rate_hint_ttl_sec`), `[cooldown-class]` (which
 error class decided the pause: `transient` → short deployment-only cooldown,
 `quota` → Retry-After, key reputation untouched), `[rep-fail]`
 (`classe=quota: nessuna penale` when a 429 deliberately does NOT touch the
-scores). Retry-After is read from the header **or** the error body JSON
+scores), `[model-cb]` (proactive per-`provider|model` breaker:
+`N` distinct keys failing 5xx inside the window ⇒ the whole model is
+soft-skipped for the open period, no reputation damage), `[ctx-overflow]`
+(the payload estimate exceeds the `max_input` of EVERY deployment of the
+requested group: one forced compaction, then a synthetic 400
+`context_length_exceeded` — no upstream call, `nx_ctx_overflow_total` /
+`nx_ctx_compacted_forced`). Retry-After is read from the header **or** the
+error body JSON
 (`"retry_after"`, `"retryAfter"`, `"retryDelay"`, "retry in 58s",
 "try again in 45s"), header first, then a global/per-provider floor.
 
@@ -140,6 +147,8 @@ scores). Retry-After is read from the header **or** the error body JSON
    never hand-edit the CSV while the gateway is running unless you also
    trigger `POST /admin/reload`.
 3. Probe results are cached forever on purpose: do not re-probe healthy
-   keys on a schedule.
+   keys on a schedule. The same **api key** (even on different row
+   deployments/twins) is never re-probed within
+   `cooldown_autoprobe_key_gap_sec` (default 300 s).
 4. The service binds loopback by default. Exposing it publicly requires
    a reverse proxy in front and a non-default master key.

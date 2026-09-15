@@ -261,6 +261,15 @@ class Policy:
     error_class_cooldowns: bool = True
     cooldown_transient_sec: int = 15
     cooldown_timeout_sec: int = 60
+    # F25: breaker PROATTIVO per provider|modello. Se lo stesso modello prende
+    # 5xx (500/502/503/504/529) da almeno `model_circuit_keys` CHIAVI diverse
+    # entro `model_circuit_window_sec`, il problema e' il modello: lo si salta
+    # per tutti i suoi deployment per `model_circuit_open_sec` (skip soft, zero
+    # penale reputazionale; scaduto il tempo si riprova).
+    model_circuit_enabled: bool = True
+    model_circuit_keys: int = 3
+    model_circuit_window_sec: int = 60
+    model_circuit_open_sec: int = 60
     # Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim
     # testo). Parte fire-and-forget, senza entrare nella risposta: se ci sono
     # deployment MAI USATI nelle ultime `cooldown_autoprobe_fresh_age_sec`
@@ -279,7 +288,10 @@ class Policy:
     cooldown_autoprobe_max_total: int = 6
     cooldown_autoprobe_timeout_sec: float = 45.0
     cooldown_autoprobe_fresh_age_sec: float = 86400.0
-    # "Grazia" per i KO TRANSITORI del probe (5xx, timeout/rete, altri 4xx):
+    # F32: la stessa CHIAVE (anche su deployment diversi) non deve essere
+    # sondata prima di questo gap: l'autoprobe non deve martellare lo stesso
+    # conto, che sia una quota giornaliera o un rate-limit per chiave.
+    cooldown_autoprobe_key_gap_sec: float = 300.0    # "Grazia" per i KO TRANSITORI del probe (5xx, timeout/rete, altri 4xx):
     # cooldown MODESTO al posto dello skip (ruotiamo comunque, ma senza
     # bruciare il grow pieno). I KO definitivi e i 429 usano sempre grow.
     cooldown_autoprobe_transient_sec: float = 30.0
@@ -1017,6 +1029,12 @@ class Policy:
                 raw.get("error_class_cooldowns"), "error_class_cooldowns")
         _set_int(p, raw, "cooldown_transient_sec", minimum=1)
         _set_int(p, raw, "cooldown_timeout_sec", minimum=1)
+        if "model_circuit_enabled" in raw:
+            p.model_circuit_enabled = _coerce_bool(
+                raw.get("model_circuit_enabled"), "model_circuit_enabled")
+        _set_int(p, raw, "model_circuit_keys", minimum=2)
+        _set_int(p, raw, "model_circuit_window_sec", minimum=1)
+        _set_int(p, raw, "model_circuit_open_sec", minimum=1)
         if "cooldown_autoprobe_enabled" in raw:
             p.cooldown_autoprobe_enabled = _coerce_bool(
                 raw["cooldown_autoprobe_enabled"], "cooldown_autoprobe_enabled")
@@ -1031,6 +1049,7 @@ class Policy:
                      "cooldown_autoprobe_min_gap_sec",
                      "cooldown_autoprobe_timeout_sec",
                      "cooldown_autoprobe_fresh_age_sec",
+                     "cooldown_autoprobe_key_gap_sec",
                      "cooldown_autoprobe_transient_sec",
                      "cooldown_autoprobe_skip_over_sec"):
             _val = raw.get(_fld)

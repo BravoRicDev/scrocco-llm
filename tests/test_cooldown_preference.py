@@ -29,6 +29,7 @@ def router():
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     r = Router(cfg, Policy.from_dict({"cooldown_jitter_ratio": 0}))
     autoprobe._last_probe.clear()
+    autoprobe._key_last_probe.clear()
     autoprobe._probe_times.clear()
     yield r
     os.unlink(path)
