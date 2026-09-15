@@ -6422,6 +6422,23 @@ class Router:
                              int(self.cooldown_residual(_wake_u)), _wake_u)
                     return _wake
 
+        # 1quater) PROSEGUI NELLA -DIM SUCCESSIVA (prima di -go): la camminata
+        #    e' ancorata a `failed_unique` e non torna mai indietro, quindi i
+        #    deployment delle dim SUPERIORI che la scala (order, dim) mette
+        #    PRIMA del fallito sono irraggiungibili. Se nella -dim corrente non
+        #    e' rimasto nulla di vivo, la ricerca RIPARTE dalla -dim successiva
+        #    (camminata fresca, dims > dim del fallito): si sale di -dim in
+        #    -dim e solo alla fine si tocca -go (regola utente: "se la -dim non
+        #    ne ha abbastanza prosegue semplicemente la sua ricerca nella -dim
+        #    successiva prima di andare a -go"). Solo dims, mai -go/-fallback.
+        _nextd = self._dims_above(dims, failed_unique)
+        if _nextd:
+            nxt = self._walk_chain(_nextd, None, need, ctx, limit=skip,
+                                   tried=tried)
+            if nxt is not None:
+                log.info("[ladder] -dim successiva -> %s", nxt["unique"])
+                return nxt
+
         # 2) -go vivi
         nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
         if nxt is not None:
@@ -6622,6 +6639,38 @@ class Router:
             intel, mi = power[u]
             return (0 if mi > cur_mi else 1, -intel, -mi)
         return dims[:idx] + sorted(dims[idx:], key=_key) + tail
+
+    def _dims_above(self, dims: list[str],
+                    failed_unique: str | None) -> list[str]:
+        """Deployment delle -dim SUPERIORI a quella del fallito.
+
+        La scala testo e' ordinata per `order` (tier) e poi dim; dopo un
+        fallimento la camminata riprende DOPO il fallito e non torna mai
+        indietro: i dep delle dim superiori con tier piu' basso restano
+        dietro e non vengono mai raggiunti. Questo helper li recupera cosi'
+        la rotazione sale di -dim in -dim prima di passare a -go.
+
+        Ritorna [] se il fallito non appartiene a una -dim (bucket -go/
+        -fallback o group sconosciuto): in quel caso comportamento invariato.
+        """
+        if not failed_unique:
+            return []
+        cur = self.config.deployment_by_unique(failed_unique)
+        if not cur:
+            return []
+        m = self.DIM_SUFFIX_RE.search(str(cur.get("group") or ""))
+        if not m:
+            return []
+        cur_dim = int(m.group(1))
+        out: list[str] = []
+        for u in dims:
+            d = self.config.deployment_by_unique(u)
+            if not d:
+                continue
+            mm = self.DIM_SUFFIX_RE.search(str(d.get("group") or ""))
+            if mm and int(mm.group(1)) > cur_dim:
+                out.append(u)
+        return out
 
     def fallback_next(self, profile: str | None, cur_dep: dict,
                       need: frozenset[str] | None = None,
