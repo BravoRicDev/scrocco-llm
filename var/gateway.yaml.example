@@ -167,6 +167,15 @@ adaptive_timeout_floor_sec: 15
 adaptive_timeout_multiplier: 8
 adaptive_timeout_max_sec: 600
 
+# WATCHDOG ANTI-STALL del flusso in streaming. Base: nessun byte per
+# stream_stall_sec secondi -> lo stream e' considerato morto e si ruota.
+# CALIBRATO SUL PREFILL: stall = max(stream_stall_sec, min(TTFT_p50_bucket *
+# mult, max_sec)). I light restano reattivi; gli heavy (>128k, prefill 4-6s
+# fisiologici) non vengono uccisi a meta' prefill. Bucket vuoto -> base.
+stream_stall_sec: 20.0
+stream_stall_ttft_mult: 2.5
+stream_stall_max_sec: 60.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HOTWORDS — rilevamento intent "deep think" per routing preferenziale
 # ─────────────────────────────────────────────────────────────────────────────
@@ -522,13 +531,7 @@ qc_json:
   stream_first_content_adaptive: true
   stream_first_content_mult: 3.0        # deadline = mult * EMA del dep
   stream_first_content_floor_ms: 20000  # pavimento (>= 2000)
-  # WATCHDOG ANTI-STALL calibrato sul prefill atteso di QUESTA fascia di
-  # contesto: stall = max(stream_stall_sec, min(TTFT_p50_bucket * mult,
-  # max_sec)). I light restano reattivi, gli heavy (>128k, prefill 4-6s
-  # fisiologici) non vengono uccisi a meta' prefill. Bucket vuoto -> base.
-  # (stream_stall_sec e' top-level; qui mult e tetto)
-  stream_stall_ttft_mult: 2.5
-  stream_stall_max_sec: 60.0
+  # (watchdog anti-stall: vedi stream_stall_* TOP-LEVEL, calibrato sul TTFT)
   # hedge (SOLO stream, SOLO catena fredda al 1o tentativo, SOLO pre-commit):
   # se dopo tot ms A non ha ancora contenuto, si apre UN canary sul candidato
   # successivo e impegna chi dei due risponde primo; il perdente e' annullato
