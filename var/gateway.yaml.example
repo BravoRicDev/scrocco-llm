@@ -49,6 +49,18 @@ estimate_divisor: 3
 # (base/rapporto) con EMA alpha. 0 = calibrazione spenta.
 estimate_calib_alpha: 0.05
 
+# ROLLOUT AUTOMATICO DELLA STIMA ADATTIVA
+#   estimate_adaptive_enabled = master switch manuale (vince sempre).
+#   In shadow i due conteggi (legacy/adattivo) vengono accumulati e ORA
+#   persistono in adaptive_stats.json: sopravvivono ai restart, quindi il
+#   rollout si chiude da solo senza dover "cacciare" una finestra di traffico
+#   tra un deploy e l'altro.
+#   auto_enable: quando i campioni shadow sono >= auto_min_n e lo scarto medio
+#   e' entro auto_max_delta_pct, la stima adattiva entra in uso da sola.
+estimate_adaptive_auto_enable: true
+estimate_adaptive_auto_min_n: 200
+estimate_adaptive_auto_max_delta_pct: 5.0
+
 # Concorrenza PESATA A TOKEN (non a conteggio): una richiesta viene esclusa
 # dal deployment se inflight_tokens + ctx_est > max_input * conc_token_ratio.
 # 0.5 = un heavy non parte se un altro prefill e' gia' in volo sullo stesso

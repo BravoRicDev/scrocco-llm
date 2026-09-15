@@ -282,12 +282,77 @@ def _estimate_adaptive(messages: Any, divisor: int = CHARS_PER_TOKEN,
 _ESTIMATE_ADAPTIVE = False
 _ESTIMATE_SHADOW = True
 _estimate_shadow_stats: dict[str, int] = {"n": 0, "legacy": 0, "adaptive": 0}
+# AUTO-ADAPTIVE: il rollout della stima non deve dipendere da un intervento
+# manuale ne' da una finestra di traffico che i deploy azzerano. I contatori
+# shadow sopravvivono al restart (persistiti in adaptive_stats.json) e, appena
+# ci sono campioni sufficienti con delta contenuto, la stima adattiva si
+# attiva da sola. La policy resta il master switch manuale.
+_ESTIMATE_AUTO_ALLOWED = False
+_ESTIMATE_AUTO_ON = False
+_ESTIMATE_AUTO_MIN_N = 200
+_ESTIMATE_AUTO_MAX_DELTA_PCT = 5.0
 
 
-def configure_estimate(*, adaptive: bool, shadow: bool) -> None:
-    global _ESTIMATE_ADAPTIVE, _ESTIMATE_SHADOW
+def configure_estimate(*, adaptive: bool, shadow: bool,
+                       auto_enable: bool | None = None,
+                       auto_min_n: int | None = None,
+                       auto_max_delta_pct: float | None = None) -> None:
+    global _ESTIMATE_ADAPTIVE, _ESTIMATE_SHADOW, _ESTIMATE_AUTO_ALLOWED
+    global _ESTIMATE_AUTO_MIN_N, _ESTIMATE_AUTO_MAX_DELTA_PCT, _ESTIMATE_AUTO_ON
     _ESTIMATE_ADAPTIVE = bool(adaptive)
     _ESTIMATE_SHADOW = bool(shadow)
+    if auto_enable is not None:
+        _ESTIMATE_AUTO_ALLOWED = bool(auto_enable)
+        if not _ESTIMATE_AUTO_ALLOWED:
+            _ESTIMATE_AUTO_ON = False    # policy off -> spegne anche il runtime
+    if auto_min_n is not None:
+        _ESTIMATE_AUTO_MIN_N = max(1, int(auto_min_n))
+    if auto_max_delta_pct is not None:
+        _ESTIMATE_AUTO_MAX_DELTA_PCT = max(0.0, float(auto_max_delta_pct))
+    if _ESTIMATE_ADAPTIVE:
+        _ESTIMATE_AUTO_ON = False        # il master switch esplicito vince
+
+
+def estimate_auto_state() -> dict:
+    """Stato del rollout automatico (admin e test)."""
+    return {"allowed": _ESTIMATE_AUTO_ALLOWED, "on": _ESTIMATE_AUTO_ON,
+            "min_n": _ESTIMATE_AUTO_MIN_N,
+            "max_delta_pct": _ESTIMATE_AUTO_MAX_DELTA_PCT}
+
+
+def load_estimate_shadow(data: dict) -> None:
+    """Ripristina i contatori shadow (n/legacy/adaptive) da disco."""
+    if not isinstance(data, dict):
+        return
+    try:
+        n = max(0, int(data.get("n") or 0))
+        lg = max(0, int(data.get("legacy") or 0))
+        ad = max(0, int(data.get("adaptive") or 0))
+    except (TypeError, ValueError):
+        return
+    if n and (lg <= 0 or ad < 0):
+        return
+    _estimate_shadow_stats["n"] = n
+    _estimate_shadow_stats["legacy"] = lg
+    _estimate_shadow_stats["adaptive"] = ad
+
+
+def _maybe_auto_adaptive() -> None:
+    """Accende la stima adattiva quando l'evidenza shadow e' sufficiente."""
+    global _ESTIMATE_AUTO_ON
+    if _ESTIMATE_AUTO_ON or _ESTIMATE_ADAPTIVE or not _ESTIMATE_AUTO_ALLOWED:
+        return
+    n = _estimate_shadow_stats["n"]
+    if n < _ESTIMATE_AUTO_MIN_N:
+        return
+    lg = _estimate_shadow_stats["legacy"]
+    if lg <= 0:
+        return
+    delta = abs(_estimate_shadow_stats["adaptive"] - lg) * 100.0 / lg
+    if delta <= _ESTIMATE_AUTO_MAX_DELTA_PCT:
+        _ESTIMATE_AUTO_ON = True
+        log.info("[estimate] auto-adaptive ON: n=%d delta=%.2f%% (<= %.2f%%)",
+                 n, delta, _ESTIMATE_AUTO_MAX_DELTA_PCT)
 
 
 def estimate_shadow_stats() -> dict:
@@ -299,6 +364,7 @@ def estimate_shadow_stats() -> dict:
         s["adaptive_avg"] = round(s["adaptive"] / n, 1)
         s["delta_pct"] = round((s["adaptive"] - s["legacy"]) * 100.0
                                / max(1, s["legacy"]), 1)
+    s["auto"] = estimate_auto_state()
     return s
 
 
@@ -325,7 +391,8 @@ def estimate_tokens(messages: Any, divisor: int = CHARS_PER_TOKEN,
     _estimate_shadow_stats["n"] += 1
     _estimate_shadow_stats["legacy"] += legacy
     _estimate_shadow_stats["adaptive"] += adaptive
-    if _ESTIMATE_SHADOW and not _ESTIMATE_ADAPTIVE:
+    _maybe_auto_adaptive()
+    if _ESTIMATE_SHADOW and not (_ESTIMATE_ADAPTIVE or _ESTIMATE_AUTO_ON):
         log.debug("[estimate] shadow legacy=%d adaptive=%d delta=%+d",
                   legacy, adaptive, adaptive - legacy)
         return legacy
@@ -3294,6 +3361,8 @@ class Router:
                          getattr(self, "_ttft_buckets", {}).items()},
             "ttft_rate": dict(getattr(self, "_prefill_rate", {})),
             "est_div": dict(getattr(self, "_est_div", {})),
+            # evidenza shadow del rollout auto-adaptive: sopravvive al restart
+            "estimate_shadow": dict(_estimate_shadow_stats),
             "saved_at": time.time(),
         }
 
@@ -3392,6 +3461,7 @@ class Router:
                         continue
                     if 1.5 <= fd <= 4.5:
                         ediv[str(u)] = fd
+            load_estimate_shadow(data.get("estimate_shadow") or {})
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
 

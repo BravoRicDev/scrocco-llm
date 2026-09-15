@@ -170,3 +170,11 @@ error body JSON
    requeues the extracted rows in order when the write fails (retried on the
    next tick), and the latency series are bounded to 512 uniques with LRU
    eviction so `nx_upstream_latency_ms{unique=...}` cannot grow unbounded.
+7. The token-estimate rollout is self-closing: the shadow counters
+   (legacy/adaptive) persist in `adaptive_stats.json` (so deploys/restarts do
+   not reset the evidence) and the adaptive estimator turns itself on once at
+   least `estimate_adaptive_auto_min_n` samples show a mean divergence within
+   `estimate_adaptive_auto_max_delta_pct`; the explicit
+   `estimate_adaptive_enabled` master switch still wins. `[estimate]
+   auto-adaptive ON` marks the flip, and `/admin/policy` exposes
+   `estimate_adaptive_effective` plus the shadow `auto` state.

@@ -191,7 +191,10 @@ set_reasoning_reserve(1.0 - float(getattr(policy,
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 set_schemaout_config(_so_cfg_from_policy(policy))
 configure_estimate(adaptive=policy.estimate_adaptive_enabled,
-                   shadow=policy.estimate_adaptive_shadow)
+                   shadow=policy.estimate_adaptive_shadow,
+                   auto_enable=policy.estimate_adaptive_auto_enable,
+                   auto_min_n=policy.estimate_adaptive_auto_min_n,
+                   auto_max_delta_pct=policy.estimate_adaptive_auto_max_delta_pct)
 
 _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
@@ -614,7 +617,11 @@ async def _watcher(interval: float) -> None:
                     forwarder._keepalive_pool = fresh.http_keepalive_pool
                     configure_estimate(
                         adaptive=fresh.estimate_adaptive_enabled,
-                        shadow=fresh.estimate_adaptive_shadow)
+                        shadow=fresh.estimate_adaptive_shadow,
+                        auto_enable=fresh.estimate_adaptive_auto_enable,
+                        auto_min_n=fresh.estimate_adaptive_auto_min_n,
+                        auto_max_delta_pct=(
+                            fresh.estimate_adaptive_auto_max_delta_pct))
                     log.info("[policy] ricaricata: step_up=%s%% aliases=%d "
                              "per-profilo=%s", fresh.step_up_pct,
                              len(fresh.aliases),

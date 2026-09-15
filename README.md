@@ -544,7 +544,7 @@ template. The ones that matter most:
 | `anon_session_fingerprint` | true | derive a deterministic `fq_<hash>` session id for anonymous clients (system + first user + user-agent) so sticky/cache apply (e.g. Hermes); false = stay anonymous |
 | `anon_session_fp_system_chars` | 768 | anonymous fingerprint hashes only the first N chars of the system prompt (0 = whole prompt), tolerating per-turn appended context |
 | `provider_models_ttl_sec` | 300 | in-memory TTL for the once-per-endpoint `GET /models` cache (0 = no cache) |
-| `estimate_adaptive_enabled` / `estimate_adaptive_shadow` | false / true | adaptive token estimate (per-block density); shadow computes+logs both but keeps the legacy value |
+| `estimate_adaptive_enabled` / `estimate_adaptive_shadow` / `estimate_adaptive_auto_enable` | false / true / true | adaptive token estimate (per-block density); shadow computes+logs both but keeps the legacy value. Shadow counters persist in `adaptive_stats.json` and auto-enable flips the adaptive estimator on by itself once `estimate_adaptive_auto_min_n` samples (default 200) show a mean divergence within `estimate_adaptive_auto_max_delta_pct` (default 5%) — the explicit `estimate_adaptive_enabled` still wins |
 | `tool_repair.enabled` / `tool_repair.default_level` | true / `aggressive` | tool-call argument repair and default level (per-deployment CSV overrides) |
 | `tool_repair.disable_for_google` | true | Google/Gemini deployments opt out unless explicitly enabled in the CSV |
 | `tool_repair.fake_call.enabled` | true | detect tool-calls rendered as text and escalate directly to -go/-fallback |

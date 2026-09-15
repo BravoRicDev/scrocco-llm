@@ -691,6 +691,13 @@ async def get_policy(request: Request):
             "estimate_divisor": pol.estimate_divisor,
             "estimate_adaptive_enabled": pol.estimate_adaptive_enabled,
             "estimate_adaptive_shadow": pol.estimate_adaptive_shadow,
+            "estimate_adaptive_auto_enable": pol.estimate_adaptive_auto_enable,
+            "estimate_adaptive_auto_min_n": pol.estimate_adaptive_auto_min_n,
+            "estimate_adaptive_auto_max_delta_pct":
+                pol.estimate_adaptive_auto_max_delta_pct,
+            "estimate_adaptive_effective": bool(
+                pol.estimate_adaptive_enabled
+                or (estimate_shadow_stats().get("auto") or {}).get("on")),
             "estimate_shadow": estimate_shadow_stats(),
                 "sticky_ttl_sec": pol.sticky_ttl_sec,
                 "cooldown_sec": pol.cooldown_sec,

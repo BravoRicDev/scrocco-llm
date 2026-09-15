@@ -181,6 +181,14 @@ class Policy:
     # entrambe ma usa la legacy finche' non si abilita adaptive_enabled.
     estimate_adaptive_enabled: bool = False
     estimate_adaptive_shadow: bool = True
+    # AUTO-ADAPTIVE: attiva la stima adattiva da sola quando i campioni shadow
+    # accumulati (che ora SOPRAVVIVONO ai restart) mostrano un delta medio
+    # <= auto_max_delta_pct su almeno auto_min_n richieste. Serve a chiudere
+    # il rollout senza finestre di traffico dedicate ne' interventi manuali;
+    # estimate_adaptive_enabled resta il master switch manuale.
+    estimate_adaptive_auto_enable: bool = True
+    estimate_adaptive_auto_min_n: int = 200
+    estimate_adaptive_auto_max_delta_pct: float = 5.0
     # Calibrazione closed-loop del divisore dal VERO prompt_tokens upstream
     # (alpha dell'EMA sull'errore relativo; 0 = disattiva).
     estimate_calib_alpha: float = 0.05
@@ -910,6 +918,18 @@ class Policy:
         if "estimate_adaptive_shadow" in raw:
             p.estimate_adaptive_shadow = _coerce_bool(
                 raw["estimate_adaptive_shadow"], "estimate_adaptive_shadow")
+        if "estimate_adaptive_auto_enable" in raw:
+            p.estimate_adaptive_auto_enable = _coerce_bool(
+                raw["estimate_adaptive_auto_enable"],
+                "estimate_adaptive_auto_enable")
+        _set_int(p, raw, "estimate_adaptive_auto_min_n", minimum=1)
+        if "estimate_adaptive_auto_max_delta_pct" in raw:
+            v = raw["estimate_adaptive_auto_max_delta_pct"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= float(v) <= 100):
+                raise ValueError("estimate_adaptive_auto_max_delta_pct "
+                                 "deve essere 0..100")
+            p.estimate_adaptive_auto_max_delta_pct = float(v)
         if "estimate_calib_alpha" in raw:
             v = raw["estimate_calib_alpha"]
             if isinstance(v, bool) or not isinstance(v, (int, float)) \
