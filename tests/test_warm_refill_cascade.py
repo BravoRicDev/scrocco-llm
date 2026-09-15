@@ -163,11 +163,18 @@ def test_wake_sweep_raddoppia_cooldown(router, monkeypatch):
     monkeypatch.setattr(AP, "_probe_one", fake_probe)
     monkeypatch.setattr(M, "router", router)
     monkeypatch.setattr(M, "forwarder", object())
+    from app import metrics
+    _b4 = dict(metrics.snapshot(("nx_wake_sweep_total",)).get(
+        "nx_wake_sweep_total", {}))
     asyncio.run(M._wake_sweep({"model": "m", "messages": []}, "test", small,
                               frozenset(), 100, 4096, None, "sess", {}))
     assert sorted(calls) == sorted([mid["unique"], big["unique"]])
     for u in (mid["unique"], big["unique"]):
         assert router._cooldown[u] - time.time() > 900   # ~1200 (raddoppiato)
+    _af = metrics.snapshot(("nx_wake_sweep_total",)).get(
+        "nx_wake_sweep_total", {})
+    assert _af.get(("ko",), 0) - _b4.get(("ko",), 0) == 2
+    assert _af.get(("exhausted",), 0) - _b4.get(("exhausted",), 0) == 1
 
 
 def test_wake_sweep_successo_torna_caldo(router, monkeypatch):
@@ -189,11 +196,18 @@ def test_wake_sweep_successo_torna_caldo(router, monkeypatch):
     monkeypatch.setattr(AP, "_probe_one", fake_probe)
     monkeypatch.setattr(M, "router", router)
     monkeypatch.setattr(M, "forwarder", object())
+    from app import metrics
+    _b4 = dict(metrics.snapshot(("nx_wake_sweep_total",)).get(
+        "nx_wake_sweep_total", {}))
     asyncio.run(M._wake_sweep({"model": "m", "messages": []}, "test", small,
                               frozenset(), 100, 4096, None, "sess",
                               {"uniq": set(), "keys": set()}))
     assert calls == [mid["unique"]]
     assert not router.is_cooled_down(mid["unique"])   # svegliato davvero
+    _af = metrics.snapshot(("nx_wake_sweep_total",)).get(
+        "nx_wake_sweep_total", {})
+    assert _af.get(("ok",), 0) - _b4.get(("ok",), 0) == 1
+    assert _af.get(("exhausted",), 0) - _b4.get(("exhausted",), 0) == 0
 
 
 # ------------------------------------------------------- warm_fill_canary
@@ -243,6 +257,82 @@ def test_canary_esclude_owner_api_key_e_non_deliverabili(router):
                                  exclude_keys=set(), exclude_uniq=set())
     assert c3 is None                              # solo big potrebbe, ma e'
     # ... owner-altre-sessioni? no: big e' owner sX -> ancora occupato
+
+
+# ------------------------------- scelta "come a freddo" e scavo del -dim
+CSV_DIG = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps,intelligence_score,model_preference,order
+t@x.com,m/rf-small,groq,https://api.groq.com/openai/v1,free,32,32000,5,K-S,,5,0,0
+t@x.com,m/rf-mid-a,groq,https://api.groq.com/openai/v1,free,200,200000,5,K-MA,,5,0,0
+t@x.com,m/rf-mid-b,groq,https://api.groq.com/openai/v1,free,200,200000,5,K-MB,,5,50,0
+t@x.com,m/rf-big,groq,https://api.groq.com/openai/v1,free,1000,1000000,5,K-B,,5,0,0
+"""
+
+
+@pytest.fixture()
+def router_dig():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_DIG)
+    pol = Policy.from_dict({})
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    yield Router(cfg, pol)
+    os.unlink(path)
+
+
+def test_canary_scava_il_dim_col_migliore_a_freddo(router_dig):
+    """Regola utente: il canary sceglie il -dim piu' vicino "come a freddo"
+    (vince il modello preferito, non il primo per ordine CSV) e SCAVA quel
+    -dim coi tentativi successivi prima di salire al -dim superiore."""
+    r = router_dig
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mid_a = _dep(r, f"{BASE}-200k", "K-MA")
+    mid_b = _dep(r, f"{BASE}-200k", "K-MB")       # model_preference=50
+    big = _dep(r, f"{BASE}-1000k", "K-B")
+    c = r.warm_fill_canary("test", small, frozenset(), 100, 4096,
+                           tried=set(), requested_group=None,
+                           exclude_keys=set(), exclude_uniq=set())
+    assert c and c["unique"] == mid_b["unique"]   # il migliore del 200k
+    c2 = r.warm_fill_canary("test", small, frozenset(), 100, 4096,
+                            tried=set(), requested_group=None,
+                            exclude_keys=set(),
+                            exclude_uniq={mid_b["unique"]})
+    assert c2 and c2["unique"] == mid_a["unique"]  # scava lo STESSO -dim
+    c3 = r.warm_fill_canary("test", small, frozenset(), 100, 4096,
+                            tried=set(), requested_group=None,
+                            exclude_keys=set(),
+                            exclude_uniq={mid_b["unique"], mid_a["unique"]})
+    assert c3 and c3["unique"] == big["unique"]    # -dim esaurito: sale
+
+
+def test_canary_cold_pick_preferisce_il_tier_order_minimo(router):
+    """Come a freddo: a parita' di tutto vince il tier `order` minore."""
+    r = router
+    d_t0 = {"unique": "T0__m__0", "group": f"{BASE}-32k", "order": 0,
+            "priority": 0, "model_preference": 0}
+    d_t5 = {"unique": "T5__m__0", "group": f"{BASE}-32k", "order": 5,
+            "priority": 0, "model_preference": 0}
+    assert r._canary_cold_pick([d_t5, d_t0], 100)["unique"] == "T0__m__0"
+
+
+def test_wake_canary_scava_il_dim_col_migliore(router_dig):
+    r = router_dig
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mid_a = _dep(r, f"{BASE}-200k", "K-MA")
+    mid_b = _dep(r, f"{BASE}-200k", "K-MB")
+    now = time.time()
+    for d in (mid_a, mid_b):
+        r._cooldown[d["unique"]] = now + 600
+        r._cooldown_since[d["unique"]] = now - 7200
+        r.stats_for(d["unique"]).last_reason = "http_429"
+    w = r.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                           tried=set(), requested_group=None,
+                           exclude_keys=set(), exclude_uniq=set())
+    assert w and w["unique"] == mid_b["unique"]
+    w2 = r.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                            tried=set(), requested_group=None,
+                            exclude_keys=set(),
+                            exclude_uniq={mid_b["unique"]})
+    assert w2 and w2["unique"] == mid_a["unique"]
 
 
 # ---------------------------------------------------- probe (main, stream)
@@ -751,3 +841,12 @@ def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
     assert sorted(calls) == sorted([small["unique"], mid["unique"]])
     # probe conclusi -> registro vuoto (nessun contatore perso)
     assert ML.router.probes_in_flight("rf-sess") == 0
+
+
+def test_metrics_wake_sweep_espone_label_result():
+    """Il counter nx_wake_sweep_total deve renderizzare la label result
+    (Prometheus): senza declare() le serie uscivano senza nome label."""
+    from app import metrics
+    metrics.inc("nx_wake_sweep_total", ("ok",))
+    out = metrics.render()
+    assert 'nx_wake_sweep_total{result="ok"}' in out

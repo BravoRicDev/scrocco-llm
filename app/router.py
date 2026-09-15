@@ -5390,6 +5390,39 @@ class Router:
         return {str(d.get("api_key") or "") for d in pool
                 if d.get("api_key")}
 
+    def _canary_cold_pick(self, cands: list[dict],
+                          ctx: int | None) -> dict | None:
+        """Scelta del candidato canary/sveglia "come una chiamata a freddo"
+        (regola utente): nasconde il 20% piu' usato (cold spread), privilegia
+        il tier `order` minimo e ordina col reputation scoring adattivo
+        (fallback legacy: priority + model_preference). Cosi' la cascata
+        "scava" il -dim corrente partendo dal migliore invece di prendere il
+        primo per ordine CSV."""
+        if not cands:
+            return None
+        _kept = self._spread_hide(cands)
+        if _kept:
+            cands = _kept
+        try:
+            _mo = min(int(d.get("order", ORDER_LAST)) for d in cands)
+            _tier = [d for d in cands
+                     if int(d.get("order", ORDER_LAST)) == _mo]
+        except Exception:                              # noqa: BLE001
+            _tier = cands
+        if not _tier:
+            _tier = cands
+        try:
+            if getattr(self.policy, "adaptive_pick", True):
+                return min(_tier, key=lambda d: (
+                    self._reputation_score(d["unique"], d, ctx),
+                    self.usage_weight_24h(d["unique"])))
+            return min(_tier, key=lambda d: (
+                int(d.get("priority", 0) or 0),
+                -int(d.get("model_preference", 0) or 0),
+                self.usage_weight_24h(d["unique"])))
+        except Exception:                              # noqa: BLE001
+            return _tier[0]
+
     def warm_fill_canary(self, profile: str | None, cur_dep: dict,
                          need: frozenset[str] | None, ctx: int | None,
                          out_tokens: int | None,
@@ -5404,7 +5437,11 @@ class Router:
         in warm, dep assegnati a UNA qualsivoglia sessione (owner vivo), dep
         gia' tentati/sondati in QUESTA richiesta, dep che non possono
         effettivamente consegnare (need + ctx + output assicurato).
-        Ritorna il primo candidato che passa; None = esauriti."""
+        Nel -dim corrente la scelta e' "come a freddo" (_canary_cold_pick:
+        cold-spread dei piu' usati + tier order + reputation): si SCAVA il
+        -dim (gli tentativi successivi escludono i gia' provati) e solo a
+        esaurimento si sale al -dim superiore.
+        Ritorna il miglior candidato del primo -dim utile; None = esauriti."""
         cur = cur_dep.get("unique")
         ex: set[str] = set(tried or ())
         if cur:
@@ -5421,6 +5458,13 @@ class Router:
                 floor = 0
         go_suf = self.config.go_suffix or "-go"
         fb_suf = self.config.fallback_suffix or "-fallback"
+        # "SCAVA IL -DIM" (regola utente): si raccolgono TUTTI i candidati
+        # liberi del -dim corrente, si sceglie il migliore "come a freddo"
+        # e solo quando quel -dim e' esaurito si sale al successivo. Il ladder
+        # resta ASCENDENTE dal gruppo corrente; i bucket -go/-fallback non
+        # sono mai candidati (FREE only).
+        _by: dict[str, list[dict]] = {}
+        _order: list[str] = []
         for u in self._ladder_for_group(cur_dep.get("group") or ""):
             if u in ex:
                 continue
@@ -5448,7 +5492,14 @@ class Router:
             k = str(d.get("api_key") or "")
             if k and k in keys:
                 continue                               # chiave gia' in warm
-            return d
+            if g not in _by:
+                _by[g] = []
+                _order.append(g)
+            _by[g].append(d)
+        for g in _order:
+            _pick = self._canary_cold_pick(_by[g], ctx)
+            if _pick is not None:
+                return _pick
         return None
 
     def session_api_keys(self) -> set[str]:
@@ -5487,9 +5538,9 @@ class Router:
         un 429/quota — un vero e proprio SVEglia. Se risponde, il probe lo
         riporta caldo (clear_cooldown + warm owner): cosi' la capacita' che
         era stata messa in pausa torna utile senza aspettare l'autoprobe.
-        Percorre lo stesso ladder -dim del refill (free only), con le stesse
-        esclusioni; in piu' NON tocca i dep che non hanno un cooldown 429
-        maturo."""
+        Percorre lo stesso ladder -dim del refill (free only) con le stesse
+        esclusioni, scegliendo "come a freddo" nello stesso modo; in piu' NON
+        tocca i dep che non hanno un cooldown 429 maturo."""
         now = time.time()
         cur = cur_dep.get("unique")
         ex: set[str] = set(tried or ())
@@ -5510,6 +5561,8 @@ class Router:
                 floor = 0
         go_suf = self.config.go_suffix or "-go"
         fb_suf = self.config.fallback_suffix or "-fallback"
+        _by: dict[str, list[dict]] = {}
+        _order: list[str] = []
         for u in self._ladder_for_group(cur_dep.get("group") or ""):
             if u in ex:
                 continue
@@ -5547,7 +5600,14 @@ class Router:
             k = str(d.get("api_key") or "")
             if k and k in keys:
                 continue
-            return d
+            if g not in _by:
+                _by[g] = []
+                _order.append(g)
+            _by[g].append(d)
+        for g in _order:
+            _pick = self._canary_cold_pick(_by[g], ctx)
+            if _pick is not None:
+                return _pick
         return None
 
     def initial_pick(self, profile: str | None, group_name: str,

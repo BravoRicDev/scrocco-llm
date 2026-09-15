@@ -2738,6 +2738,7 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
     used_uniq = set((raced or {}).get("uniq") or ())
     used_keys = set((raced or {}).get("keys") or ())
     done = 0
+    tried: list[str] = []
     for i in range(_n):
         try:
             W = router.warm_wake_canary(
@@ -2752,6 +2753,7 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
         u = W["unique"]
         used_uniq.add(u)
         used_keys.add(str(W.get("api_key") or ""))
+        tried.append(u)
         done += 1
         with contextlib.suppress(Exception):
             router.note_probe_started(session, u)
@@ -2770,6 +2772,7 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
             with contextlib.suppress(Exception):
                 router.clear_cooldown(u)
                 router.note_warm_owner(session, u)
+            metrics.inc("nx_wake_sweep_total", ("ok",))
             log.info("[sveglia] %s risponde (%.0fms) -> torna caldo "
                      "(tentativo %d/%d)", u, lat or 0.0, done, _n)
             return
@@ -2777,11 +2780,16 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
         with contextlib.suppress(Exception):
             router.mark_failed_double_residual(u, reason="wake_probe",
                                                status=code or None)
+        metrics.inc("nx_wake_sweep_total", ("ko",))
         log.info("[sveglia] %s KO (code=%s) -> cooldown raddoppiato "
                  "(tentativo %d/%d)", u, code, done, _n)
+    metrics.inc("nx_wake_sweep_total", ("exhausted",))
     if done:
-        log.info("[sveglia] giro concluso: %d tentativi, nessun risveglio",
-                 done)
+        log.info("[sveglia] giro concluso: %d tentativi su [%s], "
+                 "nessun risveglio", done, ", ".join(tried))
+    else:
+        log.debug("[sveglia] nessun dormiente maturo (429>=min_age) da "
+                  "svegliare")
 
 
 async def _stream_with_fallback(profile: str | None, first_dep: dict,
