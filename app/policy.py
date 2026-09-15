@@ -127,7 +127,7 @@ class QcJson:
                                            # committare su 1 token poi morto);
                                            # un finish_reason con >0 char
                                            # committa comunque
-    stream_total_deadline_ms: int = 90000  # tetto wall-clock su tutto il giro
+    stream_total_deadline_ms: int = 180000  # tetto wall-clock su tutto il giro
     stream_commit_include_reasoning: bool = False  # True: bastano i reasoning
                                            # token per impegnare lo stream
     # PARACADUTE: sulla catena -go/-fallback (ULTIMO scaglione del ladder) il
@@ -136,14 +136,17 @@ class QcJson:
     # (si trasmette quel che arriva). False = comportamento legacy (timeout ->
     # rotazione/503), utile solo se le catene hanno molti account validi.
     stream_parachute_no_timeout: bool = True
-    # HOLD-UNTIL-FINISH: se attivo (per-deployment via colonna CSV
-    # `hold_until_finish`, o globalmente qui) il gateway NON consegna al client
-    # finche' lo stream upstream non e' chiuso PULITAMENTE (finish_reason o
-    # [DONE]): niente risposte a meta'. Se lo stream si tronca (length non
-    # dovuto al cap del client, EOF senza finish_reason) si ruota su un altro
-    # deployment; se nessuno completa -> 503 ritentabile. Costo: si perde lo
-    # streaming incrementale (i byte partono a risposta completa).
-    stream_hold_until_finish: bool = False
+    # HOLD-UNTIL-FINISH: attivo di default (decisione post-incidente viemmegi
+    # 2026-09-15): il gateway NON consegna al client finche' lo stream upstream
+    # non e' chiuso PULITAMENTE (finish_reason stop/tool_calls o [DONE]):
+    # niente risposte a meta'. Chiusure sporche o finish_reason=length (anche
+    # a 0 caratteri) -> rotazione PRE-BYTE su un candidato piu' capace, senza
+    # penalizzare il deployment troncato dal budget. Costo: si perde lo
+    # streaming incrementale (i byte partono a risposta completa); la gara
+    # hedge resta attiva ma hold-aware (solo upstream MUTI). La colonna CSV
+    # `hold_until_finish` resta opt-in per-deployment (OR con questo valore:
+    # con default True il hold non si puo' spegnere dal CSV).
+    stream_hold_until_finish: bool = True
     stream_hold_idle_ms: int = 120000
     stream_hold_max_buffer_bytes: int = 50 * 1024 * 1024
     # --- STRUCT-OUT (#5): enforcement output strutturato ---

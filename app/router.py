@@ -5731,12 +5731,45 @@ class Router:
         return self._walk_ladder_resilient(esc, cur_dep["unique"], need,
                                            ctx, tried=tried)
 
+    def _capable_first(self, ladder: list[str], cur_dep: dict) -> list[str]:
+        """Riordina il ladder (lista di UNIQUE, vedi _ladder_for_group) per la
+        rotazione DOPO troncatura/risposta-vuota: tra i candidati SUCCESSIVI al
+        deployment corrente (la camminata non torna mai indietro) passano
+        avanti quelli con finestra di input MAGGIORE (il problema e'
+        fisicamente lo spazio: -4096 token non li fa pensare nessuno), a
+        parita' la `intelligence` piu' alta e la finestra piu' grande; la coda
+        -go/-fallback resta fissa in fondo (che all'occorrenza ignora gia' i
+        cooldown). Il prefisso fino al corrente e' invariato (gia' tentato o
+        mai raggiungibile dalla walk)."""
+        cur_mi = int(cur_dep.get("max_input_tokens") or 0)
+        cur_u = cur_dep.get("unique")
+        go_suf = self.config.go_suffix or "-go"
+        fb_suf = self.config.fallback_suffix or "-fallback"
+        power: dict[str, tuple[int, int]] = {}
+        dims: list[str] = []
+        tail: list[str] = []
+        for u in ladder:
+            d = self.config.deployment_by_unique(u) or {}
+            g = d.get("group") or ""
+            intel = int(d.get("intelligence") or 0)
+            mi = int(d.get("max_input_tokens") or 0)
+            power[u] = (intel, mi)
+            (tail if (g.endswith(go_suf) or g.endswith(fb_suf))
+             else dims).append(u)
+        idx = (dims.index(cur_u) + 1) if cur_u in dims else 0
+
+        def _key(u: str):
+            intel, mi = power[u]
+            return (0 if mi > cur_mi else 1, -intel, -mi)
+        return dims[:idx] + sorted(dims[idx:], key=_key) + tail
+
     def fallback_next(self, profile: str | None, cur_dep: dict,
                       need: frozenset[str] | None = None,
                       scope: str = "chain",
                       ctx: int | None = None,
                       tried: set[str] | None = None,
-                      requested_group: str | None = None) -> dict | None:
+                      requested_group: str | None = None,
+                      prefer_capable: bool = False) -> dict | None:
         """Prossimo tentativo DOPO un fallimento, con regole di SCOPO:
 
         - scope="chain": catena DEL MONDO del deployment corrente — cap-group
@@ -5753,6 +5786,10 @@ class Router:
         al pin escalation-winner per continuare a valere anche dopo che la
         richiesta e' salita su altre dim (cur_dep["group"] cambia). None =
         usa cur_dep["group"] (comportamento storico).
+
+        `prefer_capable`: rotazione DOPO troncatura/risposta-vuota: le dim con
+        finestra di output maggiore e `intelligence` piu' alta passano avanti
+        (_capable_first); coda -go/-fallback e resilienza cooldown invariate.
         """
         req_grp = requested_group or cur_dep["group"]
         # --- WARM POOL: failover verso i "caldi" propri (free-dims stesso
@@ -5799,8 +5836,11 @@ class Router:
                 if _ew is not None:
                     _p = self._esc_pin_probe(req_grp, _ew, need, ctx, tried)
                     return _p if _p is not None else _ew
+                _lad = self._ladder_for_group(cur_dep["group"])
+                if prefer_capable:
+                    _lad = self._capable_first(_lad, cur_dep)
                 nxt = self._walk_ladder_resilient(
-                    self._ladder_for_group(cur_dep["group"]),
+                    _lad,
                     cur_dep["unique"], need, ctx, tried=tried)
                 if nxt is not None and nxt["group"] != cur_dep["group"]:
                     log.info("[ladder] rotazione %s -> %s",
@@ -5846,8 +5886,11 @@ class Router:
             if _ew is not None:
                 _p = self._esc_pin_probe(req_grp, _ew, need, ctx, tried)
                 return _p if _p is not None else _ew
+            _lad = self._ladder_for_group(cur_dep["group"])
+            if prefer_capable:
+                _lad = self._capable_first(_lad, cur_dep)
             nxt = self._walk_ladder_resilient(
-                self._ladder_for_group(cur_dep["group"]),
+                _lad,
                 cur_dep["unique"], need, ctx, tried=tried)
             if nxt is not None:
                 return nxt

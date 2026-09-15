@@ -47,6 +47,11 @@ PROVIDER_HEADER = "provider"
 DATA_HEADER = "data"
 CONTEXT_HEADER = "context"
 MAX_INPUT_HEADER = "max_input"
+# Tetto della dimensione di contesto: un `context` >1000 nel CSV (es. 1049,
+# nato per errore su viemmegi) viene NORMALIZZATO a 1000k in fase di parsing:
+# nessun gruppo -Nk sopra 1000k esiste, e max_input non supera mai 1.000.000.
+MAX_CONTEXT_DIM_K = 1000
+MAX_CONTEXT_INPUT = MAX_CONTEXT_DIM_K * 1000
 PRIORITY_HEADER = "priority"
 CAPS_HEADER = "caps"
 EFFORT_CAPABLE_HEADER = "effort_capable"
@@ -216,6 +221,11 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
             ctx_k = int(float(raw_ctx))
         except ValueError:
             ctx_k = None
+    if ctx_k is not None:
+        # Normalizzazione voluta (regola dell'utente): >1000 diventa 1000k.
+        # Il clamp avviene QUI, unico choke point: nomi dei gruppi, ladder,
+        # regex -Nk e confronti d*1000 derivano tutti da context_k.
+        ctx_k = min(ctx_k, MAX_CONTEXT_DIM_K)
 
     raw_max = (row.get(MAX_INPUT_HEADER) or "").strip()
     max_from_csv = 0
@@ -225,6 +235,8 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         except ValueError:
             max_from_csv = 0
     max_input = max_from_csv if max_from_csv > 0 else ((ctx_k or 0) * 1000)
+    if max_input > MAX_CONTEXT_INPUT:
+        max_input = MAX_CONTEXT_INPUT
 
     try:
         priority = int(float((row.get(PRIORITY_HEADER) or "").strip()))

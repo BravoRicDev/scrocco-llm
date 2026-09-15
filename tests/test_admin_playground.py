@@ -19,8 +19,8 @@ from app.forwarder import UpstreamError
 os.environ["GATEWAY_MASTER_KEY"] = "test-master-not-default"
 
 CSV = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
-t@x,model-a,groq,https://a.test/v1,free,1000,8000,5,K-A,
-t@x,model-b,groq,https://b.test/v1,free,2000,8000,5,K-B,
+t@x,model-a,groq,https://a.test/v1,free,500,8000,5,K-A,
+t@x,model-b,groq,https://b.test/v1,free,1000,8000,5,K-B,
 """
 BASE = "scrocco-llm-test"
 MK = {"Authorization": "Bearer test-master-playground"}
@@ -79,19 +79,19 @@ def test_playground_success_single_try(client, monkeypatch):
     assert body["attempts"] == 1 and body["fallbacks"] == 0
     assert body["resolved_model"] == "scrocco-llm-test"
     assert body["profile"] == "test"
-    assert body["group"] == f"{BASE}-1000k"
+    assert body["group"] == f"{BASE}-500k"
     assert body["content"] == "Ciao!"
-    assert body["used"] == {"unique": _uid(m, f"{BASE}-1000k"),
-                            "group": f"{BASE}-1000k"}
+    assert body["used"] == {"unique": _uid(m, f"{BASE}-500k"),
+                            "group": f"{BASE}-500k"}
     assert len(body["trace"]) == 1
     st = body["trace"][0]
     assert st["step"] == 1
-    assert st["unique"] == _uid(m, f"{BASE}-1000k")
-    assert st["group"] == f"{BASE}-1000k"
+    assert st["unique"] == _uid(m, f"{BASE}-500k")
+    assert st["group"] == f"{BASE}-500k"
     assert st["profile"] == "test"
     assert st["reason"] is None
     assert st["verdict"] == "ok"
-    assert calls == [_uid(m, f"{BASE}-1000k")]
+    assert calls == [_uid(m, f"{BASE}-500k")]
 
 
 def test_playground_fallback_one_failure(client, monkeypatch):
@@ -109,14 +109,14 @@ def test_playground_fallback_one_failure(client, monkeypatch):
     assert body["ok"] is True
     assert body["attempts"] == 2 and body["fallbacks"] == 1
     assert body["content"] == "ok dal fallback"
-    assert body["used"]["unique"] == _uid(m, f"{BASE}-2000k")
-    assert calls == [_uid(m, f"{BASE}-1000k"), _uid(m, f"{BASE}-2000k")]
+    assert body["used"]["unique"] == _uid(m, f"{BASE}-1000k")
+    assert calls == [_uid(m, f"{BASE}-500k"), _uid(m, f"{BASE}-1000k")]
     tr = body["trace"]
     assert len(tr) == 2
     assert tr[0]["verdict"] == "fail" and tr[0]["reason"] == "http_503"
-    assert tr[0]["unique"] == _uid(m, f"{BASE}-1000k")
+    assert tr[0]["unique"] == _uid(m, f"{BASE}-500k")
     assert tr[1]["verdict"] == "ok" and tr[1]["reason"] is None
-    assert tr[1]["unique"] == _uid(m, f"{BASE}-2000k")
+    assert tr[1]["unique"] == _uid(m, f"{BASE}-1000k")
 
 
 def test_playground_chain_exhausted(client, monkeypatch):
@@ -130,7 +130,7 @@ def test_playground_chain_exhausted(client, monkeypatch):
     assert body["ok"] is False
     assert body["attempts"] == 2 and body["fallbacks"] == 1
     assert "error" in body and body["error"]["message"]
-    assert calls == [_uid(m, f"{BASE}-1000k"), _uid(m, f"{BASE}-2000k")]
+    assert calls == [_uid(m, f"{BASE}-500k"), _uid(m, f"{BASE}-1000k")]
     assert all(t["verdict"] == "fail" for t in body["trace"])
     assert [t["reason"] for t in body["trace"]] == ["http_503", "http_503"]
 
@@ -150,7 +150,7 @@ def test_playground_no_side_effects(client, monkeypatch):
     assert r.status_code == 200
     assert r.json()["ok"] is False
     # il deployment fallito NON è in cooldown, stats senza nuovi ingressi
-    assert _uid(m, f"{BASE}-1000k") not in m.router._cooldown
+    assert _uid(m, f"{BASE}-500k") not in m.router._cooldown
     assert dict(m.router._cooldown) == before_cd
     assert dict(m.router._stats) == before_stats
     assert dict(m.KEYHEALTH.data) == before_kh

@@ -1988,7 +1988,8 @@ def _buffered_answer_text(buffered) -> str:
 async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
                        min_chars: int = 40, hold_until_finish: bool = False,
                        hold_idle_ms: int = 120000,
-                       hold_max_bytes: int = 50 * 1024 * 1024):
+                       hold_max_bytes: int = 50 * 1024 * 1024,
+                       first_byte: "asyncio.Event | None" = None):
     """Consuma `gen` finche' arriva CONTENUTO DI RISPOSTA sufficiente, oppure
     error / EOF / deadline.
 
@@ -2004,10 +2005,15 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
     Con `hold_until_finish` (hold mode) NON si committa a `min_chars`: si
     consuma fino a una chiusura PULITA (finish_reason stop/tool_calls o
     [DONE]) cosi' da non consegnare MAI una risposta a meta'. Chiusure non
-    pulite -> verdict 'truncated'; finish_reason=='length' con contenuto ->
-    'length_truncated' (il chiamante consegna solo se e' il cap del client).
+    pulite -> verdict 'truncated'. finish_reason=='length' NON e' mai
+    'content', nemmeno con 0 caratteri (reasoning che ha esaurito il budget):
+    -> 'length_truncated' (il chiamante consegna solo se e' il cap del
+    client). Chiusura pulita con 0 caratteri -> 'empty_eof' con
+    meta['empty_clean']=True: si ruota SENZA punire il deployment.
     Idle per-chunk = `hold_idle_ms`; cap buffer = `hold_max_bytes` (oltre il
     cap si consegna il buffer accumulato come 'content').
+    `first_byte`: se fornito (gara hedge in hold), viene settato al primo
+    chunk ricevuto: il chiamante capisce se A sta streammando o e' muto.
 
     Ritorna (verdict, buffered, pending, meta) con verdict in
     {'content','error','empty_eof','timeout','truncated','length_truncated'};
@@ -2035,15 +2041,30 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
     def _eof():
         # fine stream senza una risposta impegnalbile.
         if hold:
-            # chiusura PULITA (finish_reason o [DONE]) -> risposta completa.
-            if meta.get("finish_reason") or saw_done:
-                return "content", buffered, None, meta
+            fr = meta.get("finish_reason")
+            if fr == "length":
+                # TRONCATURE mai 'content' (fix incidente viemmegi 2026-09-15):
+                # finish_reason=length significa che l'output e' stato TAGLIATO
+                # (budget o nostro clamp), anche con 0 caratteri (reasoning che
+                # si e' mangiato tutto il budget): si ruota, non si consegna il
+                # moncone. Il chiamante riconsegna solo se e' il cap del client.
+                meta["saw_reasoning"] = saw_reasoning
+                meta["no_rotate"] = False
+                return "length_truncated", buffered, None, meta
             if answer_chars or saw_tool_calls \
                     or (include_reasoning and saw_reasoning):
+                if fr or saw_done:
+                    # chiusura PULITA (finish_reason o [DONE]) -> risposta completa.
+                    return "content", buffered, None, meta
                 # contenuto ma nessun terminatore pulito -> troncata.
                 return "truncated", buffered, None, meta
+            # zero caratteri utili: se il modello ha CHIUSO pulito (stop/[DONE])
+            # non e' rotto, ha solo risposto vuoto -> si ruota SENZA penale
+            # (empty_clean); se non ha chiuso e' upstream rotto -> ruota + penale.
             meta["saw_reasoning"] = saw_reasoning
-            meta["no_rotate"] = bool(meta.get("finish_reason"))
+            if fr or saw_done:
+                meta["empty_clean"] = True
+            meta["no_rotate"] = False
             return "empty_eof", buffered, None, meta
         if answer_chars or saw_tool_calls or (include_reasoning and saw_reasoning):
             return "content", buffered, None, meta
@@ -2060,6 +2081,15 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
         if hold:
             # idle timeout per-chunk: si resetta ad ogni chunk ricevuto.
             remaining = max(0.001, hold_idle_ms / 1000.0)
+            if not buffered:
+                # PRIMA del primo byte vale anche il deadline primo-contenuto:
+                # un upstream MUTO (morto) non puo' trattenere la richiesta per
+                # 120s; la rotazione (e il paracadute sull'ultimo scaglione)
+                # restano possibili. Dopo il primo byte, solo idle per-chunk.
+                remaining = min(remaining,
+                                max(0.0, deadline - time.monotonic()))
+                if remaining <= 0:
+                    return "timeout", buffered, None, meta
         else:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2081,6 +2111,8 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
             return "empty_eof", buffered, None, meta
         buffered.append(chunk)
         buffered_bytes += len(chunk)
+        if first_byte is not None:
+            first_byte.set()
         # FIX: upstream patologico (flood reasoning-only / contenuto enorme):
         # esci prima della deadline per non accumulare memoria illimitata.
         if buffered_bytes > MAX_PEEK_BUFFER_BYTES:
@@ -2136,9 +2168,9 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
                 return "content", buffered, None, meta
             return _eof()
         if hold and saw_fr_here:
-            frv = meta.get("finish_reason")
-            if frv == "length" and answer_chars > 0:
-                return "length_truncated", buffered, None, meta
+            if meta.get("finish_reason") == "length":
+                # troncatura (con o senza answer): mai content, vedi _eof()
+                return _eof()
             if answer_chars > 0 or saw_tool_calls \
                     or (include_reasoning and saw_reasoning):
                 return "content", buffered, None, meta
@@ -2270,7 +2302,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                       scope, ctx, tried_set, attempts, requested_group,
                       session, client_ip, attribution, hedge_ms,
                       _tr_cfg, _tct_cfg, k: int = 1,
-                      fresh_only: bool = False):
+                      fresh_only: bool = False,
+                      hold: bool = False):
     """HEDGE sul primo contenuto (stream, pre-commit).
 
     A e' gia' aperto; se dopo `hedge_ms` non ha ancora un verdetto si aprono
@@ -2279,21 +2312,39 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     della sessione e si preferiscono i meno usati) e corrono tutti. Vince chi
     IMPEGNA contenuto; i perdenti vengono annullati SENZA punizione.
 
+    HOLD mode: il verdetto 'content' arriva solo a chiusura pulita, quindi
+    "nessun verdetto dopo hedge_ms" NON significa A muto: si gareggia solo se
+    A non ha prodotto NEANCHE un byte (cold-start vero, come il delay
+    hedge_delay_ms calibrato sul TTFT). Se A sta gia' streammando si aspetta
+    la sua chiusura senza accollare traffico/buffer doppio ai canary.
+
     IMPORTANTE: ogni canary che ha PRODOTTO contenuto (anche perdente) entra
     subito nella lista warm della sessione (`note_warm_owner`): il parco dei
     "buoni" si popola al volo, senza holder/reputazione, e la caccia attiva
     diventa rara. Ritorna i valori di (dep, gen, t_att, verdict, prebuf,
     pending, meta) del vincente."""
-    def _peek(g, fcm):
+    def _peek(g, fcm, fb=None):
         return _peek_stream(g, fcm, incl_reason, min_ch,
-                            hold_until_finish=False,
+                            hold_until_finish=hold,
                             hold_idle_ms=hold_idle,
-                            hold_max_bytes=hold_maxb)
-    futA = asyncio.ensure_future(_peek(gen, fc_ms))
-    done, _ = await asyncio.wait({futA}, timeout=max(0.05,
-                                                     hedge_ms / 1000.0))
-    if done:
+                            hold_max_bytes=hold_maxb,
+                            first_byte=fb)
+    firstA = asyncio.Event() if hold else None
+    futA = asyncio.ensure_future(_peek(gen, fc_ms, firstA))
+    waiter = asyncio.ensure_future(firstA.wait()) if hold else None
+    done, _pending = await asyncio.wait(
+        ({futA, waiter} if waiter is not None else {futA}),
+        timeout=max(0.05, hedge_ms / 1000.0))
+    if futA in done:
+        if waiter is not None:
+            waiter.cancel()
         return dep, gen, t_att, *await futA
+    if waiter is not None:
+        if waiter.done():
+            # A ha emesso byte ma non ha chiuso: in hold E' la norma
+            # (risposta lunga), NON una gara da vincere: si aspetta A.
+            return dep, gen, t_att, *await futA
+        waiter.cancel()
     # ---- candidati NUOVI per la gara -----------------------------------
     try:
         _excl = (set(router._sess_deps().get(session, ()))
@@ -2568,15 +2619,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             or 120000)
             hold_maxb = int(getattr(qcp, "stream_hold_max_buffer_bytes",
                                     52428800) or 52428800)
-            # --- peek + HEDGE (F3): solo catena FREDDA, primo tentativo,
-            # mai in hold-mode. Il loser viene annullato SENZA punirlo:
-            # l'abbiamo interrotto noi, non e' prova di upstream rotto. ---
+            # --- peek + HEDGE (F3): solo catena FREDDA, primo tentativo.
+            # In HOLD mode la gara e' hold-aware (vedi _hedge_peek): parte
+            # solo se A non ha emesso NEANCHE un byte. Il loser viene
+            # annullato SENZA punirlo: l'abbiamo interrotto noi, non e'
+            # prova di upstream rotto. ---
             _h_ms = 0
             _fresh_only = False
             # GARA quando la WARM non puo' aiutare: catena fredda, oppure
             # eletto = holder LENTO (ammesso in warm da P1), oppure holder già
             # provato/inutilizzabile. E a OGNI rotazione (budget opzionale).
-            if not hold and _hedge_ms > 0:
+            if _hedge_ms > 0:
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
                     _h_u = _h_dep["unique"] if _h_dep else None
@@ -2608,7 +2661,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     requested_group=requested_group, session=session,
                     client_ip=client_ip, attribution=attribution,
                     hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
-                    _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only)
+                    _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only,
+                    hold=hold)
                 # backoff "il buono non esiste": se vince ancora A, niente
                 # altre gare per la sessione/bucket finche' non scade.
                 router.note_hunt(session, ctx,
@@ -2696,7 +2750,20 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # e' auto-inflitta: ruotare va bene (il dim dopo ha piu' spazio) ma
             # NON declassare il deployment (non e' colpa sua).
             _gw_clamp_trunc = bool(_maxtok.get("cap") and fr == "length")
-            if _gw_clamp_trunc:
+            # 0 caratteri in hold (stop/[DONE] puliti senza risposta, o length
+            # bruciato tutto in reasoning): il modello NON e' rotto, ha solo
+            # finito il budget o risposto vuoto -> si ruota (ladder, poi
+            # -go/-fallback) SENZA penale; la penale resta per gli stream
+            # VAMENTE rotti (timeout, EOF sporco, length con mezzo answer).
+            _zero_empty = (
+                (verdict == "empty_eof" and bool(meta.get("empty_clean")))
+                or (verdict == "length_truncated"
+                    and not _buffered_answer_text(prebuf)))
+            if _zero_empty:
+                log.info("[hold] %s: chiusura '%s' senza risposta (fr=%s): "
+                         "nessuna penale, ruoto su candidato piu' capace",
+                         dep["unique"], verdict, fr)
+            elif _gw_clamp_trunc:
                 log.info("[maxtok] %s: stream vuoto perche' ha esaurito il "
                          "clamp gateway (%s->%s): nessuna penale, ruoto",
                          dep["unique"], _maxtok.get("old"),
@@ -2721,10 +2788,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                               tried=tried_set) \
                     if profile else None
             else:
+                # Su troncatura/risposta-vuota preferiamo un candidato PIU'
+                # CAPACE (finestra > corrente, poi intelligence), perche' il
+                # problema e'fisicamente lo spazio di output: la scala normale
+                # (dim ascendente) resta il fallback se il picker non trova di
+                # meglio.
+                _cap_pref = (verdict == "length_truncated" or _zero_empty)
                 nxt = None if (no_rotate or over_deadline) else (
                     router.fallback_next(profile, dep, need, scope, ctx=ctx,
                                          tried=tried_set,
-                                         requested_group=requested_group)
+                                         requested_group=requested_group,
+                                         prefer_capable=_cap_pref)
                     if profile else None)
             log.warning("[fallback] stream %s pre-contenuto verdict=%s fr=%s "
                         "no_rotate=%s -> %s", dep["unique"], verdict, fr,
