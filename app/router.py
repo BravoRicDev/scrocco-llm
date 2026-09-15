@@ -1503,6 +1503,14 @@ class Router:
             else:
                 seconds = float(pol.cooldown_sec)
         seconds = max(1.0, float(seconds))
+        # TETTO operatore sui cooldown STIMATI ('heuristic'): un retry
+        # dichiarato dal provider (Retry-After/quota => 'authoritative') o un
+        # credit/tier non si tocca MAI. 0 = nessun tetto.
+        if _prov == "heuristic":
+            _ceil = max(0, int(getattr(pol, "cooldown_estimate_ceiling_sec",
+                                       0) or 0))
+            if _ceil > 0:
+                seconds = min(seconds, float(_ceil))
         # ── CLASSI DI ERRORE (F18) ────────────────────────────────────────
         # 429 = quota: chiave satura -> soft per-chiave (sotto) + durata
         #   dettata dal Retry-After; 503/529 = dep sovraccarico -> cooldown
@@ -3534,6 +3542,185 @@ class Router:
         if unique:
             self._repair_exempt().pop(unique, None)
 
+    # -------------------------------- FINESTRA DI FALLIMENTO DEL MODELLO (P1-4)
+    # 3 KO (non esenti) entro `model_fail_window_sec` sullo stesso MODELLO —
+    # anche su chiavi DIVERSE — mettono il modello in pausa su TUTTE le sue
+    # chiavi per `model_fail_cooldown_sec`: le chiavi gemelle non ripescano un
+    # modello malato. Un successo azzera la finestra del modello.
+    def _model_fail_win(self) -> dict:
+        d = getattr(self, "_model_fail_win_map", None)
+        if d is None:
+            d = self._model_fail_win_map = {}
+        return d
+
+    def note_model_failure(self, dep_or_unique) -> int:
+        """Registra un KO normale e, alla soglia, bencha il MODELLO su tutte
+        le sue chiavi. Ritorna il numero di KO nella finestra (post-soglia: la
+        soglia stessa)."""
+        if isinstance(dep_or_unique, dict):
+            dep = dep_or_unique
+            u = dep.get("unique")
+        else:
+            u = dep_or_unique
+            dep = self.config.deployment_by_unique(u) if u else None
+        model = (dep or {}).get("model")
+        thr = max(0, int(getattr(self.policy, "model_fail_threshold", 3) or 0))
+        if not u or not model or thr <= 0:
+            return 0
+        win = float(getattr(self.policy, "model_fail_window_sec", 900) or 900)
+        now = time.time()
+        dq = self._model_fail_win().setdefault(model, deque())
+        dq.append(now)
+        while dq and (now - dq[0]) > win:
+            dq.popleft()
+        if len(dq) < thr:
+            return len(dq)
+        cd = float(getattr(self.policy, "model_fail_cooldown_sec", 600) or 600)
+        n = 0
+        for _lst in self.config.groups.values():
+            for d in _lst:
+                if d.get("model") != model:
+                    continue
+                try:
+                    if self.cooldown_residual(d["unique"]) > cd:
+                        continue          # mai accorciare un bench piu' lungo
+                    self.mark_failed(d["unique"], seconds=cd,
+                                     reason="model_unhealthy")
+                    n += 1
+                except Exception:                          # noqa: BLE001
+                    pass
+        self._model_fail_win().pop(model, None)
+        try:
+            log.warning("[model-bench] %s: %d KO in %.0fs -> modello in pausa "
+                        "%.0fs su %d chiavi", model, thr, win, cd, n)
+        except Exception:                                  # noqa: BLE001
+            pass
+        return thr
+
+    def note_model_success(self, unique: str | None) -> None:
+        """Un successo reale azzera la finestra di fallimento del modello."""
+        if not unique:
+            return
+        try:
+            dep = self.config.deployment_by_unique(unique)
+            m = (dep or {}).get("model")
+            if m:
+                self._model_fail_win().pop(m, None)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------- DEGRADED MODE (P1)
+    # "Rete degradata": se la quota di HOST sani scende sotto
+    # `degraded_healthy_ratio` per `degraded_entry_grace_sec`, sospendiamo
+    # l'ESPLORAZIONE (cascata refill, hedge canary, hunt, sveglia): durante un
+    # blackout upstream quelle richieste speculative bruciano rate-limit e
+    # chiavi senza portare a casa nulla. Resta la rotazione normale della
+    # ladder (il servizio deve rispondere). Uscita solo dopo
+    # `degraded_exit_grace_sec` SOPRA soglia (anti-flap).
+    def _degraded_state(self) -> dict:
+        st = getattr(self, "_degraded_st", None)
+        if st is None:
+            st = self._degraded_st = {"since": None, "healthy": None,
+                                      "active": False}
+        return st
+
+    @staticmethod
+    def _dep_host(dep: dict) -> str:
+        raw = (dep or {}).get("api_base") or (dep or {}).get("endpoint") or ""
+        try:
+            return urllib.parse.urlparse(raw).hostname or ""
+        except Exception:                                  # noqa: BLE001
+            return ""
+
+    def hosts_health(self) -> tuple[int, int]:
+        """(host sani, host totali). Un host e' sano se HA almeno un
+        deployment utilizzabile ADESSO (non cooled, non quarantenato, non
+        retiring/draining)."""
+        tot: set[str] = set()
+        ok: set[str] = set()
+        try:
+            for lst in self.config.groups.values():
+                for d in lst:
+                    u = d.get("unique")
+                    h = self._dep_host(d)
+                    if not u or not h:
+                        continue
+                    tot.add(h)
+                    if (u in ok or self.is_cooled_down(u)
+                            or self.is_retired(u)
+                            or self._endpoint_quarantined(d)):
+                        continue
+                    try:
+                        if self.is_draining(u):
+                            continue
+                    except Exception:                      # noqa: BLE001
+                        pass
+                    ok.add(h)
+        except Exception:                                  # noqa: BLE001
+            return 0, 0
+        return len(ok), len(tot)
+
+    def degraded_active(self) -> bool:
+        """Valuta la macchina a stati (con grace) e ritorna True se siamo in
+        modalita' degradata. Non ha effetti collaterali oltre ai log di
+        transizione."""
+        try:
+            p = self.policy
+            if not bool(getattr(p, "degraded_mode_enabled", True)):
+                return False
+            ratio_thr = float(getattr(p, "degraded_healthy_ratio", 0.5) or 0.0)
+            min_prov = int(getattr(p, "degraded_min_providers", 3) or 0)
+            entry = max(0.0, float(getattr(p, "degraded_entry_grace_sec",
+                                            60) or 0.0))
+            exitg = max(0.0, float(getattr(p, "degraded_exit_grace_sec",
+                                            120) or 0.0))
+        except Exception:                                  # noqa: BLE001
+            return False
+        if ratio_thr <= 0:
+            return False
+        h, t = self.hosts_health()
+        st = self._degraded_state()
+        if t < min_prov or t <= 0:
+            st["since"] = None
+            st["healthy"] = None
+            st["active"] = False
+            return False
+        ratio = h / float(t)
+        now = time.time()
+        if ratio < ratio_thr:
+            st["healthy"] = None
+            if st["since"] is None:
+                st["since"] = now
+            if not st["active"] and (now - st["since"]) >= entry:
+                st["active"] = True
+                log.warning("[degraded] host sani %d/%d (%.0f%% < %.0f%%): "
+                            "sospendo cascata/hedge/hunt finche' la rete non "
+                            "si riprende", h, t, ratio * 100.0, ratio_thr * 100.0)
+        else:
+            st["since"] = None
+            if st["active"]:
+                if st["healthy"] is None:
+                    st["healthy"] = now
+                # exit grace 0 = esce subito (il tempo di grazia e' gia'
+                # trascorso o non e' richiesto); altrimenti serve che la
+                # soglia resti superata per `degraded_exit_grace_sec`.
+                if exitg <= 0.0 or (now - st["healthy"]) >= exitg:
+                    st["active"] = False
+                    st["healthy"] = None
+                    log.info("[degraded] host sani %d/%d -> riprendo "
+                             "l'esplorazione", h, t)
+            else:
+                st["healthy"] = None
+        return bool(st["active"])
+
+    def degraded_view(self) -> dict:
+        st = self._degraded_state()
+        h, t = self.hosts_health()
+        return {"active": bool(st.get("active")), "hosts_healthy": h,
+                "hosts_total": t,
+                "ratio": (round(h / float(t), 3) if t else None),
+                "since": st.get("since")}
+
     # ------------------------------------------------ PROVENIENZA COOLDOWN (P0)
     def _cooldown_prov(self) -> dict:
         d = getattr(self, "_cooldown_prov_map", None)
@@ -3633,6 +3820,7 @@ class Router:
         s.probe_fail_streak = 0
         # successo reale: azzera anche l'esenzione-riparazione (P0)
         self.reset_repair_exempt(unique)
+        self.note_model_success(unique)
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = min(1.0, 0.8 * prev + 0.2 * q)
         # contatore cumulativo + timestamp ultimo successo (persistiti)

@@ -79,6 +79,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         repair_reasoning_replay, _REASONING_REPLAY_RE,
                         repair_reasoning_error, reasoning_err_kind,
                         classify_error_class,
+                        dep_host, is_provider_level,
                         restore_reasoning, is_unclear_error,
                         QUOTA_MIN_COOLDOWN_S)
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
@@ -2640,15 +2641,23 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     winner = None
     running = set(futs)
     while running:
-        completed, running = await asyncio.wait(
+        completed, pending = await asyncio.wait(
             running, return_when=asyncio.FIRST_COMPLETED)
-        f = completed.pop()
-        try:
-            results[f] = f.result()
-        except BaseException:
-            results[f] = ("error", [], None, {})
-        if results[f][0] == "content":
-            winner = f
+        # NB: esaminare TUTTI i completati del tick (non solo uno): se piu'
+        # canari finiscono insieme, gli altri resterebbero con l'eccezione
+        # non recuperata e il loro verdetto andrebbe perso.
+        running = set(pending)
+        for f in completed:
+            if f in results:
+                continue
+            try:
+                results[f] = f.result()
+            except BaseException:
+                results[f] = ("error", [], None, {})
+            if results[f][0] == "content":
+                winner = f
+                break
+        if winner is not None:
             break
     if winner is None:
         for f in list(running):
@@ -2968,6 +2977,25 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     # ATTEMPT TRAIL (P0): per ogni hop fallito, PERCHE' e' stato scartato
     # (classe d'errore onesta). Finisce nel body/header del 503 finale.
     trail: list = []
+    skip_hosts: set[str] = set()         # P1-5: host saltati (errore provider)
+
+    def _next_filtered(*a, **k):
+        """fallback_next + P1-5: salta gli host che hanno gia' fallito a
+        livello provider in QUESTA richiesta; se non ne restano, torna al
+        candidato saltato (mai lasciare la richiesta senza risposta)."""
+        _n = router.fallback_next(*a, **k)
+        if _n is None or dep_host(_n) not in skip_hosts:
+            return _n
+        _saved = _n
+        for _ in range(8):
+            tried_set.add(_saved["unique"])
+            _c = router.fallback_next(*a, **k)
+            if _c is None:
+                return _saved
+            if dep_host(_c) not in skip_hosts:
+                return _c
+            _saved = _c
+        return _saved
     _races_done = 0
     # WARM-REFILL a cascata: candidati gia' sonciati in QUESTA richiesta
     # (uniq + api_key) e round gia' consumati (budget per-richiesta =
@@ -2993,8 +3021,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         _was_dormant = router.is_cooled_down(dep["unique"])
         def _fail(u, *, seconds=None, reason=None, status=None):
             if _was_dormant:
-                return router.mark_failed_double_residual(u, reason=reason, status=status)
-            return router.mark_failed(u, seconds=seconds, reason=reason, status=status)
+                _r = router.mark_failed_double_residual(u, reason=reason, status=status)
+            else:
+                _r = router.mark_failed(u, seconds=seconds, reason=reason, status=status)
+            # P1-4: 3 KO dello stesso MODELLO (anche su chiavi diverse) entro
+            # la finestra -> bench del modello su tutte le sue chiavi.
+            with contextlib.suppress(Exception):
+                router.note_model_failure(dep)
+            return _r
         router.note_start(dep["unique"], ctx)
         try:
             t_att = time.monotonic()
@@ -3083,7 +3117,18 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _refill = False
             _need_out = 0
             _pol = router.policy
-            if (session and profile
+            # DEGRADED (P1-6): in un blackout upstream l'esplorazione
+            # (cascata refill, hedge canary, sveglia) si sospende: spreca
+            # rate-limit e chiavi. Resta la rotazione della ladder.
+            try:
+                _degraded = router.degraded_active()
+            except Exception:
+                _degraded = False
+            if (_degraded and not _wake_spawned):
+                _wake_spawned = True          # evita ripetizioni nel loop
+                log.info("[degraded] esplorazione sospesa per questa "
+                         "richiesta (%s)", dep.get("unique"))
+            if (session and profile and not _degraded
                     and bool(getattr(_pol, "warm_refill_enabled", True))
                     and bool(getattr(_pol, "warm_pool_enabled", True))):
                 _ready = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
@@ -3115,7 +3160,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                               ctx, _need_out,
                                               requested_group, session,
                                               _raced)
-            if _hedge_ms > 0 or _refill:
+            if not _degraded and (_hedge_ms > 0 or _refill):
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
                     _h_u = _h_dep["unique"] if _h_dep else None
@@ -3335,6 +3380,18 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     "cls": classify_error_class(err.status, detail),
                     "status": abs(int(err.status)) if err.status else None,
                     "ms": int((time.monotonic() - t_att) * 1000)})
+            except Exception:                # noqa: BLE001
+                pass
+            # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/transport)
+            # -> salta TUTTO l'host per questa richiesta.
+            try:
+                if is_provider_level(classify_error_class(err.status, detail)):
+                    _h = dep_host(dep)
+                    if _h and _h not in skip_hosts:
+                        skip_hosts.add(_h)
+                        log.info("[skip-host] %s: errore provider-level -> "
+                                 "host %s saltato per questa richiesta",
+                                 dep["unique"], _h)
             except Exception:                # noqa: BLE001
                 pass
             # "does not support vision input" (llm7/Cloudflare) su richieste
@@ -3588,9 +3645,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # _punish_concurrency e le classi di cooldown (F18).
                 _fail(dep["unique"], seconds=_cd, reason=reason,
                       status=abs(err.status) if err.status else None)
-            nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                       tried=tried_set,
-                                       requested_group=requested_group) \
+            nxt = _next_filtered(profile, dep, need, scope, ctx=ctx,
+                                 tried=tried_set,
+                                 requested_group=requested_group) \
                 if profile else None
             if nxt is not None and thought_sig and nxt["unique"] in attempts:
                 nxt = None                 # gruppo/catena tutto Gemini 3
@@ -3632,9 +3689,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 pass
             _fail(dep["unique"], seconds=_soft_cd(
                 router.stats_for(dep["unique"]).fail_count_24h))
-            nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                       tried=tried_set,
-                                       requested_group=requested_group) \
+            nxt = _next_filtered(profile, dep, need, scope, ctx=ctx,
+                                 tried=tried_set,
+                                 requested_group=requested_group) \
                 if profile else None
             log.warning("[fallback] stream %s errore imprevisto %r -> %s",
                         dep["unique"], exc,

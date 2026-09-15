@@ -599,6 +599,7 @@ async def state(request: Request):
                 "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
             },
             "endpoint_quarantine": gw.router.endpoint_quarantine_view(),
+            "degraded": gw.router.degraded_view(),
             "cold_spread": {
                 "pct": float(getattr(pol, "cold_spread_pct", 0.20) or 0.0),
                 "min_pool": int(getattr(pol, "ladder_skip_after", 0) or 0),

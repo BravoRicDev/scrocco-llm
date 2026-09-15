@@ -1937,6 +1937,30 @@ def media_input_needed(need) -> bool:
     return bool(set(need or ()) & MEDIA_INPUT_CAPS)
 
 
+def dep_host(dep: dict) -> str:
+    """Hostname dell'endpoint di un deployment (chiave di skip/quarantena)."""
+    url = str((dep or {}).get("api_base") or (dep or {}).get("endpoint") or "")
+    if not url:
+        return ""
+    try:
+        return (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:                                  # noqa: BLE001
+        return ""
+
+
+# Errori PROVIDER-LEVEL: la colpa e' dell'host, non della singola chiave.
+# Per il resto della richiesta conviene saltare TUTTO l'host (skipPlatforms)
+# invece di bruciare un hop per ogni chiave che ci vive sopra.
+PROVIDER_LEVEL_CLASSES = frozenset({
+    "upstream_error", "provider_transient", "host_transient", "timeout",
+    "network",
+})
+
+
+def is_provider_level(cls: str | None) -> bool:
+    return (cls or "") in PROVIDER_LEVEL_CLASSES
+
+
 class Forwarder:
     def __init__(self, client: httpx.AsyncClient | None = None,
                  keepalive_pool: bool = False):
@@ -2614,6 +2638,7 @@ truncation_hook=None,
         _corrected: set[str] = set()
         _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
         trail: list = []                     # ATTEMPT TRAIL (P0) per il 503
+        skip_hosts: set[str] = set()         # P1-5: host saltati (provider KO)
         _rsn_restored = False                # history originale gia' riprovata
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
@@ -2653,9 +2678,27 @@ truncation_hook=None,
             # stessa famiglia dello sticky corrente, sposta lo sticky su di lui
             # (la sessione riparte warm invece che fredda).
             _n = router.fallback_next(*a, **k)
-            if _n is not None:
+            if _n is None:
+                return None
+            if dep_host(_n) not in skip_hosts:
                 router.sticky_handoff(ses, _n)
-            return _n
+                return _n
+            # P1-5 skipPlatforms: l'host ha gia' fallito a livello provider in
+            # QUESTA richiesta -> provo un altro host; se non ne restano, torno
+            # al candidato saltato (mai lasciare la richiesta senza risposta).
+            _saved = _n
+            for _ in range(8):
+                tried.add(_saved["unique"])
+                cand = router.fallback_next(*a, **k)
+                if cand is None:
+                    router.sticky_handoff(ses, _saved)
+                    return _saved
+                if dep_host(cand) not in skip_hosts:
+                    router.sticky_handoff(ses, cand)
+                    return cand
+                _saved = cand
+            router.sticky_handoff(ses, _saved)
+            return _saved
         # ---- L1 #1: normalizzazione STRUTTURALE della history (coda) ----
         if _hn.enabled:
             _new_msgs, _hn_rep = normalize_messages(
@@ -2683,10 +2726,15 @@ truncation_hook=None,
             def _fail_cur(seconds=None, reason=None, status=None, kind=None):
                 _k = kind if kind is not None else _kind_default
                 if _was_dormant and _k != ErrorKind.PERMANENT_DEAD:
-                    return router.mark_failed_double_residual(
+                    _r = router.mark_failed_double_residual(
                         cur, reason=reason, status=status)
-                return router.mark_failed(
-                    cur, seconds=seconds, reason=reason, status=status, kind=_k)
+                else:
+                    _r = router.mark_failed(
+                        cur, seconds=seconds, reason=reason, status=status, kind=_k)
+                # P1-4: KO ripetuti dello stesso MODELLO -> bench cross-chiave.
+                with contextlib.suppress(Exception):
+                    router.note_model_failure(dep)
+                return _r
             tried.add(cur)                  # note_end deve riferirsi a QUESTO,
             if attempts_box is not None:
                 attempts_box.append(cur)    # osservabilità summary per-richiesta
@@ -2718,7 +2766,14 @@ truncation_hook=None,
                     _fly = router.probes_in_flight(ses)
                 except Exception:
                     _fly = 0
-                if (_refill_on and _ready_min and _refill_rounds < _maxif
+                # DEGRADED (P1-6): in blackout upstream niente speculativo
+                # (cascata/canary/sveglia): brucia rate-limit senza costrutto.
+                try:
+                    _degraded = router.degraded_active()
+                except Exception:
+                    _degraded = False
+                if (_refill_on and _ready_min and not _degraded
+                        and _refill_rounds < _maxif
                         and _fly < _maxif
                         and (not _deadline_ms
                              or (time.monotonic() - _t0) * 1000
@@ -2828,20 +2883,28 @@ truncation_hook=None,
                     errB = None
                     _pend = {futA, _fB}
                     while _pend:
-                        _cmp, _pend = await asyncio.wait(
+                        _cmp, _rest = await asyncio.wait(
                             _pend, return_when=asyncio.FIRST_COMPLETED)
-                        _f = _cmp.pop()
-                        try:
-                            _r = _f.result()
-                        except BaseException as exc:
-                            if _f is futA:
-                                errA = exc
-                            else:
-                                errB = exc
-                            continue
-                        data = _r
-                        served_A = (_f is futA)
-                        break
+                        # NB: bisogna esaminare TUTTI i future completati in
+                        # questo giro, non solo uno: se A e B finiscono
+                        # insieme, scartare gli altri lascerebbe la loro
+                        # eccezione non recuperata (e il probe del loser non
+                        # partirebbe -> nessuna penale).
+                        _pend = set(_rest)
+                        for _f in _cmp:
+                            try:
+                                _r = _f.result()
+                            except BaseException as exc:
+                                if _f is futA:
+                                    errA = exc
+                                else:
+                                    errB = exc
+                                continue
+                            data = _r
+                            served_A = (_f is futA)
+                            break
+                        if data is not None:
+                            break
                     if data is None:
                         # entrambi giu': A finisce nell'handler errori
                         # esistente (penali solite); B riceve la sua da probe
@@ -3119,6 +3182,19 @@ truncation_hook=None,
                         "cls": classify_error_class(err.status, detail),
                         "status": abs(int(err.status)) if err.status else None,
                         "ms": int((time.monotonic() - t0) * 1000)})
+                except Exception:            # noqa: BLE001
+                    pass
+                # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/
+                # transport) -> salta TUTTO l'host per questa richiesta invece
+                # di bruciare un hop per ogni chiave che ci vive sopra.
+                try:
+                    if is_provider_level(classify_error_class(err.status, detail)):
+                        _h = dep_host(dep)
+                        if _h and _h not in skip_hosts:
+                            skip_hosts.add(_h)
+                            log.info("[skip-host] %s: errore provider-level "
+                                     "-> host %s saltato per questa richiesta",
+                                     cur, _h)
                 except Exception:            # noqa: BLE001
                     pass
                 # BAN/ToS dell'endpoint? quarantena l'host 24h PRIMA di

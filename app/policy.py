@@ -629,6 +629,27 @@ class Policy:
     # si ritenta senza cooldown); esaurito il budget si torna al KO normale.
     # Un successo azzera lo streak.
     repair_exempt_streak_limit: int = 3
+    # FINESTRA DI FALLIMENTO DEL MODELLO (cross-chiave): N KO non-esenti entro
+    # `model_fail_window_sec` sullo stesso modello (anche su chiavi DIVERSE)
+    # -> bench del modello su TUTTE le sue chiavi per `model_fail_cooldown_sec`
+    # (le chiavi gemelle non ripescano un modello malato). 0 = disattivata.
+    model_fail_window_sec: int = 900
+    model_fail_threshold: int = 3
+    model_fail_cooldown_sec: int = 600
+    # DEGRADED MODE: sotto `degraded_healthy_ratio` di HOST sani (per
+    # `degraded_entry_grace_sec`) si sospende l'ESPLORAZIONE (cascata refill,
+    # hedge canary, hunt, sveglia) e resta la sola rotazione ladder; si
+    # riprende solo dopo `degraded_exit_grace_sec` SOPRA soglia (anti-flap).
+    # Sotto `degraded_min_providers` host non si entra mai in degradato.
+    degraded_mode_enabled: bool = True
+    degraded_healthy_ratio: float = 0.5
+    degraded_min_providers: int = 3
+    degraded_entry_grace_sec: int = 60
+    degraded_exit_grace_sec: int = 120
+    # TETTO operatore sui cooldown STIMATI da noi (provenienza 'heuristic'):
+    # non tocca MAI un retry dichiarato dal provider (Retry-After, reset
+    # quota => 'authoritative') ne' credit/tier. 0 = nessun tetto.
+    cooldown_estimate_ceiling_sec: int = 0
     # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
     # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
@@ -1211,6 +1232,27 @@ class Policy:
                 raise ValueError(
                     "repair_exempt_streak_limit deve essere un intero >= 0"
                 ) from None
+        for _fld in ("model_fail_window_sec", "model_fail_threshold",
+                     "model_fail_cooldown_sec", "degraded_min_providers",
+                     "degraded_entry_grace_sec", "degraded_exit_grace_sec",
+                     "cooldown_estimate_ceiling_sec"):
+            if raw.get(_fld) is not None:
+                try:
+                    setattr(p, _fld, max(0, int(raw[_fld])))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{_fld} deve essere un intero >= 0") from None
+        if raw.get("degraded_mode_enabled") is not None:
+            p.degraded_mode_enabled = bool(raw["degraded_mode_enabled"])
+        if raw.get("degraded_healthy_ratio") is not None:
+            try:
+                _r = float(raw["degraded_healthy_ratio"])
+            except (TypeError, ValueError):
+                raise ValueError("degraded_healthy_ratio deve essere un "
+                                 "numero tra 0 e 1") from None
+            if not (0.0 <= _r <= 1.0):
+                raise ValueError("degraded_healthy_ratio deve essere tra 0 e 1")
+            p.degraded_healthy_ratio = _r
         for _fld in ("cooldown_autoprobe_crisis_ratio",
                      "cooldown_autoprobe_crisis_mult",
                      "hotreload_probe_timeout_sec",
