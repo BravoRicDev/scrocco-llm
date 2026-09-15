@@ -626,6 +626,14 @@ class Router:
         self._circuit_breaker_timeout = 60.0  # seconds before half-open
         self._circuit_breaker_half_open_requests = 3  # requests in half-open before close
 
+        # REGISTRO QUIRK LOCALE (P2-9): applica subito i flag dichiarati in
+        # policy ai deployment che matchano il glob del modello.
+        self._applied_quirks: list[dict] = []
+        try:
+            self.apply_quirks()
+        except Exception as exc:                      # pragma: no cover
+            log.warning("[quirk] applicazione fallita: %r", exc)
+
     # ------------------------------------------------- escalation winner
     def _esc(self) -> dict:
         """Ritorna (e crea al volo se serve) il dict escalation-winner.
@@ -3721,6 +3729,244 @@ class Router:
                 "ratio": (round(h / float(t), 3) if t else None),
                 "since": st.get("since")}
 
+    # ------------------------------------------------- LEASE PER CHIAVE (P2)
+    def _key_leases(self) -> dict:
+        d = getattr(self, "_key_leases_map", None)
+        if d is None:
+            d = self._key_leases_map = {}
+        return d
+
+    def _lease_max_age(self) -> float:
+        return max(1.0, float(getattr(
+            self.policy, "key_concurrency_lease_max_age_sec", 120) or 120))
+
+    def _prune_key_leases(self, now: float | None = None) -> None:
+        """Scarta le lease piu' vecchie del tetto (una richiesta interrotta
+        non deve saturare la chiave per sempre)."""
+        now = time.time() if now is None else now
+        age = self._lease_max_age()
+        m = self._key_leases()
+        for k in list(m):
+            fresh = [e for e in m[k] if now - e[1] <= age]
+            if fresh:
+                m[k] = fresh
+            else:
+                m.pop(k, None)
+
+    def key_inflight(self, dep: dict | None) -> int:
+        if not dep:
+            return 0
+        return len(self._key_leases().get(dep.get("api_key") or "", ()))
+
+    def key_lease_acquire(self, dep: dict | None) -> tuple | None:
+        """Riserva una "lease" (richiesta in volo) per la api_key del dep.
+
+        Opt-in (`key_concurrency_enabled`): con il cap raggiunto ritorna None
+        — il chiamante NON deve bloccare la richiesta (cap SOFT: la chiave
+        viene solo deprioritizzata finche' esistono alternative), quindi il
+        None serve solo a non incrementare il contatore."""
+        if not dep or not bool(getattr(self.policy,
+                                        "key_concurrency_enabled", False)):
+            return None
+        now = time.time()
+        self._prune_key_leases(now)
+        key = dep.get("api_key") or ""
+        cap = max(0, int(getattr(self.policy, "key_concurrency_max", 2) or 0))
+        ent = self._key_leases().setdefault(key, [])
+        if cap and len(ent) >= cap:
+            return None
+        tok = ("%s|%s|%d" % (key[:12], dep.get("unique"), now))
+        ent.append((tok, now, dep.get("unique")))
+        return (key, tok)
+
+    def key_lease_release(self, lease: tuple | None) -> None:
+        if not lease:
+            return
+        key, tok = lease
+        ent = self._key_leases().get(key)
+        if not ent:
+            return
+        self._key_leases()[key] = [e for e in ent if e[0] != tok] or None
+        if not self._key_leases()[key]:
+            self._key_leases().pop(key, None)
+
+    def _lease_filter(self, deps: list[dict]) -> list[dict]:
+        """Depriorizza (non elimina) i dep la cui api_key e' al cap di
+        concorrenza: se TUTTI sono al cap ritorna la lista intera — il cap
+        non deve mai trasformarsi in un 503."""
+        if not bool(getattr(self.policy, "key_concurrency_enabled", False)):
+            return deps
+        cap = max(0, int(getattr(self.policy, "key_concurrency_max", 2) or 0))
+        if not cap:
+            return deps
+        self._prune_key_leases()
+        m = self._key_leases()
+        if not m:
+            return deps
+        kept = [d for d in deps
+                if len(m.get(d.get("api_key") or "", ())) < cap]
+        return kept or deps
+
+    def key_leases_view(self) -> dict:
+        self._prune_key_leases()
+        m = self._key_leases()
+        return {k: len(v) for k, v in sorted(m.items())}
+
+    # --------------------------------------------------- QUIRK LOCALE (P2-9)
+    QUIRK_FLAGS = ("thinking_replay", "strip_reasoning", "no_thinking",
+                   "hold_until_finish", "media_defer")
+
+    def apply_quirks(self) -> int:
+        """Applica IN MEMORIA i quirk dichiarati in policy ai deployment
+        il cui modello matcha il glob (case-insensitive), mappandoli sui flag
+        esistenti. Non riscrive il CSV: e' conoscenza dichiarativa locale.
+        Ritorna il numero di coppie (deployment, flag) applicate."""
+        quirks = list(getattr(self.policy, "quirks", None) or [])
+        self._applied_quirks = []
+        if not quirks:
+            return 0
+        import fnmatch
+        n = 0
+        for dep in self._all_deps():
+            model = str(dep.get("model") or "").lower()
+            for q in quirks:
+                glob = str(q.get("model") or "")
+                if not glob or not fnmatch.fnmatch(model, glob):
+                    continue
+                flag = str(q.get("flag") or "")
+                if flag not in self.QUIRK_FLAGS:
+                    log.warning("[quirk] flag sconosciuto '%s' per %s",
+                                flag, glob)
+                    continue
+                dep[flag] = True
+                n += 1
+                self._applied_quirks.append(
+                    {"model": glob, "flag": flag,
+                     "severity": q.get("severity") or "warning",
+                     "note": q.get("note") or "", "unique": dep.get("unique")})
+                if (q.get("severity") == "blocker"):
+                    log.warning("[quirk] BLOCKER %s (%s) -> %s",
+                                dep.get("model"), flag, dep.get("unique"))
+        if self._applied_quirks:
+            log.info("[quirk] %d applicazioni su %d quirk dichiarati",
+                     n, len(quirks))
+        return n
+
+    def quirks_view(self) -> dict:
+        applied = getattr(self, "_applied_quirks", []) or []
+        by_model: dict[str, int] = {}
+        for a in applied:
+            by_model[a["model"]] = by_model.get(a["model"], 0) + 1
+        return {"declared": len(getattr(self.policy, "quirks", None) or []),
+                "applied": len(applied), "by_model": by_model}
+
+    def _all_deps(self):
+        for deps in self.config.groups.values():
+            for d in deps:
+                yield d
+
+    # ------------------------------------------------ PRESSURE (P2-10)
+    def pressure_view(self, limit: int = 40) -> dict:
+        """Perche' un modello/deployment viene saltato: cooldown attivi con
+        provenienza, bench di modello, chiavi sature (lease), quarantene
+        endpoint, esenzioni-riparazione esaurite. Ordinato per pressione
+        (residuo di cooldown decrescente)."""
+        now = time.time()
+        self._prune_key_leases(now)
+        rows = []
+        for u, exp in list(self._cooldown.items()):
+            rem = float(exp) - now
+            if rem <= 0:
+                continue
+            d = self.config.deployment_by_unique(u) or {}
+            s = self.stats_for(u)
+            rows.append({
+                "unique": u, "model": d.get("model"), "group": d.get("group"),
+                "remaining_sec": int(rem),
+                "reason": getattr(s, "last_reason", None),
+                "provenance": self.cooldown_provenance(u),
+                "fail_24h": getattr(s, "fail_count_24h", None),
+                "probeable": self.cooldown_probeable(u),
+            })
+        rows.sort(key=lambda r: -r["remaining_sec"])
+        benches: dict[str, int] = {}
+        for u, exp in self._cooldown.items():
+            if exp <= now:
+                continue
+            d = self.config.deployment_by_unique(u) or {}
+            if getattr(self.stats_for(u), "last_reason", None) == \
+                    "model_unhealthy":
+                benches[str(d.get("model"))] = benches.get(
+                    str(d.get("model")), 0) + 1
+        exempt = {u: n for u, n in (getattr(self, "_repair_exempt_map", {})
+                                    or {}).items() if n}
+        return {
+            "cooldowns_total": len(rows),
+            "cooldowns": rows[:limit],
+            "model_bench": dict(sorted(benches.items(),
+                                       key=lambda kv: -kv[1])[:limit]),
+            "endpoint_quarantine": self.endpoint_quarantine_view(),
+            "key_leases": self.key_leases_view(),
+            "repair_exempt": exempt,
+            "model_fail_window": {m: len(q) for m, q in
+                                  (getattr(self, "_model_fail_win_map", {})
+                                   or {}).items() if q},
+        }
+
+    def clear_pressure(self, model: str | None = None,
+                       unique: str | None = None) -> dict:
+        """Azzera cooldown + penalita' + finestre di fallimento (operatore).
+
+        `unique` -> solo quel deployment; `model` -> tutte le sue chiavi;
+        nessun filtro -> tutto. La pressione si ricostruisce dai risultati
+        live: il caso peggiore di un clear prematuro e' un altro giro di
+        fallimenti, meglio di un pool che non riesce a ruotare."""
+        now = time.time()
+        want_model = (model or "").strip()
+        cleared: list[str] = []
+        for u in list(self._cooldown):
+            d = self.config.deployment_by_unique(u) or {}
+            if unique and u != unique:
+                continue
+            if want_model and str(d.get("model") or "") != want_model:
+                continue
+            if self._cooldown.get(u, 0) > now:
+                cleared.append(u)
+            self._cooldown.pop(u, None)
+        m = getattr(self, "_cooldown_prov_map", None)
+        if m:
+            for u in cleared:
+                m.pop(u, None)
+        rex = getattr(self, "_repair_exempt_map", None)
+        if rex:
+            for u in list(rex):
+                d = self.config.deployment_by_unique(u) or {}
+                if unique and u != unique:
+                    continue
+                if want_model and str(d.get("model") or "") != want_model:
+                    continue
+                rex.pop(u, None)
+        mw = getattr(self, "_model_fail_win_map", None)
+        if mw:
+            for mk in list(mw):
+                if want_model and mk != want_model:
+                    continue
+                mw.pop(mk, None)
+        q = getattr(self, "_endpoint_quarantine", None)
+        if q and not unique:
+            for h in list(q):
+                if want_model:
+                    continue
+                q.pop(h, None)
+        if not want_model and not unique:
+            mcb = getattr(self, "_model_cb", None)
+            if mcb:
+                mcb.clear()
+        self._key_leases().clear()
+        log.warning("[pressure] clear (model=%s unique=%s): %d cooldown "
+                    "rimossi", want_model or "-", unique or "-", len(cleared))
+        return {"ok": True, "cleared": cleared, "count": len(cleared)}
+
     # ------------------------------------------------ PROVENIENZA COOLDOWN (P0)
     def _cooldown_prov(self) -> dict:
         d = getattr(self, "_cooldown_prov_map", None)
@@ -4979,6 +5225,9 @@ class Router:
         # model-stickiness e non devono essere disturbati dalla saturazione.
         if self.config.group_caps.get(group_name) is None:
             deps = self._apply_concurrency_limit(deps, ctx)
+        # LEASE PER CHIAVE (P2-8, opt-in): depriorizza le api_key con troppe
+        # richieste in volo (soft: se tutte sono al cap, lista invariata).
+        deps = self._lease_filter(deps)
         # ORDINAMENTO DETERMINISTICO per -go/-fallback: niente metriche
         # (reputation, latenza, recency, _score). Solo `data` (giorno rinnovo
         # -> sort_key) e `model_preference`. Le metriche restano SOLO come
@@ -5206,6 +5455,9 @@ class Router:
         gname = eligible[0][1]["group"]
         pool = [d for _, d in eligible]
         preferred, _ = self._defer_media(gname, need, pool)
+        # LEASE (P2-8, opt-in): depriorizza le chiavi con troppe richieste in
+        # volo (soft: se tutte sono al cap la lista resta intera).
+        preferred = self._lease_filter(preferred)
 
         # failover same-model (gruppi gen/stt): prima le chiavi gemelle
         if prefer_model:

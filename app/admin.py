@@ -161,6 +161,12 @@ def _commit_csv(header: list[str], rows: list[dict]) -> None:
     csv_store.save_table(gw.CSV_PATH, header, rows, like=gw.config)
     try:
         gw.config.reload()              # già validato dal save
+        # I flag dei quirk (P2-9) vivono solo in memoria: il reload ricostruisce
+        # i dep dict, quindi vanno riapplicati subito.
+        try:
+            gw.router.apply_quirks()
+        except Exception:
+            pass
         log.info("[config] CSV aggiornato via admin: profili=%s deployment=%d",
                  ",".join(gw.config.profiles),
                  sum(len(v) for v in gw.config.groups.values()))
@@ -600,6 +606,12 @@ async def state(request: Request):
             },
             "endpoint_quarantine": gw.router.endpoint_quarantine_view(),
             "degraded": gw.router.degraded_view(),
+            "key_leases": gw.router.key_leases_view(),
+            "quirks": gw.router.quirks_view(),
+            "pressure": {
+                "cooldowns_total":
+                    gw.router.pressure_view(limit=0)["cooldowns_total"],
+            },
             "cold_spread": {
                 "pct": float(getattr(pol, "cold_spread_pct", 0.20) or 0.0),
                 "min_pool": int(getattr(pol, "ladder_skip_after", 0) or 0),
@@ -635,6 +647,41 @@ async def clear_cooldowns(request: Request):
     cleared = list(gw.router._cooldown)
     gw.router._cooldown.clear()
     return {"ok": True, "cleared": cleared}
+
+
+@admin_api.post("/pressure/clear")
+async def clear_pressure(request: Request):
+    """Azzera cooldown/penalita'/finestre di fallimento (operatore).
+
+    Body opzionale: {"unique": "<dep>"} oppure {"model": "<modello>"}; senza
+    filtri azzera tutto. La pressione si ricostruisce dai risultati live."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    body = body or {}
+    return gw.router.clear_pressure(model=body.get("model"),
+                                    unique=body.get("unique"))
+
+
+@admin_api.post("/pressure/inspect")
+async def inspect_pressure(request: Request):
+    """Vista dettagliata del perche' i deployment vengono saltati."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    try:
+        limit = int((body or {}).get("limit", 40))
+    except (TypeError, ValueError):
+        limit = 40
+    return gw.router.pressure_view(limit=max(0, limit))
 
 
 @admin_api.post("/sessions/release")

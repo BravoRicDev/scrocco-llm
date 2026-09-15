@@ -650,6 +650,20 @@ class Policy:
     # non tocca MAI un retry dichiarato dal provider (Retry-After, reset
     # quota => 'authoritative') ne' credit/tier. 0 = nessun tetto.
     cooldown_estimate_ceiling_sec: int = 0
+    # LEASE DI CONCORRENZA PER CHIAVE (opt-in): chiude la race
+    # check-then-act sotto carico parallelo. Se una api_key ha gia'
+    # `key_concurrency_max` richieste in volo viene DEPRIORITIZZATA nelle
+    # scelte (soft: se non resta altro si usa comunque, mai 503 per il solo
+    # lease); una lease scade da sola dopo `key_concurrency_lease_max_age_sec`.
+    key_concurrency_enabled: bool = False
+    key_concurrency_max: int = 2
+    key_concurrency_lease_max_age_sec: int = 120
+    # REGISTRO QUIRK LOCALE: lista di {model: glob, flag: <colonna CSV>,
+    # severity: blocker|warning|info, note: str}. Conoscenza DICHIARATIVA
+    # per-modello (glob case-insensitive, es. "*nemotron-3-ultra*") mappata
+    # sui flag esistenti e applicata IN MEMORIA ai deployment, senza
+    # riscrivere il CSV e senza catalogo esterno.
+    quirks: list = field(default_factory=list)
     # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
     # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
@@ -1244,6 +1258,37 @@ class Policy:
                         f"{_fld} deve essere un intero >= 0") from None
         if raw.get("degraded_mode_enabled") is not None:
             p.degraded_mode_enabled = bool(raw["degraded_mode_enabled"])
+        if raw.get("key_concurrency_enabled") is not None:
+            p.key_concurrency_enabled = bool(raw["key_concurrency_enabled"])
+        for _fld in ("key_concurrency_max",
+                     "key_concurrency_lease_max_age_sec"):
+            if raw.get(_fld) is not None:
+                try:
+                    setattr(p, _fld, max(0, int(raw[_fld])))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{_fld} deve essere un intero >= 0") from None
+        if raw.get("quirks") is not None:
+            _q = raw["quirks"]
+            if not isinstance(_q, (list, tuple)):
+                raise ValueError("quirks deve essere una lista di oggetti")
+            _qout = []
+            for _it in _q:
+                if not isinstance(_it, dict):
+                    raise ValueError("ogni quirk deve essere un oggetto")
+                _glob = str(_it.get("model") or "").strip().lower()
+                _flag = str(_it.get("flag") or "").strip().lower()
+                if not _glob or not _flag:
+                    raise ValueError(
+                        "ogni quirk richiede 'model' (glob) e 'flag'")
+                _sev = str(_it.get("severity") or "warning").strip().lower()
+                if _sev not in ("blocker", "warning", "info"):
+                    raise ValueError(
+                        "severity deve essere blocker|warning|info")
+                _qout.append({"model": _glob, "flag": _flag,
+                              "severity": _sev,
+                              "note": str(_it.get("note") or "")})
+            p.quirks = _qout
         if raw.get("degraded_healthy_ratio") is not None:
             try:
                 _r = float(raw["degraded_healthy_ratio"])

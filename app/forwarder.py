@@ -2747,6 +2747,7 @@ truncation_hook=None,
                          "PRIMA dell'invio (proattivo)", cur, _tp)
             router.note_start(cur, ctx)     # rotazione adattiva (peso token)
             t0 = time.monotonic()
+            _lease = router.key_lease_acquire(dep)   # P2-8 (opt-in)
             try:
                 # ---- L1 #2A: default di sampling (client vince) ----
                 if _sm.enabled:
@@ -3573,6 +3574,7 @@ truncation_hook=None,
                 dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
             finally:
+                router.key_lease_release(_lease)   # P2-8
                 router.note_end(cur, ctx)   # SEMPRE il tentativo corrente
         # catena finita dopo fallimenti QC: consegna l'ultimo broken (D3) SE ha
         # contenuto; se e' vuoto -> errore RETRYABLE (mai un turno vuoto/finto).

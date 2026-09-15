@@ -601,6 +601,10 @@ async def _watcher(interval: float) -> None:
                     log.info("[config] CSV ricaricato: profili=%s deployment=%d",
                              ",".join(config.profiles),
                              sum(len(v) for v in config.groups.values()))
+                    try:
+                        router.apply_quirks()   # flag in-memory (P2-9)
+                    except Exception:
+                        pass
                     # Probe immediato dei deployment appena aggiunti: scoprono lo
                     # stato di salute PRIMA del traffico reale (vedi autoprobe).
                     _added = sorted(_all_uniques() - _prev_uniques)
@@ -907,6 +911,10 @@ async def admin_reload(request: Request):
     fresh = Policy.load_or_default(POLICY_PATH)
     router.policy = fresh
     globals()["policy"] = fresh
+    try:
+        router.apply_quirks()          # i flag quirk sono in-memory (P2-9)
+    except Exception:
+        pass
     return {"reloaded": True, "profiles": config.profiles,
             "deployments": sum(len(v) for v in config.groups.values()),
             "policy": {"step_up_pct": fresh.step_up_pct,
@@ -2978,6 +2986,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     # (classe d'errore onesta). Finisce nel body/header del 503 finale.
     trail: list = []
     skip_hosts: set[str] = set()         # P1-5: host saltati (errore provider)
+    _lease = None                        # P2-8: lease per chiave (opt-in)
 
     def _next_filtered(*a, **k):
         """fallback_next + P1-5: salta gli host che hanno gia' fallito a
@@ -3058,6 +3067,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.info("[thinking-replay] %s: %d campi reasoning "
                              "rimessi PRIMA dell'invio (proattivo)",
                              dep["unique"], _tpr)
+            _lease = router.key_lease_acquire(dep)   # P2-8 (opt-in)
             gen = await forwarder.stream_response(dep, payload,
                                                   profile=profile or "",
                                                   ctx_est=ctx,
@@ -3279,10 +3289,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 router.note_session_success(ses, dep["unique"],
                                             (time.monotonic() - t_att) * 1000,
                                             ctx_est=ctx, kind="ttft")
+                # P2-8: la gara e' decisa; la lease si libera qui (il cap
+                # serve a non FAR PARTIRE nuovi tentativi su chiave satura).
+                router.key_lease_release(_lease)
+                _lease = None
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)
             router.note_end(dep["unique"], ctx)
+            router.key_lease_release(_lease)   # P2-8
+            _lease = None
             fr = meta.get("finish_reason")
             rot_len = getattr(router.policy.qc_sanity,
                               "rotate_on_length_empty", False)
@@ -3369,6 +3385,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             continue                    # ri-entra nel while col nuovo dep
         except UpstreamError as err:
             router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
+            router.key_lease_release(_lease)       # P2-8
+            _lease = None
             detail = err.detail or ""
             # ATTEMPT TRAIL: registra l'hop fallito con la sua classe onesta
             # (anche quando il rimedio reasoning piu' sotto lo ritenta).
