@@ -25,6 +25,7 @@ def router():
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     r = Router(cfg, Policy.from_dict({}))
     r.policy.cooldown_jitter_ratio = 0.0
+    r.policy.cooldown_jitter_sec_max = 0.0   # F19: qui servono secondi esatti
     yield r
     os.unlink(path)
 

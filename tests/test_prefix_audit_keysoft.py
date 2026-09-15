@@ -134,7 +134,9 @@ def test_429_soft_capped(router):
     router.policy.key_soft_max_sec = 60
     router.mark_failed(ua, seconds=9999, reason="http_429")
     until = router._key_soft[router._key_tag(ua)]
-    assert until - time.time() <= 61
+    d = until - time.time()
+    # tetto rispettato + spread DETERMINISTICO anti-herd (F19, 0..2s)
+    assert 60 <= d <= 62.5
 
 
 def test_soft_disabled_flag(router):

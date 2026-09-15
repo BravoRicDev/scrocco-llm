@@ -84,9 +84,11 @@ def test_cold_start_persists_and_accumulates(router):
     router.record_success(u, 100.0)
     # -10 dep + key/prov condivisi (log-norm) -> leggermente sotto -1010
     assert router._reputation_score(u, a) == pytest.approx(-1015.8, abs=1.0)
+    before = router._reputation_score(u, a)
     router.record_failure(u, "http_429", 429)
-    # +5 dep; key/prov si compensano (-2+2) -> torna a -1005 esatto
-    assert router._reputation_score(u, a) == -1005.0
+    # 429 = QUOTA: nessuna penale di reputazione (F18): la chiave e' satura,
+    # non 'cattiva'. Resta identica a prima.
+    assert router._reputation_score(u, a) == pytest.approx(before, abs=1e-9)
 
 
 def test_cold_start_survives_restart(router):

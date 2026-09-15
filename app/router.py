@@ -1328,7 +1328,7 @@ class Router:
             return 0.0
         # --- budget guard: apprendimento del limite dal 429 --------------
         bg_cfg = pol.budget_guard or {}
-        if reason == "http_429" and bg_cfg.get("enabled"):
+        if reason in ("http_429", "quota_exhausted") and bg_cfg.get("enabled"):
             floor_min = max(1.0, float(bg_cfg.get("min_per_min", 10)))
             floor_day = max(1.0, float(bg_cfg.get("min_per_day", 200)))
             learned_min = max(floor_min, s.minute_calls * 1.2)
@@ -1345,6 +1345,7 @@ class Router:
         s.fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)      # EMA verso lo 0 (α=0.2)
+        _explicit_seconds = seconds is not None   # F18: solo per i DERIVATI
         if seconds is None:
             mode = getattr(pol, "cooldown_mode", "linear") or "linear"
             if mode == "linear":
@@ -1359,11 +1360,33 @@ class Router:
             else:
                 seconds = float(pol.cooldown_sec)
         seconds = max(1.0, float(seconds))
-        # TIMEOUT = danno reale (tempo perso senza rispondere ne' fallire con
-        # codice): il cooldown del timeout e' `timeout_cooldown_mult` volte
-        # quello "classico", con gli stessi moltiplicatori su fail_24h gia'
-        # applicati sopra. Poi si ri-applica il tetto max_cooldown_sec.
-        if reason == "timeout":
+        # ── CLASSI DI ERRORE (F18) ────────────────────────────────────────
+        # 429 = quota: chiave satura -> soft per-chiave (sotto) + durata
+        #   dettata dal Retry-After; 503/529 = dep sovraccarico -> cooldown
+        #   breve per-unique; 500/timeout = transitorio -> breve dedicato.
+        # Evita che un 503 isolato tenga la chiave fuori per 60s e mangi
+        # _key_scores per ore (halflife) e che un timeout esploda a minuti.
+        _cls = self._error_class(status, reason)
+        if getattr(pol, "error_class_cooldowns", True):
+            if _cls == "transient" and not _explicit_seconds:
+                # Solo i cooldown DERIVATI vengono accorciati: un `seconds`
+                # esplicito (Retry-After, soft anti-black-hole) e' un segnale
+                # concreto del chiamante e vince.
+                if reason == "timeout":
+                    _sc = int(getattr(pol, "cooldown_timeout_sec", 60) or 60)
+                else:
+                    _sc = int(getattr(pol, "cooldown_transient_sec", 15) or 15)
+                seconds = min(seconds, max(1.0, float(_sc)))
+                log.debug("[cooldown-class] %s classe=transient(%s) -> %.0fs",
+                          unique, reason or "5xx", seconds)
+            elif _cls == "quota":
+                log.debug("[cooldown-class] %s classe=quota -> %.0fs "
+                          "(retry-after)", unique, seconds)
+        # TIMEOUT: solo in modalita' storica (classi disattivate) vale il
+        # moltiplicatore `timeout_cooldown_mult`; con le classi attive il
+        # timeout ha gia' il suo cooldown breve dedicato (anti black-hole:
+        # resta >0, ma non esplode a minuti).
+        if reason == "timeout" and not getattr(pol, "error_class_cooldowns", True):
             _tm = max(1, int(getattr(pol, "timeout_cooldown_mult", 10) or 10))
             seconds = min(seconds * _tm, float(pol.max_cooldown_sec))
         # Leva B: un deployment CRONICO (fail_24h >= soglia) che fallisce
@@ -1376,7 +1399,7 @@ class Router:
                 pol, "chronic_fail_cooldown_sec", 7200) or 7200))
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
         if kind != ErrorKind.QUOTA_RESET:
-            seconds = self._apply_jitter(seconds)
+            seconds = self._apply_jitter(seconds, unique)
         _now = time.time()
         if additive:
             # ESTENSIONE ADDITIVA: non sovrascrivere il residuo esistente ma
@@ -1406,7 +1429,9 @@ class Router:
         # F7: il 429 e' quasi sempre un fatto di CHIAVE/account, non del
         # singolo deployment: bloccare soft (skip a pick, zero strike/zero
         # cooldown) TUTTE le twin sulla stessa api_key per il Retry-After.
-        if reason == "http_429" and \
+        # F18: vale anche per 'quota_exhausted' (limite giornaliero/mensile
+        # della chiave: stesso effetto, stessa gestione).
+        if reason in ("http_429", "quota_exhausted") and \
                 getattr(pol, "key_soft_429_enabled", True):
             _d429 = self.config.deployment_by_unique(unique)
             _k429 = (_d429 or {}).get("api_key")
@@ -1415,7 +1440,10 @@ class Router:
                     _k429.encode("utf-8", errors="replace")).hexdigest()[:12]
                 _cap = max(10.0, float(getattr(pol, "key_soft_max_sec",
                                                900) or 900))
-                _until = _now + min(float(seconds), _cap)
+                # jitter DETERMINISTICO (F19): le twin non devono ripartire
+                # tutte nel medesimo millisecondo al termine del Retry-After.
+                _until = _now + min(float(seconds), _cap) \
+                    + self._jitter_spread(_tag429)
                 _sd = getattr(self, "_key_soft", None)
                 if _sd is None:
                     _sd = {}
@@ -1782,7 +1810,7 @@ class Router:
                 self.policy, "chronic_fail_cooldown_sec", 7200) or 7200))
             new_cd = min(max(new_cd, floor_cd),
                          float(self.policy.max_cooldown_sec))
-        new_cd = self._apply_jitter(new_cd)
+        new_cd = self._apply_jitter(new_cd, unique)
         self._cooldown[unique] = now + new_cd
         self._cooldown_since[unique] = now
         self._cooldown_full_map()[unique] = float(new_cd)
@@ -2070,22 +2098,62 @@ class Router:
         self._note_latency_sample(unique, dur_ms, ctx_est, "total", 0.1)
 
     def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:
-        """Registra un fallimento: incrementa i punteggi per deployment, provider, chiave."""
+        """Registra un fallimento nei punteggi, PER CLASSE:
+
+        - quota (429/rate-limit): NESSUNA penale. La chiave e' satura, non
+          rotta: la gestisce il soft per-chiave (F7). Avvelenare _key_scores
+          per ore al primo 429 rendeva la chiave "cattiva" anche dopo il reset.
+        - transitorio (5xx/timeout/network): penale LIEVE e solo sul
+          deployment (FAIL_TRANSIENT). Provider e chiave non c'entrano.
+        - chiave (401/402/403/auth): come sempre (FAIL_KEY).
+        - altro 4xx (schema/payload): come sempre (deployment+provider+chiave:
+          spesso e' specifico del modello/deployment).
+        """
         if not hasattr(self, 'config') or self.config is None:
             return
         dep = self.config.deployment_by_unique(unique)
         if dep is None:
+            return
+        cls = self._error_class(status, reason)
+        ak = self._api_key_str(dep)
+        if cls == "quota":
+            log.debug("[rep-fail] %s classe=quota: nessuna penale", unique)
+            return
+        if cls == "transient":
+            self._base_scores[unique] = self._base_scores.get(unique, 0) \
+                + SW["FAIL_TRANSIENT"]
+            log.debug("[rep-fail] %s classe=transient dep+=%d (chiave e "
+                      "provider intatti)", unique, SW["FAIL_TRANSIENT"])
             return
         self._base_scores[unique] = self._base_scores.get(unique, 0) + SW["FAIL_DEPLOYMENT"]
         pk = self._provider_key(dep)
         # Classificazione: 401/403 = chiave, tutto il resto = provider
         is_key_fail = status in (401, 403)
         if is_key_fail:
-            self._key_scores[self._api_key_str(dep)] = self._key_scores.get(self._api_key_str(dep), 0) + SW["FAIL_KEY"]
+            self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["FAIL_KEY"]
         else:
             self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["FAIL_PROVIDER"]
-            self._key_scores[self._api_key_str(dep)] = self._key_scores.get(self._api_key_str(dep), 0) + SW["FAIL_KEY"]
+            self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["FAIL_KEY"]
         log.debug("[rep-fail] %s dep+=%d provider+=%d key+=%d is_key=%s", unique, SW["FAIL_DEPLOYMENT"], SW["FAIL_PROVIDER"], SW["FAIL_KEY"], is_key_fail)
+
+    @staticmethod
+    def _error_class(status: int | None, reason: str | None = None) -> str:
+        """Classe di errore per cooldown/penalita': 'quota' | 'transient' |
+        'key' | 'generic'. Unica fonte di verita' per record_failure e
+        mark_failed (il vecchio classify_error di forwarder resta per il
+        retire dei PERMANENT_DEAD)."""
+        st = abs(int(status)) if status else 0
+        r = (reason or "").lower()
+        if st == 429 or "429" in r or "rate_limit" in r or "quota" in r:
+            return "quota"
+        if st in (401, 402, 403) or any(x in r for x in (
+                "401", "402", "403", "auth", "forbidden", "unauthorized")):
+            return "key"
+        if st >= 500 or (st == 0 and r in (
+                "timeout", "read_timeout", "network", "network_error",
+                "provider_transient", "provider_fault")):
+            return "transient"
+        return "generic"
 
     def _reputation_score(self, unique: str, dep: dict,
                           ctx_est=None) -> float:
@@ -2613,13 +2681,34 @@ class Router:
                      streak, decayed, elapsed / 60.0)
         return decayed
 
-    def _apply_jitter(self, seconds: float) -> float:
-        """Jitter simmetrico sui cooldown (anti thundering herd)."""
+    def _jitter_spread(self, unique: str) -> float:
+        """Spread DETERMINISTICO per-unique (0..cooldown_jitter_sec_max s).
+
+        Anti-herd: i gemelli che prendono 429 nello stesso secondo scadono
+        spalmati su ~2s invece che al medesimo millisecondo (altrimenti al
+        secondo N ripartono tutti insieme -> nuova raffica di 429). E' una
+        funzione pura di `unique`: stabile tra restart, niente random."""
+        cap = float(getattr(self.policy, "cooldown_jitter_sec_max", 2.0) or 0.0)
+        if cap <= 0:
+            return 0.0
+        h = hashlib.sha256(str(unique).encode("utf-8")).digest()
+        return (int.from_bytes(h[:4], "big") % 2000) / 1000.0 * (cap / 2.0)
+
+    def _apply_jitter(self, seconds: float, unique: str | None = None) -> float:
+        """Jitter sul cooldown: componente ADDITIVA deterministica per-unique
+        (0..cooldown_jitter_sec_max s) + eventuale componente random
+        moltiplicativa (`cooldown_jitter_ratio`, default 0 = disattivata).
+
+        Lo spread additivo spalma la scadenza dei gemelli che incassano 429
+        nello stesso secondo: senza, ripartono tutti al medesimo ms e
+        rifanno raffica."""
+        sec = max(1.0, float(seconds))
         ratio = float(getattr(self.policy, "cooldown_jitter_ratio", 0.0) or 0.0)
-        if ratio <= 0:
-            return max(1.0, float(seconds))
-        return max(1.0, float(seconds) * random.uniform(1.0 - ratio,
-                                                       1.0 + ratio))
+        if ratio > 0:
+            sec = max(1.0, sec * random.uniform(1.0 - ratio, 1.0 + ratio))
+        if unique:
+            sec += self._jitter_spread(unique)
+        return max(1.0, sec)
 
     def _maybe_retire_on_probe_fail(self, unique: str, s) -> bool:
         """Auto-retirement dopo N probe passivi consecutivi falliti: se il

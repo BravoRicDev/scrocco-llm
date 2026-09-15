@@ -201,6 +201,12 @@ class Policy:
     # alcun byte per N secondi a stream avviato -> StreamStallError -> failover
     # (pre-byte) / cooldown (post-byte). 0 = disabilitato.
     stream_stall_sec: float = 20.0
+    # F21: stall guard CALIBRATO sul TTFT del bucket di contesto:
+    # stall_eff = max(stream_stall_sec, min(TTFT_p50_bucket * mult, max_sec)).
+    # Sui light resta ~stream_stall_sec; sugli heavy (prefill lungo) si allarga
+    # fino a max_sec. mult 0 = calibrazione spenta (fisso come prima).
+    stream_stall_ttft_mult: float = 2.5
+    stream_stall_max_sec: float = 60.0
     # Graceful shutdown: attesa massima (secondi) del drain delle richieste in
     # volo prima del flush finale del ledger. 0 = non attendere.
     shutdown_drain_sec: float = 10.0
@@ -240,9 +246,21 @@ class Policy:
     # Auto-retirement dopo N probe passivi consecutivi falliti (problema
     # permanente: chiave morta). 0 = off.
     probe_retire_after: int = 5
-    # Jitter simmetrico sui cooldown per evitare il thundering herd
-    # (0.12 = +/-12%). 0 = off.
-    cooldown_jitter_ratio: float = 0.12
+    # Jitter simmetrico RANDOM sui cooldown (0.12 = +/-12%). 0 = off.
+    # DEFAULT 0: sostituito dallo spread ADDITIVO DETERMINISTICO
+    # `cooldown_jitter_sec_max` (stabile tra restart, anti-herd sui gemelli).
+    cooldown_jitter_ratio: float = 0.0
+    # Jitter DETERMINISTICO per-unique: spread additivo 0..N secondi calcolato
+    # come sha256(unique) — i gemelli che incassano 429 nello stesso secondo
+    # non scadono tutti al medesimo millisecondo. 0 = off. Default 2.0s.
+    cooldown_jitter_sec_max: float = 2.0
+    # Classi di errore (F18): durata cooldown dedicata per categoria.
+    # 503/529/500 = dep sovraccarico/transitorio -> breve; timeout -> breve
+    # dedicato; 429 = quota -> soft per-chiave (durate dal Retry-After).
+    # False = comportamento storico (escalation + timeout_cooldown_mult).
+    error_class_cooldowns: bool = True
+    cooldown_transient_sec: int = 15
+    cooldown_timeout_sec: int = 60
     # Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim
     # testo). Parte fire-and-forget, senza entrare nella risposta: se ci sono
     # deployment MAI USATI nelle ultime `cooldown_autoprobe_fresh_age_sec`
@@ -920,6 +938,20 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "stream_stall_sec deve essere un numero >= 0") from None
+        _stm = raw.get("stream_stall_ttft_mult")
+        if _stm is not None:
+            try:
+                p.stream_stall_ttft_mult = max(0.0, float(_stm))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "stream_stall_ttft_mult deve essere un numero >= 0") from None
+        _sts = raw.get("stream_stall_max_sec")
+        if _sts is not None:
+            try:
+                p.stream_stall_max_sec = max(1.0, float(_sts))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "stream_stall_max_sec deve essere un numero >= 1") from None
         _rdh = raw.get("reputation_decay_halflife_sec")
         if _rdh is not None:
             try:
@@ -972,6 +1004,19 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "cooldown_jitter_ratio deve essere tra 0 e 1") from None
+        _cjs = raw.get("cooldown_jitter_sec_max")
+        if _cjs is not None:
+            try:
+                p.cooldown_jitter_sec_max = min(
+                    60.0, max(0.0, float(_cjs)))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "cooldown_jitter_sec_max deve essere tra 0 e 60") from None
+        if "error_class_cooldowns" in raw:
+            p.error_class_cooldowns = _coerce_bool(
+                raw.get("error_class_cooldowns"), "error_class_cooldowns")
+        _set_int(p, raw, "cooldown_transient_sec", minimum=1)
+        _set_int(p, raw, "cooldown_timeout_sec", minimum=1)
         if "cooldown_autoprobe_enabled" in raw:
             p.cooldown_autoprobe_enabled = _coerce_bool(
                 raw["cooldown_autoprobe_enabled"], "cooldown_autoprobe_enabled")

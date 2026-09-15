@@ -124,7 +124,13 @@ provider),
 loser is cancelled unpunished, never toward paid buckets), `[key-soft]`
 (per-api-key 429 blackout for Retry-After seconds: soft skip of every row
 sharing the key — no strikes, no reputation loss; near-exhausted rate
-headers do the same, TTL `rate_hint_ttl_sec`).
+headers do the same, TTL `rate_hint_ttl_sec`), `[cooldown-class]` (which
+error class decided the pause: `transient` → short deployment-only cooldown,
+`quota` → Retry-After, key reputation untouched), `[rep-fail]`
+(`classe=quota: nessuna penale` when a 429 deliberately does NOT touch the
+scores). Retry-After is read from the header **or** the error body JSON
+(`"retry_after"`, `"retryAfter"`, `"retryDelay"`, "retry in 58s",
+"try again in 45s"), header first, then a global/per-provider floor.
 
 ## Invariants (do not break)
 

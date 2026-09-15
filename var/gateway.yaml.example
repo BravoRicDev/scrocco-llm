@@ -131,8 +131,15 @@ cooldown_probe_decay: true
 cooldown_streak_halflife_sec: 1800
 # Auto-retirement dopo N probe passivi consecutivi falliti (0 = off).
 probe_retire_after: 5
-# Jitter simmetrico sui cooldown, anti "thundering herd" (0.12 = +/-12%; 0 = off).
-cooldown_jitter_ratio: 0.12
+# Anti "thundering herd" sui cooldown.
+# - cooldown_jitter_sec_max (default 2.0): spread DETERMINISTICO per-unique
+#   (sha256(unique) -> 0..2s) aggiunto a OGNI cooldown e alla scadenza del
+#   key-soft 429. Non e' random e non cambia tra restart: i gemelli della
+#   stessa chiave non scadono piu' nello stesso millisecondo.
+# - cooldown_jitter_ratio: vecchio jitter moltiplicativo RANDOM, spento di
+#   default (0.12 = +/-12%; 0 = off).
+cooldown_jitter_ratio: 0.0
+cooldown_jitter_sec_max: 2.0
 # Autoprobe dei cooldown triggerato da una chiamata (solo gruppi -dim testo):
 # sonda i dormienti piu' "pronti"; OK = sveglia il deployment; KO = il residuo
 # ALMENO RADDOPPIA (con minimo +grow) e i bersagli ruotano. L'autoprobe non
@@ -442,11 +449,26 @@ cooldown_linear_mult_min: 30     # incremento per fallimento consecutivo
 # cooldown_escalation: true      # (solo se cooldown_mode=escalation)
 # max_cooldown_sec: 18000        # tetto cooldown (5h; default 18000)
 
+# CLASSI DI ERRORE (cooldown + reputazione differenziati).
+# - 429/quota: la CHIAVE e' satura, non "cattiva" -> soft blackout per-chiave
+#   (sotto) e NESSUNA penale di reputazione; il cooldown usa il Retry-After
+#   (header O body JSON: "retry_after": 20, "retryDelay": "58s",
+#   "retry in 58s", "try again in 45s" — floor retry_after_min_sec).
+# - 503/529 e 500/timeout: guasto TRANSITORIO -> solo il deployment va in
+#   pausa breve (cooldown_transient_sec / cooldown_timeout_sec), la chiave
+#   non perde reputazione. Un `seconds` ESPLICITO (Retry-After, sonda,
+#   anti-black-hole) vince sempre e non viene accorciato.
+# - 401/402/403: livello chiave, come sempre.
+error_class_cooldowns: true
+cooldown_transient_sec: 15
+cooldown_timeout_sec: 60
+
 # TIMEOUT = DANNO REALE: un modello che "appende" senza rispondere (né errore
 # né contenuto) fa perdere tempo (fino a stream_first_content_ms per richiesta).
-# Il cooldown del SOLO fallimento-per-timeout è `timeout_cooldown_mult` volte
-# quello classico (con gli stessi moltiplicatori su fail_24h), poi clampato a
-# max_cooldown_sec. 1 = nessuna penalizzazione extra.
+# `timeout_cooldown_mult` si applica SOLO con error_class_cooldowns=false
+# (percorso storico: cooldown del timeout = mult x quello classico, poi
+# clampato a max_cooldown_sec). Con le classi attive il timeout usa
+# cooldown_timeout_sec. 1 = nessuna penalizzazione extra.
 timeout_cooldown_mult: 10
 
 # Dopo quanto (sec) un deployment in cooldown per "stale" può essere riprovato.
@@ -500,6 +522,13 @@ qc_json:
   stream_first_content_adaptive: true
   stream_first_content_mult: 3.0        # deadline = mult * EMA del dep
   stream_first_content_floor_ms: 20000  # pavimento (>= 2000)
+  # WATCHDOG ANTI-STALL calibrato sul prefill atteso di QUESTA fascia di
+  # contesto: stall = max(stream_stall_sec, min(TTFT_p50_bucket * mult,
+  # max_sec)). I light restano reattivi, gli heavy (>128k, prefill 4-6s
+  # fisiologici) non vengono uccisi a meta' prefill. Bucket vuoto -> base.
+  # (stream_stall_sec e' top-level; qui mult e tetto)
+  stream_stall_ttft_mult: 2.5
+  stream_stall_max_sec: 60.0
   # hedge (SOLO stream, SOLO catena fredda al 1o tentativo, SOLO pre-commit):
   # se dopo tot ms A non ha ancora contenuto, si apre UN canary sul candidato
   # successivo e impegna chi dei due risponde primo; il perdente e' annullato

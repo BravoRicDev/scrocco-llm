@@ -234,7 +234,10 @@ individual account limits instead of dying on the first 429.
   like `-200k` — so a 32k model is never chosen for a 150k prompt. The outgoing
   `max_tokens` is also clamped to `max(1, max_input - estimated_input)` when both
   are known, so a client reserving a huge completion cannot push
-  `input + output` past the model window (upstream 400/413). Log tag `[maxtok]`.
+  `input + output` past the model window (upstream 400/413); the estimate is
+  the same calibrated one used everywhere (learned divisor + a per-image
+  allowance — an N-image multimodal payload counts N × `image_token_estimate`).
+  Log tag `[maxtok]`.
 - **Predictive budget guard** (`budget_guard`): once a per-key cap is
   *learned from a real 429*, `safety_ratio` (default `0.8`) marks a
   deployment as virtually saturated — counting in-flight requests too
@@ -253,7 +256,11 @@ individual account limits instead of dying on the first 429.
   has started, if the upstream sends no chunk for N seconds (free-tier /
   reverse-proxy "hang" without closing), a `StreamStallError` aborts it
   immediately → standard failover/cooldown instead of blocking the client
-  indefinitely. `0` disables.
+  indefinitely. `0` disables. The effective timeout is **calibrated on the
+  request's context bucket**: `max(stream_stall_sec, min(TTFT_p50_bucket ×
+  stream_stall_ttft_mult, stream_stall_max_sec))` — a 128k+ prefill of 4-6 s
+  is normal, so a flat 8 s watchdog was killing healthy heavy streams while
+  staying too slow for light ones; an empty bucket falls back to the base.
 - **Debug sniff memory guard**: with `debug.sniff` on, input payloads and
   responses are scanned before logging; huge base64/binary blobs (image data
   URIs, Anthropic base64 sources, byte arrays) become a synthetic placeholder
@@ -268,8 +275,19 @@ individual account limits instead of dying on the first 429.
   key is idle, so a key reactivated after hours doesn't get re-exiled by one
   isolated error. `probe_retire_after` (default 5) auto-RETIRES a key after that
   many consecutive failed probes (permanent problem, CSV untouched).
-  `cooldown_jitter_ratio` (default 0.12) adds ±J% jitter to every cooldown to
-  avoid the thundering herd when a whole pool wakes up at the same second.
+  Every cooldown also gets a **deterministic** per-deployment spread
+  (`cooldown_jitter_sec_max`, default 2.0: `sha256(unique) → 0..2 s`, applied
+  to the cooldown expiry and to the per-key 429 blackout) so the twins of one
+  key never expire in the same millisecond — stable across restarts, unlike
+  the legacy random multiplier (`cooldown_jitter_ratio`, now 0 by default).
+  Cooldown duration and reputation damage are **class-aware** too
+  (`error_class_cooldowns`): a 429/quota saturates the *key* → per-key soft
+  blackout for the upstream Retry-After and **no** reputation penalty; a
+  503/529/500/timeout is a *transient* deployment fault → short pause only
+  (`cooldown_transient_sec` 15 s / `cooldown_timeout_sec` 60 s) with a light
+  deployment-only penalty and the key left clean; 401/402/403 stay key-level.
+  An explicit `seconds` (Retry-After, probes, anti-black-hole) always wins
+  and is never shortened.
 - **Cooldown autoprobe** (`cooldown_autoprobe_*`): on each text call a
   fire-and-forget pass probes the most "ready" cooled deployments (least
   remaining cooldown) across every text dim — up to `cooldown_autoprobe_per_dim`
@@ -486,6 +504,9 @@ template. The ones that matter most:
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `qc_json.stream_first_content_adaptive` / `stream_first_content_mult` / `stream_first_content_floor_ms` | true / 3.0 / 20000 | adaptive first-content deadline: `min(stream_first_content_ms, max(floor, mult * latency EMA))`; unknown EMA -> the cap. Avoids holding a 180s window on a normally-fast dep that stalled; the EMA used is the bucket of the CURRENT request (TTFT table) |
 | `qc_json.stream_hedge_delay_ms` | 1500 | cold-chain first-content hedge: wait N ms, then ONE canary on the next candidate, commit whoever answers first (stream only, pre-byte, never paid buckets); 0 = off |
+| `error_class_cooldowns` / `cooldown_transient_sec` / `cooldown_timeout_sec` | true / 15 / 60 | class-aware cooldowns: 503/529 and 500/timeout pause only that deployment briefly, key reputation untouched; 429/quota never penalizes reputation (per-key soft blackout instead); explicit `seconds` always wins. false = legacy (`timeout_cooldown_mult` x10) |
+| `cooldown_jitter_sec_max` | 2.0 | deterministic per-deployment cooldown spread `sha256(unique) → 0..2 s` (also on the per-key 429 blackout); 0 = off. Replaces the random `cooldown_jitter_ratio` (now 0) |
+| `stream_stall_ttft_mult` / `stream_stall_max_sec` | 2.5 / 60 | adaptive anti-stall watchdog: `max(stream_stall_sec, min(TTFT_p50_bucket × mult, max_sec))`; empty bucket → base |
 | `retry_after_min_sec` | 10 | minimum cooldown floor applied to 429s that return a tiny/absent Retry-After (anti-loop; 0 disables) |
 | `retry_after_floor_by_provider` | `{}` | per-provider Retry-After floor (provider -> seconds), overrides `retry_after_min_sec` |
 | `rate_hint_skip_enabled` / `rate_hint_ttl_sec` / `rate_hint_remaining_max` / `rate_hint_proven_sec` | true / 20 / 5 / 900 | soft key skip from fresh rate headers (free dims only, zero blame); while headers stay this fresh, `budget_guard.suppress_with_headers` ignores the learned caps |

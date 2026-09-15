@@ -152,7 +152,8 @@ def clamp_max_tokens(body: dict, dep: dict) -> None:
         mt = int(body[key])
     except (TypeError, ValueError):
         return
-    ctx = estimate_tokens(body.get("messages") or [], tools=body.get("tools"))
+    ctx = estimate_tokens(body.get("messages") or [], _EST_DIVISOR,
+                          _EST_IMAGE_TOKENS, tools=body.get("tools"))
     reserve = 0
     if dep.get("effort_capable") and _REASONING_RESERVE_FRAC > 0:
         reserve = int(mi * _REASONING_RESERVE_FRAC)
@@ -289,6 +290,78 @@ def set_stream_stall_sec(sec) -> None:
     except (TypeError, ValueError):
         return
     STREAM_STALL_SEC = max(0.0, v)
+
+
+# F20: parametri di stima condivisi (divisore + allowance per IMMAGINE),
+# impostati da main a startup e a ogni reload. Servono dove si stima il
+# contesto SENZA il router sottomano (clamp_max_tokens): prima le immagini
+# valevano 0 token e il divisore era quello di default.
+_EST_DIVISOR = 4
+_EST_IMAGE_TOKENS = 0
+# F21: stall guard calibrato sul TTFT del bucket di contesto. Un heavy (128k+)
+# ha prefill fisiologico di 4-6s: un watchdog fisso a 8-20s lo uccideva. Il
+# lookup arriva dal router (bucket EMA 'ttft', F1/F9).
+_TTFT_LOOKUP = None
+_STALL_TTFT_MULT = 2.5
+_STALL_MAX_SEC = 60.0
+
+
+def set_estimate_defaults(divisor=None, image_token_estimate=None) -> None:
+    """Divisore e allowance-immagine usati quando il router non e' in scope."""
+    global _EST_DIVISOR, _EST_IMAGE_TOKENS
+    if divisor is not None:
+        try:
+            _EST_DIVISOR = max(1, int(divisor))
+        except (TypeError, ValueError):
+            pass
+    if image_token_estimate is not None:
+        try:
+            _EST_IMAGE_TOKENS = max(0, int(image_token_estimate))
+        except (TypeError, ValueError):
+            pass
+
+
+def set_ttft_lookup(fn) -> None:
+    """Lookup (unique, ctx) -> ms del TTFT per bucket (calibra lo stall)."""
+    global _TTFT_LOOKUP
+    _TTFT_LOOKUP = fn
+
+
+def set_stall_bucket(*, multiplier=None, max_sec=None) -> None:
+    """Moltiplicatore e tetto dello stall guard calibrato sul TTFT (F21)."""
+    global _STALL_TTFT_MULT, _STALL_MAX_SEC
+    if multiplier is not None:
+        try:
+            _STALL_TTFT_MULT = max(0.0, float(multiplier))
+        except (TypeError, ValueError):
+            pass
+    if max_sec is not None:
+        try:
+            _STALL_MAX_SEC = max(1.0, float(max_sec))
+        except (TypeError, ValueError):
+            pass
+
+
+def _stall_sec_for(unique, ctx_est=None) -> float:
+    """F21: stall effettivo = max(base, min(TTFT_p50_bucket * mult, max_sec)).
+
+    Un heavy (128k+) ha prefill fisiologico di 4-6s: il watchdog fisso lo
+    uccideva; qui si allarga solo quanto serve, con tetto. Se il bucket non ha
+    campioni (o la calibrazione e' spenta) si torna al valore base."""
+    base = STREAM_STALL_SEC
+    if base <= 0 or _TTFT_LOOKUP is None or _STALL_TTFT_MULT <= 0:
+        return base
+    try:
+        t = _TTFT_LOOKUP(unique, ctx_est)
+    except Exception:
+        return base
+    try:
+        t = float(t)
+    except (TypeError, ValueError):
+        return base
+    if t <= 0:
+        return base
+    return max(base, min(t * _STALL_TTFT_MULT / 1000.0, _STALL_MAX_SEC))
 
 
 # config schemaout (degradazione gentile response_format): impostata da main
@@ -1139,7 +1212,10 @@ def _rate_limits_from(resp: httpx.Response) -> dict:
 _RETRY_BODY_RE = re.compile(
     r'"retryDelay"\s*:\s*"?\s*(\d+(?:\.\d+)?)\s*s'          # "retryDelay": "58s"
     r'|"retryDelay"\s*:\s*\{\s*"seconds"\s*:\s*"?(\d+)'      # {"seconds": 58}
-    r'|retry\s+in\s+(\d+(?:\.\d+)?)\s*s(?:econds)?',          # "retry in 58.9s"
+    r'|"retry_?after"\s*:\s*"?\s*(\d+(?:\.\d+)?)\s*s?"?'     # "retry_after": 20 / "23s"
+    r'|retry\s+in\s+(\d+(?:\.\d+)?)\s*s(?:econds)?'          # "retry in 58.9s"
+    r'|retry\s+after\s+(\d+(?:\.\d+)?)\s*s(?:econds)?'       # "retry after 23s"
+    r'|try\s+again\s+in\s+(\d+(?:\.\d+)?)\s*s(?:econds)?',    # "try again in 30s"
     re.IGNORECASE)
 _RETRY_BODY_CAP_S = 300.0                                     # un 429 non chiede ore
 # Floor minimo di cooldown per i 429: molti provider free restituiscono
@@ -1211,15 +1287,16 @@ def _retry_after_from(resp: httpx.Response, body: str | None,
     m = _RETRY_BODY_RE.search(body)
     if not m:
         return None
-    # I tre gruppi di cattura nell'ordine:
-    # 1) "retryDelay": "58s"               -> gruppo 1: (\d+(?:\.\d+)?)
-    # 2) {"seconds": 58}                   -> gruppo 2: (\d+)
-    # 3) "retry in 58.9s"                  -> gruppo 3: (\d+(?:\.\d+)?)
-    # Preferiamo il formato oggetto {"seconds": N} poiche' e' piu' strutturato,
-    # poi il formato stringa "retryDelay": "Ns", infine il formato testuale "retry in Ns".
+    # Gruppi di cattura (in ordine di pattern):
+    # 1) "retryDelay": "58s"       2) {"seconds": 58}
+    # 3) "retry_after": 20 | "23s" 4) retry in Ns
+    # 5) retry after Ns            6) try again in Ns
+    # Preferiamo il formato oggetto {"seconds": N} (piu' strutturato), poi
+    # tutti gli altri nell'ordine in cui compaiono.
     groups = m.groups()
-    # Cerca il gruppo 2 (formato oggetto) per primo, poi gruppo 1 (stringa), poi gruppo 3 (testo)
-    for g in (groups[1], groups[0], groups[2]):
+    order = ([groups[1]] if len(groups) > 1 else []) \
+        + [g for i, g in enumerate(groups) if i != 1]
+    for g in order:
         if g is not None:
             try:
                 val = float(g)
@@ -1447,7 +1524,7 @@ truncation_hook=None,
         async def gen() -> AsyncIterator[bytes]:
             buf = b""
             source = resp.aiter_bytes()
-            _stall = STREAM_STALL_SEC
+            _stall = _stall_sec_for(dep.get("unique"), ctx_est)
             if _stall > 0:
                 source = _stall_guard(source, _stall, dep.get("model", ""))
             try:

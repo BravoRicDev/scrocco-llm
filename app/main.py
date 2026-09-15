@@ -66,6 +66,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         set_stream_stall_sec,
                         set_adaptive_timeout, set_latency_lookup,
                         set_reasoning_reserve,
+                        set_estimate_defaults, set_ttft_lookup,
+                        set_stall_bucket,
                         set_schemaout_config,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
@@ -173,6 +175,13 @@ set_retry_after_floors(policy.retry_after_min_sec,
                        policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
 set_latency_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx))
+# F21: lo stall guard si calibra sul TTFT per bucket e sul moltiplicatore/
+# tetto di policy; F20: divisore+immagini condivisi per le stime "senza router".
+set_ttft_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx, "ttft"))
+set_stall_bucket(multiplier=policy.stream_stall_ttft_mult,
+                 max_sec=policy.stream_stall_max_sec)
+set_estimate_defaults(policy.estimate_divisor,
+                      getattr(policy, "image_token_estimate", 0) or 0)
 set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
                      floor_sec=policy.adaptive_timeout_floor_sec,
                      multiplier=policy.adaptive_timeout_multiplier,
@@ -565,6 +574,15 @@ async def _watcher(interval: float) -> None:
                     set_retry_after_floors(fresh.retry_after_min_sec,
                                            fresh.retry_after_floor_by_provider)
                     set_stream_stall_sec(fresh.stream_stall_sec)
+                    set_ttft_lookup(
+                        lambda u, ctx=None: router.bucket_latency_ms(
+                            u, ctx, "ttft"))
+                    set_stall_bucket(
+                        multiplier=fresh.stream_stall_ttft_mult,
+                        max_sec=fresh.stream_stall_max_sec)
+                    set_estimate_defaults(
+                        fresh.estimate_divisor,
+                        getattr(fresh, "image_token_estimate", 0) or 0)
                     set_adaptive_timeout(
                         enabled=fresh.adaptive_timeout_enabled,
                         floor_sec=fresh.adaptive_timeout_floor_sec,
@@ -1509,7 +1527,9 @@ async def chat_completions(request: Request, response: Response):
     if _do_compact:
         _cmsgs, _crep = compact_tool_outputs(
             payload.get("messages"), _cc, max_in=_max_in,
-            estimator=lambda ms: estimate_tokens(ms),
+            estimator=lambda ms: estimate_tokens(
+                ms, router.policy.estimate_divisor,
+                getattr(router.policy, "image_token_estimate", 0) or 0),
             boundary_floor=router.ctx_boundary_floor(session_id))
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
@@ -2580,6 +2600,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "upstream_401"
             elif prov_fault:
                 reason = "provider_fault"
+            elif err.status == -429:
+                # 429 esplicito: quota/chiave satura -> soft per-chiave (F7)
+                # e NESSUNA penale reputazionale (record_failure class-aware).
+                reason = "http_429"
             elif err.status is not None and err.status < 0:
                 reason = "other_4xx"
             elif err.status is None and "upstream timeout" in detail.lower():
@@ -2664,8 +2688,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # reason propagato solo per il TIMEOUT (mark_failed applica il
                 # moltiplicatore dedicato); per gli altri resta il comportamento
                 # storico (seconds esplicito / default).
-                _fail(dep["unique"], seconds=_cd,
-                      reason="timeout" if reason == "timeout" else None)
+                # reason/status propagati SEMPRE: senza, sul path streaming
+                # restavano morti key-soft 429, budget-guard learning,
+                # _punish_concurrency e le classi di cooldown (F18).
+                _fail(dep["unique"], seconds=_cd, reason=reason,
+                      status=abs(err.status) if err.status else None)
             nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
                                        tried=tried_set,
                                        requested_group=requested_group) \

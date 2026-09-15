@@ -34,6 +34,9 @@ SCORING_WEIGHTS = {
     "ATTEMPT_PROVIDER": 1,      # +1 per tentativo con stesso provider/modello (escluso sé stesso)
     "ATTEMPT_KEY": 1,           # +1 per tentativo con stessa chiave (escluso sé stesso)
     "FAIL_DEPLOYMENT": 5,       # +5 per fallimento specifico del deployment
+    "FAIL_TRANSIENT": 1,        # +1 fallimento transitorio (5xx/timeout):
+                                # lieve e solo sul deployment, la chiave e il
+                                # provider non c'entrano (spesso e' sovraccarico)
     "FAIL_PROVIDER": 2,         # +2 per fallimento del provider/modello (tutti i deployment)
     "FAIL_KEY": 2,              # +2 per fallimento della chiave (tutti i deployment)
     "SUCCESS_DEPLOYMENT": -10,  # -10 per successo del deployment specifico

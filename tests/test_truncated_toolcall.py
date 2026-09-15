@@ -227,4 +227,4 @@ def test_nonstream_rotates_unsalvageable():
     assert used["unique"] == good["unique"]
     assert data["choices"][0]["message"]["content"] == "ok"
     remaining = router._cooldown[broken["unique"]] - time.time()
-    assert 20 <= remaining <= 31
+    assert 20 <= remaining <= 33   # +spread F19 (<=2s)

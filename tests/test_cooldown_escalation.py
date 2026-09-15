@@ -35,6 +35,7 @@ def _make_router(max_fail=10):
     pol.stale_cooldown_retry_sec = 300
     pol.cooldown_retry_max_fail_24h = max_fail
     pol.cooldown_jitter_ratio = 0        # questi test verificano i secondi esatti
+    pol.cooldown_jitter_sec_max = 0      # (F19 spread deterministico: off qui)
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     return Router(cfg, pol), path
 
@@ -348,6 +349,7 @@ def test_4bis_vision_uses_media_capable():
 # ------------------------------------------------ TIMEOUT = danno reale (10x)
 def test_timeout_cooldown_multiplied_vs_classic():
     r, p = _make_router(max_fail=10)
+    r.policy.error_class_cooldowns = False   # testa il percorso STORICO (x10)
     # stesso deployment: fallimento classico (errore con codice) vs timeout
     d = _dep(r, f"{BASE}-1000k", "K-A")
     classic = r.mark_failed(d["unique"], reason="http_500")
@@ -366,6 +368,7 @@ def test_timeout_cooldown_multiplied_vs_classic():
 def test_timeout_cooldown_mult_knob():
     r, p = _make_router(max_fail=10)
     r.policy.timeout_cooldown_mult = 1                  # nessuna penalità extra
+    r.policy.error_class_cooldowns = False              # percorso STORICO
     d = _dep(r, f"{BASE}-1000k", "K-B")
     classic = 1800
     to = r.mark_failed(d["unique"], reason="timeout")
