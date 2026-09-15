@@ -5451,6 +5451,29 @@ class Router:
             return d
         return None
 
+    def session_api_keys(self) -> set[str]:
+        """api_key dei dep posseduti da UNA QUALSIASI sessione viva.
+        Regola utente: la SVEglia deve provare chiavi DIVERSE da tutte le
+        sessioni (mai rubare/riprovare la chiave di qualcun altro)."""
+        out: set[str] = set()
+        now = time.time()
+        try:
+            guard = self._guard_sec()
+        except Exception:                              # noqa: BLE001
+            guard = 900.0
+        for u, ent in list(self._dep_sess().items()):
+            if not ent:
+                continue
+            try:
+                if (now - float(ent[1])) >= guard:
+                    continue
+            except Exception:                          # noqa: BLE001
+                continue
+            d = self.config.deployment_by_unique(u)
+            if d and d.get("api_key"):
+                out.add(str(d["api_key"]))
+        return out
+
     def warm_wake_canary(self, profile: str | None, cur_dep: dict,
                          need: frozenset[str] | None, ctx: int | None,
                          out_tokens: int | None,
@@ -5476,6 +5499,9 @@ class Router:
             if u:
                 ex.add(u)
         keys = {str(k) for k in (exclude_keys or ()) if k}
+        # Chiave DIVERSA da TUTTE LE SESSIONI (regola utente): la Sveglia non
+        # tocca mai una api_key gia' impegnata da sessione alcuna.
+        keys |= self.session_api_keys()
         floor = 0
         if requested_group:
             try:

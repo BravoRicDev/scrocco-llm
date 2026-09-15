@@ -612,6 +612,10 @@ class Policy:
     # SVEglia: il terzo canario del refill cerca un dep in cooldown da 429 da
     # ALMENO questo tempo (default 1h) e, se risponde, lo riporta caldo.
     warm_refill_wake_min_cooldown_age_sec: float = 3600.0
+    # Tentativi di risveglio per giro (parametrizzabile): ognuno su una
+    # api_key DIVERSA da tutte le sessioni e diversa dagli altri tentativi;
+    # ogni KO RADDOPPIA il cooldown del dormiente.
+    warm_refill_wake_max_attempts: int = 10
     # 502/503 "mid-stream" di un aggregatore: pausa BREVE dell'HOST (non 24h
     # di quarantena) per non bruciare le chiavi sorelle dello stesso host.
     cooldown_host_midstream_502_sec: float = 120.0
@@ -1817,6 +1821,13 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.max_inflight non valido: {_v!r}")
                 p.warm_refill_max_inflight = int(_v)
+            if wp.get("wake_max_attempts") is not None:
+                _v = wp["wake_max_attempts"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.wake_max_attempts non valido: {_v!r}")
+                p.warm_refill_wake_max_attempts = int(_v)
 
         ca = raw.get("cache_aware")
         if ca is not None:

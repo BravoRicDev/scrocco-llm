@@ -71,6 +71,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         set_nonstream_hook,
                         set_stall_bucket,
                         set_schemaout_config,
+                        maybe_quarantine_ban,
+                        maybe_host_transient_cooldown,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy, refill_out_budget
@@ -2705,6 +2707,83 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
     t.add_done_callback(_PROBE_TASKS.discard)
 
 
+def _spawn_wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
+                      need, ctx, out_tokens, requested_group, session,
+                      raced: dict | None) -> None:
+    """SVEglia in background (regola utente): fino a
+    `warm_refill_wake_max_attempts` tentativi di risveglio su dep dormienti
+    da 429 MATURO (>=1h), ognuno su una api_key DIVERSA da tutte le sessioni
+    e diversa dagli altri tentativi. Chi risponde torna CALDO; chi fallisce
+    vede RADDOPPIATO il proprio cooldown residuo. Gira staccata, mai nel
+    percorso della risposta servita."""
+    t = asyncio.ensure_future(_wake_sweep(payload, profile, cur_dep, need,
+                                          ctx, out_tokens, requested_group,
+                                          session, raced))
+    _PROBE_TASKS.add(t)
+    t.add_done_callback(_PROBE_TASKS.discard)
+
+
+async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
+                      need, ctx, out_tokens, requested_group, session,
+                      raced: dict | None) -> None:
+    try:
+        _pol = router.policy
+        _n = int(getattr(_pol, "warm_refill_wake_max_attempts", 10) or 0)
+        _age = float(getattr(_pol, "warm_refill_wake_min_cooldown_age_sec",
+                             3600.0) or 3600.0)
+    except Exception:                              # noqa: BLE001
+        return
+    if _n <= 0:
+        return
+    used_uniq = set((raced or {}).get("uniq") or ())
+    used_keys = set((raced or {}).get("keys") or ())
+    done = 0
+    for i in range(_n):
+        try:
+            W = router.warm_wake_canary(
+                profile, cur_dep, need, ctx, out_tokens,
+                tried=used_uniq, requested_group=requested_group,
+                exclude_keys=used_keys, exclude_uniq=used_uniq,
+                min_age_sec=_age)
+        except Exception:                          # noqa: BLE001
+            return
+        if W is None:
+            break
+        u = W["unique"]
+        used_uniq.add(u)
+        used_keys.add(str(W.get("api_key") or ""))
+        done += 1
+        with contextlib.suppress(Exception):
+            router.note_probe_started(session, u)
+        try:
+            ok, lat, code, _body = await autoprobe._probe_one(
+                forwarder, W, 30.0)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                router.note_probe_done(session, u)
+            raise
+        except Exception:                          # noqa: BLE001
+            ok, code = False, 0
+        with contextlib.suppress(Exception):
+            router.note_probe_done(session, u)
+        if ok:
+            with contextlib.suppress(Exception):
+                router.clear_cooldown(u)
+                router.note_warm_owner(session, u)
+            log.info("[sveglia] %s risponde (%.0fms) -> torna caldo "
+                     "(tentativo %d/%d)", u, lat or 0.0, done, _n)
+            return
+        # KO: il dormiente ri-fallisce -> cooldown RADDOPPIATO (residuo).
+        with contextlib.suppress(Exception):
+            router.mark_failed_double_residual(u, reason="wake_probe",
+                                               status=code or None)
+        log.info("[sveglia] %s KO (code=%s) -> cooldown raddoppiato "
+                 "(tentativo %d/%d)", u, code, done, _n)
+    if done:
+        log.info("[sveglia] giro concluso: %d tentativi, nessun risveglio",
+                 done)
+
+
 async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 payload: dict, need: frozenset[str] = frozenset(),
                                 hook=None, scope: str = "chain",
@@ -2764,6 +2843,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     # sessione nel router).
     _raced: dict = {}
     _refill_rounds = 0
+    _wake_spawned = False               # la SVEglia parte una volta per richiesta
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
     # Clamp max_tokens GATEWAY-side dell'attempt corrente (via maxtok_hook):
     # se il modello esaurisce il NOSTRO budget ridotto, la troncatura e'
@@ -2890,6 +2970,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                  "in gara",
                                  dep.get("unique"), _nv, _ready, _fly,
                                  _maxif, ctx, _need_out)
+                        if not _wake_spawned:
+                            _wake_spawned = True
+                            _spawn_wake_sweep(payload, profile, dep, need,
+                                              ctx, _need_out,
+                                              requested_group, session,
+                                              _raced)
             if _hedge_ms > 0 or _refill:
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
@@ -3101,13 +3187,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
             # Service): quarantena dell'HOST 24h, cosi' la rotazione non
             # brucia una chiave dietro l'altra dello stesso provider.
-            with contextlib.suppress(AttributeError):
-                forwarder.maybe_quarantine_ban(router, dep, err.status, detail)
-                # 502/503 mid-stream di un aggregatore: e' l'HOST a essere
-                # malato -> pausa BREVE dell'host invece di bruciare le chiavi
-                # sorelle (elasticita' per un problema transitorio).
-                forwarder.maybe_host_transient_cooldown(
-                    router, dep, err.status, detail)
+            maybe_quarantine_ban(router, dep, err.status, detail)
+            # 502/503 mid-stream di un aggregatore: e' l'HOST a essere
+            # malato -> pausa BREVE dell'host invece di bruciare le chiavi
+            # sorelle (elasticita' per un problema transitorio).
+            maybe_host_transient_cooldown(router, dep, err.status, detail)
             # D5 anche in STREAMING: 4xx deployment-side (firma provider-side,
             # modello inesistente oppure 404) -> fallback pre-byte invece di
             # pass-through. Gli altri 4xx restano errori del client.

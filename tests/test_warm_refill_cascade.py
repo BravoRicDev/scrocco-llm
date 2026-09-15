@@ -11,6 +11,7 @@ warm, dep owner di qualsiasi sessione, dep gia' testati/sondati.
 import asyncio
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -124,6 +125,75 @@ def test_wake_canary_solo_429_maturi(router):
                                  tried={small["unique"]},
                                  requested_group=f"{BASE}-32k")
     assert w2 and w2["unique"] == mid["unique"]   # il piu' vicino nel ladder
+
+
+def test_wake_canary_esclude_chiavi_di_tutte_le_sessioni(router):
+    """Chiavi DIVERSE da TUTTE LE SESSIONI: se la key del dormiente e' in uso
+    da un'altra sessione, la Sveglia non la tocca (e session_api_keys la
+    espone)."""
+    mid = _dep(router, f"{BASE}-200k", "K-M")
+    small = _dep(router, f"{BASE}-32k", "K-S")
+    router.note_session_success("altra-sess", mid["unique"], 100, ctx_est=100)
+    assert str(mid.get("api_key")) in router.session_api_keys()
+    assert router.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                                   tried={small["unique"]},
+                                   requested_group=f"{BASE}-32k") is None
+
+
+def test_wake_sweep_raddoppia_cooldown(router, monkeypatch):
+    """Il giro di Sveglia prova fino a N dormienti (chiavi diverse fra loro),
+    e chi KO vede il cooldown residuo RADDOPPIATO."""
+    import app.main as M
+    from app import autoprobe as AP
+    small = _dep(router, f"{BASE}-32k", "K-S")
+    mid = _dep(router, f"{BASE}-200k", "K-M")
+    big = _dep(router, f"{BASE}-1000k", "K-B")
+    now = time.time()
+    for d in (mid, big):
+        router._cooldown[d["unique"]] = now + 600
+        router._cooldown_since[d["unique"]] = now - 7200
+        router.stats_for(d["unique"]).last_reason = "http_429"
+    router.policy.warm_refill_wake_max_attempts = 10
+    calls = []
+
+    async def fake_probe(fwd, dep, timeout):
+        calls.append(dep["unique"])
+        return (False, 5.0, 429, "")
+
+    monkeypatch.setattr(AP, "_probe_one", fake_probe)
+    monkeypatch.setattr(M, "router", router)
+    monkeypatch.setattr(M, "forwarder", object())
+    asyncio.run(M._wake_sweep({"model": "m", "messages": []}, "test", small,
+                              frozenset(), 100, 4096, None, "sess", {}))
+    assert sorted(calls) == sorted([mid["unique"], big["unique"]])
+    for u in (mid["unique"], big["unique"]):
+        assert router._cooldown[u] - time.time() > 900   # ~1200 (raddoppiato)
+
+
+def test_wake_sweep_successo_torna_caldo(router, monkeypatch):
+    """Chi risponde al primo tentativo torna caldo e il giro si ferma."""
+    import app.main as M
+    from app import autoprobe as AP
+    small = _dep(router, f"{BASE}-32k", "K-S")
+    mid = _dep(router, f"{BASE}-200k", "K-M")
+    now = time.time()
+    router._cooldown[mid["unique"]] = now + 600
+    router._cooldown_since[mid["unique"]] = now - 7200
+    router.stats_for(mid["unique"]).last_reason = "http_429"
+    calls = []
+
+    async def fake_probe(fwd, dep, timeout):
+        calls.append(dep["unique"])
+        return (True, 12.0, 200, "")
+
+    monkeypatch.setattr(AP, "_probe_one", fake_probe)
+    monkeypatch.setattr(M, "router", router)
+    monkeypatch.setattr(M, "forwarder", object())
+    asyncio.run(M._wake_sweep({"model": "m", "messages": []}, "test", small,
+                              frozenset(), 100, 4096, None, "sess",
+                              {"uniq": set(), "keys": set()}))
+    assert calls == [mid["unique"]]
+    assert not router.is_cooled_down(mid["unique"])   # svegliato davvero
 
 
 # ------------------------------------------------------- warm_fill_canary
@@ -558,14 +628,17 @@ def test_policy_knob_warm_refill():
     p = Policy.from_dict({"warm_pool": {"refill_enabled": False,
                                         "ready_min": 5,
                                         "refill_default_out_tokens": 1000,
-                                        "max_inflight": 2}})
+                                        "max_inflight": 2,
+                                        "wake_max_attempts": 5}})
     assert p.warm_refill_enabled is False
     assert p.warm_ready_min == 5
     assert p.warm_refill_default_out_tokens == 1000
     assert p.warm_refill_max_inflight == 2
+    assert p.warm_refill_wake_max_attempts == 5
     d = Policy.from_dict({})
     assert d.warm_refill_enabled is True and d.warm_ready_min == 3
     assert d.warm_refill_max_inflight == 6
+    assert d.warm_refill_wake_max_attempts == 10
 
 
 # ----------------------------------------------- tetto 4 in volo PER SESSIONE
