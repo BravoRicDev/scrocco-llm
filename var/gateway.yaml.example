@@ -44,6 +44,18 @@ profiles:
 #   3 = più conservativo (stima più alta → contesto più ampio)
 estimate_divisor: 3
 
+# Calibrazione closed-loop dell'estimator: a ogni risposta con usage reale
+# (prompt_tokens) il divisor appreso del deployment si muove verso quello vero
+# (base/rapporto) con EMA alpha. 0 = calibrazione spenta.
+estimate_calib_alpha: 0.05
+
+# Concorrenza PESATA A TOKEN (non a conteggio): una richiesta viene esclusa
+# dal deployment se inflight_tokens + ctx_est > max_input * conc_token_ratio.
+# 0.5 = un heavy non parte se un altro prefill e' gia' in volo sullo stesso
+# deployment, mentre N richieste leggere passano in parallelo. 0 = torna al
+# conteggio storico (conc_default_limit / conc_max_limit / concurrent_limit).
+conc_token_ratio: 0.5
+
 # TTL in secondi dell'affinità "sticky": lo stesso deployment viene preferito
 # per richieste consecutive della stessa sessione.
 #   3600 = 1 ora ; 0 = sticky disabilitato
@@ -493,6 +505,13 @@ qc_json:
   # successivo e impegna chi dei due risponde primo; il perdente e' annullato
   # senza punizione, mai verso bucket pagati (-go/-fallback). 0 = spento.
   stream_hedge_delay_ms: 1500
+  # Il ritardo e' ADATTIVO al bucket di contesto: su >128k il prefill e'
+  # fisiologicamente lento (4-6s) e un canary a 1.5s sarebbe rumore. Il
+  # delay effettivo = clamp(TTFT_p50_bucket * frac, min, max); se il TTFT
+  # del bucket e' ignoto si usa stream_hedge_delay_ms.
+  stream_hedge_ttft_frac: 0.6
+  stream_hedge_min_ms: 800
+  stream_hedge_max_ms: 2500
 
   # Deadline totale in ms per l'INTERO stream (960000 = 16 minuti).
   stream_total_deadline_ms: 960000
@@ -669,6 +688,18 @@ cache_aware:
     # valido: si tagliano solo valori stringa sopra la soglia, con lo stesso
     # head+tail deterministico degli stub). 0 = mai toccare (storico)
     tool_args_max_chars: 2000
+    # output JSON (liste/dict) con TROPPI elementi: troncamento STRUTTURATO
+    # (primi json_struct_head + marker con totale + ultimi json_struct_tail),
+    # cosi' l'agent trova un JSON VALIDO invece di uno spezzone ignorabile.
+    # 0 = disattiva (torna al taglio a riga).
+    json_struct_max_items: 40
+    json_struct_head: 20
+    json_struct_tail: 5
+    # retention per citazione: un output vecchio NON viene stubbato se la coda
+    # protetta cita ancora uno dei suoi token distintivi (>= cite_min_freq
+    # volte, esclusi i termini strutturali come "arguments"/nomi di tool).
+    cite_retention: true
+    cite_min_freq: 2
     # headroom ABSOLUTO anticipato sui deployment reasoning-only (riga con
     # effort_capable): la soglia assoluta scatta a questa frazione MINORE
     # della finestra, lasciando token liberi per il blocco di thinking

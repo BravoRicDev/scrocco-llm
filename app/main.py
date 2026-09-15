@@ -65,6 +65,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         set_retry_after_floors,
                         set_stream_stall_sec,
                         set_adaptive_timeout, set_latency_lookup,
+                        set_reasoning_reserve,
                         set_schemaout_config,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
@@ -176,6 +177,8 @@ set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
                      floor_sec=policy.adaptive_timeout_floor_sec,
                      multiplier=policy.adaptive_timeout_multiplier,
                      max_sec=policy.adaptive_timeout_max_sec)
+set_reasoning_reserve(1.0 - float(getattr(policy,
+                      "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 set_schemaout_config(_so_cfg_from_policy(policy))
 configure_estimate(adaptive=policy.estimate_adaptive_enabled,
@@ -567,6 +570,10 @@ async def _watcher(interval: float) -> None:
                         floor_sec=fresh.adaptive_timeout_floor_sec,
                         multiplier=fresh.adaptive_timeout_multiplier,
                         max_sec=fresh.adaptive_timeout_max_sec)
+                    set_reasoning_reserve(
+                        1.0 - float(getattr(
+                            fresh, "cache_ctx_reasoning_headroom_ratio",
+                            0.7) or 0.0))
                     set_schemaout_config(
                         _so_cfg_from_policy(fresh))
                     forwarder._keepalive_pool = fresh.http_keepalive_pool
@@ -1479,8 +1486,19 @@ async def chat_completions(request: Request, response: Response):
         _hd = router.config.deployment_by_unique(_holder)
         if _hd and _hd.get("family") and _hd.get("family") == dep.get("family"):
             _same_family = True
+    # F14: correzione per-deployment appresa dal VERO prompt_tokens upstream
+    # (tokenizer diverso da chars/4): la decisione di compattazione non deve
+    # lavorare su stime sballate.
+    try:
+        _corr = router.estimate_correction(dep.get("unique", ""))
+        if _corr != 1.0:
+            _ctx_corr = max(1, int(ctx_est * _corr))
+        else:
+            _ctx_corr = ctx_est
+    except Exception:
+        _ctx_corr = ctx_est
     _dec = should_compact(
-        _cc, ctx_est, _max_in, _holder, dep.get("unique"),
+        _cc, _ctx_corr, _max_in, _holder, dep.get("unique"),
         bool(session_id and router.is_session_compact(session_id)),
         same_family=_same_family,
         reasoning=bool(dep.get("effort_capable")))
@@ -1640,13 +1658,20 @@ async def chat_completions(request: Request, response: Response):
     # lo consente — il client che ignora reasoning_content non ne è toccato
     if qc_failed and qc_pol.annotate_reasoning and isinstance(data, dict):
         data = annotate_reasoning(data, qc_failed)
+    _u_f14 = _usage_of(data)
+    try:
+        if _u_f14 and _u_f14.get("prompt_tokens"):
+            router.note_estimate_error(used["unique"], ctx_est,
+                                       _u_f14["prompt_tokens"])
+    except Exception:
+        pass
     _emit_summary(ses=session_id or "-", req=raw_model,
                   grp=used.get("group"), dep=used["unique"],
                   tries=max(1, len(attempts_box)),
                   fb=max(0, len(attempts_box) - 1),
                   dur_ms=int((time.monotonic() - t_req) * 1000),
                   stream=False, qc=bool(qc_failed), wd=None,
-                  usage=_usage_of(data))
+                  usage=_u_f14)
     if sniff.enabled(router.policy):
         sniff.begin(_rid, {"model": raw_model, "canonical": model,
                            "profile": profile, "session": _sess or "-",
@@ -2134,7 +2159,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
                            reason="truncated_toolcall")
 
-    router.note_start(B["unique"])
+    router.note_start(B["unique"], ctx)
     genB = None
     try:
         genB = await forwarder.stream_response(
@@ -2153,7 +2178,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         if genB is not None:
             await _discard_stream(genB, None)
         try:
-            router.note_end(B["unique"])
+            router.note_end(B["unique"], ctx)
         except Exception:
             pass
         log.info("[hedge] canary %s non disponibile (%s): attendo A",
@@ -2200,7 +2225,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     _rB = results.get(futB)
     await _discard_stream(genB, _rB[2] if _rB and len(_rB) > 2 else None)
     try:
-        router.note_end(B["unique"])
+        router.note_end(B["unique"], ctx)
     except Exception:
         pass
     _rA = results.get(futA)
@@ -2278,7 +2303,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if _was_dormant:
                 return router.mark_failed_double_residual(u, reason=reason, status=status)
             return router.mark_failed(u, seconds=seconds, reason=reason, status=status)
-        router.note_start(dep["unique"])
+        router.note_start(dep["unique"], ctx)
         try:
             t_att = time.monotonic()
             # hook: a fine stream, se il guard ha trovato un tag tool-call
@@ -2345,7 +2370,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # --- peek + HEDGE (F3): solo catena FREDDA, primo tentativo,
             # mai in hold-mode. Il loser viene annullato SENZA punirlo:
             # l'abbiamo interrotto noi, non e' prova di upstream rotto. ---
+            _h_ms = 0
             if cold and tried == 1 and not hold and _hedge_ms > 0:
+                # F13: ritardo calibrato sul bucket (TTFT fisiologico del
+                # contesto): evita un canary inutile su ogni heavy.
+                try:
+                    _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
+                except Exception:
+                    _h_ms = _hedge_ms
+            if _h_ms > 0:
                 (dep, gen, t_att, verdict, prebuf, pending,
                  meta) = await _hedge_peek(
                     dep, gen, t_att, fc_ms, incl_reason, min_ch,
@@ -2354,7 +2387,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     tried_set=tried_set, attempts=attempts,
                     requested_group=requested_group, session=session,
                     client_ip=client_ip, attribution=attribution,
-                    hedge_ms=_hedge_ms, _tr_cfg=_tr_cfg,
+                    hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
                     _tct_cfg=_tct_cfg)
             else:
                 verdict, prebuf, pending, meta = await _peek_stream(
@@ -2425,7 +2458,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 break                   # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)
-            router.note_end(dep["unique"])
+            router.note_end(dep["unique"], ctx)
             fr = meta.get("finish_reason")
             rot_len = getattr(router.policy.qc_sanity,
                               "rotate_on_length_empty", False)
@@ -2479,7 +2512,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             inject_identity(payload, dep, router=router)
             continue                    # ri-entra nel while col nuovo dep
         except UpstreamError as err:
-            router.note_end(dep["unique"])   # tentativo chiuso senza stream
+            router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
             detail = err.detail or ""
             # D5 anche in STREAMING: 4xx deployment-side (firma provider-side,
             # modello inesistente oppure 404) -> fallback pre-byte invece di
@@ -2670,7 +2703,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # deve 500-are la richiesta: cooldown corto + rotazione, 503 solo
             # se non resta nulla.
             try:
-                router.note_end(dep["unique"])
+                router.note_end(dep["unique"], ctx)
             except Exception:
                 pass
             _fail(dep["unique"], seconds=_soft_cd(
@@ -2780,6 +2813,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 usage_final["cost"] = c
                 except Exception:
                     pass
+            # F14: calibrazione closed-loop dell'estimator col prompt_tokens
+            # reale del provider (stream: arriva nel chunk finale di usage).
+            try:
+                if isinstance(usage_final, dict) \
+                        and usage_final.get("prompt_tokens"):
+                    router.note_estimate_error(
+                        dep["unique"], ctx, usage_final["prompt_tokens"])
+            except Exception:
+                pass
             for o in _sse_data_objs(chunk):
                 answer_total += _answer_chars(o)
                 for ch in (o.get("choices") or []):
@@ -2871,7 +2913,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if monitor is not None:
                 monitor.cancel()
             dur_ms = int((time.monotonic() - t_req) * 1000)
-            router.note_end(dep["unique"])
+            router.note_end(dep["unique"], ctx)
             if not aborted:
                 # F1: durata TOTALE del tentativo vincente nel bucket di
                 # contesto (il commit ha gia' registrato il TTFT).

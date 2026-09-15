@@ -35,8 +35,8 @@ def _fake_router(B=None):
     notes = {"start": [], "end": [], "fail": [], "cool": []}
     r = SimpleNamespace(
         config=SimpleNamespace(go_suffix="-go", fallback_suffix="-fallback"),
-        note_start=lambda u: notes["start"].append(u),
-        note_end=lambda u: notes["end"].append(u),
+        note_start=lambda u, ctx=None: notes["start"].append(u),
+        note_end=lambda u, ctx=None: notes["end"].append(u),
         is_cooled_down=lambda u: False,
         clear_cooldown=lambda u: notes["cool"].append(u),
         first_content_deadline_ms=lambda u, ctx=None: 1000,

@@ -132,6 +132,12 @@ def clamp_max_tokens(body: dict, dep: dict) -> None:
     un client che riserva 32000 token di output su un modello 32k fa fallire
     ogni richiesta con >768 token di input (errore -400/-413). Qui il tetto
     viene portato a `max(1, max_input_tokens - ctx)` quando entrambi noti.
+
+    CLAMP CONTESTUALE (F16): oltre al ctx si sottraggono una RISERVA per il
+    reasoning block (solo modelli `effort_capable`) e un margine di sicurezza
+    del 5%. Cosi' non si chiede piu' output di quanto entra nella finestra —
+    la classe di 503 piu' stupida ("provider morto" quando in realta' era
+    "hai chiesto troppo output"). Floor 512 token, mai sopra lo spazio reale.
     """
     mi = int(dep.get("max_input_tokens") or 0)
     if mi <= 0:
@@ -147,11 +153,23 @@ def clamp_max_tokens(body: dict, dep: dict) -> None:
     except (TypeError, ValueError):
         return
     ctx = estimate_tokens(body.get("messages") or [], tools=body.get("tools"))
-    room = max(1, mi - ctx)
+    reserve = 0
+    if dep.get("effort_capable") and _REASONING_RESERVE_FRAC > 0:
+        reserve = int(mi * _REASONING_RESERVE_FRAC)
+    safety = int(mi * 0.05)
+    room = max(1, mi - ctx - reserve - safety)
     if mt > room:
-        body[key] = room
-        log.info("[maxtok] %s clamp %s %d->%d (ctx≈%d max_in=%d)",
-                 dep.get("unique", "?"), key, mt, room, ctx, mi)
+        cap = max(1, mi - ctx)
+        new_mt = min(cap, max(512, room))
+        body[key] = new_mt
+        try:
+            metrics.inc("nx_max_tokens_clamped", ())
+        except Exception:
+            pass
+        log.info("[maxtok] %s clamp %s %d->%d (ctx=%d max_in=%d "
+                 "riserva_reasoning=%d sicurezza=%d)",
+                 dep.get("unique", "?"), key, mt, new_mt, ctx, mi,
+                 reserve, safety)
 
 
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
@@ -180,6 +198,20 @@ TIMEOUT_FLOOR_SEC = 15.0
 TIMEOUT_MULTIPLIER = 8.0
 TIMEOUT_MAX_SEC = 600.0
 _LATENCY_LOOKUP = None
+# F16: frazione della finestra riservata al reasoning block sui modelli
+# `effort_capable` (0 = nessuna riserva). 1 - reasoning_headroom_ratio.
+_REASONING_RESERVE_FRAC = 0.30
+
+
+def set_reasoning_reserve(frac=None) -> None:
+    """Configura la riserva di contesto per il reasoning (da policy)."""
+    global _REASONING_RESERVE_FRAC
+    if frac is None:
+        return
+    try:
+        _REASONING_RESERVE_FRAC = max(0.0, min(0.6, float(frac)))
+    except (TypeError, ValueError):
+        pass
 
 
 def set_adaptive_timeout(*, enabled=None, floor_sec=None, multiplier=None,
@@ -1902,7 +1934,7 @@ truncation_hook=None,
             # l'identità DEVE riflettere il deployment CHE PROVA ORA: dopo un
             # fallback il system message nominerebbe il modello sbagliato.
             inject_identity(payload, dep)
-            router.note_start(cur)          # rotazione adattiva
+            router.note_start(cur, ctx)     # rotazione adattiva (peso token)
             t0 = time.monotonic()
             try:
                 # ---- L1 #2A: default di sampling (client vince) ----
@@ -2451,7 +2483,7 @@ truncation_hook=None,
                 dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
             finally:
-                router.note_end(cur)        # SEMPRE il tentativo corrente
+                router.note_end(cur, ctx)   # SEMPRE il tentativo corrente
         # catena finita dopo fallimenti QC: consegna l'ultimo broken (D3) SE ha
         # contenuto; se e' vuoto -> errore RETRYABLE (mai un turno vuoto/finto).
         if collect_qc_failures and qc_failed and last_broken is not None:

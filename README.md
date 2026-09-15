@@ -143,7 +143,35 @@ individual account limits instead of dying on the first 429.
   chosen upstream has no content after the delay, ONE canary opens on the
   next candidate and whoever commits first wins — everything is pre-byte, so
   the loser is cancelled without punishment and paid buckets (`-go`/
-  `-fallback`) are never eligible canaries.
+  `-fallback`) are never eligible canaries. The delay is **adaptive to the
+  context bucket** (`stream_hedge_ttft_frac`/`_min_ms`/`_max_ms`): on >128k
+  contexts the median TTFT *is* 4-6 s, so the canary waits
+  `clamp(TTFT_p50_bucket × 0.6, 800, 2500) ms` instead of firing as noise on
+  every heavy request.
+- **Token-weighted concurrency** (`conc_token_ratio`, default 0.5): the
+  inflight limiter weighs the REAL prefill (`inflight_tokens += ctx_est`),
+  not the request count — 3 Hermes turns of 90k are 270k tokens of concurrent
+  prefill, 3 turns of 5k are 15k. A row is skipped (pick-time only, no
+  cooldown) when `inflight_tokens + ctx_est > max_input × ratio`, so six
+  light requests still run in parallel but two heavy ones never do; the hard
+  count cap (`conc_max_limit`) stays as anti-abuse. `0` = legacy counting.
+- **Structured JSON tool-output truncation** (`json_struct_max_items`, 40):
+  before the char-based head+tail cut, a JSON list/dict with too many
+  elements is cut STRUCTURALLY — first `json_struct_head` (20) + a
+  `{"...omessi": K, "totale": N}` marker + last `json_struct_tail` (5) —
+  re-serialized as VALID JSON, so the agent can still parse the shape
+  (structured search results keep their total count and first matches)
+  instead of receiving a broken half-object. Pure function of the content
+  (cache-correct), `0` = off. Plus **citation retention**
+  (`cite_retention`/`cite_min_freq`, on/2): an old output is NOT stubbed
+  while the protected tail still cites one of its distinctive tokens
+  (repeated ≥ `cite_min_freq`, structural terms and tool names excluded).
+- **Closed-loop estimator calibration** (`estimate_calib_alpha`, 0.05):
+  every response carrying real `usage.prompt_tokens` moves that deployment's
+  learned divisor toward the true one (`base / (pt/ctx_est)`) with an EMA,
+  clamped 1.5..4.5 and persisted next to the prefill rate; the corrected
+  context (`ctx_est × base/divisor`) then feeds `should_compact`. Only
+  reliable samples (ctx ≥ 8k, prompt > 1k) are used. `0` = off.
 - **Soft key blackout, zero blame**: fresh `X-RateLimit-*` snapshots and
   429-with-Retry-After are tracked per API-KEY HASH (never plaintext):
   near-the-wall keys only *skip* the row among the free dims (other rows of
@@ -486,6 +514,11 @@ template. The ones that matter most:
 | `cache_aware.context_truncation.abs_headroom_ratio` | 0.8 | anti-churn hysteresis: the absolute trigger fires only within this fraction of the deployment window (0 disables) |
 | `cache_aware.context_truncation.reasoning_headroom_ratio` | 0.7 | extra-early absolute trigger for `effort_capable` (reasoning-only) deployments, reserving window for the thinking block (0 disables) |
 | `cache_aware.context_truncation.tool_args_max_chars` | 2000 | JSON-aware trim of oversized old `tool_calls` arguments (only long string values; output stays valid JSON); 0 = never touch args |
+| `cache_aware.context_truncation.json_struct_max_items` / `json_struct_head` / `json_struct_tail` | 40 / 20 / 5 | JSON list/dict outputs with more than this many elements are cut STRUCTURALLY (first N + `{"...omessi":K,"totale":N}` + last M) keeping the JSON valid; 0 = off (char cut) |
+| `cache_aware.context_truncation.cite_retention` / `cite_min_freq` | true / 2 | do not stub an old output while the protected tail still cites one of its distinctive tokens (≥ N occurrences; structural terms/tool names excluded) |
+| `conc_token_ratio` | 0.5 | token-weighted concurrency: skip a row when `inflight_tokens + ctx_est > max_input × ratio`; hard count cap `conc_max_limit` still applies; 0 = legacy counting |
+| `estimate_calib_alpha` | 0.05 | EMA rate at which each deployment's learned token divisor converges to the real one (`base/(prompt_tokens/ctx_est)`), clamped 1.5..4.5, persisted; 0 = off |
+| `qc_json.stream_hedge_ttft_frac` / `stream_hedge_min_ms` / `stream_hedge_max_ms` | 0.6 / 800 / 2500 | adaptive hedge delay per context bucket: `clamp(TTFT_p50_bucket × frac, min, max)`; unknown TTFT falls back to `stream_hedge_delay_ms` |
 | `request_coalescing_cache_sec` | 0 | also serve an identical non-stream payload arriving within this many seconds after the leader completed (credits/cost halved for tight retries/subagents); 0 = in-flight only |
 
 ## Security model

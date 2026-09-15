@@ -112,6 +112,10 @@ class QcJson:
     # contenuto per primo (l'altro viene cancellato pre-byte, nessuna quota
     # di risposta sprecata oltre l'avvio). 0 = spento.
     stream_hedge_delay_ms: int = 1500
+    # Calibrazione del hedge sul bucket: clamp(TTFT_bucket * frac, min, max).
+    stream_hedge_ttft_frac: float = 0.6
+    stream_hedge_min_ms: int = 800
+    stream_hedge_max_ms: int = 2500
     stream_commit_min_chars: int = 40      # caratteri di RISPOSTA minimi per
                                            # impegnare lo stream (evita di
                                            # committare su 1 token poi morto);
@@ -177,6 +181,9 @@ class Policy:
     # entrambe ma usa la legacy finche' non si abilita adaptive_enabled.
     estimate_adaptive_enabled: bool = False
     estimate_adaptive_shadow: bool = True
+    # Calibrazione closed-loop del divisore dal VERO prompt_tokens upstream
+    # (alpha dell'EMA sull'errore relativo; 0 = disattiva).
+    estimate_calib_alpha: float = 0.05
     # TTL (secondi) della cache in-memory delle GET {endpoint}/models: una
     # chiamata per endpoint (prima chiave valida), condivisa tra audit, health
     # e probe. 0 = nessuna cache (una GET per endpoint ad ogni esecuzione).
@@ -454,6 +461,11 @@ class Policy:
     conc_default_limit: int = 3
     conc_max_limit: int = 10
     conc_learn_success_streak: int = 20
+    # concorrenza PESATA A TOKEN: budget di prefill in volo per dep =
+    # max_input * conc_token_ratio. Un heavy non parte se un altro e' gia'
+    # in volo sullo stesso dep; N light passano in parallelo. 0 = spento
+    # (si torna al conteggio delle richieste).
+    conc_token_ratio: float = 0.5
 
     # CORRECTIVE_RETRY (#3): 1 tentativo correttivo, solo non-streaming,
     # su fallimenti di contenuto/formato (non timeout).
@@ -534,6 +546,16 @@ class Policy:
     # thinking): la soglia assoluta scatta a una frazione MINORE della
     # finestra cosi' restano token liberi per il reasoning block (0 = off).
     cache_ctx_reasoning_headroom_ratio: float = 0.7
+    # TRONCAMENTO STRUTTURATO JSON: liste/dict con piu' di N elementi vengono
+    # tagliati mantenendo JSON VALIDO (primi json_struct_head + marker totale
+    # + ultimi json_struct_tail) invece che a meta' oggetto. 0 = off.
+    cache_ctx_json_struct_max_items: int = 40
+    cache_ctx_json_struct_head: int = 20
+    cache_ctx_json_struct_tail: int = 5
+    # RETENTION PER CITAZIONE: non stubbare un output vecchio se la coda
+    # protetta lo cita (token ripetuto >= cite_min_freq volte).
+    cache_ctx_cite_retention: bool = True
+    cache_ctx_cite_min_freq: int = 2
     # DEBUG SNIFF: scatola nera input/output su var/debug-sniff.log con
     # rotazione oraria e retention debug_sniff_retention_hours. Default OFF
     # (file con conversazione completa: solo per debug locale).
@@ -854,6 +876,12 @@ class Policy:
         if "estimate_adaptive_shadow" in raw:
             p.estimate_adaptive_shadow = _coerce_bool(
                 raw["estimate_adaptive_shadow"], "estimate_adaptive_shadow")
+        if "estimate_calib_alpha" in raw:
+            v = raw["estimate_calib_alpha"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0.0 <= float(v) <= 1.0):
+                raise ValueError("estimate_calib_alpha deve essere 0..1")
+            p.estimate_calib_alpha = float(v)
         _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
         _rmin = raw.get("retry_after_min_sec")
         if _rmin is not None:
@@ -991,6 +1019,12 @@ class Policy:
         _set_int(p, raw, "conc_default_limit", minimum=1)
         _set_int(p, raw, "conc_max_limit", minimum=1)
         _set_int(p, raw, "conc_learn_success_streak", minimum=1)
+        if "conc_token_ratio" in raw:
+            v = raw["conc_token_ratio"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0.0 <= float(v) <= 5.0):
+                raise ValueError("conc_token_ratio deve essere 0..5")
+            p.conc_token_ratio = float(v)
         if "request_coalescing_enabled" in raw:
             p.request_coalescing_enabled = _coerce_bool(
                 raw["request_coalescing_enabled"], "request_coalescing_enabled")
@@ -1599,7 +1633,15 @@ class Policy:
                                   ("head_chars", "cache_ctx_head_chars"),
                                   ("tail_chars", "cache_ctx_tail_chars"),
                                   ("tool_args_max_chars",
-                                   "cache_ctx_tool_args_max_chars")):
+                                   "cache_ctx_tool_args_max_chars"),
+                                  ("json_struct_max_items",
+                                   "cache_ctx_json_struct_max_items"),
+                                  ("json_struct_head",
+                                   "cache_ctx_json_struct_head"),
+                                  ("json_struct_tail",
+                                   "cache_ctx_json_struct_tail"),
+                                  ("cite_min_freq",
+                                   "cache_ctx_cite_min_freq")):
                     _v = ct.get(_k)
                     if _v is not None:
                         if isinstance(_v, bool) or not isinstance(_v, (int, float)):
@@ -1633,6 +1675,10 @@ class Policy:
                         raise ValueError("cache_aware.context_truncation."
                                          "reasoning_headroom_ratio deve essere un numero")
                     p.cache_ctx_reasoning_headroom_ratio = max(0.0, float(_rhr))
+                if "cite_retention" in ct:
+                    p.cache_ctx_cite_retention = _coerce_bool(
+                        ct["cite_retention"],
+                        "cache_aware.context_truncation.cite_retention")
         # --- DEBUG (sniff input/output) ---
         _dbg = raw.get("debug")
         if _dbg is not None:
@@ -1718,6 +1764,27 @@ class Policy:
                     raise ValueError("qc_json.stream_hedge_delay_ms deve "
                                      "essere 0..60000")
                 p.qc_json.stream_hedge_delay_ms = int(v)
+            if "stream_hedge_ttft_frac" in qj:
+                v = qj["stream_hedge_ttft_frac"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0.05 <= float(v) <= 5.0):
+                    raise ValueError("qc_json.stream_hedge_ttft_frac deve "
+                                     "essere 0.05..5.0")
+                p.qc_json.stream_hedge_ttft_frac = float(v)
+            if "stream_hedge_min_ms" in qj:
+                v = qj["stream_hedge_min_ms"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= int(v) <= 60000):
+                    raise ValueError("qc_json.stream_hedge_min_ms deve "
+                                     "essere 0..60000")
+                p.qc_json.stream_hedge_min_ms = int(v)
+            if "stream_hedge_max_ms" in qj:
+                v = qj["stream_hedge_max_ms"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= int(v) <= 60000):
+                    raise ValueError("qc_json.stream_hedge_max_ms deve "
+                                     "essere 0..60000")
+                p.qc_json.stream_hedge_max_ms = int(v)
             if "stream_commit_min_chars" in qj:
                 v = qj["stream_commit_min_chars"]
                 if isinstance(v, bool) or not isinstance(v, (int, float)) \

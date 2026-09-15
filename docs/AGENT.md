@@ -88,7 +88,9 @@ routing state per deployment: `GET /admin/state` (includes
 dim below the requested `-Nk`; drops deps whose latency EMA exceeds 90s or
 that were slow for this session from warm/sticky/cache-holder and from the
 cheap selections — same session only, re-fished at `-fallback`),
-`[maxtok]` (`max_tokens` clamped to the window), `[autoprobe]`
+`[maxtok]` (`max_tokens` clamped to the window: minus a 5% safety margin and,
+for `effort_capable` deps, minus a reasoning reserve — `nx_max_tokens_clamped`
+counts the clamps), `[autoprobe]`
 (cooldown probe / backoff), `[cache]` (session holder),
 `[fallback]` (failure + next hop), `[pick-final]` (go/fallback pick; with an
 *explicit* `-go`/`-fallback` request the session cache-holder also beats the
@@ -100,7 +102,10 @@ per-session frontier watermark: a stub never un-stubs on window rotation);
 old oversized `tool_calls` arguments get a JSON-aware trim
 (`tool_args_max_chars`, never breaks JSON validity); error outputs are NEVER
 rewritten (incl. line-anchored FAILED/ERROR/fatal:); tail protected while it
-fits `keep_tail_pct`% of the window; `X-Ctxcompact-Saved` header +
+fits `keep_tail_pct`% of the window; JSON list/dict outputs with too many
+elements are cut structurally (valid JSON + `totale` marker) and a cited
+output is never stubbed (`cite_retention`);
+`X-Ctxcompact-Saved` header +
 `nx_ctxcompact_tool_total` counter; reasoning-only (effort_capable) deps get
 the earlier `reasoning_headroom_ratio` trigger), `[effort]` (`reasoning_effort` injected/
 removed per the row's `effort_capable`). Thinking crosses the translator

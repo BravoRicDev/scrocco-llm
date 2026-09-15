@@ -677,3 +677,150 @@ class TestReasoningHeadroom:
                                reasoning_headroom_ratio=0.0)
         assert should_compact(cfg, 7500, 10000, reasoning=True)["compact"] \
             is False
+
+
+# ================================================== v3: JSON strutturato (F12)
+import json
+
+
+def _conv_json(payload, pad="x"):
+    """[user] + [asst bash c0] + [tool JSON] + [user] finale."""
+    return [
+        {"role": "user", "content": "inizio " + pad * 10},
+        _asst(),
+        {"role": "tool", "tool_call_id": "c", "content": payload},
+        {"role": "user", "content": "fine " + pad * 10},
+    ]
+
+
+def _body(stub):
+    """Estrae la parte JSONV dal stub (dopo le 2 righe di intestazione)."""
+    parts = stub.split("\n", 2)
+    return parts[2] if len(parts) > 2 else ""
+
+
+class TestJsonStructure:
+    def test_lista_troncata_strutturalmente(self):
+        items = [{"id": i, "path": f"/src/file{i}.py", "line": i}
+                 for i in range(200)]
+        msgs = _conv_json(json.dumps(items))
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["stubbed"] == 1
+        body = _body(new[2]["content"])
+        parsed = json.loads(body)                 # JSON VALIDO (char-cut no)
+        assert isinstance(parsed, list)
+        assert parsed[0] == items[0]              # primi match intatti
+        assert items[-1] in parsed                # ultimi elementi presenti
+        marker = next(x for x in parsed
+                      if isinstance(x, dict) and "...omessi" in x)
+        assert marker["totale"] == 200
+        assert marker["...omessi"] > 0
+        assert len(body) < len(json.dumps(items))
+
+    def test_dict_troncato_strutturalmente(self):
+        d = {f"chiave_{i:04d}": {"valore": i, "nota": "y" * 30}
+             for i in range(120)}
+        msgs = _conv_json(json.dumps(d))
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["stubbed"] == 1
+        parsed = json.loads(_body(new[2]["content"]))
+        assert isinstance(parsed, dict) and "...omessi" in parsed
+        assert "chiave_0000" in parsed and "chiave_0119" in parsed
+
+    def test_json_piccolo_fallback_char(self):
+        """Pochi elementi (sotto soglia) ma output lungo: taglio a riga."""
+        items = [{"id": i, "blob": "z" * 300} for i in range(10)]
+        msgs = _conv_json(json.dumps(items))
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["stubbed"] == 1
+        try:
+            json.loads(_body(new[2]["content"]))
+            ok = True
+        except ValueError:
+            ok = False
+        assert ok is False                        # taglio a char, non JSON
+
+    def test_non_json_invariato_dal_ramo_strutturato(self):
+        msgs = _conv_json("x" * 9000)
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["stubbed"] == 1
+        assert "..." in new[2]["content"]
+
+    def test_struttura_disattivabile(self):
+        items = [{"id": i, "path": f"/src/f{i}.py"} for i in range(200)]
+        msgs = _conv_json(json.dumps(items))
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000,
+                               json_struct_max_items=0)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["stubbed"] == 1
+        try:
+            json.loads(_body(new[2]["content"]))
+            ok = True
+        except ValueError:
+            ok = False
+        assert ok is False                        # torna il taglio a char
+
+    def test_idempotente_e_deterministico(self):
+        items = [{"id": i, "path": f"/src/f{i}.py"} for i in range(200)]
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        a1, _ = compact_tool_outputs(_conv_json(json.dumps(items)), cfg)
+        a2, _ = compact_tool_outputs(_conv_json(json.dumps(items)), cfg)
+        b, rep = compact_tool_outputs(a1, cfg)
+        assert a1 == a2                            # pura
+        assert rep["changed"] is False and b == a1  # idempotente
+
+
+# ============================================ v3: retention per citazione (F15)
+class TestCiteRetention:
+    def _msgs(self, cited_tail, big=None):
+        big = big or ("m" * 1500 + " report: /etc/scrocco/mio_special.cfg ok "
+                      + "n" * 1500)
+        return [
+            {"role": "user", "content": "inizio"},
+            _asst(),
+            {"role": "tool", "tool_call_id": "c", "content": big},
+            {"role": "user", "content": cited_tail},
+        ]
+
+    def test_token_citato_protegge_output_vecchio(self):
+        msgs = self._msgs("rileggi /etc/scrocco/mio_special.cfg e poi "
+                          "/etc/scrocco/mio_special.cfg")
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["cite_kept"] == 1
+        assert rep["stubbed"] == 0
+        assert new[2]["content"].startswith("m" * 20)   # intatto
+
+    def test_token_generico_non_protegge(self):
+        msgs = self._msgs("arguments type function content role id bash")
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["cite_kept"] == 0
+        assert rep["stubbed"] == 1
+
+    def test_citazione_una_volta_sola_non_basta(self):
+        msgs = self._msgs("guarda /etc/scrocco/mio_special.cfg")
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000,
+                               cite_min_freq=2)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["cite_kept"] == 0 and rep["stubbed"] == 1
+
+    def test_retention_disattivabile(self):
+        msgs = self._msgs("rileggi /etc/scrocco/mio_special.cfg e poi "
+                          "/etc/scrocco/mio_special.cfg")
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000,
+                               cite_retention=False)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep.get("cite_kept", 0) == 0
+        assert rep["stubbed"] == 1
+
+    def test_nome_tool_non_conta_come_citazione(self):
+        """Citare il NOME del tool (bash) non trattiene il suo output."""
+        msgs = self._msgs("bash bash")
+        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        new, rep = compact_tool_outputs(msgs, cfg)
+        assert rep["cite_kept"] == 0 and rep["stubbed"] == 1

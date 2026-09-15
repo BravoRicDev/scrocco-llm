@@ -281,3 +281,47 @@ def test_p95_normalized_across_buckets(router):
     small = router._reputation_score(u, dep, 5000)           # normalizzata
     assert small < big
     assert big - small >= 10.0
+
+
+# ------------------------------------------------- F13: hedge adattivo al bucket
+def test_hedge_delay_scales_with_ttft_bucket(router):
+    """Su contesti grossi il prefill e' fisiologicamente lento: il canary
+    parte piu' tardi invece di essere rumore a 1.5s."""
+    u = _u(router, "K-A")
+    q = router.policy.qc_json
+    q.stream_hedge_delay_ms = 1500
+    q.stream_hedge_ttft_frac = 0.6
+    q.stream_hedge_min_ms = 800
+    q.stream_hedge_max_ms = 2500
+    router._note_latency_sample(u, 1000.0, 4000, "ttft", 1.0)      # bucket 0
+    router._note_latency_sample(u, 5000.0, 200000, "ttft", 1.0)    # bucket 3
+    # bucket 0: 0.6*1000 = 600 -> pavimento 800
+    assert router.hedge_delay_ms(u, 4000) == 800
+    # bucket 3: 0.6*5000 = 3000 -> tetto 2500
+    assert router.hedge_delay_ms(u, 200000) == 2500
+
+
+def test_hedge_delay_mid_bucket_linear(router):
+    u = _u(router, "K-A")
+    q = router.policy.qc_json
+    q.stream_hedge_delay_ms = 1500
+    q.stream_hedge_ttft_frac = 0.6
+    q.stream_hedge_min_ms = 800
+    q.stream_hedge_max_ms = 2500
+    router._note_latency_sample(u, 3000.0, 60000, "ttft", 1.0)     # bucket 2
+    assert router.hedge_delay_ms(u, 60000) == 1800                 # 0.6*3000
+
+
+def test_hedge_delay_unknown_ttft_uses_base(router):
+    u = _u(router, "K-A")
+    q = router.policy.qc_json
+    q.stream_hedge_delay_ms = 1200
+    assert router.hedge_delay_ms(u, 100000) == 1200
+
+
+def test_hedge_delay_zero_is_off(router):
+    u = _u(router, "K-A")
+    q = router.policy.qc_json
+    q.stream_hedge_delay_ms = 0
+    router._note_latency_sample(u, 5000.0, 200000, "ttft", 1.0)
+    assert router.hedge_delay_ms(u, 200000) == 0

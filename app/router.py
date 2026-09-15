@@ -139,6 +139,10 @@ class DepStats:
     last_used: float = 0.0
     ema_latency_ms: float | None = None
     inflight: int = 0
+    # Prefill REALE in volo (somma delle ctx_est): un heavy da 90k pesa come
+    # 18 light da 5k. E' il limiter che resta vero anche coi gemelli, perche'
+    # l'upstream vede la somma dei token, non il conteggio locale.
+    inflight_tokens: int = 0
     fail_streak: int = 0              # fallimenti consecutivi (escalation cooldown)
     success_ema: float | None = None  # tasso successo stimato (penalità dolce)
     last_reason: str | None = None    # ultimo motivo di fallimento (402, 429...)
@@ -483,6 +487,10 @@ class Router:
         # F9: ms per 1k token di contesto (solo kind='ttft'), invariante ai
         # bucket: usato per estrapolare il TTFT atteso su contesti mai visti.
         self._prefill_rate: dict[str, float] = {}
+        # F14 CALIBRAZIONE CLOSED-LOOP: divisore effettivo appreso dal VERO
+        # prompt_tokens riportato dall'upstream (tokenizer diverso da chars/4).
+        # estimate_correction() lo converte in moltiplicatore per estimate_tokens.
+        self._est_div: dict[str, float] = {}
         # Time-decay dei punteggi di reputazione (halflife da policy).
         self._scores_decay_ts: float = time.time()
         self._scores_decay_log_ts: float = time.time()
@@ -1930,6 +1938,55 @@ class Router:
         # --- Circuit Breaker: success updates ---
         self._update_circuit_breaker_on_success(unique)
 
+    def note_estimate_error(self, unique: str, ctx_est, prompt_tokens) -> None:
+        """Calibrazione CLOSED-LOOP dell'estimator (F14).
+
+        Il provider risponde col VERO `usage.prompt_tokens`: il rapporto
+        r = reali/stimati dice se `estimate_tokens` sottostima (r>1: il
+        tokenizer e' piu' denso di chars/4) o sovrastima (r<1). Aggiorniamo
+        un divisore per-deployment in modo che la stima converga:
+            div <- div / (1 + alpha*(r-1))     (clamp 1.5..4.5)
+        Il segno: r>1 -> divisore piu' PICCOLO -> stima piu' alta (e
+        viceversa). Solo campioni affidabili (ctx>=8000 e prompt>1000)."""
+        try:
+            ctx = int(ctx_est or 0)
+            pt = int(prompt_tokens or 0)
+        except (TypeError, ValueError):
+            return
+        if ctx < 8000 or pt <= 1000:
+            return
+        try:
+            alpha = float(getattr(self.policy, "estimate_calib_alpha", 0.05)
+                          or 0.05)
+        except (TypeError, ValueError):
+            alpha = 0.05
+        base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
+        d = getattr(self, "_est_div", None)
+        if d is None:
+            d = self._est_div = {}
+        cur = float(d.get(unique, base) or base)
+        r = pt / float(ctx)
+        # EMA ADDITIVA verso il divisor VERO (base/r): stima = chars/cur, e
+        # vogliamo chars/base * (base/cur) ~ pt  =>  cur -> base/r. La forma
+        # puramente moltiplicativa (cur*(1±err*alpha)) NON ha punto fisso e
+        # deriverebbe fino ai clamp; questa converge a base/r e resta stabile.
+        target = base / r if r > 0 else base
+        new = cur + alpha * (target - cur)
+        d[unique] = max(1.5, min(4.5, new))
+
+    def estimate_correction(self, unique: str) -> float:
+        """Moltiplicatore da applicare alla stima grezza per `unique`
+        (1.0 = nessuna correzione appresa): divisor_base / divisor_appreso."""
+        try:
+            base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
+        except (TypeError, ValueError):
+            base = 4.0
+        d = getattr(self, "_est_div", {}) or {}
+        cur = d.get(unique)
+        if not cur or cur <= 0:
+            return 1.0
+        return base / float(cur)
+
     def _note_latency_sample(self, unique: str, latency_ms: float,
                              ctx_est, kind: str, alpha: float) -> None:
         """Aggiorna l'EMA del bucket giusto (total o ttft) e, per i totali con
@@ -2363,6 +2420,33 @@ class Router:
                         or 0), cap)
         return max(2000, min(cap, max(floor, int(ema * mult))))
 
+    def hedge_delay_ms(self, unique: str, ctx_est=None) -> int:
+        """Ritardo del canary HEDGE calibrato sul bucket di contesto.
+
+        Su contesti grandi il TTFT fisiologico e' di secondi: lanciare il
+        canary a un valore fisso (1500ms) e' rumore — si pagherebbe un
+        tentativo in piu' quasi su ogni heavy. Formula:
+            clamp(TTFT_bucket * frac, min_ms, max_ms)
+        Senza stima TTFT vale il valore fisso `stream_hedge_delay_ms`
+        (0 = hedge spento del tutto)."""
+        qcp = getattr(self.policy, "qc_json", None)
+        base = int(getattr(qcp, "stream_hedge_delay_ms", 0) or 0)
+        if base <= 0:
+            return 0
+        try:
+            frac = float(getattr(qcp, "stream_hedge_ttft_frac", 0.6) or 0.6)
+            lo = int(getattr(qcp, "stream_hedge_min_ms", 800) or 800)
+            hi = int(getattr(qcp, "stream_hedge_max_ms", 2500) or 2500)
+        except (TypeError, ValueError):
+            frac, lo, hi = 0.6, 800, 2500
+        if hi < lo:
+            hi = lo
+        ttft = float(self.bucket_latency_ms(unique, ctx_est,
+                                           kind="ttft") or 0.0)
+        if ttft <= 0:
+            return base
+        return max(lo, min(hi, int(ttft * frac)))
+
     # --------------------------------------------------- auto-learn capacità
     _CAP_STRIKE_WINDOW_SEC = 7 * 86400   # strike più vecchi di 7gg si azzerano
 
@@ -2670,6 +2754,7 @@ class Router:
                 getattr(self, "_lat_buckets", {}).pop(u, None)
                 getattr(self, "_ttft_buckets", {}).pop(u, None)
                 getattr(self, "_prefill_rate", {}).pop(u, None)
+                getattr(self, "_est_div", {}).pop(u, None)
             # Cleanup provider/key scores vecchi: mantieni solo chiavi attive
             active_providers = set()
             active_keys = set()
@@ -2830,14 +2915,20 @@ class Router:
         graceful shutdown per attendere il drain prima del flush finale)."""
         return sum(s.inflight for s in self._stats.values())
 
-    def note_start(self, unique: str) -> None:
+    def note_start(self, unique: str, ctx_est: int | None = None) -> None:
         """Richiesta inviata: tocca last_used (penalità anti rate-limit),
         incrementa inflight e le FINESTRE budget (minuto/giorno). Nei gruppi
         gen/stt registra anche l'ultimo modello per la stickiness.
-        [Blocco 1] Registra anche il tentativo per il reputation scoring."""
+        [Blocco 1] Registra anche il tentativo per il reputation scoring.
+        ctx_est (se noto) alimenta il prefill pesato in volo."""
         s = self.stats_for(unique)
         s.last_used = time.time()
         s.inflight += 1
+        if ctx_est:
+            try:
+                s.inflight_tokens += max(0, int(ctx_est))
+            except (TypeError, ValueError):
+                pass
         # --- finestre budget (Feature no-spreco) -------------------------
         now = time.time()
         mk = time.strftime("%Y-%m-%dT%H:%M", time.gmtime(now))
@@ -2889,9 +2980,15 @@ class Router:
         # Dynamic concurrency limit: successo a saturazione -> il limite sale
         self._learn_concurrency(unique)
 
-    def note_end(self, unique: str) -> None:
-        self.stats_for(unique).inflight = max(
-            0, self.stats_for(unique).inflight - 1)
+    def note_end(self, unique: str, ctx_est: int | None = None) -> None:
+        _s = self.stats_for(unique)
+        _s.inflight = max(0, _s.inflight - 1)
+        if ctx_est:
+            try:
+                _s.inflight_tokens = max(
+                    0, _s.inflight_tokens - max(0, int(ctx_est)))
+            except (TypeError, ValueError):
+                pass
         # Connection draining: una richiesta a un deployment in draining e'
         # terminata -> decrementa il contatore; a zero il deployment viene
         # rimosso definitivamente (anche dalla config).
@@ -2990,6 +3087,7 @@ class Router:
             "ctx_ttft": {u: list(v) for u, v in
                          getattr(self, "_ttft_buckets", {}).items()},
             "ttft_rate": dict(getattr(self, "_prefill_rate", {})),
+            "est_div": dict(getattr(self, "_est_div", {})),
             "saved_at": time.time(),
         }
 
@@ -3079,6 +3177,15 @@ class Router:
                         continue
                     if fr > 0:
                         rate[str(u)] = fr
+            ediv = getattr(self, "_est_div", None)
+            if isinstance(ediv, dict):
+                for u, d in (data.get("est_div") or {}).items():
+                    try:
+                        fd = float(d)
+                    except (TypeError, ValueError):
+                        continue
+                    if 1.5 <= fd <= 4.5:
+                        ediv[str(u)] = fd
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
@@ -3795,18 +3902,51 @@ class Router:
             return max(1, int(fixed))
         return self._concl().get(d["unique"], self._conc_default())
 
-    def _apply_concurrency_limit(self, deps: list[dict]) -> list[dict]:
+    def _apply_concurrency_limit(self, deps: list[dict],
+                                 ctx_est: int | None = None) -> list[dict]:
         """Esclude i deployment con inflight >= limite di concorrenza: le
         richieste gia' assegnate proseguono, le NUOVE vengono deviate su chiavi
         disponibili. Se TUTTO il gruppo e' saturo, lascia passare (l'edge
         estremo non deve svuotare il pick: il fallback/ultima-spiaggia decide).
         Questo NON e' rate-limiting temporale: e' il collo di bottiglia delle
-        connessioni concorrenti per chiave (oltre il limite: 429/refused)."""
+        connessioni concorrenti per chiave (oltre il limite: 429/refused).
+
+        CONCORRENZA PESATA A TOKEN (conc_token_ratio > 0): il peso e' il
+        PREFILL REALE (inflight_tokens), non il numero di richieste — 3 turni
+        da 90k valgono 270k token di prefill, 3 da 5k ne valgono 15k. Budget
+        per dep = max_input * ratio; un heavy non parte se un altro e' gia'
+        in volo sullo stesso dep, mentre N light passano in parallelo. Resta
+        il tetto duro a conteggio (conc_max_limit). Una richiesta da SOLA
+        passa sempre (mai deadlock: si salta solo con altra roba in volo).
+        ratio=0 o contesto ignoto -> comportamento storico a conteggio."""
         if not deps:
             return deps
-        avail = [d for d in deps
-                 if self.stats_for(d["unique"]).inflight
-                 < self._concurrent_limit_for(d)]
+        try:
+            ratio = float(getattr(self.policy, "conc_token_ratio", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            ratio = 0.0
+        try:
+            ctx = int(ctx_est) if ctx_est else 0
+        except (TypeError, ValueError):
+            ctx = 0
+        hard = self._conc_max()
+
+        def _ok(d: dict) -> bool:
+            s = self.stats_for(d["unique"])
+            if s.inflight >= hard:               # tetto duro anti-abuso
+                return False
+            fixed = d.get("concurrent_limit")
+            if fixed:                            # limite FISSO dal CSV
+                return s.inflight < max(1, int(fixed))
+            mxi = int(d.get("max_input_tokens") or 0)
+            if ratio <= 0 or ctx <= 0 or mxi <= 0:
+                return s.inflight < self._concurrent_limit_for(d)
+            used = s.inflight_tokens
+            if used <= 0:
+                return True                      # niente prefill contato
+            return used + ctx <= mxi * ratio
+
+        avail = [d for d in deps if _ok(d)]
         if avail:
             return avail
         return deps
@@ -3939,7 +4079,7 @@ class Router:
         # SOLO mondo TESTO: i gruppi capacita' (gen/stt/video) hanno la loro
         # model-stickiness e non devono essere disturbati dalla saturazione.
         if self.config.group_caps.get(group_name) is None:
-            deps = self._apply_concurrency_limit(deps)
+            deps = self._apply_concurrency_limit(deps, ctx)
         # ORDINAMENTO DETERMINISTICO per -go/-fallback: niente metriche
         # (reputation, latenza, recency, _score). Solo `data` (giorno rinnovo
         # -> sort_key) e `model_preference`. Le metriche restano SOLO come
