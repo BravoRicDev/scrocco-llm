@@ -224,3 +224,130 @@ def test_persistenza_non_riscrive_due_volte():
     # secondo giro: in memoria nulla da fare, nessuna nuova scrittura
     n2 = csvlearn.learn_thinking_replay(router, "m1")
     assert n2 == 0
+
+
+# -------------------------------------------- famiglia: rejects / history ---
+RC_UNSUPPORTED = ('{"error":{"message":"property \'reasoning_content\' is '
+                  'unsupported","type":"invalid_request_error","code":'
+                  '"invalid_request_error"}}')
+THINK_400 = ('{"error":{"message":"thinking blocks are not allowed in the '
+             'current history","type":"invalid_request_error","code":'
+             '"invalid_request_error"}}')
+
+
+def test_repair_reasoning_error_kinds():
+    from app.forwarder import (repair_reasoning_error, reasoning_err_kind,
+                               strip_reasoning_fields, downgrade_thinking)
+    assert reasoning_err_kind(RC_400) == "needs"
+    assert reasoning_err_kind(RC_UNSUPPORTED) == "rejects"
+    assert reasoning_err_kind(THINK_400) == "history"
+    assert reasoning_err_kind("Rate limit exceeded") is None
+    # strip
+    body = _payload()
+    _asst(body)["reasoning_content"] = "rc"
+    steps = set()
+    assert strip_reasoning_fields(body) == 1
+    assert _asst(body).get("reasoning_content") is None
+    # downgrade
+    body2 = _payload()
+    body2["reasoning_effort"] = "medium"
+    assert downgrade_thinking(body2) == 1
+    assert "reasoning_effort" not in body2
+    # helper: un rimedio per dep, mai due volte
+    body3 = _payload()
+    body3["reasoning_effort"] = "medium"
+    assert repair_reasoning_error(body3, THINK_400, {}, steps) == "downgraded"
+    assert repair_reasoning_error(body3, THINK_400, {}, steps) is None
+
+
+def test_no_thinking_blocca_il_reinserimento_dell_effort():
+    from app.forwarder import apply_effort_policy
+    body = {"reasoning_effort": "medium"}
+    apply_effort_policy(body, {"model": "m1", "_no_thinking": True})
+    assert "reasoning_effort" not in body
+
+
+def test_e2e_rejects_strip_e_ritenta_stesso_dep():
+    """Cloudflare & co. RIFIUTANO `reasoning_content` nella history: si toglie
+    il campo e si ritenta lo STESSO dep (prima si ruotava a vuoto)."""
+    cfg, router, dep = _mk(flag="")
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(400, content=RC_UNSUPPORTED.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    payload = _payload()
+    _asst(payload)["reasoning_content"] = "vecchio reasoning"
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        return await fwd.call_with_fallback(router, "test", dep, payload,
+                                            need=frozenset({"text"}))
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == dep["unique"]
+    assert len(seen) == 2
+    assert _asst(seen[0]).get("reasoning_content")
+    assert _asst(seen[1]).get("reasoning_content") is None
+    assert dep["unique"] not in router._cooldown
+
+
+def test_e2e_history_downgrade_thinking_stesso_dep():
+    cfg, router, dep = _mk(flag="")
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(400, content=THINK_400.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    payload = _payload()
+    payload["reasoning_effort"] = "medium"
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        return await fwd.call_with_fallback(router, "test", dep, payload,
+                                            need=frozenset({"text"}))
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == dep["unique"]
+    assert len(seen) == 2
+    assert seen[0].get("reasoning_effort") == "medium"
+    assert "reasoning_effort" not in seen[1]      # thinking disabilitato
+    assert dep["unique"] not in router._cooldown
+    # il CSV non e' stato sporcato (solo copia locale marcata)
+    assert not dep.get("_no_thinking")
+
+
+def test_probe_impara_il_flag_senza_penale():
+    """Il probe (sweep non-stream) scopre che il provider vuole il reasoning:
+    nessuna penale sulla chiave e flag `thinking_replay` appreso per il modello."""
+    from app import forwarder as F
+    cfg, router, dep = _mk(flag="")
+    assert dep["thinking_replay"] is False
+
+    async def _boom():
+        raise F.UpstreamError(-400, RC_400)
+
+    async def _run():
+        fut = asyncio.ensure_future(_boom())
+        F._spawn_ns_probe(router, dep, fut, 0.0, 100, "sess")
+        await asyncio.gather(*list(F._NS_PROBES), return_exceptions=True)
+
+    asyncio.run(_run())
+    twins = [d for deps in router.config.groups.values() for d in deps
+             if d["model"] == "m1"]
+    assert all(d["thinking_replay"] for d in twins)
+    assert dep["unique"] not in router._cooldown

@@ -62,6 +62,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         is_provider_fault_body,
                         is_embedded_provider_error,
                         media_reject_signature, media_input_needed,
+                        media_modality_signature,
                         _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         set_retry_after_floors,
@@ -76,6 +77,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         maybe_host_transient_cooldown,
                         note_context_limit,
                         repair_reasoning_replay, _REASONING_REPLAY_RE,
+                        repair_reasoning_error, reasoning_err_kind,
                         restore_reasoning, is_unclear_error,
                         QUOTA_MIN_COOLDOWN_S)
 from .csvlearn import learn_thinking_replay
@@ -2562,9 +2564,13 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             # ECCEZIONE: il rifiuto "replay del reasoning" e' un problema del
             # PAYLOAD (tutte le chiavi del provider lo rifiutano): la chiave
             # e' sana -> nessuna penale (la richiesta principale ripara).
-            if _REASONING_REPLAY_RE.search(str(exc)):
-                log.info("[hedge] canary %s: payload replay-reasoning "
-                         "(chiave sana, nessuna penale)", _bu)
+            _rk = reasoning_err_kind(str(exc))
+            if _rk is not None:
+                log.info("[hedge] canary %s: payload della famiglia reasoning "
+                         "(%s) (chiave sana, nessuna penale)", _bu, _rk)
+                if _rk == "needs":
+                    with contextlib.suppress(Exception):
+                        learn_thinking_replay(router, B.get("model"))
             else:
                 try:
                     _sec = getattr(exc, "retry_after", None)
@@ -2885,7 +2891,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     requested_group = requested_group or (first_dep or {}).get("group")
     tried = 0
     tried_set: set[str] = set()
-    _rsn_repaired: set[str] = set()      # replay reasoning gia' riparato
+    _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
     _rsn_restored = False                # history originale gia' riprovata
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
@@ -3281,23 +3287,30 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # dep; se fallisce di nuovo -> cooldown (reason=model_feature).
             _media_raw = bool(media_reject_signature(detail))
             media_sig = _media_raw and media_input_needed(need)
-            _rsn_media = _media_raw and not media_sig
-            # REPLAY DEL REASONING: opencode zen "Console Go" (deepseek
-            # thinking) pretende il campo `reasoning_content` sugli assistant
-            # con tool_calls; il client lo droppa -> 400 bloccante. Prima di
-            # qualunque cooldown/rotazione: ripara il payload e ritenta LO
-            # STESSO deployment (tutte le chiavi del provider rifiutano lo
-            # stesso payload: ruotare brucia la catena per niente).
-            if ((_REASONING_REPLAY_RE.search(detail) or _rsn_media)
-                    and dep["unique"] not in _rsn_repaired):
-                _rsn_repaired.add(dep["unique"])
-                _nfix = repair_reasoning_replay(payload)
-                metrics.inc("nx_reasoning_replay_total", ("repaired",))
-                log.warning("[reasoning-replay] %s: %d assistant con "
-                            "tool_calls senza reasoning_content -> riparati, "
-                            "ritento lo stesso deployment", dep["unique"],
-                            _nfix)
-                learn_thinking_replay(router, dep.get("model"))
+            _rsn_media = media_modality_signature(detail) \
+                and not media_sig and reasoning_err_kind(detail) is None
+            # FAMIGLIA REASONING (needs/rejects/history): un rimedio per dep,
+            # poi si ritenta LO STESSO deployment. Copre il replay del campo
+            # `reasoning_content` (opencode zen / deepseek thinking), il
+            # provider che lo RIFIUTA (Cloudflare "reasoning_content is
+            # unsupported") e la history incoerente col thinking nativo
+            # (Anthropic/Gemini). Ruotare non aiuta: tutte le chiavi dello
+            # stesso provider rifiutano lo stesso payload.
+            _steps = _rsn_steps.setdefault(dep["unique"], set())
+            _rr = repair_reasoning_error(
+                payload, detail, dep, _steps, orig_messages,
+                force_kind=("needs" if _rsn_media else None))
+            if _rr == "downgraded":
+                dep = dict(dep)
+                dep["_no_thinking"] = True      # copia locale, non il CSV
+            if _rr:
+                metrics.inc("nx_reasoning_replay_total", (_rr,))
+                log.warning("[reasoning-%s] %s: rimedio applicato -> ritento "
+                            "lo stesso deployment", _rr, dep["unique"])
+                if _rr == "repaired":
+                    # IMPARA: d'ora in poi il flag e' nel CSV per questo
+                    # modello (tutti i gemelli) e la richiesta parte corretta.
+                    learn_thinking_replay(router, dep.get("model"))
                 continue
             # ERRORE "OSCURO" su richiesta reasoning: il taglio del reasoning
             # (histnorm) e' un'ottimizzazione di token; se il provider non ci

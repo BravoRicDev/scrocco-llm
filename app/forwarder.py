@@ -107,6 +107,13 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
       NON ha inviato `temperature` (il client vince sempre).
     """
     effort = get_effort()
+    if dep.get("_no_thinking"):
+        # rimedio "downgraded": il provider rifiuta il thinking su questa
+        # history -> nessun campo di reasoning per questo tentativo.
+        body.pop("reasoning_effort", None)
+        body.pop("thinking", None)
+        body.pop("reasoning", None)
+        return body
     if effort == "default":
         return body
     host = (dep.get("api_base") or "").lower()
@@ -280,8 +287,15 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                 # Payload REPLAY-REASONING: non e' colpa della chiave (tutte
                 # le chiavi del provider rifiutano lo stesso payload) ->
                 # nessuna penale, la richiesta principale lo ripara.
-                if _REASONING_REPLAY_RE.search(str(raised)):
+                _rkind = reasoning_err_kind(str(raised))
+                if _rkind is not None:
                     metrics.inc("nx_hedge_total", ("probe_payload",))
+                    # Il probe ha scoperto che questo modello vuole il campo
+                    # reasoning: impariamo il flag per tutti i gemelli cosi'
+                    # la prossima richiesta parte gia' corretta.
+                    if _rkind == "needs":
+                        with contextlib.suppress(Exception):
+                            learn_thinking_replay(router, dep.get("model"))
                 else:
                     try:
                         _sec = getattr(raised, "retry_after", None)
@@ -674,6 +688,34 @@ _PAYLOAD_SCHEMA_RE = re.compile(
 _REASONING_REPLAY_RE = re.compile(
     r"reasoning[_\w]*[^\n]{0,120}?must be passed back", re.IGNORECASE)
 
+# FAMIGLIA "REASONING" (thinking): un'unica regex con gruppi nominati per
+# distinguere il RIMEDIO giusto. I provider sbagliano il messaggio e a volte
+# lo mascherano ("does not support vision input" su richieste di testo), quindi
+# si guarda la firma del testo + il payload reale:
+#   needs_field      -> il provider PRETENDE il campo `reasoning_content` che
+#                       il client agentico ha droppato -> si INIETTA (reasoning
+#                       vero se disponibile, altrimenti un segnaposto).
+#   rejects_field    -> il provider RIFIUTA i campi reasoning nella history
+#                       ("reasoning_content is unsupported") -> si TOGLIE il
+#                       campo (content/tool_calls restano) e si ritenta.
+#   history_mismatch -> il provider (Anthropic/Gemini nativi) vuole blocchi
+#                       thinking coerenti con la history, che noi costruiamo da
+#                       soli content+tool_calls -> si DISABILITA il thinking
+#                       per QUESTA richiesta, history intatta.
+_REASONING_ERR_RE = re.compile(
+    r"(?P<needs_field>reasoning[_\w]*[^\n]{0,120}?must be passed back"
+    r"|reasoning[_\w]*[^\n,;.]{0,60}?(?:is |are )?required"
+    r"|missing[^\n,;.]{0,30}reasoning_content)"
+    r"|(?P<rejects_field>(?:reasoning[_a-z]*|reasoning)['\" ]*"
+    r"(?:is|are|was|were)?[ ]*(?:unsupported|not supported|not allowed|"
+    r"invalid|unknown)"
+    r"|(?:unsupported|not supported|unknown|unexpected|invalid)\s{1,3}"
+    r"['\"]?reasoning[_a-z]*['\"]?"
+    r"|property ['\"]?reasoning[_a-z]*['\"]? is (?:unsupported|unknown))"
+    r"|(?P<history_mismatch>thinking[^\n]{0,60}(?:block|signature|content)"
+    r"|thought[_ ]signature)",
+    re.IGNORECASE)
+
 # Segnaposto neutro: il provider vuole il CAMPO presente, non il contenuto
 # (verificato live: anche una stringa fissa viene accettata).
 _RC_REPLAY_PLACEHOLDER = "[reasoning non disponibile: turno replayato dal gateway]"
@@ -753,6 +795,89 @@ def apply_thinking_replay(body: dict, dep: dict,
         return 0
     n = restore_reasoning(body, orig) if orig else 0
     return n + repair_reasoning_replay(body)
+
+
+def strip_reasoning_fields(body: dict) -> int:
+    """Rimuove i campi reasoning che il provider RIFIUTA (es. Cloudflare
+    "reasoning_content is unsupported"): il contenuto del modello resta
+    (content/tool_calls), si elimina solo il campo incriminato. Ritorna
+    quanti campi sono stati tolti (0 = niente da fare)."""
+    n = 0
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(msgs, list):
+        return 0
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        for k in ("reasoning_content", "reasoning"):
+            if k in m:
+                m.pop(k, None)
+                n += 1
+    return n
+
+
+def downgrade_thinking(body: dict) -> int:
+    """Disabilita il THINKING per QUESTA richiesta (history intatta): toglie
+    `thinking`/`reasoning_effort`/`reasoning` a livello di payload. Rimedio
+    per i provider che pretendono blocchi thinking coerenti con la history
+    (Anthropic/Gemini) e rispondono 400 su una history costruita dal gateway
+    da soli `content`+`tool_calls`. Ritorna quanti campi ha tolto.
+
+    NB: `apply_effort_policy` puo' RE-INJECTARE `reasoning_effort`; per questo
+    il chiamante marca il dep con `_no_thinking` (copia locale) che la blocca."""
+    if not isinstance(body, dict):
+        return 0
+    n = 0
+    for k in ("thinking", "reasoning_effort", "reasoning"):
+        if k in body:
+            body.pop(k, None)
+            n += 1
+    return n
+
+
+def reasoning_err_kind(detail: str) -> str | None:
+    """Classifica l'errore nella famiglia reasoning:
+    'needs' | 'rejects' | 'history' | None (errore di altra natura)."""
+    m = _REASONING_ERR_RE.search(detail or "")
+    if not m:
+        return None
+    if m.group("needs_field"):
+        return "needs"
+    if m.group("rejects_field"):
+        return "rejects"
+    return "history"
+
+
+def repair_reasoning_error(body: dict, detail: str, dep: dict,
+                           steps: set, orig: list | None = None,
+                           force_kind: str | None = None) -> str | None:
+    """Applica UN rimedio (mai lo stesso due volte) per un errore della
+    famiglia reasoning. Ritorna 'repaired' | 'stripped' | 'downgraded' se ha
+    modificato il body (il chiamante ritenta LO STESSO deployment), altrimenti
+    None (nessun rimedio: si prosegue con la classificazione normale).
+
+    `steps` e' lo stato del singolo deployment (set dei rimedi gia' provati).
+    `force_kind` serve quando il testo dell'errore e' fuorviante (es. il falso
+    "does not support vision input" di llm7/Cloudflare)."""
+    kind = force_kind or reasoning_err_kind(detail)
+    if kind == "needs":
+        if "repaired" in steps:
+            return None
+        steps.add("repaired")
+        n = restore_reasoning(body, orig) if orig else 0
+        n += repair_reasoning_replay(body)
+        return "repaired" if n else None
+    if kind == "rejects":
+        if "stripped" in steps:
+            return None
+        steps.add("stripped")
+        return "stripped" if strip_reasoning_fields(body) else None
+    if kind == "history":
+        if "downgraded" in steps:
+            return None
+        steps.add("downgraded")
+        return "downgraded" if downgrade_thinking(body) else None
+    return None
 
 
 def is_unclear_error(status: int | None, detail: str | None) -> bool:
@@ -1725,6 +1850,19 @@ def media_reject_signature(detail: str) -> bool:
     return any(m in low for m in _MEDIA_REJECT_MARKERS)
 
 
+# Marker SPECIFICI di modalita' (senza il generico "unsupported"/"not
+# supported", che compare anche negli errori di reasoning/schema): serve a
+# distinguere un vero rifiuto vision/image da un messaggio fuorviante.
+_MEDIA_MODALITY_MARKERS = ("vision", "image", "audio", "video",
+                           "multimodal", "multi-modal", "modalit", "modality")
+
+
+def media_modality_signature(detail: str) -> bool:
+    """True se il dettaglio nomina ESPLICITAMENTE una modalita' di input."""
+    low = (detail or "").lower()
+    return any(m in low for m in _MEDIA_MODALITY_MARKERS)
+
+
 # capability di INPUT media: se la richiesta non ne ha bisogno, un rifiuto
 # "does not support vision input" non e' un rifiuto di modalita' ma un
 # modello/proxy rotto per QUESTA richiesta (caso llm7/Cloudflare che risponde
@@ -2412,7 +2550,7 @@ truncation_hook=None,
         _so = schemaout_config_from_policy(router.policy)
         _tt = text_config_from_policy(router.policy)
         _corrected: set[str] = set()
-        _rsn_repaired: set[str] = set()      # replay reasoning gia' riparato
+        _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
         _rsn_restored = False                # history originale gia' riprovata
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
@@ -2915,25 +3053,30 @@ truncation_hook=None,
                 maybe_host_transient_cooldown(router, dep, err.status, detail)
                 # 413/400 context-length: ridimensiona al vero max_input
                 note_context_limit(router, dep, err.status, detail, ctx)
-                # REPLAY DEL REASONING: il provider pretende il campo sugli
-                # assistant con tool_calls. Ripara e ritenta LO STESSO dep.
-                # Vale anche per il falso "does not support vision input"
-                # (llm7/Cloudflare) su richieste SENZA media: il proxy maschera
-                # lo stesso problema del reasoning mancante.
+                # FAMIGLIA REASONING (needs/rejects/history): un rimedio per
+                # dep, poi si ritenta LO STESSO deployment. Vale anche per il
+                # falso "does not support vision input" (llm7/Cloudflare) su
+                # richieste SENZA media: il proxy maschera lo stesso problema
+                # del reasoning mancante -> si forza il rimedio "needs".
                 _media_raw = bool(media_reject_signature(detail))
-                _rsn_media = _media_raw and not media_input_needed(need)
-                if ((_REASONING_REPLAY_RE.search(detail) or _rsn_media)
-                        and cur not in _rsn_repaired):
-                    _rsn_repaired.add(cur)
-                    _nfix = repair_reasoning_replay(payload)
-                    metrics.inc("nx_reasoning_replay_total", ("repaired",))
-                    log.warning("[reasoning-replay] %s: %d assistant con "
-                                "tool_calls senza reasoning_content -> "
-                                "riparati, ritento lo stesso deployment",
-                                cur, _nfix)
-                    # IMPARA: d'ora in poi il flag e' nel CSV per questo
-                    # modello (tutti i gemelli) e la richiesta parte corretta.
-                    learn_thinking_replay(router, dep.get("model"))
+                _rsn_media = media_modality_signature(detail) \
+                    and not media_input_needed(need) \
+                    and reasoning_err_kind(detail) is None
+                _steps = _rsn_steps.setdefault(cur, set())
+                _rr = repair_reasoning_error(
+                    payload, detail, dep, _steps, orig_messages,
+                    force_kind=("needs" if _rsn_media else None))
+                if _rr == "downgraded":
+                    dep = dict(dep)
+                    dep["_no_thinking"] = True      # copia locale, non il CSV
+                if _rr:
+                    metrics.inc("nx_reasoning_replay_total", (_rr,))
+                    log.warning("[reasoning-%s] %s: rimedio applicato -> "
+                                "ritento lo stesso deployment", _rr, cur)
+                    if _rr == "repaired":
+                        # IMPARA: d'ora in poi il flag e' nel CSV per questo
+                        # modello (tutti i gemelli) e parte corretto.
+                        learn_thinking_replay(router, dep.get("model"))
                     continue
                 # ERRORE "OSCURO" su richiesta reasoning: il taglio del
                 # reasoning (histnorm) e' un'ottimizzazione di token; senza una
