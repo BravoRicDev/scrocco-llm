@@ -226,6 +226,68 @@ def test_hedge_refill_gara_a_coppie_e_probe_in_warm(M, monkeypatch):
     assert notes["fail"] == []
 
 
+def test_hedge_refill_canary_che_sbaglia_apertura_va_in_cooldown(M,
+                                                                 monkeypatch):
+    """REGE (utente): errore durante il canary -> cooldown come al solito.
+    A (muto->poi chiude) serve comunque; il canary che solleva all'apertura
+    viene punito, non solo 'notato'."""
+    from types import SimpleNamespace
+    from app.forwarder import UpstreamError
+    DEP_A = {"unique": "A__m1__0", "group": "g-32k", "model": "m1",
+             "api_key": "K-A"}
+    DEP_C = {"unique": "C__m9__9", "group": "g-200k", "model": "m9",
+             "api_key": "K-C"}
+    notes = {"start": [], "fail": [], "end": [], "warm": []}
+    fails = {}
+
+    def mark_failed(u, **kw):
+        notes["fail"].append(u)
+        fails[u] = kw
+
+    r = _fake_peel_router(notes)
+    r.mark_failed = mark_failed
+    r.warm_fill_canary = lambda *a, **k: DEP_C
+
+    async def genA():
+        yield SLOW
+        await asyncio.sleep(0.05)
+        yield STOP
+
+    async def sr(dep, payload, **kw):
+        if dep["unique"] == "C__m9__9":
+            raise UpstreamError(503, "endpoint unavailable")
+
+        async def gen():
+            yield FAST
+            yield STOP
+        return gen()
+    monkeypatch.setattr(M.forwarder, "stream_response", sr)
+    monkeypatch.setattr(M, "inject_identity",
+                        lambda p, d, router=None: None)
+
+    async def go():
+        old = (M.router, M.inject_identity)
+        M.router = r
+        try:
+            raced = {"uniq": {"A__m1__0"}, "keys": {"K-A"}}
+            out = await M._hedge_peek(
+                dict(DEP_A), genA(), 0.0, 5000, False, 40, 60000, 2048,
+                payload={}, profile="test", need=frozenset(), scope="chain",
+                ctx=100, tried_set=set(), attempts=[], requested_group=None,
+                session="rf-sess", client_ip="", attribution=None,
+                hedge_ms=20, _tr_cfg=None, _tct_cfg=None,
+                hold=True, refill=True, out_tokens=4096, raced=raced)
+            await _join_probes(M)
+            return out
+        finally:
+            M.router, M.inject_identity = old
+    (dep, gen, t_att, verdict, prebuf, pending, meta) = asyncio.run(go())
+    assert verdict == "content" and dep["unique"] == "A__m1__0"
+    assert "C__m9__9" in notes["fail"]
+    assert fails["C__m9__9"].get("reason") == "canary_error"
+    assert "A__m1__0" not in notes["fail"]
+
+
 # --------------------------------------- loop streaming: refill end-to-end
 CSV_LOOP = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps,intelligence_score
 t@x.com,m/rf-small,groq,https://api.groq.com/openai/v1,free,32,32000,5,K-S,,5

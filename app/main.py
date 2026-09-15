@@ -2429,8 +2429,22 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 await _discard_stream(genB, None)
             with contextlib.suppress(Exception):
                 router.note_end(_bu, ctx)
-            log.info("[hedge] canary %s non disponibile (%s)", _bu,
-                     type(exc).__name__)
+            # REGE (utente): un errore durante il canary va in cooldown
+            # COME AL SOLITO: 429/5xx transitori -> soft cooldown calibrato
+            # sui fallimenti 24h (retry_after numerico ha priorita').
+            try:
+                _sec = getattr(exc, "retry_after", None)
+                if not (isinstance(_sec, (int, float)) and _sec > 0):
+                    try:
+                        _f24 = router.stats_for(_bu).fail_count_24h
+                    except Exception:
+                        _f24 = 0
+                    _sec = _soft_cd(_f24)
+                router.mark_failed(_bu, seconds=_sec, reason="canary_error")
+            except Exception:
+                pass
+            log.info("[hedge] canary %s non disponibile (%s) -> cooldown",
+                     _bu, type(exc).__name__)
     if not canaries:
         metrics.inc("nx_hedge_total", ("no_canary",))
         return dep, gen, t_att, *await futA
