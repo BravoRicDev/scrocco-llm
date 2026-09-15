@@ -720,6 +720,9 @@ cache_aware:
     enabled: true
     keep_turns: 4
     max_tool_output_chars: 2000
+    # dedup (I2): duplicati riconosciuti sul contenuto NORMALIZZATO (date,
+    # orari, ms e hex azzerati) oltre che sul tool_call_id; il rimando porta
+    # `head:` con i primi 200 char, cosi' l'agente non ripete il comando.
     min_saved_tokens: 500
     # stub deterministico head+tail (0/0 = stub secco legacy)
     head_chars: 600
@@ -727,8 +730,14 @@ cache_aware:
     # frontiera dinamica: protegge la coda finche' sta in keep_tail_pct%
     # della finestra del deployment scelto (0 = vale solo keep_turns)
     keep_tail_pct: 2.0
-    # output con errori: MAI toccati (Traceback/...Error/Exception/exit != 0,
-    # e righe che iniziano con FAILED/ERROR/fatal: - pytest/git)
+    # output con errori: MAI toccati (exit != 0, Traceback/...Error/Exception,
+    # righe che iniziano con FAILED/ERROR/fatal: - pytest/git) + pattern reali
+    # degli agent (case-insensitive): command not found / not found /
+    # permission denied / access denied / no such file / timed out / timeout /
+    # connection refused|reset / disk quota / read-only file system / killed /
+    # ENOENT|EACCES|EPERM|ETIMEDOUT|ECONNREFUSED|ECONNRESET.
+    # Gli output < 20 char prendono lo stub SECCO (senza head+tail) e non
+    # vengono MAI gonfiati.
     keep_error_outputs: true
     # argomenti dei tool_calls vecchi: troncamento JSON-AWARE (il JSON resta
     # valido: si tagliano solo valori stringa sopra la soglia, con lo stesso
@@ -737,19 +746,28 @@ cache_aware:
     # output JSON (liste/dict) con TROPPI elementi: troncamento STRUTTURATO
     # (primi json_struct_head + marker con totale + ultimi json_struct_tail),
     # cosi' l'agent trova un JSON VALIDO invece di uno spezzone ignorabile.
+    # I3: riconosce anche il JSON dentro i fence markdown (```json) e, nei
+    # dict, scende nel valore dominante ({"files": [...200...]}).
     # 0 = disattiva (torna al taglio a riga).
     json_struct_max_items: 40
     json_struct_head: 20
     json_struct_tail: 5
     # retention per citazione: un output vecchio NON viene stubbato se la coda
-    # protetta cita ancora uno dei suoi token distintivi (>= cite_min_freq
-    # volte, esclusi i termini strutturali come "arguments"/nomi di tool).
+    # protetta cita ancora uno dei suoi token distintivi. I1: il token deve
+    # essere path-like (contenere '/' o '.'), lungo >= 6 char, ripetuto
+    # >= cite_min_freq volte e diverso da termini strutturali/nomi di tool;
+    # il numero di token considerati e' dinamico (cap 300, ~len^2/10).
     cite_retention: true
-    cite_min_freq: 2
+    cite_min_freq: 3
     # headroom ABSOLUTO anticipato sui deployment reasoning-only (riga con
     # effort_capable): la soglia assoluta scatta a questa frazione MINORE
     # della finestra, lasciando token liberi per il blocco di thinking
     reasoning_headroom_ratio: 0.7
+    # H3: riserva dedicata al blocco di thinking nel GATE di compattazione:
+    # effective_ctx = ctx_est + reasoning_reserve_ratio * max_input, cosi' la
+    # compattazione scatta PRIMA che il reasoning faccia sforare la finestra.
+    # 0 = disattiva (comportamento storico).
+    reasoning_reserve_ratio: 0.15
     # nuovi inneschi (oltre a max_input): soglia assoluta e cache fredda
     min_ctx_tokens: 50000
     on_deployment_switch: true

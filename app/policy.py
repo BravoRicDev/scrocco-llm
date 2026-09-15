@@ -576,6 +576,10 @@ class Policy:
     # thinking): la soglia assoluta scatta a una frazione MINORE della
     # finestra cosi' restano token liberi per il reasoning block (0 = off).
     cache_ctx_reasoning_headroom_ratio: float = 0.7
+    # H3: riserva di finestra per il blocco reasoning dei modelli thinking,
+    # SOMMATA al ctx_est nel gate should_compact (l'output di thinking non e'
+    # nell'input: senza riserva si sfonda a meta' risposta). 0 = off.
+    cache_ctx_reasoning_reserve_ratio: float = 0.15
     # TRONCAMENTO STRUTTURATO JSON: liste/dict con piu' di N elementi vengono
     # tagliati mantenendo JSON VALIDO (primi json_struct_head + marker totale
     # + ultimi json_struct_tail) invece che a meta' oggetto. 0 = off.
@@ -585,7 +589,7 @@ class Policy:
     # RETENTION PER CITAZIONE: non stubbare un output vecchio se la coda
     # protetta lo cita (token ripetuto >= cite_min_freq volte).
     cache_ctx_cite_retention: bool = True
-    cache_ctx_cite_min_freq: int = 2
+    cache_ctx_cite_min_freq: int = 3
     # DEBUG SNIFF: scatola nera input/output su var/debug-sniff.log con
     # rotazione oraria e retention debug_sniff_retention_hours. Default OFF
     # (file con conversazione completa: solo per debug locale).
@@ -1739,6 +1743,13 @@ class Policy:
                         raise ValueError("cache_aware.context_truncation."
                                          "reasoning_headroom_ratio deve essere un numero")
                     p.cache_ctx_reasoning_headroom_ratio = max(0.0, float(_rhr))
+                _rrr = ct.get("reasoning_reserve_ratio")
+                if _rrr is not None:
+                    if isinstance(_rrr, bool) or not isinstance(_rrr, (int, float)):
+                        raise ValueError("cache_aware.context_truncation."
+                                         "reasoning_reserve_ratio deve essere un numero")
+                    p.cache_ctx_reasoning_reserve_ratio = max(0.0,
+                                                              float(_rrr))
                 if "cite_retention" in ct:
                     p.cache_ctx_cite_retention = _coerce_bool(
                         ct["cite_retention"],

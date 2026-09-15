@@ -66,6 +66,17 @@ def get_dummy_fill() -> tuple[bool, str]:
     return _dummy_fill.get()
 
 
+def reset_request_flags() -> None:
+    """I6: difensivo — riporta i flag per-richiesta ai default.
+
+    I token di set/reset coprono i percorsi normali, ma un `return` anticipato
+    (400/413) o un'eccezione tra la set e il finally lascerebbe il flag attivo
+    nel contesto. Chiamata all'inizio dell'handler: qualunque cosa sia rimasta
+    da una richiesta precedente non sopravvive."""
+    _avoid_gemini.set(False)
+    _dummy_fill.set((False, ""))
+
+
 def is_google_base(api_base: str) -> bool:
     """True se l'api_base e' un endpoint Google Generative Language."""
     return "generativelanguage.googleapis.com" in (api_base or "")

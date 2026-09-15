@@ -161,11 +161,25 @@ individual account limits instead of dying on the first 429.
   `{"...omessi": K, "totale": N}` marker + last `json_struct_tail` (5) —
   re-serialized as VALID JSON, so the agent can still parse the shape
   (structured search results keep their total count and first matches)
-  instead of receiving a broken half-object. Pure function of the content
-  (cache-correct), `0` = off. Plus **citation retention**
-  (`cite_retention`/`cite_min_freq`, on/2): an old output is NOT stubbed
-  while the protected tail still cites one of its distinctive tokens
-  (repeated ≥ `cite_min_freq`, structural terms and tool names excluded).
+  instead of receiving a broken half-object. Fenced code blocks (```json)
+  are recognized, and for a dict the dominant value is cut recursively
+  (`{"files": [...200...]}` keeps the wrapper). Pure function of the content
+  (cache-correct), `0` = off. Dedup works on the **normalized** content too
+  (dates, clock times, ms and hex stripped): two `ls -R`/`search_files`
+  differing only by a timestamp collapse into one back-reference, which now
+  carries a `head:` of the first 200 chars so the agent does not blindly
+  repeat the command. Plus **citation retention**
+  (`cite_retention`/`cite_min_freq`, on/3): an old output is NOT stubbed
+  while the protected tail still cites one of its distinctive path-like
+  tokens (≥ `cite_min_freq` occurrences, length ≥ 6, must contain `/` or `.`,
+  structural terms and tool names excluded, dynamic cap).
+  Error outputs are never rewritten: `exit != 0`, `Traceback/…Error/Exception`,
+  `FAILED/ERROR/fatal:` lines **and** the real agent patterns (command not
+  found, permission denied, no such file, timeout, `ENOENT`/`EACCES`/… ,
+  case-insensitive) are all protected; outputs shorter than 20 chars get a
+  bare stub and are never inflated. The truncation frontier and the
+  saved-token estimate use the deployment's **learned divisor**
+  (`estimate_correction`, H2), not a fixed chars/4.
 - **Closed-loop estimator calibration** (`estimate_calib_alpha`, 0.05):
   every response carrying real `usage.prompt_tokens` moves that deployment's
   learned divisor toward the true one (`base / (pt/ctx_est)`) with an EMA,
@@ -542,15 +556,16 @@ template. The ones that matter most:
 | `cache_aware.context_truncation.keep_turns` | 4 | number of most recent user turns kept intact |
 | `cache_aware.context_truncation.head_chars` / `tail_chars` | 600 / 600 | fixed head/tail chars kept (line-boundary cut) inside each old tool output; 0/0 = bare legacy stub |
 | `cache_aware.context_truncation.keep_tail_pct` | 2.0 | dynamic frontier: the message tail is protected while it fits in this % of the deployment window (tightens inside `keep_turns` on huge windows; 0 = off; floor 8 msgs) |
-| `cache_aware.context_truncation.keep_error_outputs` | true | tool outputs containing Traceback/…Error/Exception or exit≠0 are never rewritten (overflow included) |
+| `cache_aware.context_truncation.keep_error_outputs` | true | tool outputs containing Traceback/…Error/Exception, `exit != 0`, `FAILED/ERROR/fatal:` lines or agent patterns (command not found, permission denied, timeout, ENOENT/EACCES/…) are never rewritten (overflow included); outputs < 20 chars get a bare stub and are never inflated |
 | `cache_aware.context_truncation.min_ctx_tokens` | 50000 | absolute context threshold that also triggers trimming |
 | `cache_aware.context_truncation.on_deployment_switch` | true | trigger trimming when the cache is cold (no holder / different deployment) |
 | `cache_aware.context_truncation.switch_min_tokens` | 8000 | minimum context to apply the deployment-switch trigger |
 | `cache_aware.context_truncation.abs_headroom_ratio` | 0.8 | anti-churn hysteresis: the absolute trigger fires only within this fraction of the deployment window (0 disables) |
 | `cache_aware.context_truncation.reasoning_headroom_ratio` | 0.7 | extra-early absolute trigger for `effort_capable` (reasoning-only) deployments, reserving window for the thinking block (0 disables) |
+| `cache_aware.context_truncation.reasoning_reserve_ratio` | 0.15 | window reserve added to `ctx_est` in the compaction gate (`eff_ctx = ctx_est + ratio × max_input`) so compaction fires before the thinking block overflows the window; 0 = legacy |
 | `cache_aware.context_truncation.tool_args_max_chars` | 2000 | JSON-aware trim of oversized old `tool_calls` arguments (only long string values; output stays valid JSON); 0 = never touch args |
-| `cache_aware.context_truncation.json_struct_max_items` / `json_struct_head` / `json_struct_tail` | 40 / 20 / 5 | JSON list/dict outputs with more than this many elements are cut STRUCTURALLY (first N + `{"...omessi":K,"totale":N}` + last M) keeping the JSON valid; 0 = off (char cut) |
-| `cache_aware.context_truncation.cite_retention` / `cite_min_freq` | true / 2 | do not stub an old output while the protected tail still cites one of its distinctive tokens (≥ N occurrences; structural terms/tool names excluded) |
+| `cache_aware.context_truncation.json_struct_max_items` / `json_struct_head` / `json_struct_tail` | 40 / 20 / 5 | JSON list/dict outputs with more than this many elements are cut STRUCTURALLY (first N + `{"...omessi":K,"totale":N}` + last M) keeping the JSON valid, also inside ```json fences and on a dict's dominant value; 0 = off (char cut) |
+| `cache_aware.context_truncation.cite_retention` / `cite_min_freq` | true / 3 | do not stub an old output while the protected tail still cites one of its distinctive path-like tokens (≥ N occurrences, length ≥ 6, must contain `/` or `.`; structural terms/tool names excluded) |
 | `conc_token_ratio` | 0.5 | token-weighted concurrency: skip a row when `inflight_tokens + ctx_est > max_input × ratio`; hard count cap `conc_max_limit` still applies; 0 = legacy counting |
 | `estimate_calib_alpha` | 0.05 | EMA rate at which each deployment's learned token divisor converges to the real one (`base/(prompt_tokens/ctx_est)`), clamped 1.5..4.5, persisted; 0 = off |
 | `qc_json.stream_hedge_ttft_frac` / `stream_hedge_min_ms` / `stream_hedge_max_ms` | 0.6 / 800 / 2500 | adaptive hedge delay per context bucket: `clamp(TTFT_p50_bucket × frac, min, max)`; unknown TTFT falls back to `stream_hedge_delay_ms` |

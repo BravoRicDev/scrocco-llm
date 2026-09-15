@@ -109,7 +109,13 @@ class Ledger:
                                        default=str) + "\n")
             return len(rows)
         except Exception:                       # noqa: BLE001 - best effort
-            log.warning("[ledger] flush FALLITO (%d righe perse)",
+            # I4: le righe erano gia' state estratte dal buffer: senza
+            # rimetterle, un errore disco (o di serializzazione) le perdeva
+            # per sempre. Si riaccodano in testa (ordine preservato) e si
+            # ritenta al prossimo flush (watcher/shutdown).
+            with self._lock:
+                self._buf = rows + self._buf
+            log.warning("[ledger] flush FALLITO (%d righe rimesse in coda)",
                         len(rows), exc_info=True)
             return 0
 

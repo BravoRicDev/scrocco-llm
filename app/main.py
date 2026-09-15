@@ -73,8 +73,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
 from .health import health_loop
 from .policy import Policy
 from .qc import annotate_reasoning
-from .thought_sig import (has_unsigned_tool_calls, set_avoid_gemini,
-                          set_dummy_fill)
+from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
+                          set_avoid_gemini, set_dummy_fill)
 from .router import Router, inject_identity, estimate_tokens, configure_estimate
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
@@ -1334,6 +1334,11 @@ async def chat_completions(request: Request, response: Response):
     import uuid as _uuid
     _rid = _uuid.uuid4().hex[:12]
 
+    # I6: azzera i flag per-request prima di QUALSIASI return anticipato
+    # (401/403/400/413): un percorso uscito senza reset non deve inquinare la
+    # richiesta successiva che riusa lo stesso contesto ContextVar.
+    reset_request_flags()
+
     # Gemini 3: se la history contiene tool_call prive di thought_signature
     # (conversazione passata per modelli non-Google) Gemini risponderebbe 400
     # INVALID_ARGUMENT sul replay. Con `thought_sig_dummy_fill` attivo il
@@ -1600,6 +1605,12 @@ async def chat_completions(request: Request, response: Response):
             _ctx_corr = ctx_est
     except Exception:
         _ctx_corr = ctx_est
+    # H2: divisore chars/token CALIBRATO (F14) da usare per il budget della
+    # frontiera: il 4 fisso sottostima i token sui tokenizer non-OpenAI.
+    try:
+        _div_eff = router.effective_divisor(dep.get("unique", ""))
+    except Exception:
+        _div_eff = float(getattr(router.policy, "estimate_divisor", 4) or 4)
     _dec = should_compact(
         _cc, _ctx_corr, _max_in, _holder, dep.get("unique"),
         bool(session_id and router.is_session_compact(session_id)),
@@ -1613,9 +1624,10 @@ async def chat_completions(request: Request, response: Response):
         _cmsgs, _crep = compact_tool_outputs(
             payload.get("messages"), _cc, max_in=_max_in,
             estimator=lambda ms: estimate_tokens(
-                ms, router.policy.estimate_divisor,
+                ms, _div_eff,
                 getattr(router.policy, "image_token_estimate", 0) or 0),
-            boundary_floor=router.ctx_boundary_floor(session_id))
+            boundary_floor=router.ctx_boundary_floor(session_id),
+            divisor=_div_eff)
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
             router.note_compact_boundary(session_id, _crep.get("boundary"))
@@ -1640,7 +1652,8 @@ async def chat_completions(request: Request, response: Response):
             try:
                 _bnd = frontier_boundary(payload.get("messages") or [],
                                          _cc, _max_in,
-                                         router.ctx_boundary_floor(session_id))
+                                         router.ctx_boundary_floor(session_id),
+                                         _div_eff)
             except Exception:                 # noqa: BLE001
                 _bnd = None
         _aud = router.audit_prefix(session_id,

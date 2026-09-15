@@ -55,7 +55,14 @@ _RIMANDO_PREFIX = "[rimando:"
 # "ERROR ...", git "fatal: ...") che non contengono la parola Error.
 _ERROR_RE = re.compile(
     r"\b(?:[A-Z][a-zA-Z]*Error|Exception|ENOSPC|EACCES|SIGKILL|Traceback)\b"
-    r"|(?im:^\s*(?:FAILED|ERROR)\b|^\s*fatal:)")
+    r"|(?im:^\s*(?:FAILED|ERROR)\b|^\s*fatal:)"
+    # H1: fallimenti reali dei tool Hermes che NON contengono la parola
+    # "Error": un exit 1 con "command not found" veniva stubbato via e
+    # l'agente ripeteva il comando all'infinito. Case-insensitive.
+    r"|(?i:\b(?:command not found|not found|permission denied|access denied|"
+    r"no such file|timed out|timeout|connection refused|connection reset|"
+    r"disk quota|read-only file system|killed|ENOENT|EACCES|EPERM|ETIMEDOUT|"
+    r"ECONNREFUSED|ECONNRESET)\b)")
 # Exit code nel testo del tool result (formati generici dei vari client).
 _EXIT_RE = re.compile(r"(?im)\bexit(?:[ _-]*code)?\s*[:=]\s*(-?\d+)")
 # Floor del walk a budget: gli ultimi N messaggi restano sempre integri.
@@ -77,11 +84,12 @@ class CtxCompactConfig:
                  keep_error_outputs: bool = True,
                  tool_args_max_chars: int = 2000,
                  reasoning_headroom_ratio: float = 0.7,
+                 reasoning_reserve_ratio: float = 0.15,
                  json_struct_max_items: int = 40,
                  json_struct_head: int = 20,
                  json_struct_tail: int = 5,
                  cite_retention: bool = True,
-                 cite_min_freq: int = 2):
+                 cite_min_freq: int = 3):
         self.enabled = bool(enabled)
         self.keep_turns = int(keep_turns)
         self.max_tool_output_chars = int(max_tool_output_chars)
@@ -112,6 +120,10 @@ class CtxCompactConfig:
         # la soglia assoluta scatta a una frazione MINORE della finestra, cosi'
         # restano token liberi per il reasoning block prima del limite.
         self.reasoning_headroom_ratio = max(0.0, float(reasoning_headroom_ratio))
+        # H3: riserva di finestra per il blocco reasoning, sommata al ctx_est
+        # quando si decide se compattare (l'output thinking non e' nell'input).
+        self.reasoning_reserve_ratio = max(0.0,
+                                           float(reasoning_reserve_ratio))
         # TRONCAMENTO STRUTTURATO JSON: list/dict con troppi elementi vengono
         # tagliati a struttura (primi N + marker totale + ultimi M) invece che
         # a meta' di un oggetto: l'LLM vede JSON VALIDO e lo usa.
@@ -157,7 +169,9 @@ def create_ctxcompact_config(policy_dict: dict | None = None) -> CtxCompactConfi
     for src, attr in (("keep_tail_pct", "keep_tail_pct"),
                       ("abs_headroom_ratio", "abs_headroom_ratio"),
                       ("reasoning_headroom_ratio",
-                       "reasoning_headroom_ratio")):
+                       "reasoning_headroom_ratio"),
+                      ("reasoning_reserve_ratio",
+                       "reasoning_reserve_ratio")):
         if ct.get(src) is not None:
             setattr(cfg, attr, float(ct[src]))
     if "on_deployment_switch" in ct:
@@ -202,6 +216,9 @@ def ctxcompact_config_from_policy(policy) -> CtxCompactConfig:
             getattr(policy, "cache_ctx_tool_args_max_chars", 2000) or 0),
         reasoning_headroom_ratio=float(
             getattr(policy, "cache_ctx_reasoning_headroom_ratio", 0.7)
+            or 0.0),
+        reasoning_reserve_ratio=float(
+            getattr(policy, "cache_ctx_reasoning_reserve_ratio", 0.15)
             or 0.0),
         json_struct_max_items=int(
             getattr(policy, "cache_ctx_json_struct_max_items", 40) or 0),
@@ -253,10 +270,21 @@ def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
                  if ratio > 0 else cfg.reasoning_headroom_ratio)
     if max_in > 0 and ratio > 0:
         near_saturation = ctx_est >= int(max_in * ratio)
+    # H3: sui modelli thinking (effort_capable) l'OUTPUT non e' nell'input.
+    # Il reasoning puo' bruciare 16-32k token DOPO il ctx_est e far sforare la
+    # finestra a meta' risposta: si confronta il contesto EFFETTIVO
+    # (input + riserva), cosi' la compattazione scatta PRIMA della zona rossa.
+    eff_ctx = ctx_est
+    if reasoning and max_in > 0:
+        rr = float(getattr(cfg, "reasoning_reserve_ratio", 0.0) or 0.0)
+        if rr > 0:
+            eff_ctx = ctx_est + int(max_in * rr)
+            if max_in > 0 and ratio > 0:
+                near_saturation = eff_ctx >= int(max_in * ratio)
     reasons = []
     if overflow:
         reasons.append("overflow")
-    if (cfg.min_ctx_tokens > 0 and ctx_est >= cfg.min_ctx_tokens
+    if (cfg.min_ctx_tokens > 0 and eff_ctx >= cfg.min_ctx_tokens
             and (overflow or near_saturation)):
         reasons.append("abs")
     if (cfg.on_deployment_switch and cold and not same_family
@@ -265,7 +293,7 @@ def should_compact(cfg: CtxCompactConfig, ctx_est: int, max_in: int = 0,
     if session_compact:
         reasons.append("sticky")
     return {"compact": bool(reasons), "reason": ",".join(reasons),
-            "cold": cold, "overflow": overflow}
+            "cold": cold, "overflow": overflow, "eff_ctx": eff_ctx}
 
 
 def _content_len(content) -> int:
@@ -338,21 +366,16 @@ def _cut_tail(text: str, limit: int) -> str:
 
 
 _JSON_MARK = "...omessi"
+# I3: JSON incapsulato in fence markdown (```json ... ```): senza lo strip il
+# primo char non e' '['/'{' e si ricade nel taglio a caratteri a meta' oggetto
+# (l'LLM lo ignora). Funzione pura.
+_FENCE_RE = re.compile(r"^\s*```(?:json)?[ \t]*\r?\n?|\r?\n?\s*```\s*$",
+                       re.IGNORECASE)
 
 
-def _json_struct_cut(content: str, cfg: CtxCompactConfig) -> str | None:
-    """Troncamento STRUTTURATO di un tool output JSON: liste/dict con troppi
-    elementi -> JSON VALIDO con primi N + marker (con totale) + ultimi M,
-    invece di uno spezzone a meta' oggetto che l'LLM ignora. PURA e
-    deterministica; None se non applicabile (non-JSON, sotto soglia, o
-    nessun guadagno di caratteri)."""
-    s = content.strip()
-    if not s or s[0] not in "[{":
-        return None
-    try:
-        obj = json.loads(s)
-    except (ValueError, TypeError):
-        return None
+def _struct_cut_value(obj, cfg: CtxCompactConfig):
+    """Taglio strutturato di UNA lista/dict troppo grande (o None se sotto
+    soglia/non applicabile). Ritorna la struttura sostitutiva."""
     maxn = int(cfg.json_struct_max_items)
     if maxn <= 0:
         return None
@@ -367,11 +390,7 @@ def _json_struct_cut(content: str, cfg: CtxCompactConfig) -> str | None:
             cut.append({_JSON_MARK: omitted, "totale": len(obj)})
         if tail:
             cut.extend(obj[len(obj) - tail:])
-        try:
-            body = json.dumps(cut, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return None
-        return body if len(body) < len(content) else None
+        return cut
     if isinstance(obj, dict):
         if len(obj) <= maxn:
             return None
@@ -384,24 +403,61 @@ def _json_struct_cut(content: str, cfg: CtxCompactConfig) -> str | None:
             out["totale"] = len(keys)
         for k in keep_tail:
             out[k] = obj[k]
-        try:
-            body = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return None
-        return body if len(body) < len(content) else None
+        return out
     return None
+
+
+def _json_struct_cut(content: str, cfg: CtxCompactConfig) -> str | None:
+    """Troncamento STRUTTURATO di un tool output JSON: liste/dict con troppi
+    elementi -> JSON VALIDO con primi N + marker (con totale) + ultimi M,
+    invece di uno spezzone a meta' oggetto che l'LLM ignora. PURA e
+    deterministica; None se non applicabile (non-JSON, sotto soglia, o
+    nessun guadagno di caratteri)."""
+    s = _FENCE_RE.sub("", content.strip()).strip()
+    if not s or s[0] not in "[{":
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    if int(cfg.json_struct_max_items) <= 0:
+        return None
+    cut = _struct_cut_value(obj, cfg)
+    if cut is None and isinstance(obj, dict):
+        # I3: dict PICCOLO ma con un valore DOMINANTE enorme, tipico di
+        # Hermes ({"files": [200 elementi]}): si taglia DENTRO quel valore
+        # conservando l'involucro, invece di lasciarlo intero.
+        for k, v in obj.items():
+            if isinstance(v, (list, dict)):
+                inner = _struct_cut_value(v, cfg)
+                if inner is not None:
+                    cut = dict(obj)
+                    cut[k] = inner
+                    break
+    if cut is None:
+        return None
+    try:
+        body = json.dumps(cut, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    return body if len(body) < len(content) else None
 
 
 def _stub_for(content: str, name: str, cfg: CtxCompactConfig) -> str:
     """Stub deterministico: funzione PURA del contenuto originale."""
     n = len(content)
-    if cfg.head_chars <= 0 and cfg.tail_chars <= 0:
-        return cfg.stub_text.replace("{n}", str(n))
     lines = content.count("\n") + 1
     code = _exit_code(content)
     summary = f"[{name}] {n:,} char, {lines} righe"
     if code is not None:
         summary += f", exit {code}"
+    # H1: output VUOTO/quasi vuoto ("", "No matches found"): inutile tenerlo
+    # intero, ma nemmeno head+tail (non c'e' nulla da mostrare). Stub nudo:
+    # il guard "mai gonfiare" del chiamante decide se conviene davvero.
+    if n < 20:
+        return (f"{cfg.stub_text.replace('{n}', str(n))}\n{summary}")
+    if cfg.head_chars <= 0 and cfg.tail_chars <= 0:
+        return cfg.stub_text.replace("{n}", str(n))
     # JSON STRUTTURATO: se il content e' una lista/dict enorme, si conserva la
     # FORMA (JSON valido, primi + ultimi + totale) invece del taglio a char.
     if cfg.json_struct_max_items > 0:
@@ -417,17 +473,22 @@ def _stub_for(content: str, name: str, cfg: CtxCompactConfig) -> str:
             f"{summary}\n{head}{marker}{tail}")
 
 
-def _msg_tokens(m) -> int:
-    """Stima rough (chars/4 + overhead, include l'envelope dei tool_calls) per
-    il walk della frontiera a budget."""
+def _msg_tokens(m, divisor: float = 4.0) -> int:
+    """Stima rough (chars/divisor + overhead, include l'envelope dei
+    tool_calls) per il walk della frontiera a budget. H2: il divisore non e'
+    piu' il 4 fisso ma quello CALIBRATO per-deployment (F14): su Qwen
+    (~3.2 char/token) il 4 sottostima del 20% e la frontiera proteggeva
+    troppo, lasciando il payload sopra max_input."""
     n = _content_len(m.get("content")) if isinstance(m, dict) else 0
     tcs = m.get("tool_calls") if isinstance(m, dict) else None
     if tcs:
         n += len(str(tcs))
-    return n // 4 + 10
+    d = divisor if divisor and divisor > 0 else 4.0
+    return int(n / d) + 10
 
 
-def _walk_boundary(messages, max_in: int, keep_tail_pct: float) -> int:
+def _walk_boundary(messages, max_in: int, keep_tail_pct: float,
+                   divisor: float = 4.0) -> int:
     """Frontiera a BUDGET TOKEN (stile Hermes, adattata): protegge la coda
     finche' resta dentro keep_tail_pct% della finestra; floor fisso di
     _MIN_PROTECTED_MSGS messaggi integri. Ritorna il primo indice protetto
@@ -440,7 +501,7 @@ def _walk_boundary(messages, max_in: int, keep_tail_pct: float) -> int:
     accum = 0
     boundary = 0
     for i in range(n - 1, -1, -1):
-        t = _msg_tokens(messages[i])
+        t = _msg_tokens(messages[i], divisor)
         if accum + t > budget and (n - i) >= min_protect:
             boundary = i
             break
@@ -457,11 +518,22 @@ def _trim_args_json(args: str, cfg: CtxCompactConfig) -> str | None:
     mantenendo il JSON VALIDO (i provider parserizzati in modo stretto non
     devono mai ricevere un 400). Ritorna None se non si può toccare.
     Pura funzione dei byte originali: stesso input -> stessi output."""
+    limit = cfg.tool_args_max_chars
     try:
         obj = json.loads(args)
     except Exception:
-        return None
-    limit = cfg.tool_args_max_chars
+        # I3: arguments NON-JSON (es. execute_code con uno script grezzo):
+        # taglio head+tail sulla STRINGA. Resta una stringa non-JSON (non lo
+        # era nemmeno prima): non si inventa struttura, si risparmiano token.
+        if limit <= 0 or len(args) <= limit or _ARGS_MARKER in args:
+            return None
+        _h = _cut_head(args, cfg.head_chars) if cfg.head_chars > 0 else ""
+        _t = _cut_tail(args, cfg.tail_chars) if cfg.tail_chars > 0 else ""
+        _om = len(args) - len(_h) - len(_t)
+        if _om <= 0:
+            return None
+        _out = f"{_h}\n...[omessi {_om:,} char]...\n{_t}"
+        return _out if len(_out) < len(args) else None
     mutated = False
 
     def walk(v):
@@ -495,7 +567,7 @@ def _trim_args_json(args: str, cfg: CtxCompactConfig) -> str | None:
 
 
 def frontier_boundary(messages, cfg: CtxCompactConfig, max_in: int = 0,
-                      boundary_floor: int = 0):
+                      boundary_floor: int = 0, divisor: float = 4.0):
     """Frontiera corrente (stessa regola di compact_tool_outputs, cosi' la
     compressione e l'audit del prefisso usano lo STESSO confine): indice da
     cui la lista e' protetta. None = niente turni utente (non toccare)."""
@@ -512,7 +584,7 @@ def frontier_boundary(messages, cfg: CtxCompactConfig, max_in: int = 0,
     # (finestre enormi: l'ultimo turno da solo puo' valere piu' del budget),
     # mai allargarle oltre se il budget e' generoso: max() delle due.
     boundary = max(boundary, _walk_boundary(messages, max_in,
-                                            cfg.keep_tail_pct))
+                                            cfg.keep_tail_pct, divisor))
     # Watermark per-sessione: mai rigressioni.
     try:
         boundary = max(boundary, int(boundary_floor))
@@ -522,6 +594,14 @@ def frontier_boundary(messages, cfg: CtxCompactConfig, max_in: int = 0,
 
 
 _CITE_RE = re.compile(r"[A-Za-z0-9_./-]{4,60}")
+# I2: rumore che cambia a ogni esecuzione (date, millisecondi, hex) — va
+# neutralizzato PRIMA dell'hash di dedup, altrimenti due output identici a
+# meno di timestamp restano due blob da 8k.
+_DEDUP_NORM_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"           # 2026-09-15
+    r"|\d{1,2}:\d{2}(?::\d{2})?"   # 12:00 / 12:00:00
+    r"|\d+(?:\.\d+)?\s*ms\b"       # 72 ms / 12.5ms
+    r"|0x[0-9a-fA-F]+")            # 0xdeadbeef
 # Token STRUTTURALI dell'envelope (chiavi dei tool_calls, ruoli, campi JSON):
 # compaiono in quasi ogni messaggio e non sono "citazioni" — se li tenessimo,
 # bloccheremmo lo stub di mezzo contesto.
@@ -531,10 +611,9 @@ _CITE_STOP = frozenset((
     "finish_reason", "delta", "error", "result", "text", "value", "key",
     "data", "json", "true", "false", "null", "string", "number", "object",
     "array", "assistant", "system", "user", "tool"))
-# Un riferimento VERO (file, simbolo, riga, ticket) contiene di norma un
-# separatore o una cifra: config.py, src/main.rs, _helper, foo2. Una parola
-# piana ripetuta ("riga", "bash") non giustifica tenere intatto un output.
-_CITE_REF = re.compile(r"[._/]|\d")
+# Un riferimento VERO (file, simbolo, riga, ticket) che merita di bloccare lo
+# stub: I1 lo filtra direttamente in `_cited_tokens` (lunghezza >= 6 e
+# presenza di '/' o '.'), niente piu' regex di riferimento.
 
 
 def _tool_names(messages) -> set[str]:
@@ -572,30 +651,47 @@ def _msg_text(m) -> str:
     return t
 
 
-def _cited_regex(messages, boundary: int, min_freq: int, cap: int = 300):
-    """Regex dei token CITATI dalla coda protetta (indice >= boundary) con
-    frequenza >= min_freq. Hermes legge config.py:45 al turno 10 e lo cita al
-    turno 40: se quell'output fosse stubbato il riferimento andrebbe perso.
-    Deterministico (ordinamento per lunghezza+alfabetico, cap fisso)."""
+def _cited_tokens(messages, boundary: int, min_freq: int,
+                  cap: int = 300) -> list[str]:
+    """Token CITATI dalla coda protetta (indice >= boundary) con frequenza
+    >= min_freq che giustificano tenere INTATTO un output vecchio (Hermes
+    legge config.py:45 al turno 10 e lo cita al turno 40: se quell'output
+    fosse stubbato il riferimento andrebbe perso).
+
+    I1: niente `re.compile("tok1|tok2|...")` costruita a ogni richiesta
+    (centinaia di alternazioni = rischio ReDoS + 5-10 ms per messaggio): si
+    torna una LISTA e il test di citazione e' un banale `tok in content`.
+    Filtro severo per non bloccare la compressione: frequenza >= min_freq,
+    lunghezza >= 6 e SOLO riferimenti veri (path/estensioni con '/' o '.').
+    Cap dinamico: piu' token distinti nella coda = piu' rumore, quindi il
+    numero di riferimenti protetti cresce molto lentamente."""
     if boundary >= len(messages):
-        return None
+        return []
     ctr: dict[str, int] = {}
     for m in messages[boundary:]:
         for tok in _CITE_RE.findall(_msg_text(m)):
             ctr[tok] = ctr.get(tok, 0) + 1
+    if not ctr:
+        return []
     tnames = _tool_names(messages)
     keep = [t for t, n in ctr.items()
-            if n >= min_freq and t not in _CITE_STOP and t not in tnames
-            and _CITE_REF.search(t)]
+            if n >= min_freq and len(t) >= 6 and t not in _CITE_STOP
+            and t not in tnames and ("/" in t or "." in t)]
     if not keep:
-        return None
+        return []
     keep.sort(key=lambda t: (-len(t), t))
-    keep = keep[:cap]
-    return re.compile("|".join(re.escape(t) for t in keep))
+    return keep[:max(1, min(cap, len(ctr) // 10))]
+
+
+def _is_cited(content: str, keep) -> bool:
+    """True se il contenuto cita ancora un token protetto della coda (I1:
+    test di sottostringa su lista, nessuna regex compilata al volo)."""
+    return bool(keep) and any(t in content for t in keep)
 
 
 def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
-                         estimator=None, boundary_floor: int = 0):
+                         estimator=None, boundary_floor: int = 0,
+                         divisor: float = 4.0):
     """Ritorna (nuova_lista, report). Non muta l'input.
 
     report: {stubbed, deduped, args_trimmed, tools (conta per nome di tool),
@@ -617,7 +713,8 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
     if not cfg.enabled or not messages:
         return messages, rep
 
-    boundary = frontier_boundary(messages, cfg, max_in, boundary_floor)
+    boundary = frontier_boundary(messages, cfg, max_in, boundary_floor,
+                                 divisor)
     if boundary is None:
         return messages, rep               # niente turni utente: non toccare
     rep["boundary"] = boundary
@@ -629,8 +726,8 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
     deduped = 0
     args_trimmed = 0
     cite_kept = 0
-    cited_re = (_cited_regex(messages, boundary, cfg.cite_min_freq)
-                if cfg.cite_retention else None)
+    cited_keep = (_cited_tokens(messages, boundary, cfg.cite_min_freq)
+                  if cfg.cite_retention else [])
     changed_msgs: list = []                # (orig, nuova) per l'estimator
 
     def _cost(msg_list, plain_chars):
@@ -660,9 +757,14 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         code = _exit_code(content)
         if cfg.keep_error_outputs and _has_error(content, code):
             continue                       # duplicato d'errore: non toccare
-        h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+        # I2: hash NORMALIZZATO (date, millisecondi, indirizzi esadecimali
+        # sono rumore che cambia a ogni run) -> due `ls -R`/`search_files`
+        # quasi identici collassano nello stesso rimando. Resta una funzione
+        # PURA del contenuto (nessuno stato), quindi cache-correct.
+        norm = _DEDUP_NORM_RE.sub("", content).strip()
+        h = hashlib.md5(norm.encode("utf-8", errors="replace")).hexdigest()[:12]
         cid = m.get("tool_call_id")
-        if cited_re is not None and cited_re.search(content):
+        if _is_cited(content, cited_keep):
             # ancora CITATO dalla coda: resta intatto (il conteggio lo fa
             # PASS2, unica sede della decisione: qui registriamo solo la
             # copia canonica per i rimandi)
@@ -680,9 +782,13 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
                        and (cfg.head_chars > 0 or cfg.tail_chars > 0))
             where = (f"al messaggio {ref}" if str(ref).startswith("msg@")
                      else f"al tool_call_id {ref}")
+            # I2: il rimando porta un HEAD (200 char) cosi' l'agente vede
+            # subito di cosa si tratta e NON ripete il comando alla cieca.
+            # Puro funzione del contenuto -> byte stabili.
+            head = _cut_head(content, 200)
             stub = (f"{_RIMANDO_PREFIX} output identico"
                     f"{' (già compresso)' if already else ''} {where}, "
-                    f"{len(content):,} char]")
+                    f"{len(content):,} char - head: {head}]")
             new[i] = {**m, "content": stub}
             deduped += 1
             saved += len(content) - len(stub)
@@ -701,18 +807,20 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         if not isinstance(content, str):
             continue                       # liste multimodali: intatte
         n = len(content)
-        if n <= cfg.max_tool_output_chars:
+        if n >= 20 and n <= cfg.max_tool_output_chars:
             continue                       # output gia' piccolo: lascialo
         if _already_stub(content, cfg):
             continue                       # idempotenza
         code = _exit_code(content)
         if cfg.keep_error_outputs and _has_error(content, code):
             continue                       # errori MAI toccati (anche overflow)
-        if cited_re is not None and cited_re.search(content):
+        if _is_cited(content, cited_keep):
             cite_kept += 1                 # ancora CITATO dalla coda: intatto
             continue
         name = labels.get(m.get("tool_call_id"), "tool")
         stub = _stub_for(content, name, cfg)
+        if len(stub) >= n:
+            continue                       # H1: mai gonfiare il payload
         new[i] = {**m, "content": stub}
         stubbed += 1
         saved += n - len(stub)
@@ -762,7 +870,8 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         after = sum(_cost([x], 0) for _o, x in changed_msgs)
         rep["saved_tokens_est"] = max(0, before - after)
     else:
-        rep["saved_tokens_est"] = saved // 4
+        _d = divisor if divisor and divisor > 0 else 4.0
+        rep["saved_tokens_est"] = int(saved / _d)
     if ((stubbed == 0 and deduped == 0 and args_trimmed == 0)
             or rep["saved_tokens_est"] < cfg.min_saved_tokens):
         return messages, {**rep, "changed": False}

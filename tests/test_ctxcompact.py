@@ -4,7 +4,102 @@ from types import SimpleNamespace
 
 from app.ctxcompact import (CtxCompactConfig, compact_tool_outputs,
                             create_ctxcompact_config,
-                            ctxcompact_config_from_policy, should_compact)
+                            ctxcompact_config_from_policy,
+                            frontier_boundary, should_compact)
+
+
+class TestH1H2H3:
+    """H1 errori reali/vuoti, H2 divisore calibrato, H3 riserva reasoning."""
+
+    def _msgs(self, err, clean):
+        return [
+            {"role": "user", "content": "vai"},
+            {"role": "tool", "tool_call_id": "c1", "content": err},
+            {"role": "tool", "tool_call_id": "c2", "content": clean},
+            {"role": "user", "content": "ok"},
+            {"role": "assistant", "content": "fatto"},
+        ]
+
+    def _cfg(self, **kw):
+        base = dict(keep_turns=1, max_tool_output_chars=50,
+                    min_saved_tokens=0)
+        base.update(kw)
+        return CtxCompactConfig(**base)
+
+    def test_h1_errore_senza_la_parola_error_e_protetto(self):
+        """H1: 'command not found' (exit 1) non contiene 'Error': NON si stubba."""
+        err = "bash: foo: command not found\n" + "x" * 3000
+        clean = "RISULTATO\n" + "y" * 3000
+        new, rep = compact_tool_outputs(self._msgs(err, clean), self._cfg())
+        assert rep["changed"]
+        assert new[1]["content"] == err            # errore: intatto
+        assert new[2]["content"] != clean          # pulito: stubbato
+
+    def test_h1_pattern_denied_e_timeout(self):
+        for pat in ("permission denied", "read timed out", "ENOENT",
+                    "no such file"):
+            err = f"tool: {pat}\n" + "x" * 3000
+            new, _ = compact_tool_outputs(
+                self._msgs(err, "y" * 3000), self._cfg())
+            assert new[1]["content"] == err, pat
+
+    def test_h1_exit_code_non_zero_protetto(self):
+        err = "esito: exit code: 1\n" + "z" * 3000   # nessuna keyword
+        new, _ = compact_tool_outputs(self._msgs(err, "y" * 3000),
+                                      self._cfg())
+        assert new[1]["content"] == err
+
+    def test_h1_output_minuscolo_non_gonfiato(self):
+        """H1: uno stub piu' lungo dell'originale non conviene mai."""
+        short = "No matches found"
+        new, rep = compact_tool_outputs(self._msgs(short, "y" * 3000),
+                                        self._cfg())
+        assert new[1]["content"] == short
+        assert rep["changed"]                        # l'altro si stubbа
+        assert new[2]["content"] != "y" * 3000
+
+    def test_h2_msg_tokens_usa_il_divisore(self):
+        from app.ctxcompact import _msg_tokens
+        m = {"role": "tool", "content": "x" * 3200}
+        assert _msg_tokens(m, 4.0) < _msg_tokens(m, 3.2)
+
+    def test_h2_frontiera_non_regredisce_col_divisore(self):
+        msgs = [{"role": "user", "content": "u" * 100}]
+        for i in range(14):
+            msgs.append({"role": "assistant", "content": "a" * 3000})
+            msgs.append({"role": "tool", "tool_call_id": f"c{i}",
+                         "content": "t" * 3000})
+        cfg = CtxCompactConfig(keep_turns=1)
+        b4 = frontier_boundary(msgs, cfg, max_in=30000, divisor=4.0)
+        b32 = frontier_boundary(msgs, cfg, max_in=30000, divisor=3.2)
+        assert b32 >= b4
+        assert b32 > 0 and b4 > 0
+        # il saved stimato senza estimator usa lo stesso divisore
+        _, r4 = compact_tool_outputs(msgs, cfg, max_in=30000, divisor=4.0)
+        _, r32 = compact_tool_outputs(msgs, cfg, max_in=30000, divisor=3.2)
+        assert r32.get("saved_tokens_est", 0) != r4.get("saved_tokens_est", 0)
+
+    def test_h3_riserva_reasoning_fa_scattare_abs_prima(self):
+        cfg = CtxCompactConfig(min_ctx_tokens=100000,
+                               abs_headroom_ratio=0.85,
+                               reasoning_headroom_ratio=0.0,
+                               reasoning_reserve_ratio=0.15)
+        off = should_compact(cfg, 145000, 200000, holder="u", dep_unique="u",
+                             reasoning=False)
+        on = should_compact(cfg, 145000, 200000, holder="u", dep_unique="u",
+                            reasoning=True)
+        assert off["compact"] is False
+        assert on["compact"] is True and "abs" in on["reason"]
+        assert on["eff_ctx"] == 145000 + 30000
+
+    def test_h3_riserva_zero_disattiva(self):
+        cfg = CtxCompactConfig(min_ctx_tokens=100000,
+                               abs_headroom_ratio=0.85,
+                               reasoning_headroom_ratio=0.0,
+                               reasoning_reserve_ratio=0.0)
+        d = should_compact(cfg, 145000, 200000, holder="u", dep_unique="u",
+                           reasoning=True)
+        assert d["compact"] is False and d["eff_ctx"] == 145000
 
 
 def _tool(content):
@@ -566,15 +661,20 @@ class TestArgsTruncation:
         assert len(out) < len(args)
         assert rep["tools"].get("write_file")
 
-    def test_non_parseable_intatto(self):
+    def test_non_parseable_tagliato_a_char(self):
+        # I3: se `arguments` non e' JSON (es. script python grezzo), non lo si
+        # lascia intatto: si applica un taglio char head/tail. Resta una
+        # stringa non-JSON (lo era anche prima), quindi non si rompe nulla.
         args = "{" + "x" * 4000                    # JSON spazzatura
         new, rep = compact_tool_outputs(self._conv(args), self._cfg())
-        assert rep["args_trimmed"] == 0
-        assert new[1]["tool_calls"][0]["function"]["arguments"] == args
+        assert rep["args_trimmed"] == 1
+        out = new[1]["tool_calls"][0]["function"]["arguments"]
+        assert out != args and len(out) < len(args)
+        assert "[omessi" in out
 
     def test_solo_stringhe_corte_intatto(self):
         import json
-        args = json.dumps({"a": "x" * 3000, "b": "y"})   # il campo > 500? no: soglia per-valore? 3000>500 -> taglia
+        args = json.dumps({"a": "x" * 30000, "b": "y"})   # il campo > 500? no: soglia per-valore? 3000>500 -> taglia
         # NB: soglia per-stringa = tool_args_max_chars -> "x"*3000 viene
         # tagliata; qui verifichiamo che un args SOPRA soglia ma SENZA
         # stringhe sopra soglia resti byte-identico (no re-dump inutile)
@@ -674,7 +774,8 @@ class TestReasoningHeadroom:
 
     def test_ratio_a_zero_non_cambia_niente(self):
         cfg = CtxCompactConfig(min_ctx_tokens=1, abs_headroom_ratio=0.8,
-                               reasoning_headroom_ratio=0.0)
+                               reasoning_headroom_ratio=0.0,
+                               reasoning_reserve_ratio=0.0)  # H3 knob a parte
         assert should_compact(cfg, 7500, 10000, reasoning=True)["compact"] \
             is False
 
@@ -731,7 +832,7 @@ class TestJsonStructure:
 
     def test_json_piccolo_fallback_char(self):
         """Pochi elementi (sotto soglia) ma output lungo: taglio a riga."""
-        items = [{"id": i, "blob": "z" * 300} for i in range(10)]
+        items = [{"id": i, "blob": "z" * 3000} for i in range(10)]
         msgs = _conv_json(json.dumps(items))
         cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
@@ -787,7 +888,10 @@ class TestCiteRetention:
         ]
 
     def test_token_citato_protegge_output_vecchio(self):
+        # I1: min_freq di default ora e' 3 (prima 2) e il token deve essere
+        # path-like (contiene '/' o '.'): lo si cita 3 volte.
         msgs = self._msgs("rileggi /etc/scrocco/mio_special.cfg e poi "
+                          "/etc/scrocco/mio_special.cfg, ancora "
                           "/etc/scrocco/mio_special.cfg")
         cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)

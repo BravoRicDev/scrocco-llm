@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from typing import Any
 
 _lock = threading.Lock()
@@ -19,9 +19,13 @@ _started = time.time()
 _counters: dict[str, dict[tuple[str, ...], float]] = defaultdict(
     lambda: defaultdict(float))
 _gauges: dict[str, Any] = {}
-# latenze per unique: somme e conteggi (media calcolata all'export)
-_latency_sum: dict[str, float] = defaultdict(float)
-_latency_count: dict[str, float] = defaultdict(float)
+# latenze per unique: somme e conteggi (media calcolata all'export).
+# I5: LRU limitata — senza tetto la cardinalita' di
+# nx_upstream_latency_ms{unique=...} cresceva per sempre (scrape pesanti,
+# Grafana che esplode). 512 unique in volo sono piu' che sufficienti.
+_LATENCY_MAX = 512
+_latency_sum: "OrderedDict[str, float]" = OrderedDict()
+_latency_count: "OrderedDict[str, float]" = OrderedDict()
 
 
 def inc(name: str, labels: tuple[str, ...] = (), value: float = 1.0) -> None:
@@ -36,8 +40,13 @@ def set_gauge(name: str, value: float) -> None:
 
 def observe_latency_ms(unique: str, ms: float) -> None:
     with _lock:
-        _latency_sum[unique] += ms
-        _latency_count[unique] += 1
+        _latency_sum[unique] = _latency_sum.get(unique, 0.0) + ms
+        _latency_count[unique] = _latency_count.get(unique, 0.0) + 1
+        _latency_sum.move_to_end(unique)        # I5: LRU (il piu' recente in coda)
+        _latency_count.move_to_end(unique)
+        while len(_latency_sum) > _LATENCY_MAX:
+            old, _ = _latency_sum.popitem(last=False)
+            _latency_count.pop(old, None)
 
 
 def render() -> str:
@@ -87,7 +96,6 @@ def snapshot(names: tuple[str, ...] = ()) -> dict[str, dict[tuple[str, ...], flo
                     for n in names}
         return {n: {k: v for k, v in series.items()}
                 for n, series in _counters.items()}
-        _latency_count.clear()
 
 
 def _label_names(metric: str) -> list[str]:

@@ -100,14 +100,24 @@ context trim: old large tool outputs → deterministic head+tail stub with
 (content-hash refs, `(già compresso)` when the target is itself stubbed;
 per-session frontier watermark: a stub never un-stubs on window rotation);
 old oversized `tool_calls` arguments get a JSON-aware trim
-(`tool_args_max_chars`, never breaks JSON validity); error outputs are NEVER
-rewritten (incl. line-anchored FAILED/ERROR/fatal:); tail protected while it
-fits `keep_tail_pct`% of the window; JSON list/dict outputs with too many
-elements are cut structurally (valid JSON + `totale` marker) and a cited
-output is never stubbed (`cite_retention`);
+(`tool_args_max_chars`, never breaks JSON validity; a non-JSON argument string
+is char-trimmed head/tail instead of being left huge); error outputs are NEVER
+rewritten (incl. `exit != 0`, line-anchored FAILED/ERROR/fatal: **and** the
+real agent patterns: command not found, permission denied, no such file,
+timeout, ENOENT/EACCES/EPERM/ECONNREFUSED…, case-insensitive; outputs < 20
+chars get a bare stub and are never inflated); tail protected while it fits
+`keep_tail_pct`% of the window; JSON list/dict outputs with too many elements
+are cut structurally (valid JSON + `totale` marker) — also inside ```json
+fences and on a dict's dominant value — and a cited output is never stubbed
+(`cite_retention`, path-like tokens ≥ `cite_min_freq`, dynamic cap); dedup
+runs on the NORMALIZED content (dates/clock/ms/hex stripped) and its
+back-reference carries a `head:` of the first 200 chars;
 `X-Ctxcompact-Saved` header +
 `nx_ctxcompact_tool_total` counter; reasoning-only (effort_capable) deps get
-the earlier `reasoning_headroom_ratio` trigger), `[effort]` (`reasoning_effort` injected/
+the earlier `reasoning_headroom_ratio` trigger **and** a
+`reasoning_reserve_ratio` window reserve added to `ctx_est` in the
+compaction gate; the frontier walk and the saved-token estimate use the
+deployment's learned divisor (`[latency]`/`estimate_correction`)), `[effort]` (`reasoning_effort` injected/
 removed per the row's `effort_capable`). Thinking crosses the translator
 boundary: upstream reasoning (Responses summaries, Anthropic `thinking`
 blocks, Gemini `thought` parts) is delivered to the client as
@@ -152,3 +162,11 @@ error body JSON
    `cooldown_autoprobe_key_gap_sec` (default 300 s).
 4. The service binds loopback by default. Exposing it publicly requires
    a reverse proxy in front and a non-default master key.
+5. Per-request thought-signature flags (`set_avoid_gemini`/`set_dummy_fill`)
+   are reset at the top of every handler (`reset_request_flags()`): an early
+   `return` (400/413/401) or an exception must never leave the ContextVar
+   active for the next request reusing the same event loop.
+6. Durability/observability never lose data or explode: `ledger.flush()`
+   requeues the extracted rows in order when the write fails (retried on the
+   next tick), and the latency series are bounded to 512 uniques with LRU
+   eviction so `nx_upstream_latency_ms{unique=...}` cannot grow unbounded.

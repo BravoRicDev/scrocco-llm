@@ -2103,6 +2103,25 @@ class Router:
             return 1.0
         return base / float(cur)
 
+    def effective_divisor(self, unique: str) -> float:
+        """H2: divisore chars/token CALIBRATO per `unique` (F14). Su Qwen
+        (~3.2 char/token) vale ~3.2 invece del 4 fisso: chi conta i token per
+        il budget della frontiera ctxcompact deve usare QUESTO, altrimenti
+        sottostima il contesto e lascia il payload sopra max_input."""
+        try:
+            base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
+        except (TypeError, ValueError):
+            base = 4.0
+        d = getattr(self, "_est_div", {}) or {}
+        cur = d.get(unique)
+        try:
+            cur = float(cur)
+        except (TypeError, ValueError):
+            return base
+        if not cur or cur <= 0:
+            return base
+        return cur
+
     def _note_latency_sample(self, unique: str, latency_ms: float,
                              ctx_est, kind: str, alpha: float) -> None:
         """Aggiorna l'EMA del bucket giusto (total o ttft) e, per i totali con
