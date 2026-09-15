@@ -356,11 +356,13 @@ individual account limits instead of dying on the first 429.
   soft-skipped for `model_circuit_open_sec` (60 s): no reputation damage, and
   the per-key/per-deployment breakers keep handling the rest. Symmetrically, a
   payload whose estimated context exceeds the `max_input` of **every**
-  deployment of the requested group no longer burns the chain: the gateway
-  force-compacts once (ignoring `min_saved_tokens`) and, if the estimate is
-  still above 105 % of the group window, answers a synthetic `400
-  context_length_exceeded` before touching any upstream
-  (`nx_ctx_overflow_total`, `nx_ctx_compacted_forced`).
+  deployment of the requested group no longer burns the chain and is NOT
+  force-fit into the requested dim: the gateway first **climbs the dim ladder**
+  to the smallest dim that holds it (`[dim]` log, group sticky re-anchored,
+  105 % tolerance). Only if NO dim fits, it force-compacts once (ignoring
+  `min_saved_tokens`) and, if the estimate is still above the biggest window,
+  answers a synthetic `400 context_length_exceeded` before touching any
+  upstream (`nx_ctx_overflow_total`, `nx_ctx_compacted_forced`).
 - **Quality-weighted EMA, coalescing & error classification**: `note_result()`
   accepts a `quality` (1.0 clean; lower for tool-repair/text-parse/QC/fake
   tool-call) that scales the latency/success EMA update rate, so broken-but-alive
