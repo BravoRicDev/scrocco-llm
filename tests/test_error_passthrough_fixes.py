@@ -221,6 +221,48 @@ def test_vision_vera_non_punisce_il_deployment(monkeypatch):
     assert broken["unique"] not in router._cooldown
 
 
+def test_vision_fuorviante_ripara_il_reasoning_e_riprova():
+    """Ipotesi (utente): llm7/Cloudflare maschera col messaggio 'vision' il
+    solito problema del reasoning mancante. Il gateway prova la riparazione
+    sullo STESSO dep: se il 2o tentativo passa, nessun cooldown."""
+    import httpx
+    import json
+
+    cfg, router, broken, good = _mk()
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(400, content=VISION_400.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    payload = {"model": "x",
+               "messages": [
+                   {"role": "user", "content": "x"},
+                   {"role": "assistant", "content": None,
+                    "tool_calls": [{"id": "t1", "type": "function",
+                                    "function": {"name": "f",
+                                                 "arguments": "{}"}}]},
+                   {"role": "tool", "tool_call_id": "t1", "content": "r"}]}
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        return await fwd.call_with_fallback(
+            router, "test", broken, payload, need=frozenset({"text"}))
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == broken["unique"]        # stesso dep, riprovato
+    assert len(seen) == 2
+    asst = [m for m in seen[1]["messages"] if m.get("tool_calls")][0]
+    assert asst.get("reasoning_content")             # riparato PRIMA dell'invio
+    assert broken["unique"] not in router._cooldown  # nessun cooldown
+
+
 def test_vision_fuorviante_nonstream_va_in_cooldown():
     import httpx
 

@@ -3273,13 +3273,22 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         except UpstreamError as err:
             router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
             detail = err.detail or ""
+            # "does not support vision input" (llm7/Cloudflare) su richieste
+            # di PURO TESTO: il proxy maschera spesso lo stesso problema del
+            # reasoning mancante (i payload reali hanno decine di assistant
+            # con tool_calls e zero reasoning_content). Quindi lo trattiamo
+            # come candidato replay: prima si ripara e si ritenta LO STESSO
+            # dep; se fallisce di nuovo -> cooldown (reason=model_feature).
+            _media_raw = bool(media_reject_signature(detail))
+            media_sig = _media_raw and media_input_needed(need)
+            _rsn_media = _media_raw and not media_sig
             # REPLAY DEL REASONING: opencode zen "Console Go" (deepseek
             # thinking) pretende il campo `reasoning_content` sugli assistant
             # con tool_calls; il client lo droppa -> 400 bloccante. Prima di
             # qualunque cooldown/rotazione: ripara il payload e ritenta LO
             # STESSO deployment (tutte le chiavi del provider rifiutano lo
             # stesso payload: ruotare brucia la catena per niente).
-            if (_REASONING_REPLAY_RE.search(detail)
+            if ((_REASONING_REPLAY_RE.search(detail) or _rsn_media)
                     and dep["unique"] not in _rsn_repaired):
                 _rsn_repaired.add(dep["unique"])
                 _nfix = repair_reasoning_replay(payload)
@@ -3336,8 +3345,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # Cloudflare) rispondono "does not support vision input" a
             # richieste di puro testo -> in quel caso il dep e' rotto per
             # QUESTA richiesta e va in cooldown come un KO normale.
-            _media_raw = bool(media_reject_signature(detail))
-            media_sig = _media_raw and media_input_needed(need)
+            # NB: `_media_raw`/`media_sig` sono gia' calcolati sopra (servono
+            # anche al tentativo di replay reasoning).
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
             prov_fault = is_provider_fault_body(detail)
             quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False

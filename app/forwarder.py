@@ -2917,7 +2917,12 @@ truncation_hook=None,
                 note_context_limit(router, dep, err.status, detail, ctx)
                 # REPLAY DEL REASONING: il provider pretende il campo sugli
                 # assistant con tool_calls. Ripara e ritenta LO STESSO dep.
-                if (_REASONING_REPLAY_RE.search(detail)
+                # Vale anche per il falso "does not support vision input"
+                # (llm7/Cloudflare) su richieste SENZA media: il proxy maschera
+                # lo stesso problema del reasoning mancante.
+                _media_raw = bool(media_reject_signature(detail))
+                _rsn_media = _media_raw and not media_input_needed(need)
+                if ((_REASONING_REPLAY_RE.search(detail) or _rsn_media)
                         and cur not in _rsn_repaired):
                     _rsn_repaired.add(cur)
                     _nfix = repair_reasoning_replay(payload)
