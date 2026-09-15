@@ -87,6 +87,17 @@ TTFT_RATE_FLOOR_MS = 250.0      # pavimento assoluto dell'estrapolazione
 # servito i contesti grossi non viene punito per la sua natura.
 SLOW_REL_BASELINE_MULT = 2.0
 
+# SOGLIA "LENTO" SIZE-AWARE (B3 ibrida): "lento" = peggiore del doppio della
+# norma PER QUELLA TAGLIA, non oltre i 90s fissi (un 128k che risponde in
+# 100s e' normale, non lento). Baseline: mediana di FLOTTA del bucket ->
+# stima dal rate di prefill/generazione -> 90s legacy. Floor assoluto per non
+# marchiare quando la flotta e' tutta veloce.
+SLOW_LATENCY_ABS_FLOOR_MS = 45000.0
+SLOW_LATENCY_REL_MULT = 2.0
+SLOW_LATENCY_MIN_PEERS = 5
+SLOW_GEN_MULT = 6.0                 # total atteso ~ ttft * mult (fallback)
+SLOW_TYPICAL_COMPLETION_TOKENS = 600.0   # output tipico per la stima gen
+
 
 def _is_quota_evidence(reason: str | None, status: int | None = None) -> bool:
     """True se l'evidenza di fallimento e' di QUOTA (429/satura), non di guasto.
@@ -177,6 +188,7 @@ class DepStats:
     last_success_ts: float = 0.0      # timestamp ultimo successo
     last_fail_ts: float = 0.0         # timestamp ultimo fallimento
     probe_fail_streak: int = 0        # probe passivi consecutivi falliti (cap)
+    json_fallback: int = 0            # quante volte ha ignorato stream:true (JSON->SSE)
     # --- dynamic scoring: feature osservate per-deployment ---
     latency_history: list = field(default_factory=list)  # ultimi N (bucket, ctx, ms)
     total_tokens: int = 0              # token completati cumulativi
@@ -547,6 +559,14 @@ class Router:
         # quando si pesca a freddo, distribuendo il carico a prescindere
         # dall'`order`. In-memory; ricostruita dai log all'avvio.
         self._usage_times: dict[str, "deque[tuple[float, float]]"] = {}
+        # Budget A FINESTRA dei cooldown-wakeup della scala (solo dim nati da
+        # 429/quota): evita di riesumare sempre gli stessi deployment.
+        self._wake_times: dict[str, "deque[float]"] = {}
+        # token/s di generazione per dep (EMA) e cache della mediana di
+        # flotta per bucket; stato del "caccia al sostituto" per sessione.
+        self._gen_rate: dict[str, float] = {}
+        self._fleet_cache: dict = {}
+        self._hunt_state: dict = {}
         # Modalita' COMPATTA sticky per-sessione (troncamento cache-aware)
         self._session_compact: dict[str, float] = {}
         # ESCALATION WINNER (transversale alla sessione): il bucket RICHIESTO
@@ -1128,7 +1148,8 @@ class Router:
             return None
         if self.is_cooled_down(unique) or self.is_retired(unique):
             return None
-        if self._is_demoted_dep(unique, session_id, ctx):
+        if self._is_demoted_dep(unique, session_id, ctx,
+                                allow_slow=self._warm_allow_slow()):
             return None
         if not self._cap_fits(dep, ctx):
             return None
@@ -2284,11 +2305,26 @@ class Router:
                 return max(TTFT_RATE_FLOOR_MS, float(r) * cx / 1000.0)
         return getattr(self, "_avg_latencies", {}).get(unique)
 
-    def note_stream_end(self, unique: str, dur_ms: float, ctx_est=None) -> None:
+    def note_stream_end(self, unique: str, dur_ms: float, ctx_est=None,
+                        completion_tokens=None) -> None:
         """Durata TOTALE di uno stream committed: alimenta solo i bucket
         'total' (il punteggio di reputazione e l'EMA globale li ha gia'
         contati il commit sul primo contenuto)."""
         self._note_latency_sample(unique, dur_ms, ctx_est, "total", 0.1)
+        # Rate di generazione (token/s): servono alla stima "total" quando il
+        # bucket non ha campioni propri (B3, fallback rate-based).
+        try:
+            ct = int(completion_tokens or 0)
+            if ct > 0 and dur_ms and dur_ms > 0:
+                tps = ct / (float(dur_ms) / 1000.0)
+                gr = getattr(self, "_gen_rate", None)
+                if gr is None:
+                    gr = {}
+                    self._gen_rate = gr
+                prev = gr.get(unique)
+                gr[unique] = (tps if not prev else prev * 0.8 + tps * 0.2)
+        except (TypeError, ValueError):
+            pass
 
     def record_failure(self, unique: str, reason: str | None, status: int | None) -> None:
         """Registra un fallimento nei punteggi, PER CLASSE:
@@ -2413,15 +2449,17 @@ class Router:
         # request (per-deployment scoped: altri dep sulla stessa chiave non
         # vengono toccati), con fallback all'EMA globale.
         ema = self.bucket_latency_ms(unique, ctx_est) or 0
-        if ema > LATENCY_ROTATE_THRESHOLD_MS:
-            over_seconds = (ema - LATENCY_ROTATE_THRESHOLD_MS) / 1000.0
+        _thr = self._slow_threshold_ms(unique, ctx_est)
+        if ema > _thr:
+            over_seconds = (ema - _thr) / 1000.0
             penalty = over_seconds * LATENCY_PENALTY_PER_SEC  # e.g., 0.5 per second
             _dcy = self._cooldown_decay(unique)
             if _dcy < 1.0:
                 penalty *= _dcy        # penalita' che decade col cooldown
             score += penalty
-            log.debug("[latency-penalty] %s ema=%.0fms threshold=%sms penalty=%.1f (over=%.1fs)",
-                      unique, ema, LATENCY_ROTATE_THRESHOLD_MS, penalty, over_seconds)
+            log.debug("[latency-penalty] %s ema=%.0fms threshold=%.0fms "
+                      "penalty=%.1f (over=%.1fs)",
+                      unique, ema, _thr, penalty, over_seconds)
 
         # Bias di EFFORT: SOLO quando il client chiede esplicitamente effort
         # "high" si sposta la scelta verso l'intelligence alta e si premia chi
@@ -2523,6 +2561,142 @@ class Router:
             return None
         return self._avg_latencies.get(unique)
 
+    def _fleet_bucket_median(self, kind: str, bucket: int):
+        """Mediana di FLOTTA degli EMA nello stesso bucket (cache 60s).
+
+        E' il termine di paragone "sensato": quanto e' normale per quella
+        taglia di contesto. None se non ci sono abbastanza pari (min_peers)."""
+        if bucket < 0:
+            return None
+        now = time.time()
+        ck = (kind, bucket)
+        cache = getattr(self, "_fleet_cache", None)
+        if cache is None:
+            cache = {}
+            self._fleet_cache = cache
+        c = cache.get(ck)
+        if c and now - c[1] < 60.0:
+            return c[0]
+        table = getattr(self, "_ttft_buckets" if kind == "ttft"
+                        else "_lat_buckets", None)
+        vals = []
+        for v in (table or {}).values():
+            try:
+                if v and len(v) > bucket and float(v[bucket]) > 0:
+                    vals.append(float(v[bucket]))
+            except (TypeError, ValueError, IndexError):
+                continue
+        med = None
+        if len(vals) >= max(1, int(getattr(self.policy, 'slow_latency_min_peers',
+                                            SLOW_LATENCY_MIN_PEERS))):
+            vals.sort()
+            med = vals[len(vals) // 2]
+        cache[ck] = (med, now)
+        return med
+
+    def _fleet_global_median(self):
+        """Mediana GLOBALE degli EMA: baseline quando il bucket non ha dati
+        (es. chiamate senza ctx). Cache 60s."""
+        now = time.time()
+        cache = getattr(self, "_fleet_cache", None)
+        if cache is None:
+            cache = {}
+            self._fleet_cache = cache
+        c = cache.get("__global__")
+        if c and now - c[1] < 60.0:
+            return c[0]
+        vals = [float(v) for v in (getattr(self, "_avg_latencies", {}) or {})
+                .values() if v and float(v) > 0]
+        med = None
+        if len(vals) >= max(1, int(getattr(self.policy, 'slow_latency_min_peers',
+                                            SLOW_LATENCY_MIN_PEERS))):
+            vals.sort()
+            med = vals[len(vals) // 2]
+        cache["__global__"] = (med, now)
+        return med
+
+    def _expected_latency_ms(self, unique: str, ctx_est=None,
+                             kind: str = "total"):
+        """Latenza ATTESA per questa taglia: mediana di flotta del bucket,
+        altrimenti mediana GLOBALE, altrimenti il bucket del dep, altrimenti
+        stima dal rate (prefill + generazione)."""
+        med = self._fleet_bucket_median(kind, _ctx_bucket(ctx_est))
+        if med and med > 0:
+            return float(med)
+        gmed = self._fleet_global_median()
+        if gmed and gmed > 0:
+            return float(gmed)
+        # NIENTE fallback all'EMA propria del dep: sarebbe baseline di se
+        # stesso e "lento" non scatterebbe MAI. Senza flotta si stima dal
+        # rate, altrimenti legacy 90s (vedi _slow_threshold_ms).
+        try:
+            cx = int(ctx_est or 0)
+        except (TypeError, ValueError):
+            cx = 0
+        if cx <= 0:
+            return None
+        r = (getattr(self, "_prefill_rate", {}) or {}).get(unique)
+        if not r or r <= 0:
+            return None
+        ttft = max(TTFT_RATE_FLOOR_MS, float(r) * cx / 1000.0)
+        if kind == "ttft":
+            return ttft
+        g = (getattr(self, "_gen_rate", {}) or {}).get(unique)
+        if g and g > 0:
+            return ttft + (SLOW_TYPICAL_COMPLETION_TOKENS / float(g)) * 1000.0
+        return ttft * SLOW_GEN_MULT
+
+    def _slow_threshold_ms(self, unique: str, ctx_est=None,
+                           kind: str = "total") -> float:
+        """Soglia size-aware oltre la quale un dep e' "lento"."""
+        base = self._expected_latency_ms(unique, ctx_est, kind)
+        if not base or base <= 0:
+            return float(LATENCY_ROTATE_THRESHOLD_MS)
+        return max(float(SLOW_LATENCY_ABS_FLOOR_MS),
+                   float(SLOW_LATENCY_REL_MULT) * float(base))
+
+    # ---- caccia al sostituto: budget/backoff (anti-spreco) ---------------
+    def hunt_allowed(self, session_id: str | None, ctx_est=None) -> bool:
+        """False se per questa sessione/bucket la caccia e' in backoff (una
+        caccia senza guadagno = il buono non esiste) o ha superato il cap."""
+        if not session_id:
+            return True
+        st = (getattr(self, "_hunt_state", None) or {}).get(
+            (session_id, _ctx_bucket(ctx_est)))
+        if not st:
+            return True
+        now = time.time()
+        if float(st.get("backoff_until") or 0.0) > now:
+            return False
+        dq = st.get("races")
+        if dq:
+            win = float(getattr(self.policy, "hunt_window_sec", 3600) or 3600)
+            while dq and now - dq[0] > win:
+                dq.popleft()
+            cap = int(getattr(self.policy, "hunt_max_per_window", 5) or 0)
+            if cap > 0 and len(dq) >= cap:
+                return False
+        return True
+
+    def note_hunt(self, session_id: str | None, ctx_est, gained: bool) -> None:
+        """Registra una caccia; senza guadagno (nessun canary migliore) mette
+        in backoff per `hunt_backoff_sec`: non si ri-caccia a ogni turno su un
+        modello che E' il migliore disponibile per quella taglia."""
+        if not session_id:
+            return
+        now = time.time()
+        hs = getattr(self, "_hunt_state", None)
+        if hs is None:
+            hs = {}
+            self._hunt_state = hs
+        st = hs.setdefault(
+            (session_id, _ctx_bucket(ctx_est)),
+            {"races": deque(), "backoff_until": 0.0})
+        st["races"].append(now)
+        if not gained:
+            st["backoff_until"] = now + float(
+                getattr(self.policy, "hunt_backoff_sec", 600) or 600)
+
     def _is_slow_dep(self, unique: str, ctx_est=None) -> bool:
         """True se la latenza del deployment supera la soglia di rotazione
         (LATENCY_ROTATE_THRESHOLD_MS, 90s di default).
@@ -2535,7 +2709,9 @@ class Router:
         sopra soglia lo fa USCIIRE dal pool caldo e dallo sticky, ma resta
         eleggibile nel ladder come riserva (non lo mettiamo in quarantena)."""
         avg = self.bucket_latency_ms(unique, ctx_est)
-        return avg is not None and float(avg) > LATENCY_ROTATE_THRESHOLD_MS
+        if avg is None:
+            return False
+        return float(avg) > self._slow_threshold_ms(unique, ctx_est)
 
     def is_slow_for_session(self, unique: str,
                             session_id: str | None = None,
@@ -2623,10 +2799,11 @@ class Router:
                                       kind="ttft" if kind == "ttft" else "total")
         relative_ok = base is None or base <= 0 or lat is None \
             or lat > SLOW_REL_BASELINE_MULT * float(base)
-        hard = (lat is not None and lat > LATENCY_ROTATE_THRESHOLD_MS
-                and relative_ok)
+        _thr = self._slow_threshold_ms(unique, ctx_est, kind)
+        hard = (lat is not None and lat > _thr and relative_ok)
         soft = (not hard) and lat is not None \
-            and lat > SOFT_SLOW_LATENCY_MS and heavy and relative_ok
+            and lat > max(SOFT_SLOW_LATENCY_MS, _thr * 0.6) \
+            and heavy and relative_ok
         if hard or soft:
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
         else:
@@ -2648,13 +2825,26 @@ class Router:
 
     def _is_demoted_dep(self, unique: str,
                         session_id: str | None = None,
-                        ctx: int | None = None) -> bool:
+                        ctx: int | None = None,
+                        allow_slow: bool = False) -> bool:
         """Dep fuori dai tier 'economici' per la sessione: EMA globale sopra
         soglia OPPURE successo lento registrato per QUESTA sessione (hard:
         sempre; soft: solo con ctx pesante > SOFT_SLOW_CTX_MIN). Resta
-        eleggibile nell'ultimo scaglione (-fallback/ultima spiaggia)."""
+        eleggibile nell'ultimo scaglione (-fallback/ultima spiaggia).
+
+        Con `allow_slow=True` (warm/sticky/holder) la LATENZA non demote: un
+        successo lento va comunque registrato nel warm (cosi' la sessione lo
+        conosce e la gara puo' cercargli un sostituto). Una chiave SATURA
+        (soft-429/fault) resta invece SEMPRE fuori."""
+        if self._key_fault_blocked(unique):
+            return True
+        if allow_slow:
+            return False
         return (self._is_slow_dep(unique, ctx)
                 or self.is_slow_for_session(unique, session_id, ctx))
+
+    def _warm_allow_slow(self) -> bool:
+        return bool(getattr(self.policy, "warm_pool_allow_slow", True))
 
     def first_content_deadline_ms(self, unique: str, ctx_est=None) -> int:
         """Finestra d'attesa del primo contenuto per `unique`.
@@ -2963,6 +3153,29 @@ class Router:
         lifecycle (successo = prova di vita), senza spendere probe."""
         return self.is_retired(unique) and not self._retired_permanent(unique)
 
+    def _prune_wake_times(self, now: float | None = None) -> None:
+        """Pota i timestamp di wakeup oltre la finestra (memoria)."""
+        now = now if now is not None else time.time()
+        _win = max(1.0, float(getattr(
+            self.policy, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
+        for u, dq in list((getattr(self, "_wake_times", None) or {}).items()):
+            while dq and now - dq[0] > _win:
+                dq.popleft()
+            if not dq:
+                getattr(self, "_wake_times", {}).pop(u, None)
+
+    def _prune_hunt_state(self, now: float | None = None) -> None:
+        now = now if now is not None else time.time()
+        win = float(getattr(self.policy, "hunt_window_sec", 3600) or 3600)
+        for k, st in list((getattr(self, "_hunt_state", None) or {}).items()):
+            dq = st.get("races")
+            while dq and now - dq[0] > win:
+                dq.popleft()
+            if not dq and float(st.get("backoff_until") or 0.0) <= now:
+                getattr(self, "_hunt_state", {}).pop(k, None)
+        if len(self._fleet_cache) > 4096:
+            self._fleet_cache.clear()
+
     def purge_expired(self) -> tuple[int, int]:
         """Rimuove sticky scadute e cooldown espirati (chiamato dal watcher).
 
@@ -2972,6 +3185,8 @@ class Router:
         [Blocco 1] Ora include anche la pulizia di _stats (memory leak fix):
         rimuove entry stale (>48h) per prevenire crescita infinita della memoria.
         """
+        self._prune_hunt_state()
+        self._prune_wake_times()
         now = time.time()
         self._decay_scores(now)     # time-decay reputazione (halflife policy)
         dead_sessions = [s for s, (_t, ts) in self._sticky.items()
@@ -4662,6 +4877,107 @@ class Router:
             return preferred[0]
         return None
 
+    def note_warm_owner(self, session_id: str | None, unique: str) -> None:
+        """Registra la PROVA DI FUNZIONAMENTO di un deployment per la sessione
+        (solo ownership warm, NIENTE holder/reputazione/latency).
+
+        Usata per i canary che hanno PRODOTTO contenuto ma hanno perso la gara:
+        il deploy e' buono (l'abbiamo visto rispondere), quindi entra subito
+        nella lista warm del profilo. Cosi' il prossimo giro la warm sa gia'
+        dove andare e non serve andare a caccia. Non diventa holder: il primo
+        posto resta di chi ha servito davvero la risposta."""
+        if not session_id or not unique:
+            return
+        try:
+            self._note_dep_session(session_id, unique)
+        except Exception:                      # mai rompere la risposta
+            log.debug("[warm] note_warm_owner %s fallito", unique,
+                      exc_info=True)
+
+    def _is_known_nonstream(self, unique: str) -> bool:
+        """True se il dep e' noto per IGNORARE stream:true (risponde JSON e
+        viene adattato). Un canary cosi' non puo' vincere la gara: lo si
+        esclude dal pool dei sostituti."""
+        s = self._stats.get(unique)
+        return bool(s and getattr(s, "json_fallback", 0) >= 2)
+
+    def hedge_canaries(self, profile: str | None, dep: dict,
+                       need: frozenset[str] | None, ctx: int | None,
+                       tried: set[str] | None, requested_group: str | None,
+                       k: int = 2, exclude: set[str] | None = None,
+                       fresh_only: bool = False) -> list[dict]:
+        """Fino a `k` candidati NUOVI per la gara sul primo contenuto.
+
+        Regole: mai A ne' i gia' provati; mai bucket pagati (-go/-fallback);
+        mai ritirati permanenti; mai sotto il floor di dim richiesto dal
+        client; mai dep noti non-streaming. Tier CRESCENTI: prima i tier
+        diversi da quello di A, poi (se serve) quello di A. Con
+        `fresh_only=True` (eletto warm lento) si esclude TUTTO il warm della
+        sessione (vogliamo candidati nuovi) e si preferiscono i MENO USATI
+        nelle 24h."""
+        k = max(1, int(k))
+        a_u = dep.get("unique")
+        ex = set(tried or ())
+        if a_u:
+            ex.add(a_u)
+        for u in (exclude or ()):
+            if u:
+                ex.add(u)
+        if fresh_only:
+            try:
+                ex |= set(self._sess_deps().get(current_session(), ()))
+            except Exception:                  # noqa: BLE001
+                pass
+        floor = 0
+        if requested_group:
+            try:
+                floor = int(self._group_min_dim(requested_group) or 0)
+            except Exception:                  # noqa: BLE001
+                floor = 0
+        a_group = dep.get("group")
+        ladder = self.config.chains.get(profile or "", []) or []
+        tiers: list[tuple[int, str, list[str]]] = []
+        cur_g = None
+        cur: list[str] = []
+        cur_mxi = 0
+        for u in ladder:
+            d = self.config.deployment_by_unique(u)
+            if not d:
+                continue
+            g = str(d.get("group") or "")
+            if not self._free_group(g):
+                continue                       # solo dim gratis
+            if self.is_retired(u):
+                if not self._retired_usable(u):
+                    continue
+                continue                       # i ritirati non sono canary
+            mxi = int(d.get("max_input_tokens") or 0)
+            if floor and mxi and mxi < floor * 1000:
+                continue                       # mai sotto la dim richiesta
+            if self._is_known_nonstream(u):
+                continue
+            if g != cur_g:
+                if cur:
+                    tiers.append((cur_mxi, cur_g, cur))
+                cur_g, cur, cur_mxi = g, [], mxi
+            cur.append(u)
+        if cur:
+            tiers.append((cur_mxi, cur_g, cur))
+        tiers.sort(key=lambda t: (t[1] == a_group, t[0]))
+        out: list[dict] = []
+        taken: set[str] = set()
+        for _mxi, _g, us in tiers:
+            if len(out) >= k:
+                break
+            if fresh_only:
+                us = sorted(us, key=lambda u: self.usage_weight_24h(u))
+            got = self._walk_chain(us, None, need, ctx, tried=ex)
+            if got is not None and got["unique"] not in taken:
+                taken.add(got["unique"])
+                ex.add(got["unique"])
+                out.append(got)
+        return out[:k]
+
     def prelast_shared(self, uniques: list[str], failed_unique: str | None,
                        need: frozenset[str] | None = None,
                        ctx: int | None = None,
@@ -4807,9 +5123,9 @@ class Router:
                 continue
             if self.is_cooled_down(u) or self._gemini_blocked(dep):
                 continue
-            if self._is_demoted_dep(u, sid, ctx):
-                log.debug("[warm] skip lento (ema>%.0fms o lento-sessione): %s",
-                          LATENCY_ROTATE_THRESHOLD_MS, u)
+            if self._is_demoted_dep(u, sid, ctx,
+                                    allow_slow=self._warm_allow_slow()):
+                log.debug("[warm] skip (chiave satura o demote): %s", u)
                 continue
             if need and not self._dep_supports(dep, need):
                 continue
@@ -4836,7 +5152,8 @@ class Router:
                      ctx: int | None = None,
                      session_id: str | None = None,
                      warm: bool = True,
-                     prefer_holder: bool = False) -> dict | None:
+                     prefer_holder: bool = False,
+                     prefer_fast: bool = False) -> dict | None:
         """Prima selezione dentro un gruppo; nessun candidato vivo ->
         cammina la catena DEL MONDO del gruppo (cap-chain per -C, testo
         per dims/-go/-fallback). Sostituisce pick+fallback_after in main.
@@ -4861,6 +5178,19 @@ class Router:
                     need=need, ctx=ctx)
                 if _warm:
                     _dep = _warm[0]
+                    # P3 (non-stream): se l'eletto e' LENTO e c'e' un caldo
+                    # non-lento della stessa sessione, prendi quello (niente
+                    # gara in non-stream: meglio non pagare un prefill lento).
+                    if prefer_fast and self._is_demoted_dep(
+                            _dep["unique"], session_id, ctx):
+                        for _alt in _warm[1:]:
+                            if not self._is_demoted_dep(
+                                    _alt["unique"], session_id, ctx):
+                                log.info("[warm] %s: eletto lento -> prendo "
+                                         "il caldo non-lento %s",
+                                         _dep["unique"], _alt["unique"])
+                                _dep = _alt
+                                break
                     log.info("[warm] initial_pick %s -> %s (caldo proprio: "
                              "my_success, max_in=%s)", group_name, _dep["unique"],
                              int(_dep.get("max_input_tokens") or 0))
@@ -4895,7 +5225,9 @@ class Router:
                     and not self.is_cooled_down(sticky_dep) \
                     and not self._gemini_blocked(sd) \
                     and not self.other_session_recent(sticky_dep) \
-                    and not self._is_demoted_dep(sticky_dep, session_id, ctx) \
+                    and not self._is_demoted_dep(
+                        sticky_dep, session_id, ctx,
+                        allow_slow=self._warm_allow_slow()) \
                     and self._cap_fits(sd, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
@@ -5127,46 +5459,6 @@ class Router:
         if nxt is not None:
             return nxt
 
-        # 1bis) dims cooldown-wakeup: prova i dim RAFFREDDATI da più tempo
-        # (stantii, cooldown_age >= stale_cooldown_retry_sec) e con cooldown
-        # residuo minore, PRIMA di saltare a -go (a pagamento). Fino a
-        # `ladder_cooldown_wakeups` risvegli per richiesta (oltre a quello del
-        # dim esplicito in initial_pick): così anche gli step intermedi provano
-        # a risvegliare un cooldown invece di andare subito a -go. Stessa soglia
-        # degli "stantii" della scala, per non martellare un cooldown fresco.
-        _tried_set = tried or set()
-        _dims_set = set(dims)
-        _max_wake = max(0, int(getattr(pol, "ladder_cooldown_wakeups", 3) or 0))
-        _woken = 0
-        if _max_wake > 0:
-            for u in _tried_set:
-                if u not in _dims_set or not self.is_cooled_down(u):
-                    continue
-                _cage = self.cooldown_age(u)
-                if _cage is not None and _cage >= age:
-                    _woken += 1
-        _cooled_dims = []
-        if _woken < _max_wake:
-            for u in _chronic_filter(dims, True):
-                if u in _tried_set or not self.is_cooled_down(u):
-                    continue
-                if self.is_slow_for_session(u, ctx=ctx):
-                    continue
-                _cage = self.cooldown_age(u)
-                if _cage is None or _cage < age:
-                    continue                       # cooldown fresco: non svegliare
-                _cooled_dims.append(u)
-        if _cooled_dims:
-            _cooled_dims.sort(
-                key=lambda u: self.cooldown_residual(u))
-            _wake_u = _cooled_dims[0]
-            _wake = cfg.deployment_by_unique(_wake_u)
-            if _wake is not None:
-                _rem = int(self.cooldown_residual(_wake_u))
-                log.info("[ladder] dims cooldown-wakeup (%d/%d): residuo %ds "
-                         "-> %s", _woken + 1, _max_wake, _rem, _wake_u)
-                return _wake
-
         # 1ter) PRE-ULTIMA SPIAGGIA (fra l'ultimo -dim e -go): dims VIVI che
         #    un'ALTRA sessione ha servito con successo negli ultimi
         #    session_dep_guard_sec. Sono occupati -> la sessione corrente li
@@ -5175,6 +5467,62 @@ class Router:
         _shared = self.prelast_shared(dims, failed_unique, need, ctx, tried)
         if _shared is not None:
             return _shared
+
+        # 1bis) dims cooldown-wakeup: SOLO cooldown nati da QUOTA/429 (una
+        #    chiave satura e' VIVA: il cooldown puo' essere piu' lungo della
+        #    finestra di quota) e con cooldown_age >= stale_cooldown_retry_sec.
+        #    Budget A FINESTRA (`ladder_cooldown_wakeups` per
+        #    `ladder_cooldown_wakeup_window_sec`): niente riesumazioni ripetute
+        #    degli stessi. Scelta: residuo minore (il piu' vicino a scadere).
+        #    Filtri allineati a _walk_chain (other_session_recent, retired,
+        #    gemini/model breaker, need, cap_fits, slow-sessione/soft-429).
+        _now_w = time.time()
+        _win = max(1.0, float(getattr(
+            pol, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
+        _max_wake = max(0, int(getattr(pol, "ladder_cooldown_wakeups", 20) or 0))
+        if _max_wake > 0:
+            _tried_w = tried or set()
+            _cooled_dims = []
+            for u in _chronic_filter(dims, True):
+                if u in _tried_w or u == failed_unique:
+                    continue
+                if not self.is_cooled_down(u):
+                    continue
+                _cage = self.cooldown_age(u)
+                if _cage is None or _cage < age:
+                    continue                       # cooldown fresco
+                if not _is_quota_evidence(
+                        getattr(self.stats_for(u), "last_reason", None)):
+                    continue                       # solo nati da 429/quota
+                _du = cfg.deployment_by_unique(u)
+                if _du is None or self.is_retired(u) \
+                        or self._gemini_blocked(_du) or self._model_blocked(_du):
+                    continue
+                if self.other_session_recent(u):
+                    continue
+                if self.is_slow_for_session(u, ctx=ctx):
+                    continue
+                if need and not self._dep_supports(_du, need):
+                    continue
+                if not self._cap_fits(_du, ctx):
+                    continue
+                _dq = self._wake_times.get(u)
+                if _dq:
+                    while _dq and _now_w - _dq[0] > _win:
+                        _dq.popleft()
+                    if len(_dq) >= _max_wake:
+                        continue                   # budget finestra esaurito
+                _cooled_dims.append(u)
+            if _cooled_dims:
+                _cooled_dims.sort(key=lambda u: self.cooldown_residual(u))
+                _wake_u = _cooled_dims[0]
+                _wake = cfg.deployment_by_unique(_wake_u)
+                if _wake is not None:
+                    self._wake_times.setdefault(_wake_u, deque()).append(_now_w)
+                    log.info("[ladder] dims cooldown-wakeup 429 (budget %d/%ds):"
+                             " residuo %ds -> %s", _max_wake, int(_win),
+                             int(self.cooldown_residual(_wake_u)), _wake_u)
+                    return _wake
 
         # 2) -go vivi
         nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
@@ -5185,7 +5533,10 @@ class Router:
         # 3) dims stantii (max stale_max) — mai i cronici (Leva B).
         #    Opzionale: `ladder_stale_max=0` disattiva (l'autoprobe risveglia).
         if stale_max > 0:
-            nxt = self._walk_chain(_chronic_filter(dims, True), failed_unique,
+            _q_dims = [u for u in _chronic_filter(dims, True)
+                       if _is_quota_evidence(
+                           getattr(self.stats_for(u), "last_reason", None))]
+            nxt = self._walk_chain(_q_dims, failed_unique,
                                    need, ctx,
                                    min_cooldown_age=age, limit=stale_max,
                                    tried=tried)

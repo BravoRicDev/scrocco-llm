@@ -84,10 +84,17 @@ no restart.
 **Where did my request go?** every request logs one `[summary]` line;
 routing state per deployment: `GET /admin/state` (includes
 `adaptive.session_dep_guard` and `adaptive.warm_pool`). Useful tags:
-`[prelast]` (shared deployment tier), `[warm]` (own warm-pool tier; never a
-dim below the requested `-Nk`; drops deps whose latency EMA exceeds 90s or
-that were slow for this session from warm/sticky/cache-holder and from the
-cheap selections — same session only, re-fished at `-fallback`),
+`[prelast]` (shared deployment tier, tried BEFORE cooldown wakeups),
+`[warm]` (own warm-pool tier; never a dim below the requested `-Nk`; with
+`warm_pool.allow_slow=false` deps slower than the size-aware threshold leave
+warm/sticky/cache-holder and are re-fished only at `-fallback`; by default
+slow deps STAY in warm and the race hunts them a NEW substitute),
+`[ladder] dims cooldown-wakeup 429` (revives only dims whose last failure
+was quota, budget 20/window per dep, before the paid `-go`),
+`[estimate] auto-adaptive ON` / `[latency-penalty]` (slow = worse than
+`max(slow_latency_abs_floor_ms, slow_latency_rel_mult x fleet median/rate
+estimate)` — a 128k in 100s is NOT slow), `[hedge]`/`[hunt]` backoff
+(a race that found nothing better suspends hunting for `hunt_backoff_sec`),
 `[maxtok]` (`max_tokens` clamped to the window: minus a 5% safety margin and,
 for `effort_capable` deps, minus a reasoning reserve — `nx_max_tokens_clamped`
 counts the clamps), `[autoprobe]`
@@ -137,8 +144,13 @@ conversation prefix CHANGED between requests: `identity`/`prefix` verdicts;
 the same verdict also labels `nx_chain_503_total`, the breadcrumb telling
 how many retryable 503 were a prefix-mutation cache miss rather than a dead
 provider),
-`[hedge]` (cold-chain first-content race: one canary, pre-commit only, the
-loser is cancelled unpunished, never toward paid buckets), `[key-soft]`
+`[hedge]` (first-content race when warm cannot help — cold chain, slow warm
+holder, or tried holder: up to `stream_hedge_tiers` canaries on NEW candidates
+in ascending other tiers (never paid, never below the requested dim, never
+`json_fallback>=2`; when replacing the slow warm holder the warm list itself
+is excluded and least-used-24h are preferred), pre-commit only, losers
+cancelled unpunished; a loser that produced content still becomes
+warm-ownership evidence), `[key-soft]`
 (per-api-key 429 blackout for Retry-After seconds: soft skip of every row
 sharing the key — no strikes, no reputation loss; near-exhausted rate
 headers do the same, TTL `rate_hint_ttl_sec`), `[cooldown-class]` (which

@@ -42,10 +42,14 @@ individual account limits instead of dying on the first 429.
   failure in the last 24h, capped at 5h). **Timeouts are penalised 10×**
   because a hung upstream costs real wall-clock time.
 - **Resilient ladder**: at most `ladder_skip_after` attempts per context
-  group before climbing, up to `ladder_cooldown_wakeups` stale-cooldown
-  revivals (tried *before* jumping to `-go`), a *chronic parachute* for
-  high-failure keys before spending on the paid `-fallback`, and a final
-  last-resort pass. A dead bucket never blocks the whole chain for minutes.
+  group before climbing, then **shared-alive dims already served by another
+  session** (session collaboration, tried *before* waking cooldowns), then up
+  to `ladder_cooldown_wakeups` cooldown revivals **only for dims whose last
+  failure was quota/429** (a saturated key is alive: its cooldown can outlast
+  the quota window; a 503/timeout-cooled dim is NOT revived here) within a
+  `ladder_cooldown_wakeup_window_sec` per-dep budget, and only then the paid
+  `-go`, a *chronic parachute*, and a final last-resort pass. A dead bucket
+  never blocks the whole chain for minutes.
 - **Escalation winner + pre-pin probe**: when a request climbs out of a dead
   bucket and a higher group serves it, that winner is remembered *per
   requested bucket*. The next request still tries its own bucket, makes one
@@ -139,15 +143,26 @@ individual account limits instead of dying on the first 429.
   that request labels the counter, so retryable 503s caused by a mutated
   prefix (cache miss perceived as "dead provider") are countable.
 - **First-content hedge** (`qc_json.stream_hedge_delay_ms`, default 1500,
-  0 = off): on the FIRST attempt of a cache-COLD streaming chain, if the
-  chosen upstream has no content after the delay, ONE canary opens on the
-  next candidate and whoever commits first wins — everything is pre-byte, so
-  the loser is cancelled without punishment and paid buckets (`-go`/
-  `-fallback`) are never eligible canaries. The delay is **adaptive to the
-  context bucket** (`stream_hedge_ttft_frac`/`_min_ms`/`_max_ms`): on >128k
-  contexts the median TTFT *is* 4-6 s, so the canary waits
-  `clamp(TTFT_p50_bucket × 0.6, 800, 2500) ms` instead of firing as noise on
-  every heavy request.
+  0 = off): whenever the WARM pool cannot help (cold chain, or the session
+  holder is itself a SLOW dep, or the holder was already tried), after the
+  delay — **adaptive to the context bucket** (`stream_hedge_ttft_frac`/
+  `_min_ms`/`_max_ms`: `clamp(TTFT_p50_bucket × 0.6, 800, 2500) ms`, so on
+  >128k it never fires as noise) — up to `stream_hedge_tiers` (default 2 →
+  3 concurrent requests) canaries race on **NEW candidates** with
+  `stream_hedge_cross_tier` (default true): ascending *different* dim tiers,
+  never below the client's requested dim, never paid buckets, never deps
+  known to ignore `stream:true` (`json_fallback >= 2`). When the elected
+  candidate is the SLOW warm holder the canaries deliberately exclude the
+  warm list itself and prefer the session's LEAST-USED deps in 24 h — the
+  hunt must discover a replacement, not rehash the same list. Whoever commits
+  content first wins; losers are cancelled pre-byte without punishment, but a
+  loser that DID produce content is registered as warm-ownership evidence for
+  the session (`note_warm_owner`, holder/reputation untouched): the good-dep
+  park fills up on the fly and active hunting becomes rare. Races may repeat
+  at every rotation (`stream_hedge_max_races = 0` = unlimited), bounded only
+  by the stream deadline/tries — plus a session+bucket **backoff**
+  (`hunt_backoff_sec`, default 600) after a race that found nothing better:
+  if no replacement beats the current one we stop paying for the hunt.
 - **Token-weighted concurrency** (`conc_token_ratio`, default 0.5): the
   inflight limiter weighs the REAL prefill (`inflight_tokens += ctx_est`),
   not the request count — 3 Hermes turns of 90k are 270k tokens of concurrent
@@ -213,11 +228,14 @@ individual account limits instead of dying on the first 429.
   then smallest `max_input`. Applies to automatic routing and explicit `-Nk`
   dims; never to `-go`/`-fallback` (deliberate paid escalation). The window is
   `session_dep_guard_sec` (or `ttl_sec`); `max_attempts` caps the pool (0 =
-  unlimited). Log tag `[warm]`. A dep whose latency EMA exceeds
-  `LATENCY_ROTATE_THRESHOLD_MS` (90s), **or that was slow for this session**
-  (per-session latch), is excluded from the warm pool, sticky and cache-holder:
-  it still competes as a normal ladder reserve, and for the same session it
-  only becomes fishable again at the last stage (`-fallback`/last resort). The
+  unlimited). Log tag `[warm]`. `warm_pool.allow_slow` (default **true**)
+  admits slow deps (latency over the size-aware threshold) into warm/sticky/
+  holder: a slow success is still recorded so the session KNOWS it, while the
+  hedge above races a NEW substitute — when the holder itself is the slow
+  election, the race starts from it. A SATURATED key (soft-429/fault) is
+  always excluded. With `allow_slow=false` the old rule applies: slow deps
+  leave warm/sticky/holder and are fishable again only at the last stage
+  (`-fallback`/last resort). The
   warm pool never picks a dim **smaller** than the requested one: for an
   explicit `...-200k` it ignores warm `-64k` deps of the same session (the
   `-Nk` is the client's *minimum*).
@@ -525,7 +543,7 @@ template. The ones that matter most:
 | `cooldown_mode` / `cooldown_base_min` / `cooldown_linear_mult_min` | `linear` / 30 / 30 | linear cooldown: 30 min + 30 min per failure/24h |
 | `max_cooldown_sec` | 18000 | cooldown ceiling (5 h) |
 | `timeout_cooldown_mult` | 10 | multiplier applied to a *timeout* failure |
-| `ladder_skip_after` / `ladder_stale_max` / `ladder_cooldown_wakeups` | 10 / 3 / 3 | attempts per dim before climbing / stale revivals / cooled-dim wakeup probes per request before `-go` |
+| `ladder_skip_after` / `ladder_stale_max` / `ladder_cooldown_wakeups` / `ladder_cooldown_wakeup_window_sec` | 10 / 3 / 20 / 3600 | attempts per dim before climbing / stale revivals after `-go` / solo-429 cooldown wakeups per window, tried before `-go`, per-dep |
 | `cold_spread_pct` | 0.20 | cold-pick load spreading: hide the top % most-attempted dims (last 24h, ok+fail) so under-used providers get traffic regardless of `order`; session-owned deps are always exempt; also sets `min_pool = ladder_skip_after` |
 | `initial_pick_cooldown_wakeup` | true | retry a stale cooled dim at the very first pick (before esc-win/ladder) |
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
@@ -537,13 +555,14 @@ template. The ones that matter most:
 | `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO residual at least doubles (min +grow, rotate targets); min gap between probes; probe timeout |
 | `cooldown_autoprobe_multiply_24h` / `cooldown_autoprobe_skip_over_sec` | true / 7200 | KO increment × probes in the last 24h (1×, 2×, 3×…); cooled > 2h excluded from probing (ladder wakeup / last resort / time will retry) |
 | `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 900 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |
-| `warm_pool.enabled` / `warm_pool.ttl_sec` / `warm_pool.max_attempts` | true / 0 / 0 | tier "caldi" prima del `-dim` e della scala: esaurisce i free-dims serviti con successo da QUESTA sessione (ordine: cache-holder, MRU, `order`, `max_input`); `ttl_sec=0` usa `session_dep_guard_sec`; `max_attempts=0` illimitato; esclude i dep lenti (EMA > 90s o lenti-per-sessione) e non pesca mai dim < richiesta |
+| `warm_pool.enabled` / `warm_pool.ttl_sec` / `warm_pool.max_attempts` / `warm_pool.allow_slow` | true / 0 / 0 / true | tier "caldi" prima del `-dim` e della scala: esaurisce i free-dims serviti con successo da QUESTA sessione (ordine: cache-holder, MRU, `order`, `max_input`); `ttl_sec=0` usa `session_dep_guard_sec`; `max_attempts=0` illimitato; esclude i dep lenti (EMA > 90s o lenti-per-sessione) e non pesca mai dim < richiesta |
 | `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
 | `escalation_pin` / `escalation_pin_probe_dims` | true / 2 | escalation-winner shortcut and pre-pin probe count |
 | `qc_json.stream_first_content_ms` / `stream_total_deadline_ms` | 240000 / 960000 | first-content deadline per deployment / total request deadline |
 | `qc_json.stream_first_content_adaptive` / `stream_first_content_mult` / `stream_first_content_floor_ms` | true / 3.0 / 20000 | adaptive first-content deadline: `min(stream_first_content_ms, max(floor, mult * latency EMA))`; unknown EMA -> the cap. Avoids holding a 180s window on a normally-fast dep that stalled; the EMA used is the bucket of the CURRENT request (TTFT table) |
-| `qc_json.stream_hedge_delay_ms` | 1500 | cold-chain first-content hedge: wait N ms, then ONE canary on the next candidate, commit whoever answers first (stream only, pre-byte, never paid buckets); 0 = off |
+| `qc_json.stream_hedge_delay_ms` | 1500 | first-content hedge: wait N ms (adaptive per bucket), then race canaries, commit whoever answers first (stream only, pre-byte, never paid buckets); 0 = off |
+| `qc_json.stream_hedge_cross_tier` / `stream_hedge_tiers` / `stream_hedge_max_races` | true / 2 / 0 | canary on NEW candidates in ascending different tiers (never below the requested dim; warm-lento case: exclude the warm list, least-used 24h); max concurrent = 1+tiers; races per request (0 = every rotation, then `hunt_backoff_sec`) |
 | `error_class_cooldowns` / `cooldown_transient_sec` / `cooldown_timeout_sec` | true / 15 / 60 | class-aware cooldowns: 503/529 and 500/timeout pause only that deployment briefly, key reputation untouched; 429/quota never penalizes reputation (per-key soft blackout instead); explicit `seconds` always wins. false = legacy (`timeout_cooldown_mult` x10) |
 | `cooldown_jitter_sec_max` | 2.0 | deterministic per-deployment cooldown spread `sha256(unique) → 0..2 s` (also on the per-key 429 blackout); 0 = off. Replaces the random `cooldown_jitter_ratio` (now 0) |
 | `stream_stall_ttft_mult` / `stream_stall_max_sec` | 2.5 / 60 | adaptive anti-stall watchdog: `max(stream_stall_sec, min(TTFT_p50_bucket × mult, max_sec))`; empty bucket → base |
@@ -581,6 +600,8 @@ template. The ones that matter most:
 | `conc_token_ratio` | 0.5 | token-weighted concurrency: skip a row when `inflight_tokens + ctx_est > max_input × ratio`; hard count cap `conc_max_limit` still applies; 0 = legacy counting |
 | `estimate_calib_alpha` | 0.05 | EMA rate at which each deployment's learned token divisor converges to the real one (`base/(prompt_tokens/ctx_est)`), clamped 1.5..4.5, persisted; 0 = off |
 | `qc_json.stream_hedge_ttft_frac` / `stream_hedge_min_ms` / `stream_hedge_max_ms` | 0.6 / 800 / 2500 | adaptive hedge delay per context bucket: `clamp(TTFT_p50_bucket × frac, min, max)`; unknown TTFT falls back to `stream_hedge_delay_ms` |
+| `slow_latency_abs_floor_ms` / `slow_latency_rel_mult` / `slow_latency_min_peers` | 45000 / 2.0 / 5 | size-aware "slow" threshold: `max(floor, rel x atteso)` where the expectation is the fleet median in the context bucket -> global median -> prefill/gen rate -> 90s legacy |
+| `hunt_backoff_sec` / `hunt_max_per_window` / `hunt_window_sec` | 600 / 5 / 3600 | substitute-hunt budget: after a race that found nothing better, no new races for that session+bucket for N sec; hard cap of races per window |
 | `request_coalescing_cache_sec` | 0 | also serve an identical non-stream payload arriving within this many seconds after the leader completed (credits/cost halved for tight retries/subagents); 0 = in-flight only |
 
 ## Security model

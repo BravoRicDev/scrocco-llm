@@ -67,6 +67,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         set_adaptive_timeout, set_latency_lookup,
                         set_reasoning_reserve,
                         set_estimate_defaults, set_ttft_lookup,
+                        set_nonstream_hook,
                         set_stall_bucket,
                         set_schemaout_config,
                         QUOTA_MIN_COOLDOWN_S)
@@ -182,6 +183,17 @@ set_stall_bucket(multiplier=policy.stream_stall_ttft_mult,
                  max_sec=policy.stream_stall_max_sec)
 set_estimate_defaults(policy.estimate_divisor,
                       getattr(policy, "image_token_estimate", 0) or 0)
+
+# P4: i dep che IGNORANO stream:true vengono annotati (json_fallback++) e poi
+# esclusi dai canary: un non-streaming non puo' vincere la gara.
+def _note_json_fallback(_u):
+    try:
+        if _u:
+            router.stats_for(_u).json_fallback += 1
+    except Exception:                          # noqa: BLE001
+        pass
+
+set_nonstream_hook(_note_json_fallback)
 set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
                      floor_sec=policy.adaptive_timeout_floor_sec,
                      multiplier=policy.adaptive_timeout_multiplier,
@@ -1456,9 +1468,11 @@ async def chat_completions(request: Request, response: Response):
         if _max_grp > 0 and ctx_est and ctx_est > int(_max_grp * 1.05):
             from .ctxcompact import (compact_tool_outputs,
                                      ctxcompact_config_from_policy)
-            import dataclasses as _dc
-            _ccf = _dc.replace(ctxcompact_config_from_policy(router.policy),
-                               min_saved_tokens=0)
+            # NB: CtxCompactConfig NON e' un dataclass -> niente
+            # `dataclasses.replace` (TypeError a runtime: era il bug di
+            # viemmegi). E' un'istanza fresca per chiamata: si muta il campo.
+            _ccf = ctxcompact_config_from_policy(router.policy)
+            _ccf.min_saved_tokens = 0
             _img = getattr(router.policy, "image_token_estimate", 0) or 0
             _forced, _frep = compact_tool_outputs(
                 payload.get("messages") or [], _ccf, max_in=_max_grp,
@@ -1512,7 +1526,8 @@ async def chat_completions(request: Request, response: Response):
                                   ctx_est,
                                   session_id=session_id,
                                   warm=_warm,
-                                  prefer_holder=_paid_holder)
+                                  prefer_holder=_paid_holder,
+                                  prefer_fast=not stream)
     if dep is None:
         # F31: se il motivo e' l'overflow (tutti i dep del gruppo hanno
         # max_input < ctx) NON e' un disservizio ma un errore del client:
@@ -2240,15 +2255,21 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                       hold_idle, hold_maxb, *, payload, profile, need,
                       scope, ctx, tried_set, attempts, requested_group,
                       session, client_ip, attribution, hedge_ms,
-                      _tr_cfg, _tct_cfg):
-    """F3 HEDGE sul primo contenuto (SOLO catena fredda, SOLO 1° tentativo,
-    SOLO pre-commit): A e' gia' aperto; se dopo `hedge_ms` non ha ancora un
-    verdetto, si apre il canary B (candidato successivo di fallback_next,
-    MAI un bucket pagato -go/-fallback) e i due peek corrono. Vince chi
-    IMPEGNA contenuto; il perdente viene annullato senza punizione (li'
-    abbiamo abortiti noi, non e' prova di upstream rotto) e nessun byte era
-    partito verso il client. Ritorna i valori di (dep, gen, t_att, verdict,
-    prebuf, pending, meta) del vincente."""
+                      _tr_cfg, _tct_cfg, k: int = 1,
+                      fresh_only: bool = False):
+    """HEDGE sul primo contenuto (stream, pre-commit).
+
+    A e' gia' aperto; se dopo `hedge_ms` non ha ancora un verdetto si aprono
+    fino a `k` canary **nuovi** (tier crescenti, mai bucket pagati, mai sotto
+    il floor di dim richiesto; con `fresh_only=True` si escludono i caldi
+    della sessione e si preferiscono i meno usati) e corrono tutti. Vince chi
+    IMPEGNA contenuto; i perdenti vengono annullati SENZA punizione.
+
+    IMPORTANTE: ogni canary che ha PRODOTTO contenuto (anche perdente) entra
+    subito nella lista warm della sessione (`note_warm_owner`): il parco dei
+    "buoni" si popola al volo, senza holder/reputazione, e la caccia attiva
+    diventa rara. Ritorna i valori di (dep, gen, t_att, verdict, prebuf,
+    pending, meta) del vincente."""
     def _peek(g, fcm):
         return _peek_stream(g, fcm, incl_reason, min_ch,
                             hold_until_finish=False,
@@ -2259,64 +2280,72 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                                                      hedge_ms / 1000.0))
     if done:
         return dep, gen, t_att, *await futA
+    # ---- candidati NUOVI per la gara -----------------------------------
     try:
-        B = router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                 tried=tried_set,
-                                 requested_group=requested_group)
+        _excl = (set(router._sess_deps().get(session, ()))
+                 if fresh_only else None)
+        cands = router.hedge_canaries(
+            profile, dep, need, ctx, tried_set, requested_group,
+            k=max(1, int(k)), exclude=_excl, fresh_only=bool(fresh_only))
     except Exception:
-        B = None
-    _paid = ""
-    if B is None or B.get("unique") in tried_set:
-        _paid = "nessun candidato"
-    else:
-        _grp = str(B.get("group") or "")
-        if _grp.endswith(router.config.go_suffix or "-go") \
-                or _grp.endswith(router.config.fallback_suffix
-                                 or "-fallback"):
-            _paid = "bucket pagato"
-    if _paid:
-        log.debug("[hedge] %s: niente canary (%s)", dep.get("unique"), _paid)
+        cands = []
+    if not cands:
+        metrics.inc("nx_hedge_total", ("no_canary",))
+        log.debug("[hedge] %s: nessun candidato nuovo (%s)", dep.get("unique"),
+                  "warm-lento" if fresh_only else "cross-tier")
         return dep, gen, t_att, *await futA
-    tB = time.monotonic()
-    p2 = dict(payload)
-    inject_identity(p2, B, router=router)
+    canaries: list[dict] = []
+    for B in cands:
+        _bu = B["unique"]
+        tB = time.monotonic()
+        p2 = dict(payload)
+        inject_identity(p2, B, router=router)
 
-    def _hookB(_salvaged, _u=B["unique"]):
-        metrics.inc("nx_truncated_toolcall_total",
-                    (_u, "salvaged" if _salvaged else "dropped"))
-        router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
-                           reason="truncated_toolcall")
+        def _hookB(_salvaged, _u=_bu):
+            metrics.inc("nx_truncated_toolcall_total",
+                        (_u, "salvaged" if _salvaged else "dropped"))
+            router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
+                               reason="truncated_toolcall")
 
-    router.note_start(B["unique"], ctx)
-    genB = None
-    try:
-        genB = await forwarder.stream_response(
-            B, p2, profile=profile or "", ctx_est=ctx,
-            client_ip=client_ip, session=session, attribution=attribution,
-            tool_repair_config=_tr_cfg, truncation_config=_tct_cfg,
-            truncation_hook=_hookB,
-            rate_hook=lambda u, rl: router.note_rate_limit(u, rl))
-        if router.is_cooled_down(B["unique"]):
-            router.clear_cooldown(B["unique"])
-        futB = asyncio.ensure_future(
-            _peek(genB, router.first_content_deadline_ms(B["unique"], ctx)))
-    except asyncio.CancelledError:
-        raise
-    except BaseException as exc:
-        if genB is not None:
-            await _discard_stream(genB, None)
+        router.note_start(_bu, ctx)
+        genB = None
         try:
-            router.note_end(B["unique"], ctx)
-        except Exception:
-            pass
-        log.info("[hedge] canary %s non disponibile (%s): attendo A",
-                 B.get("unique"), type(exc).__name__)
+            genB = await forwarder.stream_response(
+                B, p2, profile=profile or "", ctx_est=ctx,
+                client_ip=client_ip, session=session, attribution=attribution,
+                tool_repair_config=_tr_cfg, truncation_config=_tct_cfg,
+                truncation_hook=_hookB,
+                rate_hook=lambda u, rl: router.note_rate_limit(u, rl))
+            if router.is_cooled_down(_bu):
+                router.clear_cooldown(_bu)
+            futB = asyncio.ensure_future(
+                _peek(genB, router.first_content_deadline_ms(_bu, ctx)))
+            canaries.append({"dep": B, "gen": genB, "t0": tB, "fut": futB})
+        except asyncio.CancelledError:
+            if genB is not None:
+                await _discard_stream(genB, None)
+            with contextlib.suppress(Exception):
+                router.note_end(_bu, ctx)
+            raise
+        except BaseException as exc:
+            if genB is not None:
+                await _discard_stream(genB, None)
+            with contextlib.suppress(Exception):
+                router.note_end(_bu, ctx)
+            log.info("[hedge] canary %s non disponibile (%s)", _bu,
+                     type(exc).__name__)
+    if not canaries:
+        metrics.inc("nx_hedge_total", ("no_canary",))
         return dep, gen, t_att, *await futA
     log.info("[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
-             dep.get("unique"), hedge_ms, B.get("unique"))
+             dep.get("unique"), hedge_ms,
+             ",".join(c["dep"]["unique"] for c in canaries))
+    futs: dict = {futA: None}
+    for c in canaries:
+        futs[c["fut"]] = c
     results: dict = {}
     winner = None
-    running = {futA, futB}
+    running = set(futs)
     while running:
         completed, running = await asyncio.wait(
             running, return_when=asyncio.FIRST_COMPLETED)
@@ -2329,40 +2358,61 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             winner = f
             break
     if winner is None:
-        for f in tuple(running):
+        for f in list(running):
             try:
                 results[f] = await f
             except BaseException:
                 results[f] = ("error", [], None, {})
-        winner = futA          # nessuno dei due impegna: rotazione col verdetto di A
-    if winner is futB:
-        futA.cancel()
-        with contextlib.suppress(BaseException):
-            await futA
-        await _discard_stream(gen, None)
-        attempts.append(B["unique"])
-        tried_set.add(B["unique"])
-        log.info("[hedge] vince %s (A=%s annullato, non punito)",
-                 B.get("unique"), dep.get("unique"))
-        return B, genB, tB, *results[futB]
-    # vince A (contenuto o verdetto di rotazione): B annullato senza punizione
-    if not futB.done():
-        futB.cancel()
+        winner = futA
+    # ---------------------------------------------------------- A vince ----
+    if winner is futA:
+        metrics.inc("nx_hedge_total", ("won_a",))
+        for c in canaries:
+            await _seed_loser(c, results, session)
+        _rA = results.get(futA)
+        if _rA is None:
+            try:
+                _rA = await futA
+            except BaseException:
+                _rA = ("timeout", [], None, {})
+        return dep, gen, t_att, *_rA
+    # ------------------------------------------------- canary vince ---------
+    metrics.inc("nx_hedge_total", ("won_b",))
+    w = futs[winner]
+    futA.cancel()
     with contextlib.suppress(BaseException):
-        await futB
-    _rB = results.get(futB)
-    await _discard_stream(genB, _rB[2] if _rB and len(_rB) > 2 else None)
-    try:
-        router.note_end(B["unique"], ctx)
-    except Exception:
-        pass
-    _rA = results.get(futA)
-    if _rA is None:
-        try:
-            _rA = await futA
-        except BaseException:
-            _rA = ("timeout", [], None, {})
-    return dep, gen, t_att, *_rA
+        await futA
+    await _discard_stream(gen, None)
+    with contextlib.suppress(Exception):
+        router.note_end(dep["unique"], ctx)
+    for c in canaries:
+        if c is w:
+            continue
+        await _seed_loser(c, results, session)
+    attempts.append(w["dep"]["unique"])
+    tried_set.add(w["dep"]["unique"])
+    log.info("[hedge] vince %s (A=%s e %d altri annullati, non puniti)",
+             w["dep"]["unique"], dep.get("unique"), len(canaries) - 1)
+    return w["dep"], w["gen"], w["t0"], *results[winner]
+
+
+async def _seed_loser(c: dict, results: dict, session) -> None:
+    """Chiude un canary perdente senza punirlo e, se aveva gia' PRODOTTO
+    contenuto, lo registra come prova-di-vita per la sessione (ownership warm):
+    il deploy e' buono -> entra nel parco "caldi" e la prossima volta non
+    serve andarlo a caccia."""
+    f = c["fut"]
+    if not f.done():
+        f.cancel()
+    with contextlib.suppress(BaseException):
+        await f
+    _r = results.get(f)
+    await _discard_stream(c["gen"],
+                          _r[2] if _r and len(_r) > 2 else None)
+    with contextlib.suppress(Exception):
+        router.note_end(c["dep"]["unique"])
+    if _r and _r[0] == "content":
+        router.note_warm_owner(session, c["dep"]["unique"])
 
 
 async def _stream_with_fallback(profile: str | None, first_dep: dict,
@@ -2417,6 +2467,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     except Exception:
         _hedge_ms = 0
     attempts: list[str] = []
+    _races_done = 0
     ttfb_ms: int | None = None          # letta da sse()/_summary via closure
     # Gemini 3 tool replay: una history con tool_call prive di firma rende Gemini
     # inutilizzabile. L'esclusione avviene A MONTE nel router (set_avoid_gemini in
@@ -2499,14 +2550,33 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # mai in hold-mode. Il loser viene annullato SENZA punirlo:
             # l'abbiamo interrotto noi, non e' prova di upstream rotto. ---
             _h_ms = 0
-            if cold and tried == 1 and not hold and _hedge_ms > 0:
-                # F13: ritardo calibrato sul bucket (TTFT fisiologico del
-                # contesto): evita un canary inutile su ogni heavy.
+            _fresh_only = False
+            # GARA quando la WARM non puo' aiutare: catena fredda, oppure
+            # eletto = holder LENTO (ammesso in warm da P1), oppure holder già
+            # provato/inutilizzabile. E a OGNI rotazione (budget opzionale).
+            if not hold and _hedge_ms > 0:
                 try:
-                    _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
+                    _h_dep = router.cache_holder(need=need, ctx=ctx)
+                    _h_u = _h_dep["unique"] if _h_dep else None
                 except Exception:
-                    _h_ms = _hedge_ms
+                    _h_u = None
+                _warm_useful = bool(_h_u and _h_u not in tried_set
+                                    and _h_u != dep["unique"])
+                _races_max = int(getattr(qcp, "stream_hedge_max_races", 0) or 0)
+                if not _warm_useful and (_races_max == 0
+                                         or _races_done < _races_max) \
+                        and router.hunt_allowed(session, ctx):
+                    # F13: ritardo calibrato sul bucket (TTFT fisiologico).
+                    try:
+                        _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
+                    except Exception:
+                        _h_ms = _hedge_ms
+                    _fresh_only = bool(_h_u and _h_u == dep["unique"])
             if _h_ms > 0:
+                _races_done += 1
+                _dep_before = dep["unique"]
+                _hh_k = max(1, int(getattr(qcp, "stream_hedge_tiers", 1) or 1)) \
+                    if bool(getattr(qcp, "stream_hedge_cross_tier", True)) else 1
                 (dep, gen, t_att, verdict, prebuf, pending,
                  meta) = await _hedge_peek(
                     dep, gen, t_att, fc_ms, incl_reason, min_ch,
@@ -2516,7 +2586,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     requested_group=requested_group, session=session,
                     client_ip=client_ip, attribution=attribution,
                     hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
-                    _tct_cfg=_tct_cfg)
+                    _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only)
+                # backoff "il buono non esiste": se vince ancora A, niente
+                # altre gare per la sessione/bucket finche' non scade.
+                router.note_hunt(session, ctx,
+                                 gained=(dep["unique"] != _dep_before))
             else:
                 verdict, prebuf, pending, meta = await _peek_stream(
                     gen, fc_ms, incl_reason, min_ch,
@@ -3052,8 +3126,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if not aborted:
                 # F1: durata TOTALE del tentativo vincente nel bucket di
                 # contesto (il commit ha gia' registrato il TTFT).
-                router.note_stream_end(dep["unique"],
-                                       (time.monotonic() - t_att) * 1000, ctx)
+                router.note_stream_end(
+                    dep["unique"], (time.monotonic() - t_att) * 1000, ctx,
+                    completion_tokens=(usage_final or {}).get(
+                        "completion_tokens"))
             # NB (fix): il watchdog NON inietta mai nulla nello stream verso il
             # client (un `data:` non-conforme viene renderizzato come testo da
             # opencode & simili). L'unica reazione automatica e' il cooldown del

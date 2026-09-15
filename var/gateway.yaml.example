@@ -543,9 +543,33 @@ ladder_skip_after: 10
 # Soglia di deployment "stale" oltre la quale il ladder scatta.
 ladder_stale_max: 3
 
-# Quanti risvegli di dim in cooldown provare (nell'ordine dal meno raffreddato)
-# PRIMA di salire a -go (0 = nessuno, come prima).
-ladder_cooldown_wakeups: 3
+# Quanti risvegli di dim in cooldown provare (nell'ordine dal residuo minore)
+# PRIMA di salire a -go (0 = nessuno, come prima). SOLO dim il cui ultimo
+# fallimento e' di QUOTA/429: una chiave satura e' viva, il cooldown puo'
+# essere piu' lungo della finestra di quota; un dim raffreddato da 503/timeout NON
+# viene riesumato qui (lo fanno autoprobe/ultima spiaggia). Il budget e' A
+# FINESTRA per deployment: dopo N risvegli in window_sec non si riprova.
+ladder_cooldown_wakeups: 20
+ladder_cooldown_wakeup_window_sec: 3600
+
+# SOGLIA "LENTO" SIZE-AWARE (B3 ibrida): "lento" = oltre
+#     max(abs_floor_ms, rel_mult * atteso)
+# dove l'atteso per QUELLA taglia di contesto e': mediana di FLOTTA nel bucket
+# (min_peers campioni) -> mediana globale -> stima dal rate (prefill token/s
+# e, a fine stream, generazione token/s) -> 90s legacy. Un 128k che risponde
+# in 100s e' NORMALE, non lento: cosi' non si demota/caccia in continuazione
+# bruciando quota free-tier.
+slow_latency_abs_floor_ms: 45000
+slow_latency_rel_mult: 2.0
+slow_latency_min_peers: 5
+
+# CACCIA AL SOSTITUTO (anti-spreco): quando il best warm e' LENTO la catena
+# fredda, la gara cerca candidati NUOVI; se non trova di meglio (vince A),
+# backoff di hunt_backoff_sec per sessione+bucket (il buono NON esiste) e
+# comunque al piu' hunt_max_per_window gare per hunt_window_sec.
+hunt_backoff_sec: 600
+hunt_max_per_window: 5
+hunt_window_sec: 3600
 
 # COLD SPREAD — sui soli dims vivi (esclusi -go/-fallback e gruppi capacita'):
 # nasconde dal pool la quota TOP per numero di tentativi (ok+fail) nelle ultime
@@ -591,6 +615,16 @@ qc_json:
   stream_hedge_ttft_frac: 0.6
   stream_hedge_min_ms: 800
   stream_hedge_max_ms: 2500
+  # GARA quando la WARM non puo' aiutare (catena fredda, o holder lento che
+  # la gara deve sostituire, o holder gia' provato): NON solo 1o tentativo.
+  # cross_tier=true: i canary cercano candidati NUOVI su TIER crescenti
+  # (mai sotto la dim richiesta, mai -go/-fallback, mai non-streaming noti);
+  # se l'eletto e' il warm holder LENTO, i canary ESCLUDONO la lista warm
+  # stessa e preferiscono i meno usati nelle 24h. tiers=2 => max 3 in volo.
+  # max_races=0: una gara a ogni rotazione (limitata solo da deadline/tries).
+  stream_hedge_cross_tier: true
+  stream_hedge_tiers: 2
+  stream_hedge_max_races: 0
 
   # Deadline totale in ms per l'INTERO stream (960000 = 16 minuti).
   stream_total_deadline_ms: 960000
@@ -844,6 +878,11 @@ warm_pool:
   enabled: true
   ttl_sec: 0
   max_attempts: 0
+  # P1: ammette i LENTI nel pool caldo/sticky/holder (il successo lento si
+  # registra e la sessione lo conosce; la gara cerca il sostituito NUOVO).
+  # Una chiave SATURA (soft-429/fault) resta sempre fuori. false = come
+  # prima: i lenti escono dal warm.
+  allow_slow: true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEBUG — scatola nera input/output (solo per debug locale)

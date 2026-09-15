@@ -327,6 +327,26 @@ def set_ttft_lookup(fn) -> None:
     _TTFT_LOOKUP = fn
 
 
+# P4: annota i deployment che IGNORANO stream:true (rispondono JSON e il
+# forwarder lo adatta a SSE). Un canary cosi' non puo' vincere la gara: viene
+# escluso dal pool dei sostituti (vedi Router._is_known_nonstream).
+_NONSTREAM_HOOK = None
+
+
+def set_nonstream_hook(fn) -> None:
+    global _NONSTREAM_HOOK
+    _NONSTREAM_HOOK = fn
+
+
+def _note_nonstream(dep: dict) -> None:
+    if _NONSTREAM_HOOK is None:
+        return
+    try:
+        _NONSTREAM_HOOK(dep.get("unique"))
+    except Exception:                          # mai rompere lo stream
+        pass
+
+
 def set_stall_bucket(*, multiplier=None, max_sec=None) -> None:
     """Moltiplicatore e tetto dello stall guard calibrato sul TTFT (F21)."""
     global _STALL_TTFT_MULT, _STALL_MAX_SEC
@@ -1492,6 +1512,7 @@ truncation_hook=None,
                     await resp.aclose()
                 except Exception:
                     pass
+                _note_nonstream(dep)
                 adapted = _json_to_sse(raw)
                 if _style != proto.CHAT:
                     try:

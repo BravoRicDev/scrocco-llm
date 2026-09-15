@@ -31,9 +31,15 @@ def router():
 
 
 def _cool(r, u):
+    """Cooled E stantio con evidenza di QUOTA (il wakeup ora e' solo-429) e
+    finestra di quota riaperta (niente soft/hint attivi)."""
     now = time.time()
     r._cooldown[u] = now + 3600.0            # ancora cooled
     r._cooldown_since[u] = now - 1800.0      # age = 1800 >= 300
+    r._cooldown_full_map()[u] = 3600.0
+    r.stats_for(u).last_reason = "http_429"
+    r._key_soft.clear()
+    r._key_hints.clear()
 
 
 def _dims(cfg):
@@ -87,6 +93,8 @@ def test_wakeups_disabled_goes_straight_to_go(router):
 
 
 def test_wakeup_cap_one(router):
+    """Budget A FINESTRA per deployment: con cap 1 lo STESSO dim non viene
+    svegliato due volte (un altro dim puo' esserlo)."""
     router.policy.ladder_cooldown_wakeups = 1
     dims = _dims(router.config)
     for u in dims:
@@ -94,10 +102,11 @@ def test_wakeup_cap_one(router):
     ladder = router.config.chains[PROF]
     tried = set()
     first = router._walk_ladder_resilient(ladder, None, None, None, tried)
+    assert first is not None and first["unique"] in dims
+    assert len(router._wake_times[first["unique"]]) == 1
     tried.add(first["unique"])
-    second = router._walk_ladder_resilient(ladder, None, None, None, tried)
-    assert first["unique"] in dims
-    assert second["unique"] in _go(router.config)
+    router._walk_ladder_resilient(ladder, None, None, None, tried)
+    assert len(router._wake_times[first["unique"]]) == 1   # non ri-svegliato
 
 
 def test_fresh_cooldown_not_woken(router):
@@ -116,7 +125,8 @@ def test_parsing_ladder_knobs():
                           "ladder_cooldown_wakeups": 5})
     assert p.ladder_skip_after == 10
     assert p.ladder_cooldown_wakeups == 5
-    assert Policy.from_dict({}).ladder_cooldown_wakeups == 3
+    assert Policy.from_dict({}).ladder_cooldown_wakeups == 20
+    assert Policy.from_dict({}).ladder_cooldown_wakeup_window_sec == 3600
     # nuovi toggle "risveglio"
     assert Policy.from_dict({}).initial_pick_cooldown_wakeup is True
     assert Policy.from_dict(
@@ -168,20 +178,27 @@ def test_wakeup_cap_ten_wakes_all_dims(router):
 
 
 def test_wakeup_orders_by_smallest_residual(router):
-    """Fra i dim cooled vince il 'piu' pronto' (residuo MINORE), poi a salire."""
+    """Fra i dim cooled-429 vince il 'piu' pronto' (residuo MINORE), poi a
+    salire."""
     router.policy.ladder_cooldown_wakeups = 10
     dims = _dims(router.config)
     now = time.time()
-    for i, u in enumerate(dims):          # dims[0] = residuo minore
+    for i, u in enumerate(dims):
         router._cooldown[u] = now + 1000.0 * (i + 1)
         router._cooldown_since[u] = now - 1800.0
+        router._cooldown_full_map()[u] = 100000.0   # non schiacciare i residui
+        router.stats_for(u).last_reason = "http_429"
+    router._key_soft.clear()
+    router._key_hints.clear()
     tried = set()
     picks = []
     for _ in range(len(dims)):
         d = router._walk_ladder_resilient(
             router.config.chains[PROF], None, None, None, tried)
-        assert d is not None
+        assert d is not None and d["unique"] in dims
         picks.append(d["unique"])
         tried.add(d["unique"])
-    assert picks == dims
-
+    _by_res = sorted(dims, key=lambda u: router.cooldown_residual(u))
+    assert picks[0] == _by_res[0]                    # il piu' pronto per primo
+    res = [round(router.cooldown_residual(u), -2) for u in picks]
+    assert res == sorted(res)                        # poi a salire (tolleranza)

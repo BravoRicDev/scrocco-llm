@@ -116,8 +116,16 @@ def test_demote_soft_relative_still_gated_by_ctx(router):
     u = _u(router, "K-A")
     router.record_success(u, 2000.0, ctx_est=1000)      # baseline leggera 2s
     router._avg_latencies[u] = 1000.0
+    # Flotta a 40s -> soglia size-aware 80s: 70s NON e' hard, e' soft.
+    _others = list(dict.fromkeys(
+        d["unique"] for g in router.config.groups.values() for d in g
+        if d["unique"] != u))[:5]
+    router.policy.slow_latency_min_peers = 2   # fixture piccola: bastano 2 pari
+    for _p in _others:
+        router._avg_latencies[_p] = 40000.0
+    router._fleet_cache.clear()
     sid = "S2"
-    # 70s su ctx pesante: hard? no (70<90). soft? 60<70<=90 e ctx>30k.
+    # 70s su ctx pesante: hard? no (70<80). soft? 60<70 e ctx>30k.
     # relativa: 70s > 2*2s (il heavy bucket non ha campioni? ripiega globale)
     router._note_session_slow(sid, u, 70000.0, ctx_est=50000)
     assert router.is_slow_for_session(u, sid, 50000)     # pesante: demosso

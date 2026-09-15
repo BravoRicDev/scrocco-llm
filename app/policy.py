@@ -116,6 +116,12 @@ class QcJson:
     stream_hedge_ttft_frac: float = 0.6
     stream_hedge_min_ms: int = 800
     stream_hedge_max_ms: int = 2500
+    # HEDGE cross-tier: canary su TIER diversi (fino a `tiers`, max 2 -> 3
+    # richieste in volo con A) e gara a ogni rotazione finche' la warm non
+    # aiuta. `max_races=0` = illimitato (limitato da deadline e max_tries).
+    stream_hedge_cross_tier: bool = True
+    stream_hedge_tiers: int = 2
+    stream_hedge_max_races: int = 0
     stream_commit_min_chars: int = 40      # caratteri di RISPOSTA minimi per
                                            # impegnare lo stream (evita di
                                            # committare su 1 token poi morto);
@@ -262,6 +268,20 @@ class Policy:
     # come sha256(unique) — i gemelli che incassano 429 nello stesso secondo
     # non scadono tutti al medesimo millisecondo. 0 = off. Default 2.0s.
     cooldown_jitter_sec_max: float = 2.0
+    # SOGLIA "LENTO" SIZE-AWARE (B3 ibrida): lento = oltre
+    # max(slow_latency_abs_floor_ms, slow_latency_rel_mult * atteso), dove
+    # l'atteso e' la MEDIANA DI FLOTTA del bucket di contesto -> stima dal
+    # rate di prefill/generazione -> 90s legacy. Cosi' un 128k che risponde
+    # in 100s (normale) NON e' lento; lo e' uno che fa il doppio della norma.
+    slow_latency_abs_floor_ms: int = 45000
+    slow_latency_rel_mult: float = 2.0
+    slow_latency_min_peers: int = 5
+    # ANTI-SPRECO della caccia al sostituto: dopo una caccia senza guadagno
+    # (il buono non esiste) niente altre gare per la sessione/bucket nel
+    # backoff; cap di cacce per finestra come rete.
+    hunt_backoff_sec: int = 600
+    hunt_max_per_window: int = 5
+    hunt_window_sec: int = 3600
     # Classi di errore (F18): durata cooldown dedicata per categoria.
     # 503/529/500 = dep sovraccarico/transitorio -> breve; timeout -> breve
     # dedicato; 429 = quota -> soft per-chiave (durate dal Retry-After).
@@ -563,6 +583,11 @@ class Policy:
     warm_pool_enabled: bool = True
     warm_pool_ttl_sec: int = 0
     warm_pool_max_attempts: int = 0
+    # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
+    # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
+    # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
+    # Una chiave SATURA (soft-429/fault) resta SEMPRE fuori.
+    warm_pool_allow_slow: bool = True
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
     # AUDIT prefisso (F4): impronta del prefisso canonico per sessione, per
@@ -717,7 +742,10 @@ class Policy:
     ladder_stale_max: int = 3
     # Numero di risvegli di dim in cooldown (stantii) tentati PRIMA di
     # escalare a -go (oltre a quello del dim sticky/esplicito). 0 = nessuno.
-    ladder_cooldown_wakeups: int = 3
+    # Budget A FINESTRA dei cooldown-wakeup della scala (solo dim nati da
+    # 429/quota): max N wakeup per deployment per `window_sec`.
+    ladder_cooldown_wakeups: int = 20
+    ladder_cooldown_wakeup_window_sec: int = 3600
     # COLD SPREAD: a ogni pick "a freddo" nascondi dai candidati il `pct`
     # dei deployment col MAGGIOR numero di tentativi (ok+fail) nelle ultime
     # 24h, cosi' il carico si distribuisce anche su `order`/provider diversi.
@@ -1068,6 +1096,17 @@ class Policy:
             p.error_class_cooldowns = _coerce_bool(
                 raw.get("error_class_cooldowns"), "error_class_cooldowns")
         _set_int(p, raw, "cooldown_transient_sec", minimum=1)
+        _set_int(p, raw, "slow_latency_abs_floor_ms", minimum=0)
+        _set_int(p, raw, "slow_latency_min_peers", minimum=1)
+        _set_int(p, raw, "hunt_backoff_sec", minimum=0)
+        _set_int(p, raw, "hunt_max_per_window", minimum=0)
+        _set_int(p, raw, "hunt_window_sec", minimum=1)
+        _srel = raw.get("slow_latency_rel_mult")
+        if _srel is not None:
+            if isinstance(_srel, bool) or not isinstance(_srel, (int, float)) \
+                    or not (0.0 <= float(_srel) <= 100.0):
+                raise ValueError("slow_latency_rel_mult deve essere 0..100")
+            p.slow_latency_rel_mult = float(_srel)
         _set_int(p, raw, "cooldown_timeout_sec", minimum=1)
         if "model_circuit_enabled" in raw:
             p.model_circuit_enabled = _coerce_bool(
@@ -1711,6 +1750,9 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.max_attempts non valido: {_v!r}")
                 p.warm_pool_max_attempts = int(_v)
+            if "allow_slow" in wp:
+                p.warm_pool_allow_slow = _coerce_bool(
+                    wp["allow_slow"], "warm_pool.allow_slow")
 
         ca = raw.get("cache_aware")
         if ca is not None:
@@ -1903,6 +1945,23 @@ class Policy:
                     raise ValueError("qc_json.stream_hedge_max_ms deve "
                                      "essere 0..60000")
                 p.qc_json.stream_hedge_max_ms = int(v)
+            if "stream_hedge_cross_tier" in qj:
+                p.qc_json.stream_hedge_cross_tier = _coerce_bool(
+                    qj["stream_hedge_cross_tier"],
+                    "qc_json.stream_hedge_cross_tier")
+            if "stream_hedge_tiers" in qj:
+                v = qj["stream_hedge_tiers"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (1 <= int(v) <= 2):
+                    raise ValueError("qc_json.stream_hedge_tiers deve essere 1..2")
+                p.qc_json.stream_hedge_tiers = int(v)
+            if "stream_hedge_max_races" in qj:
+                v = qj["stream_hedge_max_races"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= int(v) <= 64):
+                    raise ValueError("qc_json.stream_hedge_max_races deve "
+                                     "essere 0..64 (0=illimitato)")
+                p.qc_json.stream_hedge_max_races = int(v)
             if "stream_commit_min_chars" in qj:
                 v = qj["stream_commit_min_chars"]
                 if isinstance(v, bool) or not isinstance(v, (int, float)) \
@@ -2058,6 +2117,7 @@ class Policy:
         _set_int(p, raw, "ladder_skip_after", minimum=1)
         _set_int(p, raw, "ladder_stale_max", minimum=0)
         _set_int(p, raw, "ladder_cooldown_wakeups", minimum=0)
+        _set_int(p, raw, "ladder_cooldown_wakeup_window_sec", minimum=1)
         _csp = raw.get("cold_spread_pct")
         if _csp is not None:
             try:

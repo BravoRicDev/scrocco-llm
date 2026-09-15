@@ -170,19 +170,32 @@ def test_warm_step_skips_escalation_only_scope(router):
     assert got is not None and got["unique"] == go
 
 
+def _peers(r, value=3000.0, n=5):
+    """Semina la mediana di FLOTTA: n dep 'normali' a `value` ms, cosi' la
+    soglia size-aware (2x la norma) resta bassa e i test sul 'lento'
+    funzionano come prima (la taratura e' coperta in test_slow_threshold)."""
+    us = [d["unique"] for g in r.config.groups.values() for d in g]
+    for u in us[:n]:
+        r._avg_latencies[u] = float(value)
+    r._fleet_cache.clear()
+
+
 # ------------------------------------------------------ guardia di latenza
 def test_is_slow_dep_threshold(router):
+    """Soglia SIZE-AWARE: con una flotta a ~3s, 30s non e' lento (sotto il
+    floor assoluto di 45s) mentre 90s lo e' (oltre floor e oltre 2x flotta)."""
     b = _u(router, GROUP, "K-B")
     assert router._is_slow_dep(b) is False          # EMA ignota -> non lento
-    router._avg_latencies[b] = 3000.0
-    assert router._is_slow_dep(b) is False
-    router._avg_latencies[b] = LATENCY_ROTATE_THRESHOLD_MS
-    assert router._is_slow_dep(b) is False          # soglia inclusa
+    _peers(router, 3000.0)
+    router._avg_latencies[b] = 30000.0
+    assert router._is_slow_dep(b) is False          # sotto il floor 45s
     router._avg_latencies[b] = LATENCY_ROTATE_THRESHOLD_MS + 1
-    assert router._is_slow_dep(b) is True
+    assert router._is_slow_dep(b) is True           # oltre floor e 2x flotta
 
 
 def test_warm_pool_excludes_slow_dep(router):
+    _peers(router)
+    router.policy.warm_pool_allow_slow = False
     """Un dep con EMA sopra soglia NON resta nel tier caldo: e' riserva nel
     ladder ma non viene riproposto come scelta calda."""
     b = _u(router, GROUP, "K-B")
@@ -192,6 +205,8 @@ def test_warm_pool_excludes_slow_dep(router):
 
 
 def test_sticky_rejects_slow_dep(router):
+    _peers(router)
+    router.policy.warm_pool_allow_slow = False
     """Lo sticky non deve incollare la sessione a un dep divenuto lento."""
     a = _u(router, GROUP, "K-A")
     b = _u(router, GROUP, "K-B")
@@ -205,6 +220,8 @@ def test_sticky_rejects_slow_dep(router):
 
 
 def test_cache_holder_rejects_slow_dep(router):
+    _peers(router)
+    router.policy.warm_pool_allow_slow = False
     b = _u(router, GROUP, "K-B")
     router.note_session_success("S-A", b)
     assert router.cache_holder("S-A", ctx=1000) is not None
@@ -213,6 +230,7 @@ def test_cache_holder_rejects_slow_dep(router):
 
 
 # -------------------------------------------------- primo contenuto adattivo
+
 def test_first_content_deadline_fixed(router):
     router.policy.qc_json.stream_first_content_ms = 180000
     router.policy.qc_json.stream_first_content_adaptive = False
@@ -277,6 +295,8 @@ def test_session_slow_only_free_dims(router):
 
 
 def test_warm_pool_excludes_session_slow(router):
+    _peers(router)
+    router.policy.warm_pool_allow_slow = False
     b = _u(router, GROUP, "K-B")
     router.note_session_success("S-A", b,
                                 latency_ms=LATENCY_ROTATE_THRESHOLD_MS + 1)
@@ -315,6 +335,8 @@ def test_prelast_shared_skips_session_slow(router):
 
 
 def test_ladder_reaches_session_slow_only_at_fallback(router):
+    _peers(router)
+    router.policy.warm_pool_allow_slow = False
     """Il free-dim lento-per-sessione non viene pescato nella scala normale:
     torna solo all'ultimo scaglione (-fallback)."""
     b = _u(router, GROUP, "K-B")
@@ -401,7 +423,11 @@ def test_soft_rimosso_da_successo_leggero_o_veloce(router):
 
 
 def test_soft_demote_esce_dal_warm_pool_ma_non_dal_light(router):
+    _peers(router, 40000.0)      # soglia size-aware 80s -> 70s resta SOFT
+    router.policy.warm_pool_allow_slow = False
     c = _u(router, GROUP, "K-C")             # max_input 128000: regge il 40k
+    router._avg_latencies[c] = 10000.0   # baseline propria (gate relativa ok)
+    router._fleet_cache.clear()
     router.note_session_success("S-A", c, latency_ms=70000, ctx_est=40000)
     assert router._warm_pool("S-A", _allowed(router), ctx=40000) == []
     assert [d["unique"] for d in
@@ -425,6 +451,7 @@ def test_soft_demote_pick_deployment_solo_pesante(router):
 
 
 # ======================================================== CTX WATERMARK (router)
+
 def test_ctx_frontier_monotona(router):
     assert router.ctx_boundary_floor("S-X") == 0
     router.note_compact_boundary("S-X", 22)

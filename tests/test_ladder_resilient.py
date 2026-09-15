@@ -33,7 +33,25 @@ def router():
     pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}}})
     pol.stale_cooldown_retry_sec = 300
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
-    yield Router(cfg, pol)
+    r = Router(cfg, pol)
+
+    # Il wakeup dei cooldown e' SOLO-429: qui il cooldown e' il meccanismo
+    # sotto test, quindi `mark_failed(seconds=...)` senza motivo viene trattato
+    # come quota (come se il 429 avesse saturato la chiave).
+    _orig_mf = r.mark_failed
+
+    def _mf(u, seconds=None, reason=None, status=None, **kw):
+        if reason is None and seconds is not None:
+            reason, status = "http_429", 429
+        out = _orig_mf(u, seconds=seconds, reason=reason, status=status, **kw)
+        # finestra di quota riaperta: il soft-429 sulla chiave non blocca piu'
+        # (in produzione il wakeup parte proprio dopo la sua scadenza)
+        r._key_soft.clear()
+        r._key_hints.clear()
+        return out
+
+    r.mark_failed = _mf
+    yield r
     os.unlink(path)
 
 

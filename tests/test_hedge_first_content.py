@@ -42,7 +42,10 @@ def _fake_router(B=None):
         first_content_deadline_ms=lambda u, ctx=None: 1000,
         mark_failed=lambda u, **kw: notes["fail"].append(u),
         note_rate_limit=lambda u, rl: None,
-        fallback_next=(lambda *a, **k: B),
+        # nuovo picker dei canary (tier crescenti) + warm ownership
+        hedge_canaries=(lambda *a, **k: ([B] if B else [])),
+        _sess_deps=lambda: {},
+        note_warm_owner=lambda sid, u: None,
     )
     return r, notes
 
@@ -115,12 +118,17 @@ def test_a_lento_b_vince_gara():
     assert created == ["B__m2__1"]
     assert "A" in closed                       # genA scartato, non punito
     assert notes["start"] == ["B__m2__1"]
-    assert notes["end"] == []                  # B resta aperto: impegna lui
+    # A e' annullato e la sua contabilita' CHIUSA (niente inflight leak);
+    # B resta aperto: impegna lui la risposta.
+    assert notes["end"] == ["A__m1__0"]
     assert notes["fail"] == []
 
 
 def test_bucket_pagato_mai_in_gara():
-    B = {"unique": "G__m3__0", "group": "scrocco-t-go"}
+    """Il filtro dei bucket pagati vive in Router.hedge_canaries: qui si
+    verifica che se il picker non offre nulla (come per il pagato) NON parte
+    alcun canary. La copertura del filtro e' nei test del router."""
+    B = None
     r, notes = _fake_router(B=B)
 
     async def peek(g, fcm, incl, mc, **kw):
