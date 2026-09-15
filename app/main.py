@@ -73,6 +73,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         set_schemaout_config,
                         maybe_quarantine_ban,
                         maybe_host_transient_cooldown,
+                        note_context_limit,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy, refill_out_budget
@@ -269,7 +270,25 @@ def _coalesce_cache_take(key: str, now: float):
     return ent["res"]
 
 
+def _coalesce_cacheable(res) -> bool:
+    """NON mettere in cache le RISPOSTE D'ERRORE: un 4xx/5xx (o un envelope
+    {"error": ...}) non deve avvelenare i retry identici in coda, che invece
+    devono poter scalare sul fallback."""
+    try:
+        obj = res[0] if isinstance(res, tuple) and res else res
+        sc = getattr(obj, "status_code", None)
+        if isinstance(sc, int) and sc >= 400:
+            return False
+        if isinstance(obj, dict) and isinstance(obj.get("error"), dict):
+            return False
+    except Exception:                                  # noqa: BLE001
+        return True
+    return True
+
+
 def _coalesce_cache_put(key: str, res, exp: float) -> None:
+    if not _coalesce_cacheable(res):
+        return
     _coalesce_cache[key] = {"res": res, "exp": exp}
     while len(_coalesce_cache) > _COALESCE_CACHE_MAX:
         oldest = min(_coalesce_cache, key=lambda k: _coalesce_cache[k]["exp"])
@@ -302,6 +321,7 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
     if cache_sec > 0:
         hit = _coalesce_cache_take(key, now)
         if hit is not None:
+            metrics.inc("nx_coalesce_total", ("hit",))
             return copy.deepcopy(hit)
     leader = False
     async with _inflight_lock:
@@ -315,7 +335,9 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
             return await factory()
         else:
             entry["waiters"] += 1
-    if leader:
+    if not leader:
+        metrics.inc("nx_coalesce_total", ("inflight",))
+    else:
         try:
             res = await factory()
         except BaseException as exc:                    # noqa: BLE001
@@ -726,6 +748,16 @@ async def lifespan(_app: FastAPI):
                             "in volo", _left)
             elif _infl:
                 log.info("[shutdown] drain completato")
+        except Exception:                       # noqa: BLE001
+            pass
+        # Task di background (canary/probe/sveglie): vanno cancellati PRIMA di
+        # chiudere il client httpx, altrimenti i probe in volo esplodono sul
+        # client chiuso, sporcano lo shutdown e possono far saltare il
+        # salvataggio atomico finale.
+        try:
+            _np = await _drain_probe_tasks()
+            if _np:
+                log.info("[shutdown] cancel di %d probe/sveglie in volo", _np)
         except Exception:                       # noqa: BLE001
             pass
         await forwarder.aclose()
@@ -2406,9 +2438,10 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 exclude_keys=_xk,
                 exclude_uniq=_ex_uniq)
             if _B is not None:
-                log.info("[refill] canario %s per %s (chiavi warm+in-volo "
-                         "escluse=%d, out=%s)", _B["unique"],
-                         dep.get("unique"), len(_xk), out_tokens)
+                log.info("[refill] canario %s per %s (order=%s, chiavi warm+"
+                         "in-volo escluse=%d, out=%s)", _B["unique"],
+                         dep.get("unique"), _B.get("order"), len(_xk),
+                         out_tokens)
             else:
                 log.info("[refill] %s: nessun canario free consegnabile "
                          "(chiavi escluse=%d)", dep.get("unique"), len(_xk))
@@ -2605,6 +2638,21 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
 _PROBE_TASKS: set = set()
 
 
+async def _drain_probe_tasks() -> int:
+    """Cancella e attende i task SPECULATIVI in volo (canari, probe, sveglie).
+
+    Va chiamata PRIMA di forwarder.aclose(): un probe che continua mentre il
+    client httpx e' chiuso solleva un'eccezione non gestita, sporca i log
+    dello shutdown e puo' far saltare il salvataggio atomico finale.
+    Ritorna quanti task ha cancellato."""
+    _pt = [t for t in list(_PROBE_TASKS) if not t.done()]
+    for t in _pt:
+        t.cancel()
+    if _pt:
+        await asyncio.gather(*_pt, return_exceptions=True)
+    return len(_pt)
+
+
 def _probe_drain_cap_sec() -> float:
     try:
         dd = int(getattr(router.policy.qc_json,
@@ -2773,16 +2821,17 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
                 router.clear_cooldown(u)
                 router.note_warm_owner(session, u)
             metrics.inc("nx_wake_sweep_total", ("ok",))
-            log.info("[sveglia] %s risponde (%.0fms) -> torna caldo "
-                     "(tentativo %d/%d)", u, lat or 0.0, done, _n)
+            log.info("[sveglia] %s risponde (%.0fms, order=%s) -> torna caldo "
+                     "(tentativo %d/%d)", u, lat or 0.0, W.get("order"),
+                     done, _n)
             return
         # KO: il dormiente ri-fallisce -> cooldown RADDOPPIATO (residuo).
         with contextlib.suppress(Exception):
             router.mark_failed_double_residual(u, reason="wake_probe",
                                                status=code or None)
         metrics.inc("nx_wake_sweep_total", ("ko",))
-        log.info("[sveglia] %s KO (code=%s) -> cooldown raddoppiato "
-                 "(tentativo %d/%d)", u, code, done, _n)
+        log.info("[sveglia] %s KO (code=%s, order=%s) -> cooldown raddoppiato "
+                 "(tentativo %d/%d)", u, code, W.get("order"), done, _n)
     metrics.inc("nx_wake_sweep_total", ("exhausted",))
     if done:
         log.info("[sveglia] giro concluso: %d tentativi su [%s], "
@@ -3200,6 +3249,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # malato -> pausa BREVE dell'host invece di bruciare le chiavi
             # sorelle (elasticita' per un problema transitorio).
             maybe_host_transient_cooldown(router, dep, err.status, detail)
+            # 413/400 "context length": il provider ha rivelato il VERO
+            # limite di input -> ridimensiona il deployment (regola utente).
+            note_context_limit(router, dep, err.status, detail, ctx)
             # D5 anche in STREAMING: 4xx deployment-side (firma provider-side,
             # modello inesistente oppure 404) -> fallback pre-byte invece di
             # pass-through. Gli altri 4xx restano errori del client.

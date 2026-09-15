@@ -3885,6 +3885,10 @@ class Router:
             "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
                                    guard),
             "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
+            "discovered_max_input": {str(u): int(v) for u, v in
+                                     (getattr(self, "_discovered_max_input",
+                                              None) or {}).items()
+                                     if v},
         }
 
     def load_routing_state(self, data: dict) -> dict:
@@ -3953,6 +3957,17 @@ class Router:
                 except (TypeError, ValueError, IndexError):
                     continue
         report["session_slow"] = n
+        dis = self._discovered()
+        n = 0
+        for u, lim in (data.get("discovered_max_input") or {}).items():
+            try:
+                v = int(lim)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                dis[str(u)] = v
+                n += 1
+        report["discovered_max_input"] = n
         df = getattr(self, "_ctx_frontier", None)
         if not isinstance(df, dict):
             df = {}
@@ -4370,7 +4385,7 @@ class Router:
         limite dichiarato (>0) il deployment viene saltato. ctx None = off."""
         if ctx is None:
             return True
-        mi = dep.get("max_input_tokens") or 0
+        mi = self._eff_max_input(dep)
         return mi <= 0 or ctx <= mi
 
     def _gemini_blocked(self, dep: dict) -> bool:
@@ -5223,7 +5238,7 @@ class Router:
         semplici reduci. max_input<=0 = nessun guardo (come _cap_fits)."""
         if need and not self._dep_supports(dep, need):
             return False
-        mi = int(dep.get("max_input_tokens") or 0)
+        mi = self._eff_max_input(dep)
         if mi <= 0:
             return True
         room = mi - int(ctx or 0) - int(mi * 0.05)
@@ -5236,6 +5251,52 @@ class Router:
             if frac > 0:
                 room -= int(mi * frac)
         return room >= max(0, out)
+
+    # ------------------------------- MAX_INPUT SCOPERTO DAL PROVIDER (413)
+    # Se il CSV mente (dichiara 32k ma il provider taglia a 16k) il primo 413
+    # rivela il vero limite nel body ("maximum context length is 16384").
+    # Registriamo il limite scoperto e lo usiamo come cap EFFETTIVO: solo
+    # RESTRINGERE (mai oltre il dichiarato), persistito nel routing_state.
+    def _discovered(self) -> dict:
+        d = getattr(self, "_discovered_max_input", None)
+        if d is None:
+            d = self._discovered_max_input = {}
+        return d
+
+    def note_discovered_max_input(self, unique: str | None,
+                                  limit: int | None) -> None:
+        """Il provider ha rivelato il VERO limite di input: ridimensiona il
+        deployment cosi' il router non gli rimanda payload troppo grossi."""
+        if not unique or not limit:
+            return
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            return
+        if lim <= 0:
+            return
+        dep = self.config.deployment_by_unique(unique) or {}
+        mi = int(dep.get("max_input_tokens") or 0)
+        if mi > 0:
+            lim = min(lim, mi)          # mai OLTRE il dichiarato
+        cur = self._discovered().get(unique)
+        if cur and cur <= lim:
+            return                      # gia' noto un limite piu' stretto
+        self._discovered()[unique] = lim
+        log.warning("[max-input] %s: limite reale scoperto dal provider = %d "
+                    "token (csv=%s) -> ridimensionato", unique, lim,
+                    mi or "0")
+
+    def _eff_max_input(self, dep: dict) -> int:
+        """max_input EFFETTIVO: min(dichiarato, scoperto dal provider)."""
+        mi = int(dep.get("max_input_tokens") or 0)
+        try:
+            dis = self._discovered().get(dep.get("unique"))
+        except Exception:                              # noqa: BLE001
+            dis = None
+        if dis and (mi <= 0 or dis < mi):
+            return int(dis)
+        return mi
 
     def _owned_by_any_session(self, unique: str) -> bool:
         """True se il dep ha un OWNER vivo (UNA qualsivoglia sessione): un
@@ -5390,27 +5451,57 @@ class Router:
         return {str(d.get("api_key") or "") for d in pool
                 if d.get("api_key")}
 
-    def _canary_cold_pick(self, cands: list[dict],
-                          ctx: int | None) -> dict | None:
+    def _tiers_of(self, uniqs, group: str | None = None) -> set[int]:
+        """Tier `order` dei deployment indicati (per il round-robin canary).
+        Con `group` filtra solo quel gruppo: i tier sono PER-GRUPPO, quindi
+        un tier sondato in un altro -dim non deve marcare anche questo."""
+        out: set[int] = set()
+        for u in uniqs or ():
+            d = self.config.deployment_by_unique(u)
+            if not d:
+                continue
+            if group is not None and str(d.get("group") or "") != str(group):
+                continue
+            try:
+                out.add(int(d.get("order", ORDER_LAST)))
+            except Exception:                          # noqa: BLE001
+                continue
+        return out
+
+    def _canary_cold_pick(self, cands: list[dict], ctx: int | None,
+                          sampled_tiers: set[int] | None = None
+                          ) -> dict | None:
         """Scelta del candidato canary/sveglia "come una chiamata a freddo"
-        (regola utente): nasconde il 20% piu' usato (cold spread), privilegia
-        il tier `order` minimo e ordina col reputation scoring adattivo
-        (fallback legacy: priority + model_preference). Cosi' la cascata
-        "scava" il -dim corrente partendo dal migliore invece di prendere il
-        primo per ordine CSV."""
+        (regola utente), con ROUND-ROBIN SUI TIER `order`:
+
+        - si parte sempre dal tier `order` MINIMO NON ancora sondato in questo
+          giro (1 probe per tier, in ordine crescente);
+        - quando tutti i tier sono stati sondati si RICICLA dal piu' basso
+          (le chiavi gia' provate restano escluse a monte, quindi si prende
+          una chiave diversa);
+        - dentro il tier si applica il cold spread (nasconde il 20% piu'
+          usato) e il reputation scoring adattivo (fallback legacy: priority
+          + model_preference).
+
+        Cosi' la cascata scopre in pochi probe QUALE tier e' vivo invece di
+        bruciare tutti i tentativi su un tier morto."""
         if not cands:
             return None
         _kept = self._spread_hide(cands)
         if _kept:
             cands = _kept
-        try:
-            _mo = min(int(d.get("order", ORDER_LAST)) for d in cands)
-            _tier = [d for d in cands
-                     if int(d.get("order", ORDER_LAST)) == _mo]
-        except Exception:                              # noqa: BLE001
-            _tier = cands
-        if not _tier:
-            _tier = cands
+        _by_tier: dict[int, list[dict]] = {}
+        for d in cands:
+            try:
+                _t = int(d.get("order", ORDER_LAST))
+            except Exception:                          # noqa: BLE001
+                _t = ORDER_LAST
+            _by_tier.setdefault(_t, []).append(d)
+        _tiers = sorted(_by_tier)
+        _sampled = {int(t) for t in (sampled_tiers or ())}
+        _fresh = [t for t in _tiers if t not in _sampled]
+        _t = _fresh[0] if _fresh else _tiers[0]
+        _tier = _by_tier.get(_t) or cands
         try:
             if getattr(self.policy, "adaptive_pick", True):
                 return min(_tier, key=lambda d: (
@@ -5429,7 +5520,8 @@ class Router:
                          tried: set[str] | None = None,
                          requested_group: str | None = None,
                          exclude_keys: set[str] | None = None,
-                         exclude_uniq: set[str] | None = None) -> dict | None:
+                         exclude_uniq: set[str] | None = None,
+                         sampled_tiers: set[int] | None = None) -> dict | None:
         """UN candidato probe per il warm-refill: percorre il ladder -dim
         ASCENDENTE partendo dal gruppo corrente (se nel -dim corrente non c'e'
         niente di buono si sale al -dim superiore) fermandosi ai FREE: i bucket
@@ -5496,8 +5588,10 @@ class Router:
                 _by[g] = []
                 _order.append(g)
             _by[g].append(d)
+        _sam0 = {int(t) for t in (sampled_tiers or ())}
         for g in _order:
-            _pick = self._canary_cold_pick(_by[g], ctx)
+            _pick = self._canary_cold_pick(
+                _by[g], ctx, _sam0 | self._tiers_of(ex, g))
             if _pick is not None:
                 return _pick
         return None
@@ -5532,7 +5626,8 @@ class Router:
                          requested_group: str | None = None,
                          exclude_keys: set[str] | None = None,
                          exclude_uniq: set[str] | None = None,
-                         min_age_sec: float = 3600.0) -> dict | None:
+                         min_age_sec: float = 3600.0,
+                         sampled_tiers: set[int] | None = None) -> dict | None:
         """TERZO canario del warm-refill: non cerca un dep fresco ma un
         DORMIENTE da almeno `min_age_sec` (default 1h) messo in cooldown da
         un 429/quota — un vero e proprio SVEglia. Se risponde, il probe lo
@@ -5604,8 +5699,10 @@ class Router:
                 _by[g] = []
                 _order.append(g)
             _by[g].append(d)
+        _sam0 = {int(t) for t in (sampled_tiers or ())}
         for g in _order:
-            _pick = self._canary_cold_pick(_by[g], ctx)
+            _pick = self._canary_cold_pick(
+                _by[g], ctx, _sam0 | self._tiers_of(ex, g))
             if _pick is not None:
                 return _pick
         return None

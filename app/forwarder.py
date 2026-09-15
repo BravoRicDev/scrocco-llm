@@ -768,6 +768,79 @@ def maybe_host_transient_cooldown(router, dep: dict | None, status,
                 "%.0fs", (dep or {}).get("unique"), host, host, sec)
     return True
 
+
+# ---------------------------------------------------------- MAX_INPUT 413
+# Il CSV puo' MENTIRE sul massimo input (dichiara 32k, il provider taglia a
+# 16k). Molti provider mettono il limite VERO nel body del 400/413:
+#   "maximum context length is 16384 tokens, but you requested 21500"
+# Lo estraiamo e ridimensioniamo il deployment (router.note_discovered_max_input).
+_MAXCTX_PATTERNS = (
+    re.compile(r"maximum\s+(?:context|input|prompt)\s+length\s+is\s+"
+               r"(\d{3,9})", re.I),
+    re.compile(r"(?:context|input|prompt)\s+length\s+(?:is\s+|of\s+|limit\s+"
+               r"(?:is\s+)?)?(\d{3,9})", re.I),
+    re.compile(r"limit\s+of\s+(\d{3,9})\s*tokens", re.I),
+    re.compile(r"(?:reduce|shorten)\s+(?:the\s+)?(?:length|messages|prompt)"
+               r"[^0-9]{0,40}(\d{3,9})\s*tokens", re.I),
+    re.compile(r"max(?:imum)?\s+(?:of\s+)?(\d{3,9})\s*tokens", re.I),
+    re.compile(r"too\s+long[^0-9]{0,40}(\d{3,9})\s*tokens", re.I),
+)
+
+
+def extract_provider_max_input(detail: str | None) -> int | None:
+    """Estrae il VERO limite di input (token) dal body di un errore
+    context-length del provider. None se non c'e' un numero credibile."""
+    d = detail or ""
+    for rx in _MAXCTX_PATTERNS:
+        m = rx.search(d)
+        if not m:
+            continue
+        try:
+            n = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 256 <= n <= 32_000_000:
+            return n
+    return None
+
+
+def _looks_context_limit(status, detail: str | None) -> bool:
+    try:
+        st = abs(int(status or 0))
+    except (TypeError, ValueError):
+        st = 0
+    if st == 413:
+        return True
+    low = (detail or "").lower()
+    return ("context length" in low or "context_length_exceeded" in low
+            or "maximum context" in low or "too many tokens" in low
+            or "prompt is too long" in low or "input is too long" in low)
+
+
+def note_context_limit(router, dep: dict | None, status, detail,
+                       ctx: int | None = None) -> int | None:
+    """Regola: se il provider rivela il vero limite (o risponde 413 senza
+    numero), il deployment viene RIDIMENSIONATO al vero max_input, cosi' il
+    router non gli rimanda piu' payload troppo grossi. Ritorna il limite o
+    None."""
+    if not dep or not _looks_context_limit(status, detail):
+        return None
+    lim = extract_provider_max_input(detail)
+    if not lim and ctx:
+        try:
+            lim = max(1024, int(int(ctx) * 0.9))
+        except (TypeError, ValueError):
+            lim = None
+    if not lim:
+        return None
+    try:
+        router.note_discovered_max_input(dep.get("unique"), lim)
+        return lim
+    except Exception:                              # noqa: BLE001
+        log.debug("[max-input] note_discovered fallito per %s",
+                  dep.get("unique"), exc_info=True)
+        return None
+
 # Loop degenere rilevato in STREAMING (kill precoce): il modello produce
 # output ripetitivo all'infinito -> cooldown medio, il routing ruota subito.
 STREAM_LOOP_COOLDOWN_S = 300                  # 5min
@@ -2351,9 +2424,10 @@ truncation_hook=None,
                                 log.info("[refill] ns: sveglia %s (429 "
                                          "maturo)", _B["unique"])
                         if _B is not None:
-                            log.info("[refill] ns: canario %s (chiavi "
-                                     "warm+in-volo escluse=%d)",
-                                     _B["unique"], len(_raced_keys))
+                            log.info("[refill] ns: canario %s (order=%s, "
+                                     "chiavi warm+in-volo escluse=%d)",
+                                     _B["unique"], _B.get("order"),
+                                     len(_raced_keys))
                             _raced.add(_B["unique"])
                             _raced_keys.add(str(_B.get("api_key") or ""))
                             pB = dict(payload)
@@ -2684,6 +2758,8 @@ truncation_hook=None,
                 # ruotare (altrimenti bruciamo una chiave dietro l'altra).
                 maybe_quarantine_ban(router, dep, err.status, detail)
                 maybe_host_transient_cooldown(router, dep, err.status, detail)
+                # 413/400 context-length: ridimensiona al vero max_input
+                note_context_limit(router, dep, err.status, detail, ctx)
                 _kind_default = classify_error(err.status, None, detail)
                 # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
                 # "usage limit reached" / "Resets in N days"), a prescindere
