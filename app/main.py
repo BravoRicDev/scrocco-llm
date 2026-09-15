@@ -1507,8 +1507,9 @@ async def chat_completions(request: Request, response: Response):
     # AUDIT DEL PREFISSO (F4): prima di spendere la cache a monte, impronta
     # il prefisso [1:frontier] e dice perche' e' cambiato (se e' cambiato).
     # 'identity' = colpa nostra (system/inject), 'prefix' = ctxcompact,
-    # histnorm o riscrittura del client. Solo osservabilita': nessun effetto
-    # sulla scelta del deployment.
+    # histnorm o riscrittura del client. Osservabilita': nessun effetto sulla
+    # scelta del deployment, ma F10 lo usa come breadcrumb sui 503.
+    _aud = None
     if getattr(router.policy, "cache_prefix_audit", True) and session_id:
         _bnd = (_crep.get("boundary")
                 if (_do_compact and _crep.get("changed")) else None)
@@ -1566,6 +1567,7 @@ async def chat_completions(request: Request, response: Response):
             scope="group" if explicit_req else "chain",
             ctx=ctx_est,
             cold=bool(_dec.get("cold")),
+            prefix_reason=(_aud if _aud in ("identity", "prefix") else None),
             ses=session_id, req=raw_model,
             session=_sess, client_ip=_cip, request=request,
             attribution=_attr, requested_group=group_or_explicit,
@@ -1612,7 +1614,8 @@ async def chat_completions(request: Request, response: Response):
                       fb=max(0, len(attempts_box) - 1),
                       dur_ms=int((time.monotonic() - t_req) * 1000),
                       stream=False, qc=True, wd="chain-exhausted", usage=None)
-        return _exhausted(len(attempts_box), err.detail)
+        return _exhausted(len(attempts_box), err.detail,
+                          prefix_reason=_aud)
     data, used = res[0], res[1]
     qc_failed = res[2] if len(res) > 2 else []
 
@@ -2014,11 +2017,25 @@ async def _discard_stream(gen, pending=None) -> None:
         pass
 
 
-def _exhausted(n_tries: int, detail: str | None = None):
+def _exhausted(n_tries: int, detail: str | None = None,
+               prefix_reason: str | None = None):
     """Risposta di errore RETRYABLE quando nessun deployment ha prodotto un
     output utile: HTTP 503 + Retry-After. MAI un turno finto verso il client —
     l'agente ritenta (e col routing resiliente/transient il retry di solito
-    trova una chiave viva)."""
+    trova una chiave viva).
+
+    F10: se il prefisso della sessione era MUTATO in questa richiesta
+    (identity/prefix), il 503 viene etichettato come breadcrumb: parte dei
+    503 su catena fredda sono cache-miss percepiti come "provider morto"."""
+    lab = prefix_reason if prefix_reason in ("identity", "prefix") else "clean"
+    try:
+        metrics.inc("nx_chain_503_total", (lab,))
+    except Exception:                        # noqa: BLE001
+        pass
+    if lab != "clean":
+        log.warning("[cache-audit] 503 catena esaurita dopo prefisso MUTATO "
+                    "(%s): possibile cache-miss percepito come provider morto",
+                    lab)
     msg = ("nessun deployment upstream ha prodotto una risposta dopo %d "
            "tentativi" % max(1, int(n_tries or 1)))
     if detail:
@@ -2207,6 +2224,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 attribution: dict | None = None,
                                 requested_group: str | None = None,
                                 cold: bool = False,
+                                prefix_reason: str | None = None,
                                 sniffer=None):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
     dep = first_dep
@@ -2455,7 +2473,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
                 return _exhausted(len(attempts),
-                                  "%s (%s)" % (verdict, fr) if fr else verdict)
+                                  "%s (%s)" % (verdict, fr) if fr else verdict,
+                                  prefix_reason=prefix_reason)
             dep = nxt
             inject_identity(payload, dep, router=router)
             continue                    # ri-entra nel while col nuovo dep
@@ -2637,7 +2656,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               dur_ms=int((time.monotonic() - t_req) * 1000),
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
-                return _exhausted(len(attempts), err.detail)
+                return _exhausted(len(attempts), err.detail,
+                                  prefix_reason=prefix_reason)
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -2669,7 +2689,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               dur_ms=int((time.monotonic() - t_req) * 1000),
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
-                return _exhausted(len(attempts), repr(exc)[:160])
+                return _exhausted(len(attempts), repr(exc)[:160],
+                                  prefix_reason=prefix_reason)
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt

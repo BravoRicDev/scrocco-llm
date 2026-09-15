@@ -73,6 +73,14 @@ CTX_BUCKETS = (8000, 32000, 128000)
 # EMA devono essere lunghe CTX_BUCKET_COUNT, NON len(CTX_BUCKETS) (off-by-one
 # che su ctx>128k faceva IndexError su v[b] e perdeva il bucket 3 al reload).
 CTX_BUCKET_COUNT = len(CTX_BUCKETS) + 1
+# PREFILL RATE (F9 "tassa dei gemelli"): il TTFT di un 80k non e' confrontabile
+# con quello di un 8k. Teniamo per-deployment un EMA in ms per 1k token di
+# contesto: e' la quantita' INVARIANTE al mix di contesti, e serve a estrapolare
+# il TTFT atteso quando il bucket richiesto non ha campioni (prima si ripiegava
+# sull'EMA globale mista -> deadline troppo stretto -> rotazioni/503 su catene
+# fredde con contesti grossi).
+TTFT_RATE_MIN_CTX = 8000        # sotto: il prefill e' trascurabile/rumoroso
+TTFT_RATE_FLOOR_MS = 250.0      # pavimento assoluto dell'estrapolazione
 # Demote per-sessione SOLO se la chiamata e' lenta sia in termini ASSOLUTI sia
 # RELATIVI alla baseline del dep nello STESSO bucket (>2x): chi ha sempre
 # servito i contesti grossi non viene punito per la sua natura.
@@ -151,7 +159,7 @@ class DepStats:
     last_fail_ts: float = 0.0         # timestamp ultimo fallimento
     probe_fail_streak: int = 0        # probe passivi consecutivi falliti (cap)
     # --- dynamic scoring: feature osservate per-deployment ---
-    latency_history: list[float] = field(default_factory=list)  # ultimi N latency_ms
+    latency_history: list = field(default_factory=list)  # ultimi N (bucket, ctx, ms)
     total_tokens: int = 0              # token completati cumulativi
     total_duration_ms: float = 0.0     # durata cumulativa ms
     recent_failures: int = 0           # fallimenti negli ultimi N tentativi
@@ -472,6 +480,9 @@ class Router:
         # unique -> [e0,e1,e2,e3]; 0.0 = nessun campione per quel bucket.
         self._lat_buckets: dict[str, list] = {}
         self._ttft_buckets: dict[str, list] = {}
+        # F9: ms per 1k token di contesto (solo kind='ttft'), invariante ai
+        # bucket: usato per estrapolare il TTFT atteso su contesti mai visti.
+        self._prefill_rate: dict[str, float] = {}
         # Time-decay dei punteggi di reputazione (halflife da policy).
         self._scores_decay_ts: float = time.time()
         self._scores_decay_log_ts: float = time.time()
@@ -1944,20 +1955,39 @@ class Router:
             v.append(0.0)
         old = v[b]
         v[b] = lat if old <= 0 else old * (1 - alpha) + lat * alpha
-        if kind != "ttft":
-            s = self.stats_for(unique)
-            if s is not None:
-                h = s.latency_history
-                if h is None:
-                    h = s.latency_history = []
-                h.append((b, lat))
-                if len(h) > 20:
-                    del h[:-20]
+        try:
+            cx = int(ctx_est)
+        except (TypeError, ValueError):
+            cx = 0
+        if kind == "ttft":
+            # F9: rate di prefill (ms/1k token) solo con contesto utile; e' la
+            # stessa misura per tutti i bucket, quindi regge il cambio di taglia.
+            if cx >= TTFT_RATE_MIN_CTX:
+                rate = getattr(self, "_prefill_rate", None)
+                if not isinstance(rate, dict):
+                    rate = self._prefill_rate = {}
+                r = lat / (cx / 1000.0)
+                prev = rate.get(unique)
+                rate[unique] = r if prev is None or prev <= 0 else \
+                    prev * (1 - alpha) + r * alpha
+            return
+        s = self.stats_for(unique)
+        if s is not None:
+            h = s.latency_history
+            if h is None:
+                h = s.latency_history = []
+            h.append((b, cx, lat))
+            if len(h) > 20:
+                del h[:-20]
 
     def bucket_latency_ms(self, unique: str, ctx_est=None,
                           kind: str = "total") -> float | None:
-        """EMA del deployment nel bucket di contesto della richiesta; se il
-        bucket non ha campioni, ripiega sull'EMA globale (compat)."""
+        """EMA del deployment nel bucket di contesto della richiesta.
+
+        Se il bucket non ha campioni: per kind='ttft' (F9) estrapola dal rate
+        di prefill (ms per 1k token) alla taglia richiesta, cosi' un dep visto
+        solo su contesti piccoli non sembra "veloce" anche su 100k; per gli
+        altri kind ripiega sull'EMA globale (compat)."""
         b = _ctx_bucket(ctx_est)
         table = getattr(self, "_ttft_buckets" if kind == "ttft"
                         else "_lat_buckets", None)
@@ -1965,6 +1995,15 @@ class Router:
             v = table.get(unique)
             if v and len(v) > b and v[b] > 0:
                 return float(v[b])
+        if kind == "ttft":
+            try:
+                cx = int(ctx_est)
+            except (TypeError, ValueError):
+                cx = 0
+            rate = getattr(self, "_prefill_rate", None)
+            r = rate.get(unique) if isinstance(rate, dict) else None
+            if r and r > 0 and cx > 0:
+                return max(TTFT_RATE_FLOOR_MS, float(r) * cx / 1000.0)
         return getattr(self, "_avg_latencies", {}).get(unique)
 
     def note_stream_end(self, unique: str, dur_ms: float, ctx_est=None) -> None:
@@ -2096,24 +2135,39 @@ class Router:
             stats = self._stats[unique]
             hist = stats.latency_history or []
             if hist and len(hist) >= 3:
-                # F1: i campioni sono (bucket, latenza). p95 SUL BUCKET della
-                # richiesta corrente quando ci sono >=3 campioni li', altrimenti
-                # su tutti i campioni. Cap di sicurezza sul penalty (il blocco
-                # era morto fino a ora: non deve dominare il punteggio SW).
+                # F1/F9: i campioni sono (bucket, ctx, latenza). p95 SUL BUCKET
+                # della richiesta quando ci sono >=3 campioni li', altrimenti su
+                # tutti ma NORMALIZZATI alla taglia richiesta via rate (lat *
+                # ctx_req/ctx_s): senza questo un dep provato solo su contesti
+                # grossi sembrerebbe lento anche su richieste piccole (e
+                # viceversa). Cap di sicurezza sul penalty (il blocco era morto
+                # fino a F1: non deve dominare il punteggio SW).
                 b = _ctx_bucket(ctx_est)
+                try:
+                    cx_req = int(ctx_est)
+                except (TypeError, ValueError):
+                    cx_req = 0
 
                 def _sample(x):
-                    if isinstance(x, (tuple, list)) and len(x) == 2:
-                        return int(x[0]), float(x[1])
-                    return -1, float(x)
+                    if isinstance(x, (tuple, list)):
+                        if len(x) == 3:
+                            return int(x[0]), int(x[1] or 0), float(x[2])
+                        if len(x) == 2:
+                            return int(x[0]), 0, float(x[1])
+                    return -1, 0, float(x)
+
+                def _norm(lat, cx_s):
+                    if cx_req > 0 and cx_s > 0:
+                        return lat * (cx_req / float(cx_s))
+                    return lat
 
                 pairs = [_sample(x) for x in hist]
                 if b >= 0:
-                    samples = [lat for bb, lat in pairs if bb == b]
+                    samples = [lat for bb, _c, lat in pairs if bb == b]
                 else:
-                    samples = [lat for _, lat in pairs]
+                    samples = [lat for _b, _c, lat in pairs]
                 if len(samples) < 3:
-                    samples = [lat for _, lat in pairs]
+                    samples = [_norm(lat, c) for _b, c, lat in pairs]
                 if samples and len(samples) >= 3:
                     # p95 latency
                     sorted_hist = sorted(samples)
@@ -2615,6 +2669,7 @@ class Router:
                 self._avg_latencies.pop(u, None)
                 getattr(self, "_lat_buckets", {}).pop(u, None)
                 getattr(self, "_ttft_buckets", {}).pop(u, None)
+                getattr(self, "_prefill_rate", {}).pop(u, None)
             # Cleanup provider/key scores vecchi: mantieni solo chiavi attive
             active_providers = set()
             active_keys = set()
@@ -2934,6 +2989,7 @@ class Router:
                         getattr(self, "_lat_buckets", {}).items()},
             "ctx_ttft": {u: list(v) for u, v in
                          getattr(self, "_ttft_buckets", {}).items()},
+            "ttft_rate": dict(getattr(self, "_prefill_rate", {})),
             "saved_at": time.time(),
         }
 
@@ -3014,6 +3070,15 @@ class Router:
                         continue
                     fv = (fv + [0.0] * CTX_BUCKET_COUNT)[:CTX_BUCKET_COUNT]
                     table[str(u)] = fv
+            rate = getattr(self, "_prefill_rate", None)
+            if isinstance(rate, dict):
+                for u, r in (data.get("ttft_rate") or {}).items():
+                    try:
+                        fr = float(r)
+                    except (TypeError, ValueError):
+                        continue
+                    if fr > 0:
+                        rate[str(u)] = fr
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
 

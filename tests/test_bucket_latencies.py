@@ -216,3 +216,68 @@ def test_short_rows_are_padded_not_crash(router):
     assert len(r2._lat_buckets[u]) == 4
     assert r2.bucket_latency_ms(u, 200000) == 0.0 or True  # slot 3 vuoto
     assert r2.bucket_latency_ms(u, 1000) == 100.0
+
+
+# ============ F9: PREFILL RATE (tassa dei gemelli sul TTFT) ==============
+def test_prefill_rate_only_ttft_only_big_ctx(router):
+    u = _u(router, "K-A")
+    router.note_result(u, 3200, ctx_est=16000, kind="ttft")
+    assert u in router._prefill_rate
+    assert router._prefill_rate[u] == pytest.approx(200.0)   # 3200 / 16k
+    # i totali NON alimentano il rate (semantica mista: niente prefill)
+    u2 = _u(router, "K-B")
+    router.note_result(u2, 3200, ctx_est=16000)              # kind=total
+    assert u2 not in router._prefill_rate
+    # sotto 8k il prefill e' rumore: rate invariato
+    router.note_result(u, 500, ctx_est=2000, kind="ttft")
+    assert router._prefill_rate[u] == pytest.approx(200.0)
+
+
+def test_ttft_extrapolates_on_empty_bucket(router):
+    u = _u(router, "K-A")
+    router.note_result(u, 3200, ctx_est=16000, kind="ttft")  # rate 200 ms/k
+    # bucket 3 vuoto: stima PROPORZIONALE alla taglia, non l'EMA dei piccoli
+    assert router.bucket_latency_ms(u, 200000, "ttft") == pytest.approx(40000.0)
+    assert router.bucket_latency_ms(u, 100000, "ttft") == pytest.approx(20000.0)
+    # il bucket che ha campioni resta il campione (nessuna estrapolazione)
+    assert router.bucket_latency_ms(u, 16000, "ttft") == pytest.approx(3200.0)
+    # kind=total: fallback legacy all'EMA globale (nessuna normalizzazione)
+    assert router.bucket_latency_ms(u, 200000) == pytest.approx(3200.0)
+
+
+def test_ttft_extrapolation_floor_and_unctx(router):
+    u = _u(router, "K-A")
+    router.note_result(u, 3200, ctx_est=16000, kind="ttft")
+    assert router.bucket_latency_ms(u, 1000, "ttft") == 250.0  # pavimento
+    # senza ctx si torna al fallback globale (compat), 3200 dal record
+    assert router.bucket_latency_ms(u, None, "ttft") == pytest.approx(3200.0)
+
+
+def test_ttft_rate_survives_dump_load(router):
+    u = _u(router, "K-A")
+    router.note_result(u, 3200, ctx_est=16000, kind="ttft")
+    snap = router.dump_stats()
+    assert snap["ttft_rate"][u] == pytest.approx(200.0)
+    r2 = Router(router.config, Policy.from_dict({}))
+    r2.load_stats(snap)
+    assert r2.bucket_latency_ms(u, 200000, "ttft") == pytest.approx(40000.0)
+
+
+def test_ttft_rate_rejects_junk_on_load(router):
+    u = _u(router, "K-A")
+    r2 = Router(router.config, Policy.from_dict({}))
+    r2.load_stats({"ttft_rate": {u: "nope", "bad": -5}})
+    assert u not in r2._prefill_rate and "bad" not in r2._prefill_rate
+
+
+def test_p95_normalized_across_buckets(router):
+    """Campioni solo su contesti grossi: su una richiesta piccola il p95 va
+    normalizzato (lat * ctx_req/ctx_s), non preso grezzo."""
+    u = _u(router, "K-A")
+    dep = router.config.deployment_by_unique(u)
+    s = router.stats_for(u)
+    s.latency_history = [(2, 40000, 30000.0)] * 3            # solo 40k, 30s
+    big = router._reputation_score(u, dep, 40000)            # penalty piena
+    small = router._reputation_score(u, dep, 5000)           # normalizzata
+    assert small < big
+    assert big - small >= 10.0

@@ -129,7 +129,15 @@ individual account limits instead of dying on the first 429.
   that merely served a huge context is not punished); the adaptive httpx
   timeout and the first-content deadline read the *current request's* bucket
   (TTFT table for first-content); the once-dead `dynamic_scoring` p95 leg is
-  alive, fed by per-bucket samples.
+  alive, fed by per-bucket samples. A per-deployment **prefill rate**
+  (ms per 1k context tokens, persisted) lets the TTFT be extrapolated when
+  the required bucket has no samples yet — an 80 k context is no longer
+  judged by the mixed EMA of small prompts — and the cross-bucket p95
+  fallback is normalized to the requested size the same way.
+- **503 breadcrumb** (`nx_chain_503_total{prefix=identity|prefix|clean}`):
+  when a chain is exhausted (503 + Retry-After) the prefix-audit verdict of
+  that request labels the counter, so retryable 503s caused by a mutated
+  prefix (cache miss perceived as "dead provider") are countable.
 - **First-content hedge** (`qc_json.stream_hedge_delay_ms`, default 1500,
   0 = off): on the FIRST attempt of a cache-COLD streaming chain, if the
   chosen upstream has no content after the delay, ONE canary opens on the

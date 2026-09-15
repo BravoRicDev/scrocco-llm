@@ -111,7 +111,10 @@ pass-through `chat` style — non-stream final answers included),
 `[warmstart]` (routing state — holders, stickies, warm ownership, slow
 demotes, esc pins, ctxcompact frontiers — restored at boot from
 `var/routing_state.json`, TTLs revalidated), `[cache-audit]` (why a session's
-conversation prefix CHANGED between requests: `identity`/`prefix` verdicts),
+conversation prefix CHANGED between requests: `identity`/`prefix` verdicts;
+the same verdict also labels `nx_chain_503_total`, the breadcrumb telling
+how many retryable 503 were a prefix-mutation cache miss rather than a dead
+provider),
 `[hedge]` (cold-chain first-content race: one canary, pre-commit only, the
 loser is cancelled unpunished, never toward paid buckets), `[key-soft]`
 (per-api-key 429 blackout for Retry-After seconds: soft skip of every row
