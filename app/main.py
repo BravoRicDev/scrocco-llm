@@ -74,6 +74,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         maybe_quarantine_ban,
                         maybe_host_transient_cooldown,
                         note_context_limit,
+                        repair_reasoning_replay, _REASONING_REPLAY_RE,
                         QUOTA_MIN_COOLDOWN_S)
 from .health import health_loop
 from .policy import Policy, refill_out_budget
@@ -2545,17 +2546,25 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             # REGE (utente): un errore durante il canary va in cooldown
             # COME AL SOLITO: 429/5xx transitori -> soft cooldown calibrato
             # sui fallimenti 24h (retry_after numerico ha priorita').
-            try:
-                _sec = getattr(exc, "retry_after", None)
-                if not (isinstance(_sec, (int, float)) and _sec > 0):
-                    try:
-                        _f24 = router.stats_for(_bu).fail_count_24h
-                    except Exception:
-                        _f24 = 0
-                    _sec = _soft_cd(_f24)
-                router.mark_failed(_bu, seconds=_sec, reason="canary_error")
-            except Exception:
-                pass
+            # ECCEZIONE: il rifiuto "replay del reasoning" e' un problema del
+            # PAYLOAD (tutte le chiavi del provider lo rifiutano): la chiave
+            # e' sana -> nessuna penale (la richiesta principale ripara).
+            if _REASONING_REPLAY_RE.search(str(exc)):
+                log.info("[hedge] canary %s: payload replay-reasoning "
+                         "(chiave sana, nessuna penale)", _bu)
+            else:
+                try:
+                    _sec = getattr(exc, "retry_after", None)
+                    if not (isinstance(_sec, (int, float)) and _sec > 0):
+                        try:
+                            _f24 = router.stats_for(_bu).fail_count_24h
+                        except Exception:
+                            _f24 = 0
+                        _sec = _soft_cd(_f24)
+                    router.mark_failed(_bu, seconds=_sec,
+                                       reason="canary_error")
+                except Exception:
+                    pass
             log.info("[hedge] canary %s non disponibile (%s) -> cooldown",
                      _bu, type(exc).__name__)
     if not canaries:
@@ -2862,6 +2871,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     requested_group = requested_group or (first_dep or {}).get("group")
     tried = 0
     tried_set: set[str] = set()
+    _rsn_repaired: set[str] = set()      # replay reasoning gia' riparato
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
                      or 128)
@@ -3241,6 +3251,22 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         except UpstreamError as err:
             router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
             detail = err.detail or ""
+            # REPLAY DEL REASONING: opencode zen "Console Go" (deepseek
+            # thinking) pretende il campo `reasoning_content` sugli assistant
+            # con tool_calls; il client lo droppa -> 400 bloccante. Prima di
+            # qualunque cooldown/rotazione: ripara il payload e ritenta LO
+            # STESSO deployment (tutte le chiavi del provider rifiutano lo
+            # stesso payload: ruotare brucia la catena per niente).
+            if (_REASONING_REPLAY_RE.search(detail)
+                    and dep["unique"] not in _rsn_repaired):
+                _rsn_repaired.add(dep["unique"])
+                _nfix = repair_reasoning_replay(payload)
+                metrics.inc("nx_reasoning_replay_total", ("repaired",))
+                log.warning("[reasoning-replay] %s: %d assistant con "
+                            "tool_calls senza reasoning_content -> riparati, "
+                            "ritento lo stesso deployment", dep["unique"],
+                            _nfix)
+                continue
             # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
             # Service): quarantena dell'HOST 24h, cosi' la rotazione non
             # brucia una chiave dietro l'altra dello stesso provider.

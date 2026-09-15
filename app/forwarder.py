@@ -276,16 +276,22 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                     pass
                 metrics.inc("nx_hedge_total", ("probe_ok",))
             elif raised is not None:
-                try:
-                    _sec = getattr(raised, "retry_after", None)
-                    if isinstance(_sec, (int, float)) and _sec > 0:
-                        router.mark_failed(u, seconds=_sec,
-                                           reason="probe_error")
-                    else:
-                        router.mark_failed(u, reason="probe_error")
-                except Exception:
-                    pass
-                metrics.inc("nx_hedge_total", ("probe_fail",))
+                # Payload REPLAY-REASONING: non e' colpa della chiave (tutte
+                # le chiavi del provider rifiutano lo stesso payload) ->
+                # nessuna penale, la richiesta principale lo ripara.
+                if _REASONING_REPLAY_RE.search(str(raised)):
+                    metrics.inc("nx_hedge_total", ("probe_payload",))
+                else:
+                    try:
+                        _sec = getattr(raised, "retry_after", None)
+                        if isinstance(_sec, (int, float)) and _sec > 0:
+                            router.mark_failed(u, seconds=_sec,
+                                               reason="probe_error")
+                        else:
+                            router.mark_failed(u, reason="probe_error")
+                    except Exception:
+                        pass
+                    metrics.inc("nx_hedge_total", ("probe_fail",))
             else:
                 metrics.inc("nx_hedge_total", ("probe_drop",))
             log.info("[probe-ns] %s: %s", u,
@@ -655,6 +661,42 @@ _PAYLOAD_SCHEMA_RE = re.compile(
     r"invalid|unknown)"
     r"|(?:unsupported|not supported)\s+['\"]?json_schema",
     re.IGNORECASE)
+
+# REPLAY DEL REASONING (thinking mode). opencode zen "Console Go" (deepseek
+# v4.1 thinking & co.) pretende che un assistant CON tool_calls riporti il suo
+# `reasoning_content`: il client agentico lo droppa dalla history, quindi il
+# provider risponde 400 bloccante "The `reasoning_content` in the thinking mode
+# must be passed back to the API." Il payload e' RIPARABILE: si re-inietta un
+# segnaposto sui turni assistant con tool_calls e si RITENTA LO STESSO
+# deployment (ruotare non aiuta: tutte le chiavi dello stesso provider
+# rifiutano lo stesso payload — in produzione bruciava 26 chiavi per niente).
+_REASONING_REPLAY_RE = re.compile(
+    r"reasoning[_\w]*[^\n]{0,120}?must be passed back", re.IGNORECASE)
+
+# Segnaposto neutro: il provider vuole il CAMPO presente, non il contenuto
+# (verificato live: anche una stringa fissa viene accettata).
+_RC_REPLAY_PLACEHOLDER = "[reasoning non disponibile: turno replayato dal gateway]"
+
+
+def repair_reasoning_replay(body: dict) -> int:
+    """Re-inietta il segnaposto di `reasoning_content` sugli assistant con
+    tool_calls che non lo portano. Ritorna quanti messaggi sono stati
+    riparati. Non tocca i turni senza tool_calls (accettati senza replay)."""
+    n = 0
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(msgs, list):
+        return 0
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        if not m.get("tool_calls"):
+            continue
+        rc = m.get("reasoning_content")
+        if isinstance(rc, str) and rc.strip():
+            continue
+        m["reasoning_content"] = _RC_REPLAY_PLACEHOLDER
+        n += 1
+    return n
 
 # Errore TRANSITORIO del provider/router a monte (non del client, non del
 # modello): l'upstream del provider e' giu', non ha endpoint validi ora, ecc.
@@ -2263,6 +2305,7 @@ truncation_hook=None,
         _so = schemaout_config_from_policy(router.policy)
         _tt = text_config_from_policy(router.policy)
         _corrected: set[str] = set()
+        _rsn_repaired: set[str] = set()      # replay reasoning gia' riparato
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
         last_err: UpstreamError | None = None
@@ -2760,6 +2803,18 @@ truncation_hook=None,
                 maybe_host_transient_cooldown(router, dep, err.status, detail)
                 # 413/400 context-length: ridimensiona al vero max_input
                 note_context_limit(router, dep, err.status, detail, ctx)
+                # REPLAY DEL REASONING: il provider pretende il campo sugli
+                # assistant con tool_calls. Ripara e ritenta LO STESSO dep.
+                if (_REASONING_REPLAY_RE.search(detail)
+                        and cur not in _rsn_repaired):
+                    _rsn_repaired.add(cur)
+                    _nfix = repair_reasoning_replay(payload)
+                    metrics.inc("nx_reasoning_replay_total", ("repaired",))
+                    log.warning("[reasoning-replay] %s: %d assistant con "
+                                "tool_calls senza reasoning_content -> "
+                                "riparati, ritento lo stesso deployment",
+                                cur, _nfix)
+                    continue
                 _kind_default = classify_error(err.status, None, detail)
                 # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
                 # "usage limit reached" / "Resets in N days"), a prescindere
