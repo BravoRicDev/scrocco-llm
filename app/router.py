@@ -3874,10 +3874,12 @@ class Router:
         now = time.time()
         self._prune_key_leases(now)
         rows = []
-        for u, exp in list(self._cooldown.items()):
-            rem = float(exp) - now
-            if rem <= 0:
+        for u in list(self._cooldown):
+            # cooldown EFFETTIVO (il model_preference puo' accorciarlo): il
+            # pannello deve mostrare chi e' DAVVERO tenuto fuori adesso.
+            if not self.is_cooled_down(u):
                 continue
+            rem = self.cooldown_residual(u)
             d = self.config.deployment_by_unique(u) or {}
             s = self.stats_for(u)
             rows.append({
@@ -3890,8 +3892,8 @@ class Router:
             })
         rows.sort(key=lambda r: -r["remaining_sec"])
         benches: dict[str, int] = {}
-        for u, exp in self._cooldown.items():
-            if exp <= now:
+        for u in self._cooldown:
+            if not self.is_cooled_down(u):
                 continue
             d = self.config.deployment_by_unique(u) or {}
             if getattr(self.stats_for(u), "last_reason", None) == \
