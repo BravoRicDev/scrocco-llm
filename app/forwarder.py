@@ -2015,6 +2015,11 @@ truncation_hook=None,
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
+        # stream_options vale solo in streaming: alcuni provider (opencode
+        # zen / Console Go) rifiutano con 400 "stream_options should be set
+        # along with stream = true" se arriva su una richiesta non-stream.
+        if not body.get("stream"):
+            body.pop("stream_options", None)
         apply_effort_policy(body, dep)
         _dg = downgrade_response_format(body, dep, _SCHEMAOUT_CFG)
         if _dg:

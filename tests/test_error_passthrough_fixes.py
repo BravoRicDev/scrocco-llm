@@ -153,3 +153,35 @@ def test_streaming_media_reject_never_passthrough(monkeypatch):
     assert b"ok" in asyncio.run(_drain(resp))
     assert broken["unique"] in seen
     assert good["unique"] in seen
+
+
+# ------------------------------------------------- stream_options non-stream
+def test_nonstream_toglie_stream_options():
+    """Osservato in produzione: il client manda `stream_options` in una
+    richiesta non-stream e il provider (opencode zen / Console Go) risponde
+    400 'stream_options should be set along with stream = true'. In non-stream
+    il gateway NON deve inoltrarlo."""
+    import httpx
+    import json
+
+    cfg, router, broken, good = _mk()
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        return await fwd.call_with_fallback(
+            router, "test", broken,
+            {"model": "x", "stream": False,
+             "stream_options": {"include_usage": True},
+             "messages": [{"role": "user", "content": "x"}]})
+
+    data, _used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert "stream_options" not in seen["body"]
+    assert seen["body"].get("stream") in (None, False)
