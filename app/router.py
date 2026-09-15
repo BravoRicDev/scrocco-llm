@@ -69,6 +69,10 @@ SOFT_SLOW_CTX_MIN = 30000
 # lo stesso dep che stalla su 100k. Bordi DESTRI: ctx < 8000 -> 0;
 # 8000..31999 -> 1; 32000..127999 -> 2; >=128000 -> 3.
 CTX_BUCKETS = (8000, 32000, 128000)
+# I bordi DESTRI dividono N+1 bucket: l'ultimo (>=128000) ha indice 3. Le righe
+# EMA devono essere lunghe CTX_BUCKET_COUNT, NON len(CTX_BUCKETS) (off-by-one
+# che su ctx>128k faceva IndexError su v[b] e perdeva il bucket 3 al reload).
+CTX_BUCKET_COUNT = len(CTX_BUCKETS) + 1
 # Demote per-sessione SOLO se la chiamata e' lenta sia in termini ASSOLUTI sia
 # RELATIVI alla baseline del dep nello STESSO bucket (>2x): chi ha sempre
 # servito i contesti grossi non viene punito per la sua natura.
@@ -1934,9 +1938,9 @@ class Router:
             return
         v = table.get(unique)
         if v is None:
-            v = [0.0] * len(CTX_BUCKETS)
+            v = [0.0] * CTX_BUCKET_COUNT
             table[unique] = v
-        while len(v) < len(CTX_BUCKETS):
+        while len(v) < CTX_BUCKET_COUNT:
             v.append(0.0)
         old = v[b]
         v[b] = lat if old <= 0 else old * (1 - alpha) + lat * alpha
@@ -3008,7 +3012,7 @@ class Router:
                         continue
                     if not fv or any(x < 0 for x in fv):
                         continue
-                    fv = (fv + [0.0] * len(CTX_BUCKETS))[:len(CTX_BUCKETS)]
+                    fv = (fv + [0.0] * CTX_BUCKET_COUNT)[:CTX_BUCKET_COUNT]
                     table[str(u)] = fv
         except Exception as exc:             # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)

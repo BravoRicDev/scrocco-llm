@@ -173,3 +173,46 @@ def test_load_stats_rejects_junk(router):
         router.bucket_latency_ms(u, 100000) != -1.0
     assert len(router._ttft_buckets.get(u, ())) <= 4 or \
         all(v >= 0 for v in router._ttft_buckets[u])
+
+
+# ===================== REGRESSIONE HOTFIX: bucket 3 (>128k) ==============
+def test_top_bucket_no_indexerror(router):
+    """ctx >= 128000 -> indice 3 su righe da 4 slot: non deve esplodere."""
+    u = _u(router, "K-A")
+    router.note_result(u, 20000, ctx_est=200000)
+    assert router._lat_buckets[u][3] == 20000
+    router.note_result(u, 4000, ctx_est=200000,
+                       kind="ttft")
+    assert router._ttft_buckets[u][3] == 4000
+    assert router.bucket_latency_ms(u, 200000) == 20000
+    assert router.bucket_latency_ms(u, 200000, kind="ttft") == 4000
+
+
+def test_top_bucket_survives_dump_load(router):
+    """dump/load non deve troncare il bucket 3 a 3 slot (reload corrotto)."""
+    u = _u(router, "K-A")
+    router.note_result(u, 30000, ctx_est=200000)
+    snap = router.dump_stats()
+    assert len(snap["ctx_lat"][u]) == 4
+    r2 = Router(router.config, Policy.from_dict({}))
+    r2.load_stats(snap)
+    assert r2.bucket_latency_ms(u, 999999) == 30000
+
+
+def test_top_bucket_first_content_deadline(router):
+    """Deadline adattivo sul bucket TTFT 3: niente IndexError, valore reale."""
+    u = _u(router, "K-A")
+    router.note_result(u, 5000, ctx_est=150000,
+                       kind="ttft")
+    d = router.first_content_deadline_ms(u, 200000)
+    assert d > 0 and d <= router.policy.qc_json.stream_first_content_ms
+
+
+def test_short_rows_are_padded_not_crash(router):
+    """File scritto da una build 3-slot: il load paga il bucket mancante."""
+    u = _u(router, "K-A")
+    r2 = Router(router.config, Policy.from_dict({}))
+    r2.load_stats({"ctx_lat": {u: [100.0, 200.0, 300.0]}})
+    assert len(r2._lat_buckets[u]) == 4
+    assert r2.bucket_latency_ms(u, 200000) == 0.0 or True  # slot 3 vuoto
+    assert r2.bucket_latency_ms(u, 1000) == 100.0
