@@ -351,3 +351,97 @@ def test_probe_impara_il_flag_senza_penale():
              if d["model"] == "m1"]
     assert all(d["thinking_replay"] for d in twins)
     assert dep["unique"] not in router._cooldown
+
+
+# ===================== flag strip_reasoning / no_thinking (persistiti) ======
+_HDR2 = ("commento,modello,provider,endpoint,data,context,max_input,"
+         "priority,scrocco-llm-test,caps,thinking_replay,strip_reasoning,"
+         "no_thinking\n")
+
+
+def _csv2(strip: str = "", nothink: str = "", model: str = "m9") -> str:
+    out = _HDR2
+    for key in ("K1", "K2", "K3"):
+        out += (f"a,{model},groq,https://api.groq.com/openai/v1,free,200,200000,5,"
+                f"{key},text,,{strip},{nothink}\n")
+    return out
+
+
+def _mk2(strip: str = "", nothink: str = ""):
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(_csv2(strip, nothink))
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    pol = Policy.from_dict({"capability_routing": {"model_capabilities": {}}})
+    router = Router(cfg, pol)
+    grp = next(g for g, deps in cfg.groups.items()
+               if any(d["api_key"] == "K1" for d in deps))
+    dep = next(d for d in cfg.groups[grp] if d["api_key"] == "K1")
+    return cfg, router, dep
+
+
+def test_parsing_colonne_strip_e_no_thinking():
+    cfg, router, dep = _mk2(strip="true", nothink="1")
+    assert dep["strip_reasoning"] is True
+    assert dep["no_thinking"] is True
+    cfg0, _, dep0 = _mk2()
+    assert dep0["strip_reasoning"] is False
+    assert dep0["no_thinking"] is False
+
+
+def test_proattivo_strip_reasoning_toglie_i_campi():
+    """Con `strip_reasoning` nel CSV la richiesta parte GIA' senza i campi
+    reasoning (il provider li rifiuta): nessun 400 al primo invio."""
+    _, _, dep = _mk2(strip="true")
+    body = {"messages": [
+        {"role": "assistant", "content": "x", "reasoning_content": "penso"},
+        {"role": "user", "content": "y"}]}
+    n = apply_thinking_replay(body, dep)
+    assert n == 1
+    assert "reasoning_content" not in body["messages"][0]
+
+
+def test_no_thinking_dal_csv_blocca_effort():
+    from app.forwarder import apply_effort_policy
+    _, _, dep = _mk2(nothink="true")
+    body = {"reasoning_effort": "medium", "thinking": {"type": "enabled"}}
+    apply_effort_policy(body, dep)
+    assert "reasoning_effort" not in body
+    assert "thinking" not in body
+
+
+def test_learn_strip_e_no_thinking_scrive_il_csv():
+    csvlearn._PERSISTED.clear()          # dedup globale: non ereditare test
+    cfg, router, dep = _mk2()
+
+    async def _go():
+        n = csvlearn.learn_strip_reasoning(router, "m9")
+        await asyncio.gather(*list(csvlearn._TASKS))
+        return n
+
+    assert asyncio.run(_go()) == 3
+    twins = [d for deps in router.config.groups.values() for d in deps
+             if d["model"] == "m9"]
+    assert all(d["strip_reasoning"] for d in twins)
+    import csv as _csvmod
+    with open(cfg.csv_path, newline="", encoding="utf-8") as f:
+        rows = list(_csvmod.DictReader(f))
+    assert len(rows) == 3
+    assert all(r["strip_reasoning"] == "true" for r in rows)
+    # idempotente: secondo giro non riscrive
+    assert csvlearn.learn_strip_reasoning(router, "m9") == 0
+
+    cfg2, router2, _ = _mk2()
+
+    async def _go2():
+        n = csvlearn.learn_no_thinking(router2, "m9")
+        await asyncio.gather(*list(csvlearn._TASKS))
+        return n
+
+    assert asyncio.run(_go2()) == 3
+    twins2 = [d for deps in router2.config.groups.values() for d in deps
+              if d["model"] == "m9"]
+    assert all(d["no_thinking"] for d in twins2)
+    with open(cfg2.csv_path, newline="", encoding="utf-8") as f:
+        rows2 = list(_csvmod.DictReader(f))
+    assert all(r["no_thinking"] == "true" for r in rows2)

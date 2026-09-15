@@ -81,6 +81,17 @@ HOLD_UNTIL_HEADER = "hold_until_finish"
 # disponibile, altrimenti un segnaposto) cosi' il primo tentativo e' gia'
 # corretto. Viene scritta in automatico quando un deployment lo "impara".
 THINKING_REPLAY_HEADER = "thinking_replay"
+# strip_reasoning: il provider RIFIUTA i campi reasoning nella history
+# ("property 'reasoning_content' is unsupported"). true/1/yes/on = attivo:
+# prima di ogni invio il gateway TOGLIE `reasoning_content`/`reasoning` dai
+# turni assistant (il contenuto resta). Imparata in automatico quando un
+# deployment lo scopre da un 400 del provider.
+STRIP_REASONING_HEADER = "strip_reasoning"
+# no_thinking: il provider non accetta il thinking su history costruite dal
+# gateway (blocchi thinking incoerenti con `content`+`tool_calls`). true =
+# per questo deployment NON si iniettano `reasoning_effort`/`thinking`.
+# Imparata in automatico quando il downgrade risolve un 400 del provider.
+NO_THINKING_HEADER = "no_thinking"
 # api_style: protocollo nativo dell'upstream per questo deployment. Default
 # "chat" (OpenAI Chat Completions). Altri valori gestiti da app/protocols.py:
 # "responses" (OpenAI Responses /res/v1), "messages" (Anthropic), "google"
@@ -288,6 +299,13 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     raw_tp = (row.get(THINKING_REPLAY_HEADER) or "").strip().lower()
     thinking_replay = raw_tp in ("1", "true", "yes", "on")
 
+    # strip_reasoning / no_thinking: rimedi appresi sulla history thinking
+    # (provider che RIFIUTA i campi reasoning / non accetta il thinking).
+    strip_reasoning = (row.get(STRIP_REASONING_HEADER) or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+    no_thinking = (row.get(NO_THINKING_HEADER) or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
     # api_style: protocollo nativo upstream (chat/responses/messages/google).
     api_style = normalize_style(row.get(API_STYLE_HEADER))
 
@@ -330,6 +348,8 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "concurrent_limit": _int_or_none(row.get("concurrent_limit")),
         "hold_until_finish": hold_until_finish,
         "thinking_replay": thinking_replay,
+        "strip_reasoning": strip_reasoning,
+        "no_thinking": no_thinking,
         "api_style": api_style,
     }
 
@@ -449,6 +469,7 @@ _STANDARD_COLS = frozenset({
     "max_input", "priority", "caps", "effort_capable", "intelligence_score",
     "model_preference", "media_defer", "order", "enabled",
     "hold_until_finish", "api_style", "thinking_replay",
+    "strip_reasoning", "no_thinking",
 })
 
 
@@ -804,6 +825,8 @@ class GatewayConfig:
                     "media_defer": bool(meta.get("media_defer", True)),
                     "hold_until_finish": bool(meta.get("hold_until_finish")),
                     "thinking_replay": bool(meta.get("thinking_replay")),
+                    "strip_reasoning": bool(meta.get("strip_reasoning")),
+                    "no_thinking": bool(meta.get("no_thinking")),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
                     "api_style": normalize_style(meta.get("api_style")),

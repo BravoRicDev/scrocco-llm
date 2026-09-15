@@ -46,15 +46,16 @@ def mark_twins_in_memory(config, model: str,
     return n
 
 
-def _persist(config, csv_path: Path, var_dir: Path, model: str) -> int:
+def _persist(config, csv_path: Path, var_dir: Path, model: str,
+             flag: str = THINKING_REPLAY_HEADER) -> int:
     header, rows = csv_store.load_table(csv_path)
     if not header:
         return 0
-    csv_store.ensure_flag_column(header)
+    csv_store.ensure_flag_column(header, flag)
     n = 0
     for r in rows:
         if (r.get("modello") or "").strip() == model:
-            r[THINKING_REPLAY_HEADER] = "true"
+            r[flag] = "true"
             n += 1
     if not n:
         return 0
@@ -64,26 +65,30 @@ def _persist(config, csv_path: Path, var_dir: Path, model: str) -> int:
     return n
 
 
-async def _persist_bg(config, csv_path: Path, var_dir: Path, model: str):
+async def _persist_bg(config, csv_path: Path, var_dir: Path, model: str,
+                      flag: str = THINKING_REPLAY_HEADER):
+    tag = flag.replace("_", "-")
     try:
-        n = await asyncio.to_thread(_persist, config, csv_path, var_dir, model)
+        n = await asyncio.to_thread(_persist, config, csv_path, var_dir,
+                                    model, flag)
         if n:
-            metrics.inc("nx_thinking_replay_total", ("learned",))
-            log.info("[thinking-replay] flag salvato su %d righe "
-                     "(modello %s)", n, model)
+            metrics.inc("nx_learn_flag_total", (flag, "learned"))
+            log.info("[%s] flag salvato su %d righe (modello %s)",
+                     tag, n, model)
     except Exception as exc:                      # noqa: BLE001
-        log.warning("[thinking-replay] persistenza flag fallita per %s: %s",
-                    model, exc)
+        log.warning("[%s] persistenza flag fallita per %s: %s",
+                    tag, model, exc)
 
 
-def learn_thinking_replay(router_or_config, model: str | None) -> int:
-    """Impara il flag `thinking_replay` per un modello: subito in memoria
+def learn_flag(router_or_config, model: str | None,
+               flag: str = THINKING_REPLAY_HEADER) -> int:
+    """Impara un flag per-deployment per un modello: subito in memoria
     (tutti i gemelli), poi scrittura CSV in background (una volta sola)."""
     if not model:
         return 0
     config = getattr(router_or_config, "config", router_or_config)
-    n = mark_twins_in_memory(config, model)
-    key = ("thinking_replay", model)
+    n = mark_twins_in_memory(config, model, flag)
+    key = (flag, model)
     with _LOCK:
         if key in _PERSISTED:
             return n
@@ -95,7 +100,22 @@ def learn_thinking_replay(router_or_config, model: str | None) -> int:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return n                              # fuori da un loop: solo memoria
-    t = loop.create_task(_persist_bg(config, csv_path, var_dir, model))
+    t = loop.create_task(_persist_bg(config, csv_path, var_dir, model, flag))
     _TASKS.add(t)
     t.add_done_callback(_TASKS.discard)
     return n
+
+
+def learn_thinking_replay(router_or_config, model: str | None) -> int:
+    """Impara `thinking_replay` (segna il reasoning da replayare/ripristinare)."""
+    return learn_flag(router_or_config, model, "thinking_replay")
+
+
+def learn_strip_reasoning(router_or_config, model: str | None) -> int:
+    """Impara `strip_reasoning` (il provider RIFIUTA i campi reasoning)."""
+    return learn_flag(router_or_config, model, "strip_reasoning")
+
+
+def learn_no_thinking(router_or_config, model: str | None) -> int:
+    """Impara `no_thinking` (niente reasoning_effort/thinking in invio)."""
+    return learn_flag(router_or_config, model, "no_thinking")

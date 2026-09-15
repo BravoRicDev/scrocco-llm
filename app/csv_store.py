@@ -28,7 +28,13 @@ from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      DATA_HEADER, CONTEXT_HEADER, MAX_INPUT_HEADER,
                      PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER,
                      MEDIA_DEFER_HEADER, ENABLED_HEADER,
-                     THINKING_REPLAY_HEADER, GatewayConfig)
+                     THINKING_REPLAY_HEADER, STRIP_REASONING_HEADER,
+                     NO_THINKING_HEADER, GatewayConfig)
+
+# flag booleani "sì/true/1" che l'API e i writer automatici scrivono come
+# "true"/"false" (vuoto = default della colonna).
+BOOL_FLAG_FIELDS = ("media_defer", "thinking_replay", "strip_reasoning",
+                    "no_thinking")
 
 # campi gestiti dall'API (il resto delle colonne passa trasparente)
 PAYLOAD_FIELDS = {
@@ -42,6 +48,8 @@ PAYLOAD_FIELDS = {
     "tool_repair": TOOL_REPAIR_HEADER,
     "media_defer": MEDIA_DEFER_HEADER,
     "thinking_replay": THINKING_REPLAY_HEADER,
+    "strip_reasoning": STRIP_REASONING_HEADER,
+    "no_thinking": NO_THINKING_HEADER,
     "enabled": ENABLED_HEADER,
 }
 
@@ -189,13 +197,14 @@ def ensure_enabled_column(header: list[str]) -> list[str]:
     return header
 
 
-def ensure_flag_column(header: list[str]) -> list[str]:
-    """Garantisce la colonna 'thinking_replay' (replay del reasoning).
+def ensure_flag_column(header: list[str],
+                       flag: str = THINKING_REPLAY_HEADER) -> list[str]:
+    """Garantisce la colonna di un flag appreso (default 'thinking_replay').
 
-    Serve al writer automatico che impara il flag da un 400 del provider:
-    se la colonna non esiste ancora va creata prima di save_table."""
-    if THINKING_REPLAY_HEADER not in header:
-        header.append(THINKING_REPLAY_HEADER)
+    Serve ai writer automatici che imparano un flag da un errore del
+    provider: se la colonna non esiste ancora va creata prima di save_table."""
+    if flag not in header:
+        header.append(flag)
     return header
 
 
@@ -258,20 +267,8 @@ def apply_payload(row: dict, payload: dict, prefix: str,
             if payload_key == "caps":
                 row[header_name] = validate_caps(payload["caps"])
                 continue
-            if payload_key == "media_defer":
-                v = payload["media_defer"]
-                if isinstance(v, bool):
-                    row[header_name] = "true" if v else "false"
-                elif v is None:
-                    row[header_name] = ""
-                else:
-                    s = str(v).strip().lower()
-                    row[header_name] = "" if s == "" else (
-                        "false" if s in ("0", "false", "no", "n", "off")
-                        else "true")
-                continue
-            if payload_key == "thinking_replay":
-                v = payload["thinking_replay"]
+            if payload_key in BOOL_FLAG_FIELDS:
+                v = payload[payload_key]
                 if isinstance(v, bool):
                     row[header_name] = "true" if v else "false"
                 elif v is None:

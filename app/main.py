@@ -80,7 +80,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         repair_reasoning_error, reasoning_err_kind,
                         restore_reasoning, is_unclear_error,
                         QUOTA_MIN_COOLDOWN_S)
-from .csvlearn import learn_thinking_replay
+from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
+                       learn_no_thinking)
 from .health import health_loop
 from .policy import Policy, refill_out_budget
 from .qc import annotate_reasoning
@@ -2568,9 +2569,13 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             if _rk is not None:
                 log.info("[hedge] canary %s: payload della famiglia reasoning "
                          "(%s) (chiave sana, nessuna penale)", _bu, _rk)
-                if _rk == "needs":
-                    with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):
+                    if _rk == "needs":
                         learn_thinking_replay(router, B.get("model"))
+                    elif _rk == "rejects":
+                        learn_strip_reasoning(router, B.get("model"))
+                    elif _rk == "history":
+                        learn_no_thinking(router, B.get("model"))
             else:
                 try:
                     _sec = getattr(exc, "retry_after", None)
@@ -3307,10 +3312,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 metrics.inc("nx_reasoning_replay_total", (_rr,))
                 log.warning("[reasoning-%s] %s: rimedio applicato -> ritento "
                             "lo stesso deployment", _rr, dep["unique"])
-                if _rr == "repaired":
-                    # IMPARA: d'ora in poi il flag e' nel CSV per questo
-                    # modello (tutti i gemelli) e la richiesta parte corretta.
-                    learn_thinking_replay(router, dep.get("model"))
+                # IMPARA il flag corrispondente: d'ora in poi il CSV lo porta
+                # per questo modello (tutti i gemelli) e parte corretto.
+                with contextlib.suppress(Exception):
+                    if _rr == "repaired":
+                        learn_thinking_replay(router, dep.get("model"))
+                    elif _rr == "stripped":
+                        learn_strip_reasoning(router, dep.get("model"))
+                    elif _rr == "downgraded":
+                        learn_no_thinking(router, dep.get("model"))
                 continue
             # ERRORE "OSCURO" su richiesta reasoning: il taglio del reasoning
             # (histnorm) e' un'ottimizzazione di token; se il provider non ci

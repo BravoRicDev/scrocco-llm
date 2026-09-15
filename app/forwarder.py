@@ -49,7 +49,8 @@ from urllib.parse import urlsplit
 
 from . import metrics
 from . import protocols as proto
-from .csvlearn import learn_thinking_replay
+from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
+                       learn_no_thinking)
 from .policy import refill_out_budget
 from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
@@ -107,9 +108,10 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
       NON ha inviato `temperature` (il client vince sempre).
     """
     effort = get_effort()
-    if dep.get("_no_thinking"):
-        # rimedio "downgraded": il provider rifiuta il thinking su questa
-        # history -> nessun campo di reasoning per questo tentativo.
+    if dep.get("_no_thinking") or dep.get("no_thinking"):
+        # rimedio "downgraded" (o flag appreso nel CSV): il provider rifiuta il
+        # thinking su questa history -> nessun campo di reasoning per questo
+        # tentativo.
         body.pop("reasoning_effort", None)
         body.pop("thinking", None)
         body.pop("reasoning", None)
@@ -290,12 +292,17 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                 _rkind = reasoning_err_kind(str(raised))
                 if _rkind is not None:
                     metrics.inc("nx_hedge_total", ("probe_payload",))
-                    # Il probe ha scoperto che questo modello vuole il campo
-                    # reasoning: impariamo il flag per tutti i gemelli cosi'
-                    # la prossima richiesta parte gia' corretta.
-                    if _rkind == "needs":
-                        with contextlib.suppress(Exception):
+                    # Il probe ha scoperto la natura del problema: impariamo il
+                    # flag per tutti i gemelli cosi' la prossima richiesta parte
+                    # gia' corretta (thinking_replay / strip_reasoning /
+                    # no_thinking a seconda del tipo).
+                    with contextlib.suppress(Exception):
+                        if _rkind == "needs":
                             learn_thinking_replay(router, dep.get("model"))
+                        elif _rkind == "rejects":
+                            learn_strip_reasoning(router, dep.get("model"))
+                        elif _rkind == "history":
+                            learn_no_thinking(router, dep.get("model"))
                 else:
                     try:
                         _sec = getattr(raised, "retry_after", None)
@@ -790,8 +797,15 @@ def apply_thinking_replay(body: dict, dep: dict,
     Ordine: prima il reasoning VERO (se abbiamo la history originale del
     client, es. quando histnorm l'aveva tagliato per risparmiare token),
     poi il segnaposto sui turni che restano scoperti (probe/canary/sveglia,
-    che non hanno una history originale). Ritorna i campi sistemati."""
-    if not isinstance(dep, dict) or not dep.get("thinking_replay"):
+    che non hanno una history originale). Ritorna i campi sistemati.
+
+    Se il deployment ha imparato `strip_reasoning` (il provider RIFIUTA i
+    campi reasoning) si tolgono invece di rimetterli."""
+    if not isinstance(dep, dict):
+        return 0
+    if dep.get("strip_reasoning"):
+        return strip_reasoning_fields(body)
+    if not dep.get("thinking_replay"):
         return 0
     n = restore_reasoning(body, orig) if orig else 0
     return n + repair_reasoning_replay(body)
@@ -3073,10 +3087,16 @@ truncation_hook=None,
                     metrics.inc("nx_reasoning_replay_total", (_rr,))
                     log.warning("[reasoning-%s] %s: rimedio applicato -> "
                                 "ritento lo stesso deployment", _rr, cur)
-                    if _rr == "repaired":
-                        # IMPARA: d'ora in poi il flag e' nel CSV per questo
-                        # modello (tutti i gemelli) e parte corretto.
-                        learn_thinking_replay(router, dep.get("model"))
+                    # IMPARA il flag corrispondente: d'ora in poi il CSV lo
+                    # porta per questo modello (tutti i gemelli) e la richiesta
+                    # parte corretta senza errori continui.
+                    with contextlib.suppress(Exception):
+                        if _rr == "repaired":
+                            learn_thinking_replay(router, dep.get("model"))
+                        elif _rr == "stripped":
+                            learn_strip_reasoning(router, dep.get("model"))
+                        elif _rr == "downgraded":
+                            learn_no_thinking(router, dep.get("model"))
                     continue
                 # ERRORE "OSCURO" su richiesta reasoning: il taglio del
                 # reasoning (histnorm) e' un'ottimizzazione di token; senza una
