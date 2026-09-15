@@ -281,7 +281,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses) -> None:
                 metrics.inc("nx_hedge_total", ("probe_fail",))
             else:
                 metrics.inc("nx_hedge_total", ("probe_drop",))
-            log.debug("[probe-ns] %s: %s", u,
+            log.info("[probe-ns] %s: %s", u,
                       "in warm" if ok else
                       ("cooldown" if raised is not None else "vuoto, inerme"))
         finally:
@@ -2193,6 +2193,9 @@ truncation_hook=None,
                         _nv = _ready_min
                     if _nv < _ready_min:
                         _refill_rounds += 1
+                        log.info("[refill] ns %s: warm validi %d/%d (ctx=%s, "
+                                 "out=%s) -> 2 alla volta", cur, _nv,
+                                 _ready_min, ctx, _outb)
                         _raced.add(cur)
                         _raced_keys.add(str(dep.get("api_key") or ""))
                         # chiavi gia' rappresentate nel warm: non si rimette
@@ -2213,6 +2216,9 @@ truncation_hook=None,
                         except Exception:
                             _B = None
                         if _B is not None:
+                            log.info("[refill] ns: canario %s (chiavi "
+                                     "warm+in-volo escluse=%d)",
+                                     _B["unique"], len(_raced_keys))
                             _raced.add(_B["unique"])
                             _raced_keys.add(str(_B.get("api_key") or ""))
                             pB = dict(payload)
@@ -2225,6 +2231,10 @@ truncation_hook=None,
                                 session=session, attribution=attribution,
                                 rate_hook=lambda u2, rl:
                                 router.note_rate_limit(u2, rl)))
+                        else:
+                            log.info("[refill] ns %s: nessun canario free "
+                                     "consegnabile (chiavi escluse=%d)",
+                                     cur, len(_raced_keys))
                 if _fB is None:
                     data = await self.call(dep, payload,
                                    profile=profile or "",

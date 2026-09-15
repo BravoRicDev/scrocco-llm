@@ -2367,6 +2367,13 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 requested_group=requested_group,
                 exclude_keys=_xk,
                 exclude_uniq=(raced or {}).get("uniq"))
+            if _B is not None:
+                log.info("[refill] canario %s per %s (chiavi warm+in-volo "
+                         "escluse=%d, out=%s)", _B["unique"],
+                         dep.get("unique"), len(_xk), out_tokens)
+            else:
+                log.info("[refill] %s: nessun canario free consegnabile "
+                         "(chiavi escluse=%d)", dep.get("unique"), len(_xk))
             cands = [_B] if _B is not None else []
         else:
             _excl = (set(router._sess_deps().get(session, ()))
@@ -2580,7 +2587,7 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
                 # colpa della chiave — SOLO qui nessuna penale, identico alla
                 # regola del tentativo servito.
                 metrics.inc("nx_hedge_total", ("probe_drop",))
-            log.debug("[probe] %s: %s (verdetto=%s)", u,
+            log.info("[probe] %s: %s (verdetto=%s)", u,
                       "in warm" if ok else "gestito di solito", v)
         finally:
             with contextlib.suppress(Exception):
@@ -2761,6 +2768,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     except Exception:
                         _nv = _ready
                     _refill = _nv < _ready
+                    if _refill:
+                        log.info("[refill] %s: warm validi %d/%d (ctx=%s, "
+                                 "out=%s) -> canario extra in gara",
+                                 dep.get("unique"), _nv, _ready, ctx,
+                                 _need_out)
             if _hedge_ms > 0 or _refill:
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
