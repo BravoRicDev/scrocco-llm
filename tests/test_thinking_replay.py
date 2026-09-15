@@ -21,7 +21,7 @@ import pytest
 
 from app import csvlearn
 from app.config import GatewayConfig, _classify
-from app.forwarder import (Forwarder, apply_thinking_replay,
+from app.forwarder import (Forwarder, UpstreamError, apply_thinking_replay,
                            repair_reasoning_replay, restore_reasoning)
 from app.policy import Policy
 from app.router import Router
@@ -297,6 +297,38 @@ def test_e2e_rejects_strip_e_ritenta_stesso_dep():
     assert _asst(seen[0]).get("reasoning_content")
     assert _asst(seen[1]).get("reasoning_content") is None
     assert dep["unique"] not in router._cooldown
+
+
+def test_e2e_esenzione_esaurita_poi_ko_normale():
+    """P0: il rimedio e' esentato solo per `repair_exempt_streak_limit`
+    volte; oltre, lo stesso dep prende il KO normale (cooldown) invece di
+    rimediare all'infinito."""
+    cfg, router, dep = _mk(flag="")
+    router.policy.repair_exempt_streak_limit = 1
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode()))
+        return httpx.Response(400, content=RC_UNSUPPORTED.encode())
+
+    payload = _payload()
+    _asst(payload)["reasoning_content"] = "vecchio reasoning"
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        return await fwd.call_with_fallback(router, "test", dep, payload,
+                                            need=frozenset({"text"}))
+
+    # 1a passata: il primo KO sul dep viene rimediato ('stripped') e
+    # ritentato sullo STESSO dep; esaurita l'esenzione (1) -> KO normale.
+    with pytest.raises(UpstreamError):
+        asyncio.run(_run())
+    assert len(seen) <= 3                       # 1 rimedio, mai 2 in un giro
+    assert _asst(seen[0]).get("reasoning_content")
+    assert _asst(seen[1]).get("reasoning_content") is None    # strip avvenuto
+    assert dep["unique"] in router._cooldown    # KO normale applicato
+    assert router.repair_exempt_blocked(dep["unique"], 1) is True
 
 
 def test_e2e_history_downgrade_thinking_stesso_dep():

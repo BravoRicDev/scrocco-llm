@@ -173,6 +173,7 @@ class DepStats:
     fail_streak: int = 0              # fallimenti consecutivi (escalation cooldown)
     success_ema: float | None = None  # tasso successo stimato (penalità dolce)
     last_reason: str | None = None    # ultimo motivo di fallimento (402, 429...)
+    last_provenance: str | None = None  # nascita del cooldown (P0)
     # --- budget guard: finestre scorrevoli + cap appresi dai 429 ---------
     minute_calls: int = 0             # chiamate nel minuto corrente
     minute_key: str = ""              # "YYYY-MM-DDTHH:MM" del bucket corrente
@@ -1412,7 +1413,8 @@ class Router:
     # ------------------------------------------------------------ cooldown
     def mark_failed(self, unique: str, seconds: float | None = None,
                     reason: str | None = None, status: int | None = None,
-                    kind: str | None = None, *, additive: bool = False) -> float:
+                    kind: str | None = None, *, additive: bool = False,
+                    provenance: str | None = None) -> float:
         """Marca il deployment fallito con cooldown.
 
         - `seconds` esplicito vince SEMPRE (es. Retry-After su 429)
@@ -1478,6 +1480,15 @@ class Router:
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)      # EMA verso lo 0 (α=0.2)
         _explicit_seconds = seconds is not None   # F18: solo per i DERIVATI
+        # PROVENIENZA del cooldown (P0): da cosa NASCE. Solo gli 'heuristic'
+        # (nostra stima) possono essere testati in anticipo dalla sveglia;
+        # 'authoritative' (Retry-After/quota dichiarati dal provider), 'credit'
+        # (402) e 'tier' (403) NON si toccano: il provider ha detto quando
+        # torna e ritentare prima e' solo rumore (e rischio ban).
+        _prov = provenance or self._infer_provenance(reason, status,
+                                                     _explicit_seconds)
+        s.last_provenance = _prov
+        self._cooldown_prov()[unique] = _prov
         if seconds is None:
             mode = getattr(pol, "cooldown_mode", "linear") or "linear"
             if mode == "linear":
@@ -2026,6 +2037,7 @@ class Router:
         self._cooldown.pop(unique, None)
         self._cooldown_since.pop(unique, None)
         self._cooldown_full_map().pop(unique, None)
+        self._cooldown_prov().pop(unique, None)
         s = self.stats_for(unique)
         s.fail_streak = 0
         s.fail_count_24h = 0
@@ -3488,6 +3500,78 @@ class Router:
             self._stats[unique] = s
         return s
 
+    # ------------------------------------------ ESENZIONE RIPARAZIONE (P0)
+    # Gli errori della famiglia "riparazione" (reasoning/schema/format) NON
+    # sono segnali di salute del deployment: si ruota senza cooldown. Ma
+    # l'esenzione e' LIMITATA: dopo `repair_exempt_streak_limit` fallimenti
+    # CONSECUTIVI dello stesso dep si torna al trattamento normale (cooldown),
+    # altrimenti un dep che risponde sempre con quell'errore non verrebbe
+    # mai messo da parte. Un successo azzera lo streak.
+    def _repair_exempt(self) -> dict:
+        d = getattr(self, "_repair_exempt_map", None)
+        if d is None:
+            d = self._repair_exempt_map = {}
+        return d
+
+    def note_repair_exempt(self, unique: str | None) -> int:
+        """Registra un fallimento ESENTE (riparato senza penale) e ritorna lo
+        streak consecutivo aggiornato."""
+        if not unique:
+            return 0
+        m = self._repair_exempt()
+        m[unique] = int(m.get(unique, 0)) + 1
+        return m[unique]
+
+    def repair_exempt_blocked(self, unique: str | None,
+                              limit: int = 3) -> bool:
+        """True quando lo streak ha ESAURITO il budget di esenzione: da qui in
+        poi il fallimento va trattato come KO normale."""
+        if not unique or int(limit) <= 0:
+            return False
+        return int(self._repair_exempt().get(unique, 0)) >= int(limit)
+
+    def reset_repair_exempt(self, unique: str | None) -> None:
+        if unique:
+            self._repair_exempt().pop(unique, None)
+
+    # ------------------------------------------------ PROVENIENZA COOLDOWN (P0)
+    def _cooldown_prov(self) -> dict:
+        d = getattr(self, "_cooldown_prov_map", None)
+        if d is None:
+            d = self._cooldown_prov_map = {}
+        return d
+
+    def _infer_provenance(self, reason: str | None, status: int | None,
+                          explicit_seconds: bool) -> str:
+        """Classifica la NASCITA di un cooldown: 'credit' (402/no_credits),
+        'tier' (403/forbidden/modello fuori tier), 'authoritative' (secondi
+        dichiarati dal provider: Retry-After o reset quota), altrimenti
+        'heuristic' (nostra stima)."""
+        st = abs(int(status)) if status else 0
+        r = (reason or "").lower()
+        if st == 402 or "credit" in r or "402" in r:
+            return "credit"
+        if st == 403 or "403" in r or "forbidden" in r or "tier" in r:
+            return "tier"
+        if explicit_seconds and (st == 429 or "429" in r or "quota" in r):
+            return "authoritative"
+        return "heuristic"
+
+    def cooldown_provenance(self, unique: str | None) -> str | None:
+        """Provenienza dell'ULTIMO cooldown applicato a questo dep (None se
+        nessun cooldown attivo). Un cooldown senza provenienza registrata
+        (scritto direttamente, o precedente a questa feature) vale come
+        'heuristic': e' il comportamento storico."""
+        if not unique or not self.is_cooled_down(unique):
+            return None
+        return self._cooldown_prov().get(unique) or "heuristic"
+
+    def cooldown_probeable(self, unique: str | None) -> bool:
+        """True SOLO se il cooldown e' una NOSTRA stima ('heuristic'): la
+        sveglia puo' testarlo in anticipo. Mai per authoritative/credit/tier."""
+        return self.cooldown_provenance(unique) == "heuristic"
+
+
     def inflight_total(self) -> int:
         """Richieste attualmente in volo su tutti i deployment (usato dal
         graceful shutdown per attendere il drain prima del flush finale)."""
@@ -3547,6 +3631,8 @@ class Router:
                             else s.ema_latency_ms * (1 - alpha) + latency_ms * alpha)
         s.fail_streak = 0
         s.probe_fail_streak = 0
+        # successo reale: azzera anche l'esenzione-riparazione (P0)
+        self.reset_repair_exempt(unique)
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = min(1.0, 0.8 * prev + 0.2 * q)
         # contatore cumulativo + timestamp ultimo successo (persistiti)
@@ -3647,6 +3733,7 @@ class Router:
                           "fail_count_24h": s.fail_count_24h,
                           "fail_day_key": s.fail_day_key,
                           "last_reason": s.last_reason,
+                          "last_provenance": s.last_provenance,
                           "ok_count": s.ok_count,
                           "fail_count": s.fail_count,
                           "last_success_ts": s.last_success_ts,
@@ -3701,6 +3788,7 @@ class Router:
                 except (TypeError, ValueError):
                     pass
                 s.last_reason = st.get("last_reason") or None
+                s.last_provenance = st.get("last_provenance") or None
                 try:
                     s.ok_count = max(0, int(st.get("ok_count") or 0))
                     s.fail_count = max(0, int(st.get("fail_count") or 0))
@@ -5732,6 +5820,12 @@ class Router:
                 _reason = ""
             if _reason not in ("http_429", "quota_exhausted"):
                 continue             # solo 429/quota: mai svegliare un 403/ban
+            # PROVENIENZA (P0): si sveglia SOLO un cooldown 'heuristic' (nostra
+            # stima). Se il provider ha DICHIARATO quando torna (Retry-After /
+            # reset quota = 'authoritative'), o e' credito/tier, ritentare
+            # prima scadenza e' solo rumore e rischio ban.
+            if not self.cooldown_probeable(u):
+                continue
             if self.is_retired(u) or self.is_draining(u):
                 continue
             if self._endpoint_quarantined(d) or self._gemini_blocked(d):

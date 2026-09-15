@@ -624,6 +624,11 @@ class Policy:
     # 502/503 "mid-stream" di un aggregatore: pausa BREVE dell'HOST (non 24h
     # di quarantena) per non bruciare le chiavi sorelle dello stesso host.
     cooldown_host_midstream_502_sec: float = 120.0
+    # ESENZIONE RIPARAZIONE (P0): quanti fallimenti CONSECUTIVI della famiglia
+    # reasoning/schema/format possiamo perdonare allo stesso dep (si ripara e
+    # si ritenta senza cooldown); esaurito il budget si torna al KO normale.
+    # Un successo azzera lo streak.
+    repair_exempt_streak_limit: int = 3
     # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
     # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
@@ -1198,6 +1203,14 @@ class Policy:
             p.cooldown_autoprobe_crisis_enabled = _coerce_bool(
                 raw["cooldown_autoprobe_crisis_enabled"],
                 "cooldown_autoprobe_crisis_enabled")
+        if raw.get("repair_exempt_streak_limit") is not None:
+            try:
+                p.repair_exempt_streak_limit = max(
+                    0, int(raw["repair_exempt_streak_limit"]))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "repair_exempt_streak_limit deve essere un intero >= 0"
+                ) from None
         for _fld in ("cooldown_autoprobe_crisis_ratio",
                      "cooldown_autoprobe_crisis_mult",
                      "hotreload_probe_timeout_sec",

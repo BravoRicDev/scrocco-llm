@@ -916,6 +916,54 @@ def is_unclear_error(status: int | None, detail: str | None) -> bool:
                 or media_reject_signature(d) or is_provider_fault_body(d)
                 or ban_signature_hit(d))
 
+def classify_error_class(status, detail: str | None = None) -> str:
+    """Classe d'errore "onesta" per l'ATTEMPT TRAIL mostrato al client: un
+    perche' leggibile per ogni hop, senza esporre testo del provider. Riusa
+    le firme gia' esistenti, cosi' client e log parlano la stessa lingua."""
+    d = detail or ""
+    st = abs(int(status)) if status else 0
+    low = d.lower()
+    if ban_signature_hit(d):
+        return "ban_tos"
+    if _REASONING_ERR_RE.search(d) or _REASONING_REPLAY_RE.search(d):
+        return "reasoning"
+    if _THOUGHT_SIG_RE.search(d):
+        return "thought_signature"
+    if _MODEL_MISSING_RE.search(d):
+        return "model_missing"
+    if _PAYLOAD_SCHEMA_RE.search(d):
+        return "payload_schema"
+    if media_reject_signature(d):
+        return "media"
+    if _QUOTA_EXHAUSTED_RE.search(d):
+        return "quota"
+    if st == 402:
+        return "out_of_credits"
+    if st == 401:
+        return "auth"
+    if st == 403:
+        return "forbidden"
+    if st == 404:
+        return "model_missing"
+    if st == 413:
+        return "context_too_large"
+    if st == 429:
+        return "rate_limited"
+    if host_transient_signature_hit(d):
+        return "host_transient"
+    if _PROVIDER_TRANSIENT_RE.search(d):
+        return "provider_transient"
+    if st >= 500:
+        return "upstream_error"
+    if st >= 400:
+        return "provider_bad_request"
+    if "timeout" in low or "timed out" in low:
+        return "timeout"
+    if "connect" in low or "network" in low or "transport" in low:
+        return "network"
+    return "other"
+
+
 # Errore TRANSITORIO del provider/router a monte (non del client, non del
 # modello): l'upstream del provider e' giu', non ha endpoint validi ora, ecc.
 # Arriva come 4xx col body d'errore ma NON e' un problema della richiesta ->
@@ -2565,6 +2613,7 @@ truncation_hook=None,
         _tt = text_config_from_policy(router.policy)
         _corrected: set[str] = set()
         _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
+        trail: list = []                     # ATTEMPT TRAIL (P0) per il 503
         _rsn_restored = False                # history originale gia' riprovata
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
@@ -3061,6 +3110,17 @@ truncation_hook=None,
                 if getattr(err, "final", False):
                     raise                    # decisione definitiva: non ruotare
                 detail = err.detail or ""
+                # ATTEMPT TRAIL (P0): un record per hop fallito, con la classe
+                # d'errore onesta (finisce nel body del 503 finale).
+                try:
+                    trail.append({
+                        "ord": len(trail) + 1, "dep": cur,
+                        "group": dep.get("group"), "model": dep.get("model"),
+                        "cls": classify_error_class(err.status, detail),
+                        "status": abs(int(err.status)) if err.status else None,
+                        "ms": int((time.monotonic() - t0) * 1000)})
+                except Exception:            # noqa: BLE001
+                    pass
                 # BAN/ToS dell'endpoint? quarantena l'host 24h PRIMA di
                 # ruotare (altrimenti bruciamo una chiave dietro l'altra).
                 maybe_quarantine_ban(router, dep, err.status, detail)
@@ -3077,13 +3137,27 @@ truncation_hook=None,
                     and not media_input_needed(need) \
                     and reasoning_err_kind(detail) is None
                 _steps = _rsn_steps.setdefault(cur, set())
-                _rr = repair_reasoning_error(
+                _replim = int(getattr(router.policy,
+                                      "repair_exempt_streak_limit", 3) or 0)
+                _rexb = router.repair_exempt_blocked(cur, _replim)
+                _rr = None if _rexb else repair_reasoning_error(
                     payload, detail, dep, _steps, orig_messages,
                     force_kind=("needs" if _rsn_media else None))
+                if _rexb:
+                    log.warning("[reasoning-exempt] %s: budget esenzione "
+                                "esaurito (%d) -> KO normale", cur, _replim)
+                    # Booking NORMALE: cooldown esplicito (le classi payload/
+                    # schema da sole non lo prevedono) per non ritentare il
+                    # dep all'infinito su ogni richiesta.
+                    _fail_cur(seconds=None,
+                              reason="repair_exempt_exhausted",
+                              status=abs(int(err.status)) if err.status else None)
                 if _rr == "downgraded":
                     dep = dict(dep)
                     dep["_no_thinking"] = True      # copia locale, non il CSV
                 if _rr:
+                    with contextlib.suppress(Exception):
+                        router.note_repair_exempt(cur)
                     metrics.inc("nx_reasoning_replay_total", (_rr,))
                     log.warning("[reasoning-%s] %s: rimedio applicato -> "
                                 "ritento lo stesso deployment", _rr, cur)
@@ -3430,5 +3504,8 @@ truncation_hook=None,
             data0 = last_broken[0]
             if not _looks_empty(data0):
                 return data0, last_broken[1], qc_failed
+        if last_err is not None and trail:
+            with contextlib.suppress(Exception):
+                last_err.trail = trail
         raise last_err or UpstreamError(503, "nessun deployment disponibile",
                                         final=True)

@@ -78,6 +78,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         note_context_limit,
                         repair_reasoning_replay, _REASONING_REPLAY_RE,
                         repair_reasoning_error, reasoning_err_kind,
+                        classify_error_class,
                         restore_reasoning, is_unclear_error,
                         QUOTA_MIN_COOLDOWN_S)
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
@@ -1874,8 +1875,11 @@ async def chat_completions(request: Request, response: Response):
                       fb=max(0, len(attempts_box) - 1),
                       dur_ms=int((time.monotonic() - t_req) * 1000),
                       stream=False, qc=True, wd="chain-exhausted", usage=None)
+        _trail = getattr(err, "trail", None)
         return _exhausted(len(attempts_box), err.detail,
-                          prefix_reason=_aud)
+                          prefix_reason=_aud,
+                          trail=_trail,
+                          retry_at_ms=_retry_at_ms(router, _trail))
     data, used = res[0], res[1]
     qc_failed = res[2] if len(res) > 2 else []
 
@@ -2317,7 +2321,9 @@ async def _discard_stream(gen, pending=None) -> None:
 
 
 def _exhausted(n_tries: int, detail: str | None = None,
-               prefix_reason: str | None = None):
+               prefix_reason: str | None = None,
+               trail: list | None = None,
+               retry_at_ms: int | None = None):
     """Risposta di errore RETRYABLE quando nessun deployment ha prodotto un
     output utile: HTTP 503 + Retry-After. MAI un turno finto verso il client —
     l'agente ritenta (e col routing resiliente/transient il retry di solito
@@ -2325,7 +2331,12 @@ def _exhausted(n_tries: int, detail: str | None = None,
 
     F10: se il prefisso della sessione era MUTATO in questa richiesta
     (identity/prefix), il 503 viene etichettato come breadcrumb: parte dei
-    503 su catena fredda sono cache-miss percepiti come "provider morto"."""
+    503 su catena fredda sono cache-miss percepiti come "provider morto".
+
+    ATTEMPT TRAIL (P0): ogni hop tenta di dire PERCHE' e' stato scartato
+    (classe d'errore onesta, mai testo del provider) cosi' l'operatore non
+    deve leggere i log. `retry_at_ms` = prima scadenza utile fra i cooldown
+    dei deployment provati (quando ritentare ha senso)."""
     lab = prefix_reason if prefix_reason in ("identity", "prefix") else "clean"
     try:
         metrics.inc("nx_chain_503_total", (lab,))
@@ -2339,11 +2350,36 @@ def _exhausted(n_tries: int, detail: str | None = None,
            "tentativi" % max(1, int(n_tries or 1)))
     if detail:
         msg += " (ultimo: %s)" % str(detail)[:160]
-    return JSONResponse(status_code=503, headers={"Retry-After": "2"},
-                        content={"error": {
-                            "message": msg,
-                            "type": "upstream_unavailable",
-                            "code": "no_healthy_deployment"}})
+    _tr = list(trail or [])[:10]
+    body = {"error": {
+        "message": msg,
+        "type": "upstream_unavailable",
+        "code": "no_healthy_deployment",
+        "attempts": _tr}}
+    if retry_at_ms:
+        body["error"]["retry_at_ms"] = int(retry_at_ms)
+    headers = {"Retry-After": "2", "X-Scrocco-Attempts": str(len(_tr))}
+    if _tr:
+        headers["X-Scrocco-Trail"] = ",".join(
+            "%s:%s" % (t.get("dep", "?"), t.get("cls", "?")) for t in _tr)
+    return JSONResponse(status_code=503, headers=headers, content=body)
+
+
+def _retry_at_ms(router, trail: list | None) -> int | None:
+    """Prima scadenza UTILE fra i cooldown dei deployment provati, in ms epoch:
+    dice al client (e all'operatore) quando ritentare ha senso invece di
+    ritentare alla cieca. None se nessun cooldown residuo."""
+    try:
+        best = None
+        for t in trail or []:
+            r = router.cooldown_residual(t.get("dep") or "")
+            if r and r > 0 and (best is None or r < best):
+                best = r
+        if best:
+            return int((time.time() + best) * 1000)
+    except Exception:                        # noqa: BLE001
+        return None
+    return None
 
 
 def _payload_text_empty(payload: dict) -> bool:
@@ -2929,6 +2965,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     except Exception:
         _hedge_ms = 0
     attempts: list[str] = []
+    # ATTEMPT TRAIL (P0): per ogni hop fallito, PERCHE' e' stato scartato
+    # (classe d'errore onesta). Finisce nel body/header del 503 finale.
+    trail: list = []
     _races_done = 0
     # WARM-REFILL a cascata: candidati gia' sonciati in QUESTA richiesta
     # (uniq + api_key) e round gia' consumati (budget per-richiesta =
@@ -3277,13 +3316,27 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               ttfb_ms=ttfb_ms, usage=None)
                 return _exhausted(len(attempts),
                                   "%s (%s)" % (verdict, fr) if fr else verdict,
-                                  prefix_reason=prefix_reason)
+                                  prefix_reason=prefix_reason,
+                                  trail=trail,
+                                  retry_at_ms=_retry_at_ms(router, trail))
             dep = nxt
             inject_identity(payload, dep, router=router)
             continue                    # ri-entra nel while col nuovo dep
         except UpstreamError as err:
             router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
             detail = err.detail or ""
+            # ATTEMPT TRAIL: registra l'hop fallito con la sua classe onesta
+            # (anche quando il rimedio reasoning piu' sotto lo ritenta).
+            try:
+                trail.append({
+                    "ord": len(trail) + 1,
+                    "dep": dep.get("unique"), "group": dep.get("group"),
+                    "model": dep.get("model"),
+                    "cls": classify_error_class(err.status, detail),
+                    "status": abs(int(err.status)) if err.status else None,
+                    "ms": int((time.monotonic() - t_att) * 1000)})
+            except Exception:                # noqa: BLE001
+                pass
             # "does not support vision input" (llm7/Cloudflare) su richieste
             # di PURO TESTO: il proxy maschera spesso lo stesso problema del
             # reasoning mancante (i payload reali hanno decine di assistant
@@ -3302,13 +3355,30 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # (Anthropic/Gemini). Ruotare non aiuta: tutte le chiavi dello
             # stesso provider rifiutano lo stesso payload.
             _steps = _rsn_steps.setdefault(dep["unique"], set())
-            _rr = repair_reasoning_error(
+            _replim = int(getattr(router.policy, "repair_exempt_streak_limit",
+                                  3) or 0)
+            _rexb = router.repair_exempt_blocked(dep["unique"], _replim)
+            _rr = None if _rexb else repair_reasoning_error(
                 payload, detail, dep, _steps, orig_messages,
                 force_kind=("needs" if _rsn_media else None))
+            if _rexb:
+                log.warning("[reasoning-exempt] %s: budget esenzione esaurito "
+                            "(%d) -> KO normale", dep["unique"], _replim)
+                # Booking NORMALE: le classi payload/schema da sole non
+                # prevedono cooldown, quindi lo applichiamo qui (altrimenti
+                # il dep verrebbe ritentato all'infinito su ogni richiesta).
+                with contextlib.suppress(Exception):
+                    _f24 = router.stats_for(dep["unique"]).fail_count_24h
+                    router.mark_failed(
+                        dep["unique"], seconds=_soft_cd(_f24),
+                        reason="repair_exempt_exhausted",
+                        status=abs(int(err.status)) if err.status else None)
             if _rr == "downgraded":
                 dep = dict(dep)
                 dep["_no_thinking"] = True      # copia locale, non il CSV
             if _rr:
+                with contextlib.suppress(Exception):
+                    router.note_repair_exempt(dep["unique"])
                 metrics.inc("nx_reasoning_replay_total", (_rr,))
                 log.warning("[reasoning-%s] %s: rimedio applicato -> ritento "
                             "lo stesso deployment", _rr, dep["unique"])
@@ -3542,7 +3612,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
                 return _exhausted(len(attempts), err.detail,
-                                  prefix_reason=prefix_reason)
+                                  prefix_reason=prefix_reason,
+                                  trail=trail,
+                                  retry_at_ms=_retry_at_ms(router, trail))
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -3575,7 +3647,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                               stream=True, qc=True, wd="chain-exhausted",
                               ttfb_ms=ttfb_ms, usage=None)
                 return _exhausted(len(attempts), repr(exc)[:160],
-                                  prefix_reason=prefix_reason)
+                                  prefix_reason=prefix_reason,
+                                  trail=trail,
+                                  retry_at_ms=_retry_at_ms(router, trail))
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
