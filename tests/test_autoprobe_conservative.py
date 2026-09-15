@@ -157,7 +157,8 @@ def test_default_conservativi():
     assert p.cooldown_autoprobe_per_dim == 1
     assert p.cooldown_autoprobe_max_total == 3
     assert p.cooldown_autoprobe_key_gap_sec == 3600.0
-    assert p.cooldown_autoprobe_key_day_max == 2
+    assert p.cooldown_autoprobe_key_day_max == 1
+    assert p.cooldown_autoprobe_schedule == "nightly"
     assert p.cooldown_autoprobe_key_ok_fresh_sec == 43200.0
     assert p.cooldown_autoprobe_retired_enabled is True
 

@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from collections import deque
 from typing import AsyncIterator
 
@@ -239,7 +240,8 @@ MIN_OUTPUT_FLOOR = 4096
 _NS_PROBES: set = set()
 
 
-def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses) -> None:
+def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
+                    wake: bool = False) -> None:
     u = dep.get("unique", "?")
     with contextlib.suppress(Exception):
         router.note_probe_started(ses, u)
@@ -265,6 +267,8 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses) -> None:
                           and ch0.get("finish_reason") != "length")
             if ok:
                 try:
+                    if wake:
+                        router.clear_cooldown(u)     # sveglia riuscita
                     router.note_result(
                         u, (time.monotonic() - t0) * 1000, ctx_est=ctx)
                     router.note_warm_owner(ses, u)
@@ -672,6 +676,97 @@ PROVIDER_TRANSIENT_COOLDOWN_S = 60
 # 403 upstream (permission denied / project banned / key disabled...): la key
 # non torna presto -> cooldown lungo, poi si ruota sul successivo.
 PERMISSION_DENIED_COOLDOWN_S = 1800          # 30min
+# BAN/ToS del PROVIDER verso il NOSTRO IP: non e' colpa della singola chiave,
+# e' l'endpoint intero (llm7.io "ip_banned" con 253 hit a raffica su scalifai,
+# openrouter "policy_review_required"). Se il body contiene una di queste
+# firme, quarantena dell'HOST per 24h (il router la applica a TUTTI i gate di
+# eleggibilita'): nessun deployment su quell'endpoint verra' piu' riprovato,
+# ruotato o risvegliato, finche' non scade da sola.
+_BAN_TOS_SIGNATURES = (
+    "ip_banned",
+    "policy_review_required",
+    "terms of service",
+    "access from this ip address is restricted",
+    "access is temporarily unavailable for this client",
+)
+
+
+def ban_signature_hit(detail: str | None) -> bool:
+    low = (detail or "").lower()
+    return any(sig in low for sig in _BAN_TOS_SIGNATURES)
+
+
+def maybe_quarantine_ban(router, dep: dict | None, status,
+                         detail) -> bool:
+    """True se l'errore e' una BAN/ToS dell'endpoint: mette in quarantena
+    l'host (24h). Chiamata su 403/429 con il body dell'upstream."""
+    try:
+        st = abs(int(status or 0))
+    except (TypeError, ValueError):
+        return False
+    if st not in (403, 429):
+        return False
+    if not ban_signature_hit(detail):
+        return False
+    url = str((dep or {}).get("api_base") or (dep or {}).get("endpoint") or "")
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except Exception:                              # noqa: BLE001
+        return False
+    if not host:
+        return False
+    router.quarantine_endpoint(host, 86400.0)
+    log.warning("[quarantina] %s: %s dal provider %s -> host %s fuori "
+                "gioco 24h", (dep or {}).get("unique"), st, host, host)
+    return True
+
+
+# 502/503 di un AGGREGATORE che riporta "il provider ha errore a meta'
+# stream": e' l'HOST a essere momentaneamente malato, non la singola chiave.
+# Senza host-cooldown la rotazione brucia una chiave sorella dopo l'altra
+# sullo stesso host (i nemotron tokenrouter di scalifai). Cooldown breve e
+# configurabile: elastico per un problema transitorio, non una condanna.
+_HOST_TRANSIENT_SIGNATURES = (
+    "sent an error mid-stream",
+    "provider sent an error mid-stream",
+)
+
+
+def host_transient_signature_hit(detail: str | None) -> bool:
+    low = (detail or "").lower()
+    return any(sig in low for sig in _HOST_TRANSIENT_SIGNATURES)
+
+
+def maybe_host_transient_cooldown(router, dep: dict | None, status,
+                                  detail) -> bool:
+    """True se l'errore e' un 502/503 mid-stream di un aggregatore: cooldown
+    BREVE dell'host (default 120s) per non girare a vuoto sulle chiavi
+    sorelle. Rientra da solo appena passa il malumore dell'host."""
+    try:
+        st = abs(int(status or 0))
+    except (TypeError, ValueError):
+        return False
+    if st not in (502, 503):
+        return False
+    if not host_transient_signature_hit(detail):
+        return False
+    url = str((dep or {}).get("api_base") or (dep or {}).get("endpoint") or "")
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except Exception:                              # noqa: BLE001
+        return False
+    if not host:
+        return False
+    try:
+        sec = float(getattr(router.policy, "cooldown_host_midstream_502_sec",
+                            120.0) or 120.0)
+    except Exception:                              # noqa: BLE001
+        sec = 120.0
+    sec = max(1.0, sec)
+    router.quarantine_endpoint(host, sec, reason="mid-stream 5xx host")
+    log.warning("[host-cd] %s: 502 mid-stream da %s -> host %s in pausa "
+                "%.0fs", (dep or {}).get("unique"), host, host, sec)
+    return True
 
 # Loop degenere rilevato in STREAMING (kill precoce): il modello produce
 # output ripetitivo all'infinito -> cooldown medio, il routing ruota subito.
@@ -2119,7 +2214,7 @@ truncation_hook=None,
                       and bool(ses) and bool(profile))
         _ready_min = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
         _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
-                                     4) or 0))
+                                     6) or 0))
         _raced: set[str] = set()
         _raced_keys: set[str] = set()
         _refill_rounds = 0
@@ -2188,6 +2283,7 @@ truncation_hook=None,
                                     (cur,))
                 _fB = None
                 _B = None
+                _wake_b = False
                 _tB = t0
                 try:
                     _fly = router.probes_in_flight(ses)
@@ -2230,6 +2326,30 @@ truncation_hook=None,
                                 exclude_uniq=_raced)
                         except Exception:
                             _B = None
+                        if _B is None:
+                            # TERZO canario (ns): prova a SVEGLIARE un 429
+                            # dormiente da almeno 1h (regola utente).
+                            try:
+                                _age = float(getattr(
+                                    _pol,
+                                    "warm_refill_wake_min_cooldown_age_sec",
+                                    3600.0) or 3600.0)
+                            except Exception:
+                                _age = 3600.0
+                            try:
+                                _B = router.warm_wake_canary(
+                                    profile, dep, need, ctx, _outb,
+                                    tried=tried | _raced,
+                                    requested_group=requested_group,
+                                    exclude_keys=_raced_keys,
+                                    exclude_uniq=_raced,
+                                    min_age_sec=_age)
+                            except Exception:
+                                _B = None
+                            if _B is not None:
+                                _wake_b = True
+                                log.info("[refill] ns: sveglia %s (429 "
+                                         "maturo)", _B["unique"])
                         if _B is not None:
                             log.info("[refill] ns: canario %s (chiavi "
                                      "warm+in-volo escluse=%d)",
@@ -2297,12 +2417,14 @@ truncation_hook=None,
                         # esistente (penali solite); B riceve la sua da probe
                         # (il future e' gia' completato con l'eccezione).
                         if _B is not None and errB is not None:
-                            _spawn_ns_probe(router, _B, _fB, _tB, ctx, ses)
+                            _spawn_ns_probe(router, _B, _fB, _tB, ctx, ses,
+                                            wake=_wake_b)
                         raise errA if errA is not None else errB
                     _spawn_ns_probe(router,
                                     _B if served_A else _A,
                                     _fB if served_A else futA,
-                                    _tB if served_A else _tA, ctx, ses)
+                                    _tB if served_A else _tA, ctx, ses,
+                                    wake=bool(_wake_b and served_A))
                     if not served_A:
                         log.info("[refill] consegna %s (piu' veloce di %s, "
                                  "che finisce come probe senza penale)",
@@ -2313,6 +2435,11 @@ truncation_hook=None,
                         cur = _B["unique"]
                         t0 = _tB
                         _was_dormant = False
+                        if _wake_b:
+                            with contextlib.suppress(Exception):
+                                router.clear_cooldown(cur)   # sveglia ok
+                            log.info("[refill] ns: sveglia riuscita, %s "
+                                     "torna caldo", cur)
                         if attempts_box is not None:
                             attempts_box.append(cur)
                 if _was_dormant:
@@ -2553,6 +2680,10 @@ truncation_hook=None,
                 if getattr(err, "final", False):
                     raise                    # decisione definitiva: non ruotare
                 detail = err.detail or ""
+                # BAN/ToS dell'endpoint? quarantena l'host 24h PRIMA di
+                # ruotare (altrimenti bruciamo una chiave dietro l'altra).
+                maybe_quarantine_ban(router, dep, err.status, detail)
+                maybe_host_transient_cooldown(router, dep, err.status, detail)
                 _kind_default = classify_error(err.status, None, detail)
                 # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
                 # "usage limit reached" / "Resets in N days"), a prescindere

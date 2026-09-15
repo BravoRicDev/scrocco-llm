@@ -81,6 +81,51 @@ def test_warm_valid_for_counta_solo_deliverabili(router):
     assert [d["unique"] for d in pool2] == [big["unique"]]
 
 
+# ------------------------------------------------ warm_wake_canary (SVEglia)
+def test_wake_canary_solo_429_maturi(router):
+    """La SVEglia pesca SOLO un dep in cooldown da 429 da >=1h; i 429 freschi,
+    gli altri motivi (403/ban) e i non-dormienti non sono candidabili."""
+    import time as _t
+    small = _dep(router, f"{BASE}-32k", "K-S")
+    mid = _dep(router, f"{BASE}-200k", "K-M")
+    big = _dep(router, f"{BASE}-1000k", "K-B")
+    now = _t.time()
+    # mid: 429 dormiente da 2h -> maiuscola candidata
+    router._cooldown[mid["unique"]] = now + 600
+    router._cooldown_since[mid["unique"]] = now - 7200
+    router.stats_for(mid["unique"]).last_reason = "http_429"
+    w = router.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                                tried={small["unique"]},
+                                requested_group=f"{BASE}-32k")
+    assert w and w["unique"] == mid["unique"]
+    # 429 troppo FRESCO (10 min): non si sveglia
+    router._cooldown_since[mid["unique"]] = now - 600
+    assert router.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                                   tried={small["unique"]},
+                                   requested_group=f"{BASE}-32k") is None
+    # motivo diverso (403/ban): MAI svegliato
+    router._cooldown_since[mid["unique"]] = now - 7200
+    router.stats_for(mid["unique"]).last_reason = "upstream_403"
+    assert router.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                                   tried={small["unique"]},
+                                   requested_group=f"{BASE}-32k") is None
+    # 429 maturo ma host in quarantena: escluso
+    router.stats_for(mid["unique"]).last_reason = "http_429"
+    router.quarantine_endpoint("api.groq.com", 3600)
+    assert router.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                                   tried={small["unique"]},
+                                   requested_group=f"{BASE}-32k") is None
+    router._endpoint_quarantine.clear()
+    # due 429 maturi (mid e big): vince il piu' vicino nel ladder -dim
+    router._cooldown[big["unique"]] = now + 600
+    router._cooldown_since[big["unique"]] = now - 7200
+    router.stats_for(big["unique"]).last_reason = "http_429"
+    w2 = router.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                                 tried={small["unique"]},
+                                 requested_group=f"{BASE}-32k")
+    assert w2 and w2["unique"] == mid["unique"]   # il piu' vicino nel ladder
+
+
 # ------------------------------------------------------- warm_fill_canary
 def test_canary_dim_ascendente_e_free_only(router):
     small = _dep(router, f"{BASE}-32k", "K-S")
@@ -520,7 +565,7 @@ def test_policy_knob_warm_refill():
     assert p.warm_refill_max_inflight == 2
     d = Policy.from_dict({})
     assert d.warm_refill_enabled is True and d.warm_ready_min == 3
-    assert d.warm_refill_max_inflight == 4
+    assert d.warm_refill_max_inflight == 6
 
 
 # ----------------------------------------------- tetto 4 in volo PER SESSIONE
@@ -547,7 +592,7 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
     small = ML.config.groups[f"{BASE}-32k"][0]
     big = ML.config.groups[f"{BASE}-1000k"][0]
     ML.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
-    for i in range(4):
+    for i in range(6):
         ML.router.note_probe_started("rf-sess", f"phantom-{i}")
     calls = []
 
@@ -580,9 +625,9 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
     assert isinstance(resp, ML.StreamingResponse)
     assert b"LENTO" in body
     assert calls == [small["unique"]]           # nessun canario: tetto saturo
-    assert ML.router.probes_in_flight("rf-sess") == 4   # phantom non toccati
+    assert ML.router.probes_in_flight("rf-sess") == 6   # phantom non toccati
     ML.router.note_probe_done("rf-sess", "phantom-0")
-    assert ML.router.probes_in_flight("rf-sess") == 3
+    assert ML.router.probes_in_flight("rf-sess") == 5
 
 
 def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,

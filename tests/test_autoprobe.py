@@ -372,7 +372,8 @@ def test_parsing_knobs():
     assert d.cooldown_autoprobe_per_dim == 1
     assert d.cooldown_autoprobe_max_total == 3
     assert d.cooldown_autoprobe_key_gap_sec == 3600.0
-    assert d.cooldown_autoprobe_key_day_max == 2
+    assert d.cooldown_autoprobe_key_day_max == 1
+    assert d.cooldown_autoprobe_schedule == "nightly"
     assert d.cooldown_autoprobe_key_ok_fresh_sec == 43200.0
     assert d.cooldown_autoprobe_retired_enabled is True
     assert d.cooldown_autoprobe_retired_gap_sec == 20.0
@@ -408,6 +409,8 @@ def test_probe_ko_transient_escalates_on_streak(router):
     _used_all(router)
     _cool(router, d, remaining=5.0)
     router.policy.cooldown_autoprobe_min_gap_sec = 0
+    router.policy.cooldown_autoprobe_key_day_max = 3   # qui testiamo la
+    # streak, non il budget giornaliero
     router.policy.probe_retire_after = 2
     fwd = _Fwd(_Resp(503))
     asyncio.run(autoprobe._probe_pass(router, fwd, "test"))   # streak 1 -> +30

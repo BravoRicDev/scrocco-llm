@@ -327,8 +327,13 @@ class Policy:
     cooldown_autoprobe_key_gap_sec: float = 3600.0
     # Budget di probe per CHIAVE nelle 24h (provider-aware nel codice:
     # openrouter/llm7/etc. contano le richieste, quindi 1 solo probe/giorno
-    # anche con N modelli sulla stessa chiave).
-    cooldown_autoprobe_key_day_max: int = 2
+    # anche con N modelli sulla stessa chiave). NOTTE-SOLO (regola utente
+    # 2026-09-15, dopo il ban IP di llm7.io su scalifai): 1/giorno.
+    cooldown_autoprobe_key_day_max: int = 1
+    # QUANDO sondera': "nightly" = SOLO il giro delle 00:00 locali (niente
+    # probe scatenati dalle richieste), "request" = vecchio comportamento
+    # fire-and-forget a ogni chiamata.
+    cooldown_autoprobe_schedule: str = "nightly"
     # Se una chiave ha servito traffico REALE con successo da meno di
     # questo tempo, e' viva: sondarla e' spreco di quota -> si salta.
     cooldown_autoprobe_key_ok_fresh_sec: float = 43200.0
@@ -603,7 +608,13 @@ class Policy:
     # accende un altro canario se la sessione ne ha gia' `max_inflight` in
     # corsa. Nel caso migliore il warm si trova anche 6-7 caldi transienti
     # (nessun vero spreco: se arrivano tutti buoni "durera' di piu'").
-    warm_refill_max_inflight: int = 4
+    warm_refill_max_inflight: int = 6
+    # SVEglia: il terzo canario del refill cerca un dep in cooldown da 429 da
+    # ALMENO questo tempo (default 1h) e, se risponde, lo riporta caldo.
+    warm_refill_wake_min_cooldown_age_sec: float = 3600.0
+    # 502/503 "mid-stream" di un aggregatore: pausa BREVE dell'HOST (non 24h
+    # di quarantena) per non bruciare le chiavi sorelle dello stesso host.
+    cooldown_host_midstream_502_sec: float = 120.0
     # Ammette nei "caldi" (e nello sticky/holder) anche i deployment LENTI
     # (EMA oltre soglia): il successo lento viene comunque registrato cosi' la
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
@@ -1146,6 +1157,12 @@ class Policy:
             p.cooldown_autoprobe_multiply_24h = _coerce_bool(
                 raw["cooldown_autoprobe_multiply_24h"],
                 "cooldown_autoprobe_multiply_24h")
+        if raw.get("cooldown_autoprobe_schedule") is not None:
+            _sch = str(raw["cooldown_autoprobe_schedule"]).strip().lower()
+            if _sch not in ("nightly", "request"):
+                raise ValueError(
+                    "cooldown_autoprobe_schedule deve essere nightly|request")
+            p.cooldown_autoprobe_schedule = _sch
         _set_int(p, raw, "cooldown_autoprobe_per_dim", minimum=0)
         _set_int(p, raw, "cooldown_autoprobe_max_total", minimum=0)
         _set_int(p, raw, "cooldown_autoprobe_key_day_max", minimum=0)
@@ -1158,7 +1175,9 @@ class Policy:
                      "cooldown_autoprobe_key_ok_fresh_sec",
                      "cooldown_autoprobe_retired_gap_sec",
                      "cooldown_autoprobe_transient_sec",
-                     "cooldown_autoprobe_skip_over_sec"):
+                     "cooldown_autoprobe_skip_over_sec",
+                     "warm_refill_wake_min_cooldown_age_sec",
+                     "cooldown_host_midstream_502_sec"):
             _val = raw.get(_fld)
             if _val is not None:
                 try:

@@ -32,6 +32,7 @@ import math
 import random
 import re
 import time
+import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -1148,6 +1149,8 @@ class Router:
             return None
         if self.is_cooled_down(unique) or self.is_retired(unique):
             return None
+        if self._endpoint_quarantined(dep):
+            return None
         if self._is_demoted_dep(unique, session_id, ctx,
                                 allow_slow=self._warm_allow_slow()):
             return None
@@ -1279,6 +1282,8 @@ class Router:
             if tier in tried_tiers:
                 continue
             if self.is_cooled_down(u) or self.is_retired(u):
+                continue
+            if self._endpoint_quarantined(d):
                 continue
             if self.other_session_recent(u):
                 continue
@@ -4594,6 +4599,8 @@ class Router:
                 return False
             if self._gemini_blocked(d):
                 return False
+            if self._endpoint_quarantined(d):
+                return False
             if self.is_retired(d["unique"]):
                 # I tier normali non usano MAI i ritirati. In ULTIMA SPIAGGIA
                 # (allow_retired) sono ammessi quelli ritirati per quota/
@@ -4875,6 +4882,8 @@ class Router:
                 return None
             if self.is_retired(u):
                 return None
+            if self._endpoint_quarantined(dep):
+                return None
             if self._gemini_blocked(dep):
                 return None
             if need and not self._dep_supports(dep, need):
@@ -4989,6 +4998,8 @@ class Router:
             g = str(d.get("group") or "")
             if not self._free_group(g):
                 continue                       # solo dim gratis
+            if self._endpoint_quarantined(d):
+                continue                       # ban/ToS: host in quarantena
             if self.is_retired(u):
                 if not self._retired_usable(u):
                     continue
@@ -5048,6 +5059,8 @@ class Router:
                 continue
             dep = self.config.deployment_by_unique(u)
             if dep is None or self.is_retired(u) or self.is_cooled_down(u):
+                continue
+            if self._endpoint_quarantined(dep):
                 continue
             if self._gemini_blocked(dep):
                 continue
@@ -5162,6 +5175,8 @@ class Router:
                 continue
             dep = self.config.deployment_by_unique(u)
             if dep is None or self.is_retired(u) or self.is_draining(u):
+                continue
+            if self._endpoint_quarantined(dep):
                 continue
             if self.is_cooled_down(u) or self._gemini_blocked(dep):
                 continue
@@ -5281,6 +5296,67 @@ class Router:
                 m.pop(u, None)
         return len(m)
 
+    # ------------------------------------- QUARANTENA ENDPOINT (ban / ToS IP)
+    # Se un provider risponde "Access from this IP ... ip_banned" o
+    # "policy_review_required" il problema NON e' la singola chiave: e'
+    # l'INTERO endpoint per il NOSTRO IP. Mettiamo in quarantena l'HOST per
+    # `seconds` (default 24h): nessun deployment su quell'host e' eleggibile
+    # (rotazione, warm, canary, risvegli, ultima spiaggia) e la quarantena
+    # SCDE da sola, senza ri-provare a martellate (i 253 hit llm7.io di
+    # scalifai nascevano proprio dal bruciare una chiave dopo l'altra).
+    def _ep_quar(self) -> dict:
+        d = getattr(self, "_endpoint_quarantine", None)
+        if d is None:
+            d = self._endpoint_quarantine = {}
+        return d
+
+    def quarantine_endpoint(self, host: str, seconds: float = 86400.0,
+                            reason: str = "ban/ToS") -> None:
+        if not host:
+            return
+        q = self._ep_quar()
+        until = time.time() + max(0.0, float(seconds))
+        if q.get(host, 0.0) >= until:
+            return
+        q[host] = until
+        log.warning("[quarantina] endpoint %s fuori gioco per %.0fs (%s)",
+                    host, max(0.0, float(seconds)), reason)
+
+    def _endpoint_quarantined(self, dep: dict | None) -> bool:
+        """True se l'HOST dell'endpoint del dep e' in quarantena ban/ToS."""
+        if not dep:
+            return False
+        q = self._ep_quar()
+        if not q:
+            return False
+        url = str(dep.get("api_base") or dep.get("endpoint") or "")
+        if not url:
+            return False
+        try:
+            host = urllib.parse.urlparse(url).hostname or ""
+        except Exception:                              # noqa: BLE001
+            return False
+        if not host:
+            return False
+        until = q.get(host, 0.0)
+        if until <= 0:
+            return False
+        if time.time() >= until:
+            q.pop(host, None)                          # scaduta: pulisci
+            return False
+        return True
+
+    def endpoint_quarantine_view(self) -> dict:
+        now = time.time()
+        q = self._ep_quar()
+        out = {}
+        for h, until in list(q.items()):
+            if now >= until:
+                q.pop(h, None)
+            else:
+                out[h] = round(until - now)
+        return out
+
     def warm_valid_for(self, session_id: str | None, profile: str | None,
                        group_name: str | None,
                        need: frozenset[str] | None, ctx: int | None,
@@ -5356,6 +5432,8 @@ class Router:
                 continue                               # FREE only: qui si ferma
             if self.is_retired(u) or self.is_draining(u):
                 continue
+            if self._endpoint_quarantined(d):
+                continue
             if self.is_cooled_down(u) or self._gemini_blocked(d):
                 continue
             if self._is_known_nonstream(u):
@@ -5370,6 +5448,79 @@ class Router:
             k = str(d.get("api_key") or "")
             if k and k in keys:
                 continue                               # chiave gia' in warm
+            return d
+        return None
+
+    def warm_wake_canary(self, profile: str | None, cur_dep: dict,
+                         need: frozenset[str] | None, ctx: int | None,
+                         out_tokens: int | None,
+                         tried: set[str] | None = None,
+                         requested_group: str | None = None,
+                         exclude_keys: set[str] | None = None,
+                         exclude_uniq: set[str] | None = None,
+                         min_age_sec: float = 3600.0) -> dict | None:
+        """TERZO canario del warm-refill: non cerca un dep fresco ma un
+        DORMIENTE da almeno `min_age_sec` (default 1h) messo in cooldown da
+        un 429/quota — un vero e proprio SVEglia. Se risponde, il probe lo
+        riporta caldo (clear_cooldown + warm owner): cosi' la capacita' che
+        era stata messa in pausa torna utile senza aspettare l'autoprobe.
+        Percorre lo stesso ladder -dim del refill (free only), con le stesse
+        esclusioni; in piu' NON tocca i dep che non hanno un cooldown 429
+        maturo."""
+        now = time.time()
+        cur = cur_dep.get("unique")
+        ex: set[str] = set(tried or ())
+        if cur:
+            ex.add(cur)
+        for u in (exclude_uniq or ()):
+            if u:
+                ex.add(u)
+        keys = {str(k) for k in (exclude_keys or ()) if k}
+        floor = 0
+        if requested_group:
+            try:
+                floor = int(self._group_min_dim(requested_group) or 0)
+            except Exception:                          # noqa: BLE001
+                floor = 0
+        go_suf = self.config.go_suffix or "-go"
+        fb_suf = self.config.fallback_suffix or "-fallback"
+        for u in self._ladder_for_group(cur_dep.get("group") or ""):
+            if u in ex:
+                continue
+            d = self.config.deployment_by_unique(u)
+            if not d:
+                continue
+            g = str(d.get("group") or "")
+            if g.endswith(go_suf) or g.endswith(fb_suf):
+                continue                               # FREE only
+            if not self.is_cooled_down(u):
+                continue                               # cerchiamo dormienti
+            since = float(self._cooldown_since.get(u) or 0.0)
+            if since and (now - since) < max(0.0, float(min_age_sec)):
+                continue                # troppo fresco: non e' un 429 maturo
+            try:
+                _reason = str(getattr(self.stats_for(u), "last_reason", "")
+                              or "")
+            except Exception:                          # noqa: BLE001
+                _reason = ""
+            if _reason not in ("http_429", "quota_exhausted"):
+                continue             # solo 429/quota: mai svegliare un 403/ban
+            if self.is_retired(u) or self.is_draining(u):
+                continue
+            if self._endpoint_quarantined(d) or self._gemini_blocked(d):
+                continue
+            if self._is_known_nonstream(u):
+                continue
+            if self._owned_by_any_session(u):
+                continue
+            mxi = int(d.get("max_input_tokens") or 0)
+            if floor and mxi and mxi < floor * 1000:
+                continue
+            if not self.dep_deliverable(d, need, ctx, out_tokens):
+                continue
+            k = str(d.get("api_key") or "")
+            if k and k in keys:
+                continue
             return d
         return None
 
@@ -5640,6 +5791,8 @@ class Router:
                 d = ccfg.deployment_by_unique(u)
                 if not d or self.is_retired(u):
                     continue
+                if self._endpoint_quarantined(d):
+                    continue
                 if cneed and not self._dep_supports(d, cneed):
                     continue
                 if not self._cap_fits(d, cctx):
@@ -5722,6 +5875,7 @@ class Router:
                     continue                       # solo nati da 429/quota
                 _du = cfg.deployment_by_unique(u)
                 if _du is None or self.is_retired(u) \
+                        or self._endpoint_quarantined(_du) \
                         or self._gemini_blocked(_du) or self._model_blocked(_du):
                     continue
                 if self.other_session_recent(u):
@@ -5847,6 +6001,8 @@ class Router:
             d = cfg.deployment_by_unique(u)
             if not d or self.is_retired(u):
                 continue
+            if self._endpoint_quarantined(d):
+                continue
             if need and not self._dep_supports(d, need):
                 continue
             if not self._cap_fits(d, ctx):
@@ -5872,6 +6028,8 @@ class Router:
                 continue
             _d = cfg.deployment_by_unique(u)
             if not _d:
+                continue
+            if self._endpoint_quarantined(_d):
                 continue
             if need and not self._dep_supports(_d, need):
                 continue

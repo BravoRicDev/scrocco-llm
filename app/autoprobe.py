@@ -35,7 +35,7 @@ import re
 import time
 from collections import deque
 
-from .forwarder import _MODEL_MISSING_RE
+from .forwarder import _MODEL_MISSING_RE, maybe_quarantine_ban
 from . import protocols as proto
 
 log = logging.getLogger("nx.autoprobe")
@@ -325,6 +325,7 @@ async def _retired_pass(router, forwarder) -> None:
                 log.warning("[autoprobe] %s RITIRATO ma risponde (%.0fms, "
                             "chiave %s*) -> RIABILITATO", unique, lat, name)
             else:
+                maybe_quarantine_ban(router, dep, code, _body)
                 if _quota_code(code):
                     _block_key_for_day(dep, time.time())
                 log.info("[autoprobe] %s ritirato: probe KO (%s) -> resta "
@@ -362,10 +363,19 @@ def maybe_spawn_retired(router, forwarder) -> None:
     _retired_task = loop.create_task(_retired_pass(router, forwarder))
 
 
+def _schedule(policy) -> str:
+    return str(getattr(policy, "cooldown_autoprobe_schedule",
+                       "nightly") or "nightly").strip().lower()
+
+
 def maybe_spawn(router, forwarder, profile: str) -> None:
     global _running
     if not _cfg(router.policy)[0]:
         return
+    if _schedule(router.policy) != "request":
+        return          # NOTTE-SOLO: i probe partono SOLO dal giro di
+                        # mezzanotte (main._nightly_scheduler), mai a ogni
+                        # richiesta (regola utente post-ban llm7.io)
     if _running:
         return
     _running = True
@@ -562,6 +572,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                     log.info("[autoprobe] %s: probe OK -> promosso (%.0fms)",
                              unique, lat)
                 else:
+                    maybe_quarantine_ban(router, dep, code, _body)
                     if _quota_code(code):
                         _block_key_for_day(dep, time.time())
                     _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
@@ -615,6 +626,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 router.clear_cooldown(unique)
                 log.info("[autoprobe] %s: probe OK -> risvegliato", unique)
             else:
+                maybe_quarantine_ban(router, dep, code, _body)
                 if _quota_code(code):
                     _block_key_for_day(dep, time.time())
                 _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
@@ -660,6 +672,8 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                             300.0) or 300.0)
         _key_gap = float(getattr(router.policy,
                                  "cooldown_autoprobe_key_gap_sec", 300.0) or 0.0)
+        _day_max = max(0, int(getattr(
+            router.policy, "cooldown_autoprobe_key_day_max", 1) or 0))
         for unique in uniques:
             try:
                 dep = router.config.deployment_by_unique(unique)
@@ -669,6 +683,9 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                 continue
             if not _key_gap_ok(dep, time.time(), _key_gap):
                 continue       # F32: chiave gia' sondata poco fa
+            if not _key_day_ok(dep, time.time(), _day_max):
+                continue       # budget 1/giorno per CHIAVE anche qui
+            _note_key_probe_day(dep, time.time())
             _note_key_probe(dep, time.time())
             ok, lat, _code, _body = await _probe_one(forwarder, dep, timeout)
             if ok:
@@ -676,6 +693,7 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                 log.info("[hotreload] %s: probe OK -> deployment caldo "
                          "(%.0fms)", unique, lat)
             else:
+                maybe_quarantine_ban(router, dep, _code, _body)
                 router.mark_failed(unique, seconds=_cd, reason="hotreload_probe",
                                    additive=True)
                 log.warning("[hotreload] %s: probe KO -> cooldown %.0fs",
@@ -744,3 +762,33 @@ def _bump_probe_streak(router, unique: str, streak_cap: int) -> float:
     if streak_cap > 0 and s.probe_fail_streak >= streak_cap:
         return 1.0     # multiplicatore: escalate il transitorio a grow
     return 0.0
+
+
+async def nightly_pass(router, forwarder, profiles=None) -> None:
+    """GIRO NOTTURNO (regola utente post-ban llm7.io): UNA sola volta al
+    giorno, poco dopo mezzanotte locale, un giro completo per ogni profile
+    testo: PRIMA i FRESH (mai usati), POI i COOLED (risvegli dormienti) —
+    due chiamate di _probe_pass perche' il ramo fresh, se trova bersagli,
+    esce prima di toccare i cooled. Valgono sempre i limiti conservativi:
+    per_dim, max_total, gap per-chiave e budget 1/giorno per CHIAVE (un
+    giro puo' quindi trovare poco o nulla da sondare, ed e' giusto)."""
+    global _running
+    if not _cfg(router.policy)[0]:
+        return
+    if _running:
+        return
+    _running = True
+    try:
+        profiles = list(profiles or
+                        (getattr(router.config, "profile_dims", {}) or {}))
+        log.info("[autoprobe] nightly: giro notturno su %d profile", len(profiles))
+        for pname in profiles:
+            for _round in range(2):          # 1=FRESH, 2=COOLED
+                try:
+                    await _probe_pass(router, forwarder, pname)
+                except Exception:            # noqa: BLE001
+                    log.debug("[autoprobe] nightly %s: errore nel pass",
+                              pname, exc_info=True)
+                _running = True              # _probe_pass lo azzera nel finally
+    finally:
+        _running = False

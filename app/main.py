@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import time
 import urllib.parse
@@ -210,6 +211,7 @@ configure_estimate(adaptive=policy.estimate_adaptive_enabled,
 
 _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
+_nightly_task: asyncio.Task | None = None
 _stats_file = VAR_DIR / "adaptive_stats.json"
 _last_stats_save = 0.0
 # Persistenza DEDICATA dei cooldown (var/cooldown_state.json): a differenza
@@ -651,6 +653,36 @@ async def _watcher(interval: float) -> None:
         await asyncio.sleep(interval)
 
 
+def seconds_to_midnight(now: float | None = None) -> float:
+    """Secondi alla PROSSIMA mezzanotte locale (helper puro, testabile)."""
+    import datetime as _dt
+    now_ts = time.time() if now is None else now
+    local = _dt.datetime.fromtimestamp(now_ts)
+    nxt = (local + _dt.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return max(1.0, (nxt - local).total_seconds())
+
+
+async def _nightly_scheduler():
+    """Giro NOTTURNO dell'autoprobe: alle 00:00 locali (+ jitter 0-120s) un
+    solo passaggio completo su tutti i profile testo. In modalita' 'request'
+    il task resta vivo ma non fa nulla (puo' essere riattivato a caldo)."""
+    while True:
+        try:
+            await asyncio.sleep(seconds_to_midnight()
+                                + random.uniform(0.0, 120.0))
+            if str(getattr(router.policy, "cooldown_autoprobe_schedule",
+                           "nightly")).lower() == "nightly" \
+                    and autoprobe._cfg(router.policy)[0]:
+                await autoprobe.nightly_pass(router, forwarder)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                    # il scheduler non muore MAI
+            log.warning("[autoprobe] nightly scheduler: errore",
+                        exc_info=True)
+            await asyncio.sleep(60.0)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _watch_task
@@ -663,13 +695,15 @@ async def lifespan(_app: FastAPI):
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
     _health_task = asyncio.create_task(
         health_loop(router, policy.health_interval_sec))
+    global _nightly_task
+    _nightly_task = asyncio.create_task(_nightly_scheduler())
     log.info("[start] %s su %s:%d · profili=%s · deployment=%d",
              policy.service_name, HOST, PORT, ",".join(config.profiles),
              sum(len(v) for v in config.groups.values()))
     try:
         yield
     finally:
-        for task in (_watch_task, _health_task):
+        for task in (_watch_task, _health_task, _nightly_task):
             if task:
                 task.cancel()
         # Graceful shutdown: uvicorn ha gia' smesso di accettare nuove
@@ -2356,17 +2390,19 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             return dep, gen, t_att, *await futA
         waiter.cancel()
     # ---- candidati NUOVI per la gara -----------------------------------
+    _W = None
     try:
         if refill:
             _wk = router.warm_api_keys(
                 session, profile, requested_group or dep.get("group"))
             _xk = set((raced or {}).get("keys") or ()) | _wk
             _xk.add(str(dep.get("api_key") or ""))
+            _ex_uniq = (raced or {}).get("uniq")
             _B = router.warm_fill_canary(
                 profile, dep, need, ctx, out_tokens, tried=tried_set,
                 requested_group=requested_group,
                 exclude_keys=_xk,
-                exclude_uniq=(raced or {}).get("uniq"))
+                exclude_uniq=_ex_uniq)
             if _B is not None:
                 log.info("[refill] canario %s per %s (chiavi warm+in-volo "
                          "escluse=%d, out=%s)", _B["unique"],
@@ -2374,7 +2410,32 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             else:
                 log.info("[refill] %s: nessun canario free consegnabile "
                          "(chiavi escluse=%d)", dep.get("unique"), len(_xk))
-            cands = [_B] if _B is not None else []
+            # TERZO canario: la SVEglia. Cerca un dep dormiente da un 429 da
+            # ALMENO 1h (regola utente) e prova a rimetterlo caldo.
+            if int(k) > 1:
+                _exu2 = set(_ex_uniq or ())
+                _xk2 = set(_xk)
+                if _B is not None:
+                    _exu2.add(_B["unique"])
+                    _xk2.add(str(_B.get("api_key") or ""))
+                try:
+                    _age = float(getattr(
+                        router.policy,
+                        "warm_refill_wake_min_cooldown_age_sec", 3600.0)
+                        or 3600.0)
+                except Exception:
+                    _age = 3600.0
+                _W = router.warm_wake_canary(
+                    profile, dep, need, ctx, out_tokens, tried=tried_set,
+                    requested_group=requested_group,
+                    exclude_keys=_xk2, exclude_uniq=_exu2,
+                    min_age_sec=_age)
+                if _W is not None:
+                    log.info("[refill] sveglia %s (429 in cooldown da "
+                             "almeno %.0fs)", _W["unique"], _age)
+                else:
+                    log.debug("[refill] nessuna sveglia 429 matura")
+            cands = [c for c in (_B, _W) if c is not None]
         else:
             _excl = (set(router._sess_deps().get(session, ()))
                      if fresh_only else None)
@@ -2383,6 +2444,19 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 k=max(1, int(k)), exclude=_excl, fresh_only=bool(fresh_only))
     except Exception:
         cands = []
+    # TETTO per-sessione: apri solo i canari che stanno nel tetto (gli
+    # in-volo contano tutti: refill, legacy, A/loser staccati come probe).
+    if refill and cands:
+        try:
+            _mx = int(getattr(router.policy, "warm_refill_max_inflight", 6)
+                      or 6)
+        except Exception:
+            _mx = 6
+        try:
+            _free = max(0, _mx - int(router.probes_in_flight(session)))
+        except Exception:
+            _free = _mx
+        cands = cands[:_free] if _free > 0 else []
     if not cands:
         metrics.inc("nx_hedge_total", ("no_canary",))
         log.debug("[hedge] %s: nessun candidato nuovo (%s)", dep.get("unique"),
@@ -2419,7 +2493,9 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 _peek(genB, router.first_content_deadline_ms(_bu, ctx)))
             with contextlib.suppress(Exception):
                 router.note_probe_started(session, _bu)
-            canaries.append({"dep": B, "gen": genB, "t0": tB, "fut": futB})
+            canaries.append({"dep": B, "gen": genB, "t0": tB, "fut": futB,
+                             "wake": bool(_W is not None
+                                          and B is _W)})
         except asyncio.CancelledError:
             if genB is not None:
                 await _discard_stream(genB, None)
@@ -2482,7 +2558,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         metrics.inc("nx_hedge_total", ("won_a",))
         for c in canaries:
             _spawn_probe(c["dep"], c["gen"], c["fut"], results.get(c["fut"]),
-                         session, ctx, hold)
+                         session, ctx, hold, wake=bool(c.get("wake")))
         _rA = results.get(futA)
         if _rA is None:
             try:
@@ -2495,6 +2571,11 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     w = futs[winner]
     with contextlib.suppress(Exception):
         router.note_probe_done(session, w["dep"]["unique"])
+    if w.get("wake"):
+        with contextlib.suppress(Exception):
+            router.clear_cooldown(w["dep"]["unique"])   # sveglia riuscita
+        log.info("[refill] sveglia riuscita: %s torna caldo (consegna la "
+                 "risposta)", w["dep"]["unique"])
     # A NON viene annullata: finisce la sua risposta in background come probe
     # reale (se consegna pulita entra in warm, altrimenti si scarta).
     _spawn_probe(dep, gen, futA, results.get(futA), session, ctx, hold)
@@ -2502,7 +2583,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         if c is w:
             continue
         _spawn_probe(c["dep"], c["gen"], c["fut"], results.get(c["fut"]),
-                     session, ctx, hold)
+                     session, ctx, hold, wake=bool(c.get("wake")))
     attempts.append(w["dep"]["unique"])
     tried_set.add(w["dep"]["unique"])
     log.info("[hedge] vince %s (A=%s e %d altri in volo come probe, non "
@@ -2549,10 +2630,12 @@ async def _consume_probe_stream(gen) -> bool:
 
 
 def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
-                 hold: bool = False) -> None:
+                 hold: bool = False, wake: bool = False) -> None:
     """Stacca un perdente di gara: aspetta il verdetto pendente, consuma lo
     stream fino alla fine (probe reale, MAI cancellato) e, se ha servito, lo
-    registra warm. Nota: `hold` e' solo contestuale al log/diagnosi."""
+    registra warm. Nota: `hold` e' solo contestuale al log/diagnosi.
+    `wake=True`: era la SVEglia di un cooldown 429 -> se risponde lo riporta
+    caldo (clear_cooldown), cosi' la capacita' dormiente torna disponibile."""
     u = dep.get("unique", "?")
     cap = _probe_drain_cap_sec()
     with contextlib.suppress(Exception):
@@ -2587,6 +2670,9 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
                 died = True
             ok = (v == "content") or drained
             if ok:
+                if wake:
+                    with contextlib.suppress(Exception):
+                        router.clear_cooldown(u)   # sveglia riuscita
                 router.note_warm_owner(session, u)
                 metrics.inc("nx_hedge_total", ("probe_ok",))
             elif v == "timeout" or (v is None and died):
@@ -2783,7 +2869,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     and bool(getattr(_pol, "warm_pool_enabled", True))):
                 _ready = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
                 _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
-                                            4) or 0))
+                                            6) or 0))
                 _need_out = refill_out_budget(payload, _pol)
                 try:
                     _fly = router.probes_in_flight(session)
@@ -2833,7 +2919,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 if _refill:
                     _refill_rounds += 1
                 _dep_before = dep["unique"]
-                _hh_k = 1 if _refill else (
+                _hh_k = 2 if _refill else (
                     max(1, int(getattr(qcp, "stream_hedge_tiers", 1) or 1))
                     if bool(getattr(qcp, "stream_hedge_cross_tier", True))
                     else 1)
@@ -3012,6 +3098,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         except UpstreamError as err:
             router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
             detail = err.detail or ""
+            # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
+            # Service): quarantena dell'HOST 24h, cosi' la rotazione non
+            # brucia una chiave dietro l'altra dello stesso provider.
+            with contextlib.suppress(AttributeError):
+                forwarder.maybe_quarantine_ban(router, dep, err.status, detail)
+                # 502/503 mid-stream di un aggregatore: e' l'HOST a essere
+                # malato -> pausa BREVE dell'host invece di bruciare le chiavi
+                # sorelle (elasticita' per un problema transitorio).
+                forwarder.maybe_host_transient_cooldown(
+                    router, dep, err.status, detail)
             # D5 anche in STREAMING: 4xx deployment-side (firma provider-side,
             # modello inesistente oppure 404) -> fallback pre-byte invece di
             # pass-through. Gli altri 4xx restano errori del client.
