@@ -158,11 +158,11 @@ cooldown_jitter_sec_max: 2.0
 # insiste mai: i residui lunghi li rivedra' la scala che risveglia i cooldown
 # (fra -dim e -go) o l'ULTIMA SPIAGGIA. Non rallenta mai la risposta live.
 cooldown_autoprobe_enabled: true
-cooldown_autoprobe_per_dim: 2
+cooldown_autoprobe_per_dim: 1
 cooldown_autoprobe_min_age_sec: 300
 cooldown_autoprobe_grow_sec: 120
 cooldown_autoprobe_min_gap_sec: 60
-cooldown_autoprobe_max_total: 6
+cooldown_autoprobe_max_total: 3
 cooldown_autoprobe_timeout_sec: 20
 # Moltiplica l'incremento KO per il numero di probe fatti su quel deployment
 # nelle ultime 24h (1o=1x, 2o=2x, 3o=3x...): meno richieste ravvicinate inutili.
@@ -173,7 +173,28 @@ cooldown_autoprobe_skip_over_sec: 7200
 # La stessa CHIAVE (anche su deployment diversi, i "gemelli") non torna in
 # sonda prima di questo gap: l'autoprobe non martella lo stesso conto.
 # 0 = nessun vincolo per-chiave.
-cooldown_autoprobe_key_gap_sec: 300
+cooldown_autoprobe_key_gap_sec: 3600
+# BUDGET PROBE/24h PER CHIAVE: molti free-tier (openrouter, llm7...) contano
+# le RICHIESTE/giorno, non i token. Con N modelli sulla stessa chiave un probe
+# per deployment la satura "solo per vedere se e' viva": qui si contano i
+# probe realmente fatti per chiave nelle 24h e si smette al cap. Il pool di
+# chiavi e' condiviso fra piu' server (stato locale per-host), quindi il
+# valore e' VOLUTAMENTE basso. 0 = nessun cap giornaliero.
+cooldown_autoprobe_key_day_max: 2
+# Se una chiave ha servito TRAFFICO REALE con successo da meno di questo
+# tempo, e' viva: sondarla e' spreco di quota -> si salta. 0 = mai.
+cooldown_autoprobe_key_ok_fresh_sec: 43200
+# Dopo un probe che torna 429/quota la CHIAVE e' bloccata per 24h: non si
+# provano altri modelli della stessa chiave (la quota e' per chiave, non per
+# modello). Su errori non-quota si puo' provare un altro modello, sempre
+# dentro il budget giornaliero.
+# GIRO GIORNALIERO SUI RITIRATI: nessun ritiro e' definitivo. Al primo tick
+# dopo mezzanotte locale l'autoprobe sonda TUTTI i ritirati in sequenza, con
+# calma (retired_gap_sec fra un probe e l'altro) e rispettando il budget
+# per-chiave: un probe riuscito li riabilita. In alternativa li puo' usare la
+# ULTIMA SPIAGGIA (solo ritirati NON permanenti: mai 401/403/modello morto).
+cooldown_autoprobe_retired_enabled: true
+cooldown_autoprobe_retired_gap_sec: 20
 # Time-decay dei punteggi di reputazione (halflife in secondi; 0 = off).
 reputation_decay_halflife_sec: 129600
 # Timeout upstream adattivo per-deployment (solo percorso chat):

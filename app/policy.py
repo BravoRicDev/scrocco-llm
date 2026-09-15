@@ -289,17 +289,33 @@ class Policy:
     # ruotano tra le chiamate (nel modo classico non tocca note_result/
     # mark_failed: non avvelena la rotazione adattiva).
     cooldown_autoprobe_enabled: bool = True
-    cooldown_autoprobe_per_dim: int = 2
+    # Conservativo: pochi probe, il piu' possibile 'a prova di quota'
+    # (i free-tier contano richieste/giorno, non token).
+    cooldown_autoprobe_per_dim: int = 1
     cooldown_autoprobe_min_age_sec: float = 300.0
     cooldown_autoprobe_grow_sec: float = 120.0
     cooldown_autoprobe_min_gap_sec: float = 60.0
-    cooldown_autoprobe_max_total: int = 6
+    cooldown_autoprobe_max_total: int = 3
     cooldown_autoprobe_timeout_sec: float = 45.0
     cooldown_autoprobe_fresh_age_sec: float = 86400.0
     # F32: la stessa CHIAVE (anche su deployment diversi) non deve essere
     # sondata prima di questo gap: l'autoprobe non deve martellare lo stesso
     # conto, che sia una quota giornaliera o un rate-limit per chiave.
-    cooldown_autoprobe_key_gap_sec: float = 300.0    # "Grazia" per i KO TRANSITORI del probe (5xx, timeout/rete, altri 4xx):
+    cooldown_autoprobe_key_gap_sec: float = 3600.0
+    # Budget di probe per CHIAVE nelle 24h (provider-aware nel codice:
+    # openrouter/llm7/etc. contano le richieste, quindi 1 solo probe/giorno
+    # anche con N modelli sulla stessa chiave).
+    cooldown_autoprobe_key_day_max: int = 2
+    # Se una chiave ha servito traffico REALE con successo da meno di
+    # questo tempo, e' viva: sondarla e' spreco di quota -> si salta.
+    cooldown_autoprobe_key_ok_fresh_sec: float = 43200.0
+    # GIRO GIORNALIERO SUI RITIRATI: nessun ritiro e' definitivo. Al primo
+    # tick dopo mezzanotte locale l'autoprobe sonda TUTTI i ritirati in
+    # sequenza, con un ritmo lento (retired_gap_sec fra un probe e l'altro) e
+    # rispettando il gap per-chiave: un probe riuscito li riabilita, un KO li
+    # lascia fuori fino al giro dopo. Nessun martellamento dei conti.
+    cooldown_autoprobe_retired_enabled: bool = True
+    cooldown_autoprobe_retired_gap_sec: float = 20.0    # "Grazia" per i KO TRANSITORI del probe (5xx, timeout/rete, altri 4xx):
     # cooldown MODESTO al posto dello skip (ruotiamo comunque, ma senza
     # bruciare il grow pieno). I KO definitivi e i 429 usano sempre grow.
     cooldown_autoprobe_transient_sec: float = 30.0
@@ -1062,18 +1078,25 @@ class Policy:
         if "cooldown_autoprobe_enabled" in raw:
             p.cooldown_autoprobe_enabled = _coerce_bool(
                 raw["cooldown_autoprobe_enabled"], "cooldown_autoprobe_enabled")
+        if "cooldown_autoprobe_retired_enabled" in raw:
+            p.cooldown_autoprobe_retired_enabled = _coerce_bool(
+                raw["cooldown_autoprobe_retired_enabled"],
+                "cooldown_autoprobe_retired_enabled")
         if "cooldown_autoprobe_multiply_24h" in raw:
             p.cooldown_autoprobe_multiply_24h = _coerce_bool(
                 raw["cooldown_autoprobe_multiply_24h"],
                 "cooldown_autoprobe_multiply_24h")
         _set_int(p, raw, "cooldown_autoprobe_per_dim", minimum=0)
         _set_int(p, raw, "cooldown_autoprobe_max_total", minimum=0)
+        _set_int(p, raw, "cooldown_autoprobe_key_day_max", minimum=0)
         for _fld in ("cooldown_autoprobe_min_age_sec",
                      "cooldown_autoprobe_grow_sec",
                      "cooldown_autoprobe_min_gap_sec",
                      "cooldown_autoprobe_timeout_sec",
                      "cooldown_autoprobe_fresh_age_sec",
                      "cooldown_autoprobe_key_gap_sec",
+                     "cooldown_autoprobe_key_ok_fresh_sec",
+                     "cooldown_autoprobe_retired_gap_sec",
                      "cooldown_autoprobe_transient_sec",
                      "cooldown_autoprobe_skip_over_sec"):
             _val = raw.get(_fld)

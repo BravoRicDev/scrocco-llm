@@ -118,7 +118,14 @@ the earlier `reasoning_headroom_ratio` trigger **and** a
 `reasoning_reserve_ratio` window reserve added to `ctx_est` in the
 compaction gate; the frontier walk and the saved-token estimate use the
 deployment's learned divisor (`[latency]`/`estimate_correction`)), `[effort]` (`reasoning_effort` injected/
-removed per the row's `effort_capable`). Thinking crosses the translator
+removed per the row's `effort_capable`), `[key-soft]` (a 429 puts the whole
+API KEY in soft-skip for the Retry-After window: no reputation damage; the
+autoprobe treats a saturated key the same way and never spends another model's
+probe on it), `[autoprobe]` (conservative probes: per-key 24 h budget, hourly
+per-key gap, skip when real traffic proved the key alive, daily sweep of
+retired keys after midnight), `[ladder] ... ULTIMA SPIAGGIA ESTREMA` (the
+strictest rung may use retired NON-permanent keys; a success clears the
+lifecycle). Thinking crosses the translator
 boundary: upstream reasoning (Responses summaries, Anthropic `thinking`
 blocks, Gemini `thought` parts) is delivered to the client as
 `message.reasoning_content` / `delta.reasoning_content`, exactly like the

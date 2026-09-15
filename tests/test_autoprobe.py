@@ -18,6 +18,8 @@ def _reset_probe_state():
     """Stato module-level di autoprobe isolato per test."""
     autoprobe._last_probe.clear()
     autoprobe._key_last_probe.clear()
+    autoprobe._key_probe_day.clear()
+    autoprobe._key_quota_day.clear()
     autoprobe._probe_times.clear()
     yield
 
@@ -150,6 +152,8 @@ def test_cooled_ko_doubles_residual(router):
 
 def test_per_dim_cap(router):
     _used_all(router)
+    # il test verifica il boost crisis (x2), non il default: lo fissa
+    router.policy.cooldown_autoprobe_per_dim = 2
     for k in ("K-A", "K-B", "K-C"):
         _cool(router, _dep(router, DIM, k), remaining=3000.0 + (0 if k == "K-A" else 500))
     fwd = _Fwd(_Resp(200))
@@ -363,7 +367,15 @@ def test_parsing_knobs():
     assert pol.cooldown_autoprobe_timeout_sec == 5.0
     d = Policy.from_dict({})
     assert d.cooldown_autoprobe_enabled is True
-    assert d.cooldown_autoprobe_per_dim == 2
+    # default CONSERVATIVI (free-tier condivisi fra server): pochi probe,
+    # budget giornaliero per chiave, gap orario.
+    assert d.cooldown_autoprobe_per_dim == 1
+    assert d.cooldown_autoprobe_max_total == 3
+    assert d.cooldown_autoprobe_key_gap_sec == 3600.0
+    assert d.cooldown_autoprobe_key_day_max == 2
+    assert d.cooldown_autoprobe_key_ok_fresh_sec == 43200.0
+    assert d.cooldown_autoprobe_retired_enabled is True
+    assert d.cooldown_autoprobe_retired_gap_sec == 20.0
     assert d.cooldown_autoprobe_grow_sec == 120.0
     assert d.cooldown_autoprobe_fresh_age_sec == 86400.0
     assert Policy.from_dict({"cooldown_autoprobe_fresh_age_sec": 7200}) \

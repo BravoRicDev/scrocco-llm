@@ -88,6 +88,20 @@ TTFT_RATE_FLOOR_MS = 250.0      # pavimento assoluto dell'estrapolazione
 SLOW_REL_BASELINE_MULT = 2.0
 
 
+def _is_quota_evidence(reason: str | None, status: int | None = None) -> bool:
+    """True se l'evidenza di fallimento e' di QUOTA (429/satura), non di guasto.
+
+    Stessa regola di KeyHealth.observe (F30): una chiave satura e' viva, non
+    rotta. Usata per NON contare questi fallimenti verso il ritiro automatico.
+    """
+    r = (reason or "").lower()
+    try:
+        st = abs(int(status)) if status else 0
+    except (TypeError, ValueError):
+        st = 0
+    return bool(st == 429 or "429" in r or "quota" in r or "rate_limit" in r)
+
+
 def _ctx_bucket(ctx_est) -> int:
     """Indice di bucket per la stima token del contesto; -1 = ignoto."""
     try:
@@ -1952,7 +1966,12 @@ class Router:
         s.fail_streak = self._decay_streak(s.fail_streak, s.last_fail_ts, now)
         s.last_fail_ts = now
         s.fail_streak += 1
-        s.probe_fail_streak += 1
+        # Un 429/quota NON e' "chiave rotta" ma "chiave satura": non deve
+        # contare verso il ritiro automatico, altrimenti una free-key con
+        # quota giornaliera bassa verrebbe parcheggiata per sempre solo
+        # perche' saturata oggi (stessa regola di KeyHealth.observe, F30).
+        if not _is_quota_evidence(reason, status):
+            s.probe_fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
         s.success_ema = max(0.0, 0.8 * prev)
         # Leva B: stessa pausa minima longa (2h) se il cronico fallisce
@@ -2887,9 +2906,17 @@ class Router:
     def _maybe_retire_on_probe_fail(self, unique: str, s) -> bool:
         """Auto-retirement dopo N probe passivi consecutivi falliti: se il
         problema non e' temporaneo (credenziali/modello morti) smettiamo di
-        sprecare probe. Il CSV non viene toccato (unretire manuale o probe ok)."""
+        sprecare probe. Il CSV non viene toccato (unretire manuale o probe ok).
+
+        Un'evidenza di QUOTA (429/satura) non basta a ritirare: la chiave e'
+        viva, ha solo finito il budget del momento. Il ritiro scatta solo su
+        fallimenti sostanziali (401/403/modello morto/5xx permanenti)."""
         cap = int(getattr(self.policy, "probe_retire_after", 0) or 0)
         if cap <= 0 or s.probe_fail_streak < cap:
+            return False
+        if _is_quota_evidence(getattr(s, "last_reason", None)):
+            log.debug("[probe] %s non ritirato: ultima evidenza di quota "
+                      "(%s)", unique, s.last_reason)
             return False
         try:
             from . import main as _gw_mod      # lazy: evita cicli d'import
@@ -2919,6 +2946,22 @@ class Router:
             return bool(kh and kh.is_retired(unique))
         except Exception:                      # mai bloccare il routing
             return False
+
+    def _retired_permanent(self, unique: str) -> bool:
+        """Ritirato per motivo PERMANENTE: mai riusabile, nemmeno in ultima
+        spiaggia (spam di errori inutili su una chiave/modello morti)."""
+        try:
+            from . import main as _gw_mod      # lazy: evita cicli d'import
+            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            return bool(kh and kh.is_permanently_retired(unique))
+        except Exception:                      # mai bloccare il routing
+            return False
+
+    def _retired_usable(self, unique: str) -> bool:
+        """Ritirato NON permanente (quota/probe-cap): fuori dai tier normali,
+        eleggibile SOLO come ultima spiaggia. Un successo lo ripulisce dal
+        lifecycle (successo = prova di vita), senza spendere probe."""
+        return self.is_retired(unique) and not self._retired_permanent(unique)
 
     def purge_expired(self) -> tuple[int, int]:
         """Rimuove sticky scadute e cooldown espirati (chiamato dal watcher).
@@ -4289,13 +4332,17 @@ class Router:
         nei gruppi capacità; `restrict_model` limita a un solo modello
         upstream (failover same-model dei gruppi gen/stt).
         """
-        def _ok(d: dict) -> bool:
+        def _ok(d: dict, allow_retired: bool = False) -> bool:
             if d["unique"] == exclude:
                 return False
             if self._gemini_blocked(d):
                 return False
             if self.is_retired(d["unique"]):
-                return False
+                # I tier normali non usano MAI i ritirati. In ULTIMA SPIAGGIA
+                # (allow_retired) sono ammessi quelli ritirati per quota/
+                # probe-cap, mai quelli permanenti (chiave/modello morti).
+                if not allow_retired or self._retired_permanent(d["unique"]):
+                    return False
             if self.is_draining(d["unique"]):
                 return False
             # SESSION-DEP GUARD: ignora fra i vivi i free-dims usati con
@@ -4351,7 +4398,11 @@ class Router:
             # mark_failed_double_residual). Senza probe maturi resta la vecchia
             # ultima spiaggia (ignora il cooldown), rispettando exclude/need.
             _cand = [d for d in self.config.groups.get(group_name, [])
-                     if _ok(d)]
+                     if _ok(d, allow_retired=True)]
+            _ret_n = sum(1 for d in _cand if self.is_retired(d["unique"]))
+            if _ret_n:
+                log.warning("[ladder] ULTIMA SPIAGGIA %s: uso anche %d "
+                            "ritirati non-permanenti", group_name, _ret_n)
             _ripe = [d for d in _cand if self.probe_ready(d["unique"])]
             if _ripe:
                 log.info("[probe] %s: %d dormienti maturi (>=%.0f%% del "
@@ -5231,6 +5282,30 @@ class Router:
             log.warning("[ladder] ULTIMA SPIAGGIA (cooldown ignorato, "
                         "residuo %ds) -> %s",
                         int(cooled[0][0]), dep["unique"])
+            return dep
+        # 6bis) ULTIMA SPIAGGIA ESTREMA: anche i RITIRATI, ma solo se non
+        #       permanenti (quota/probe-cap) e solo quando non e' rimasto
+        #       NIENTE altro. Un successo li ripulisce dal lifecycle: e' il
+        #       modo di "tirarli su" senza spendere probe a vuoto.
+        _ret = []
+        for u in ladder:
+            if u == failed_unique or (tried and u in tried):
+                continue
+            if not self._retired_usable(u):
+                continue
+            _d = cfg.deployment_by_unique(u)
+            if not _d:
+                continue
+            if need and not self._dep_supports(_d, need):
+                continue
+            if not self._cap_fits(_d, ctx):
+                continue
+            _ret.append((self.cooldown_residual(u), u, _d))
+        _ret.sort(key=lambda x: x[0])
+        if _ret:
+            dep = _ret[0][2]
+            log.warning("[ladder] ULTIMA SPIAGGIA ESTREMA (ritirato "
+                        "non-permanente) -> %s", dep["unique"])
             return dep
         return None
 

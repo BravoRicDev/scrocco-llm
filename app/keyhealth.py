@@ -33,6 +33,13 @@ from .atomic_store import load_json, save_json
 log = logging.getLogger("nx.keyhealth")
 
 HEALTH_FILE_NAME = "key_health.json"
+# Motivi di ritiro PERMANENTI (chiave morta / modello rimosso): mai usati
+# nemmeno in ultima spiaggia. Un ritiro per quota/probe-cap NON e' qui.
+_PERMANENT_MARKERS = ("permanent_dead", "not_found", "model_missing",
+                      "upstream_401", "upstream_402", "upstream_403",
+                      "http_401", "http_402", "http_403", "auth",
+                      "forbidden", "unauthorized", "invalid_api_key")
+
 STREAK_DEAD_THRESHOLD = 5          # fail_streak minimo per "dead_suspect"
 SUCCESS_EMA_FLOOR = 0.1            # sotto questo tasso la chiave e' sospetta
 
@@ -126,6 +133,23 @@ class KeyHealth:
     def is_retired(self, unique: str) -> bool:
         rec = self.data.get(unique)
         return bool(rec and rec.get("state") == "retired")
+
+    def retire_reason(self, unique: str) -> str:
+        """Motivo dell'ultimo ritiro ('' se ignoto)."""
+        rec = self.data.get(unique) or {}
+        return str(rec.get("last_reason") or "")
+
+    def is_permanently_retired(self, unique: str) -> bool:
+        """Ritirato per un motivo PERMANENTE (chiave morta / modello rimosso):
+        NON va riusato nemmeno come ultima spiaggia. I ritiri per quota o per
+        probe-cap NON sono permanenti: la chiave e' viva, va solo lasciata
+        stare finche' non serve davvero."""
+        if not self.is_retired(unique):
+            return False
+        r = self.retire_reason(unique).lower()
+        if not r:
+            return False
+        return any(m in r for m in _PERMANENT_MARKERS)
 
     def clear(self, unique: str) -> None:
         if self.data.pop(unique, None):

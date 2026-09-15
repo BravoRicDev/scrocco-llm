@@ -50,6 +50,131 @@ _last_probe: dict[str, float] = {}
 # deployment della stessa chiave: quota giornaliera / rate-limit sono per
 # chiave, non per unique.
 _key_last_probe: dict[str, float] = {}
+# BUDGET GIORNALIERO PER CHIAVE: molti free-tier (es. openrouter) contano
+# RICHIESTE/giorno, non token. Con N modelli sulla stessa chiave, un probe per
+# deployment satura il conto "solo per vedere se e' viva". Qui si contano i
+# probe realmente fatti per chiave nelle ultime 24h e si smette al cap.
+_key_probe_day: dict[str, deque[float]] = {}
+_MAX_KEY_PROBE_BY_PROVIDER = {
+    "openrouter": 1, "llm7": 1, "tokenrouter": 1, "unorouter": 1,
+    "bynara": 1, "api.airforce": 1, "airforce": 1, "cloudflare": 2,
+    "google": 1, "requesty": 1,
+}
+
+
+_key_quota_day: dict[str, float] = {}
+
+
+def _quota_code(code) -> bool:
+    """True se il KO del probe e' di QUOTA/saturazione (429)."""
+    return str(code or "").strip() in ("429", "http_429") or "429" in str(code or "")
+
+
+def _key_saturated(router, dep: dict, now: float) -> bool:
+    """True se la CHIAVE e' satura ORA: blocco giornaliero messo da un probe
+    429, oppure soft-429 visto dal traffico reale (F7 `_key_soft`).
+
+    Su una chiave satura non si provano altri modelli: la quota e' per
+    chiave/provider, non per modello -> sarebbe spreco puro.
+    """
+    key = _key_of(dep)
+    if not key:
+        return False
+    if _key_quota_day.get(key, 0.0) > now:
+        return True
+    try:
+        import hashlib
+        tag = hashlib.sha256(key.encode("utf-8", errors="replace")) \
+            .hexdigest()[:12]
+        return float(router._key_soft.get(tag, 0.0) or 0.0) > now
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _block_key_for_day(dep: dict, now: float) -> None:
+    """Dopo un 429 di probe: nessun altro probe su questa chiave per 24h."""
+    key = _key_of(dep)
+    if key:
+        _key_quota_day[key] = now + 86400.0
+
+
+def _provider_of(dep: dict) -> str:
+    try:
+        return str(dep.get("provider") or dep.get("tier") or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _key_day_max(dep: dict, base: int) -> int:
+    """Cap giornaliero di probe per QUESTA chiave (provider-aware)."""
+    if base <= 0:
+        return 0
+    prov = _provider_of(dep)
+    return min(base, _MAX_KEY_PROBE_BY_PROVIDER.get(prov, base))
+
+
+def _key_day_ok(dep: dict, now: float, base: int) -> bool:
+    """False se la chiave ha gia' esaurito il budget di probe giornaliero."""
+    cap = _key_day_max(dep, base)
+    if cap <= 0:
+        return True       # 0 = budget disabilitato (nessun cap giornaliero)
+    key = _key_of(dep)
+    if not key:
+        return True
+    dq = _key_probe_day.setdefault(key, deque())
+    while dq and now - dq[0] > 86400.0:
+        dq.popleft()
+    return len(dq) < cap
+
+
+def _note_key_probe_day(dep: dict, now: float) -> None:
+    key = _key_of(dep)
+    if key:
+        _key_probe_day.setdefault(key, deque()).append(now)
+
+
+def _key_ok_map(router) -> dict[str, float]:
+    """api_key -> ultimo successo REALE (traffico, non probe) su quella chiave.
+
+    Se una chiave ha servito una risposta vera di recente e' viva: sondarla
+    e' puro spreco di quota. Non crea statistiche nuove (usa solo le esistenti).
+    """
+    out: dict[str, float] = {}
+    try:
+        for grp in router.config.groups.values():
+            for d in grp:
+                k = str(d.get("api_key") or "")
+                if not k:
+                    continue
+                s = router._stats.get(d.get("unique"))
+                ts = float(getattr(s, "last_success_ts", 0.0) or 0.0) if s else 0.0
+                if ts > out.get(k, 0.0):
+                    out[k] = ts
+    except Exception:  # noqa: BLE001
+        return {}
+    return out
+
+
+def _key_ok_fresh(okmap: dict, dep: dict, now: float, fresh_sec: float) -> bool:
+    """True se la chiave ha dato prova di vita (successo reale) da poco."""
+    if fresh_sec <= 0 or not okmap:
+        return False
+    ts = okmap.get(_key_of(dep), 0.0)
+    return bool(ts and now - ts <= fresh_sec)
+# Giro giornaliero sui RITIRATI (un probe riuscito li riabilita: nessun
+# ritiro e' definitivo). Uno solo in volo, con partenza al primo tick dopo
+# mezzanotte locale e ritmo lento per non martellare i conti.
+_retired_task = None
+_retired_day = ""
+
+
+def _keyhealth():
+    """Istanza KeyHealth del gateway (None se non disponibile)."""
+    try:
+        from . import main as _gw_mod
+        return getattr(_gw_mod, "KEYHEALTH", None)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _key_of(dep: dict) -> str:
@@ -141,8 +266,103 @@ def _cfg(policy):
     )
 
 
+async def _retired_pass(router, forwarder) -> None:
+    """Giro giornaliero sui deployment RITIRATI, con calma.
+
+    Parte al primo tick dopo mezzanotte locale e sonda TUTTI i ritirati in
+    sequenza, uno ogni `cooldown_autoprobe_retired_gap_sec` secondi, saltando
+    le chiavi sondate di recente (`cooldown_autoprobe_key_gap_sec`): lo stesso
+    conto non viene martellato anche se il probe gira su deployment diversi.
+    Un probe riuscito riabilita (clear keyhealth + cooldown azzerato); un KO
+    non fa danni: restano ritirati fino al giro successivo.
+    """
+    try:
+        kh = _keyhealth()
+        if kh is None:
+            return
+        timeout = float(getattr(router.policy,
+                                "cooldown_autoprobe_timeout_sec", 20.0) or 20.0)
+        key_gap = float(getattr(router.policy,
+                                "cooldown_autoprobe_key_gap_sec", 300.0) or 0.0)
+        day_max = max(0, int(getattr(
+            router.policy, "cooldown_autoprobe_key_day_max", 4) or 0))
+        spacing = float(getattr(router.policy,
+                                "cooldown_autoprobe_retired_gap_sec",
+                                20.0) or 0.0)
+        retired = sorted(
+            u for u, rec in list((kh.data or {}).items())
+            if (rec or {}).get("state") == "retired")
+        if not retired:
+            return
+        log.info("[autoprobe] giro giornaliero RITIRATI: %d deployment "
+                 "(gap %.0fs, chiave min %.0fs)", len(retired), spacing,
+                 key_gap)
+        riab = 0
+        for unique in retired:
+            try:
+                dep = router.config.deployment_by_unique(unique)
+            except Exception:  # noqa: BLE001
+                dep = None
+            if not dep or dep.get("enabled") is False:
+                continue
+            if _keyhealth() is None:          # gateway in shutdown
+                return
+            if not _key_gap_ok(dep, time.time(), key_gap):
+                continue      # F32: stessa chiave sondata da poco
+            if not _key_day_ok(dep, time.time(), day_max):
+                continue      # stessa quota giornaliera degli altri pass
+            if _key_saturated(router, dep, time.time()):
+                continue      # chiave satura: nessun altro modello oggi
+            name = str(dep.get("api_key") or "")[:8]
+            _note_key_probe(dep, time.time())
+            _note_key_probe_day(dep, time.time())
+            ok, lat, code, _body = await _probe_one(forwarder, dep, timeout)
+            if ok:
+                kh.clear(unique)
+                router.clear_cooldown(unique)
+                router.stats_for(unique).probe_fail_streak = 0
+                riab += 1
+                log.warning("[autoprobe] %s RITIRATO ma risponde (%.0fms, "
+                            "chiave %s*) -> RIABILITATO", unique, lat, name)
+            else:
+                if _quota_code(code):
+                    _block_key_for_day(dep, time.time())
+                log.info("[autoprobe] %s ritirato: probe KO (%s) -> resta "
+                         "fuori (chiave %s*)", unique, code or "timeout",
+                         name)
+            if spacing > 0:
+                await asyncio.sleep(spacing)
+        log.info("[autoprobe] giro RITIRATI terminato: %d riabilitati su %d",
+                 riab, len(retired))
+    except Exception:  # noqa: BLE001
+        log.debug("[autoprobe] giro ritirati terminato con errore",
+                  exc_info=True)
+
+
+def maybe_spawn_retired(router, forwarder) -> None:
+    """Avvia il giro giornaliero sui ritirati (primo tick dopo mezzanotte)."""
+    global _retired_task, _retired_day
+    if not bool(getattr(router.policy,
+                        "cooldown_autoprobe_retired_enabled", True)):
+        return
+    if not _cfg(router.policy)[0]:
+        return
+    if not _keyhealth():
+        return
+    day = time.strftime("%Y-%m-%d")          # confine di mezzanotte LOCALE
+    if _retired_day == day:
+        return
+    if _retired_task is not None and not _retired_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _retired_day = day
+    _retired_task = loop.create_task(_retired_pass(router, forwarder))
+
+
 def maybe_spawn(router, forwarder, profile: str) -> None:
-    """Avvia (se non gia' in corso e se abilitato) un pass di probe sui dim cooled."""
     global _running
     if not _cfg(router.policy)[0]:
         return
@@ -297,6 +517,12 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
          transient_sec, skip_over, multiply, key_gap) = _cfg(router.policy)
         if per_dim <= 0 or max_total <= 0:
             return
+        _day_max = max(0, int(getattr(
+            router.policy, "cooldown_autoprobe_key_day_max", 4) or 0))
+        _ok_fresh = float(getattr(
+            router.policy, "cooldown_autoprobe_key_ok_fresh_sec",
+            43200.0) or 0.0)
+        _okmap = _key_ok_map(router)
         _streak_cap = max(0, int(getattr(
             router.policy, "probe_retire_after", 5) or 0))
         # --- MODO FRESH: sonda i MAI USATI (24h) con probe "normale" -----
@@ -313,7 +539,21 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                     continue
                 if not dep:
                     continue
+                _now = time.time()
+                if _key_ok_fresh(_okmap, dep, _now, _ok_fresh):
+                    log.info("[autoprobe] %s: chiave con successo reale "
+                             "recente -> probe inutile, salto", unique)
+                    continue
+                if _key_saturated(router, dep, _now):
+                    log.info("[autoprobe] %s: chiave satura (429/quota) -> "
+                             "nessun altro modello, salto", unique)
+                    continue
+                if not _key_day_ok(dep, _now, _day_max):
+                    log.info("[autoprobe] %s: budget probe/24h della chiave "
+                             "esaurito -> salto", unique)
+                    continue
                 _last_probe[unique] = time.time()
+                _note_key_probe_day(dep, _last_probe[unique])
                 _probe_times.setdefault(unique, deque()).append(_last_probe[unique])
                 _note_key_probe(dep, _last_probe[unique])
                 ok, lat, code, _body = await _probe_one(forwarder, dep, timeout)
@@ -322,6 +562,8 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                     log.info("[autoprobe] %s: probe OK -> promosso (%.0fms)",
                              unique, lat)
                 else:
+                    if _quota_code(code):
+                        _block_key_for_day(dep, time.time())
                     _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
                     _esc = _bump_probe_streak(router, unique, _streak_cap) > 0
                     if _esc:
@@ -351,7 +593,21 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 continue
             if not dep or not router.is_cooled_down(unique):
                 continue
+            _now = time.time()
+            if _key_ok_fresh(_okmap, dep, _now, _ok_fresh):
+                log.info("[autoprobe] %s: chiave con successo reale recente "
+                         "-> non la risveglio a vuoto", unique)
+                continue
+            if _key_saturated(router, dep, _now):
+                log.info("[autoprobe] %s: chiave satura (429/quota) -> "
+                         "nessun altro modello, salto", unique)
+                continue
+            if not _key_day_ok(dep, _now, _day_max):
+                log.info("[autoprobe] %s: budget probe/24h della chiave "
+                         "esaurito -> salto", unique)
+                continue
             _last_probe[unique] = time.time()
+            _note_key_probe_day(dep, _last_probe[unique])
             _probe_times.setdefault(unique, deque()).append(_last_probe[unique])
             _note_key_probe(dep, _last_probe[unique])
             ok, _lat, code, _body = await _probe_one(forwarder, dep, timeout)
@@ -359,6 +615,8 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 router.clear_cooldown(unique)
                 log.info("[autoprobe] %s: probe OK -> risvegliato", unique)
             else:
+                if _quota_code(code):
+                    _block_key_for_day(dep, time.time())
                 _cd = _probe_ko_cooldown(code, _body, grow, transient_sec)
                 _esc = _bump_probe_streak(router, unique, _streak_cap) > 0
                 if _esc:

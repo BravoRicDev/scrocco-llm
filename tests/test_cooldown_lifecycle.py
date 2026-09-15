@@ -99,7 +99,8 @@ def test_probe_cap_retires(router, monkeypatch):
     router._cooldown_full[u] = 200.0
     router._cooldown_since[u] = time.time()
     s.probe_fail_streak = router.policy.probe_retire_after - 1
-    router.mark_failed_double_residual(u, reason="http_429", status=429)
+    # 403 = guasto vero. Il 429 (quota) NON ritira: vedi il test sotto.
+    router.mark_failed_double_residual(u, reason="upstream_403", status=403)
     assert u in fake.retired
     assert fake.last_reason == "probe_escalation_cap"
     assert fake.saved == 1

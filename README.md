@@ -318,9 +318,19 @@ individual account limits instead of dying on the first 429.
   > 2h — the *stale-cooldown wakeup* in the ladder (between `-dim` and `-go`) or
   the last-resort pass retries those, never the autoprobe. The same API KEY —
   even on *different* deployments (the "twins") — is never probed again before
-  `cooldown_autoprobe_key_gap_sec` (300 s), so the probe never hammers one
-  upstream account (daily quota or per-key rate limit); hot-reloaded rows obey
-  the same gap. The live path is never slowed down (fresh probes use
+  `cooldown_autoprobe_key_gap_sec` (3600 s) **and** a hard **per-key budget**
+  of `cooldown_autoprobe_key_day_max` probes/24 h (default 2; 1 for the
+  request-metered free tiers like openrouter/llm7/google/requesty) — the key
+  pool is shared by several servers and each host only has local state, so the
+  budget is deliberately low. A key that served **real traffic** within
+  `cooldown_autoprobe_key_ok_fresh_sec` (12 h) is alive and is not probed at
+  all; a probe answering 429 blocks that whole KEY for 24 h (no other model of
+  the same key). Retired keys are not hammered either: once a day (first tick
+  after local midnight, `cooldown_autoprobe_retired_*`) they are probed with
+  calm, and a successful probe un-retires them; in addition the strictest
+  last-resort rung may use retired **non-permanent** keys (never 401/403/missing
+  model), so availability comes back without burning quota. A quota 429 can
+  never retire a key (`[rep-fail] classe=quota: nessuna penale`). The live path is never slowed down (fresh probes use
   `note_result`/`mark_failed`; cooled probes stay purely reconnaissance).
 - **Per-model circuit breaker & input-overflow fail-fast.** When
   `model_circuit_keys` (3) *distinct* API keys of the same `provider|model`
@@ -521,7 +531,9 @@ template. The ones that matter most:
 | `cooldown_retry_max_fail_24h` / `chronic_fail_cooldown_sec` | 10 / 7200 | chronic threshold / mandatory pause after re-failure |
 | `cooldown_probe_enabled` / `cooldown_probe_after_ratio` / `cooldown_probe_decay` | true / 0.5 / true | passive probe of cooled-down keys once 50% through their cooldown; penalty decays linearly |
 | `cooldown_streak_halflife_sec` / `probe_retire_after` / `cooldown_jitter_ratio` | 1800 / 5 / 0.12 | streak decay while idle; auto-retire after N failed probes; cooldown jitter (±12%) |
-| `cooldown_autoprobe_enabled` / `cooldown_autoprobe_per_dim` / `cooldown_autoprobe_max_total` | true / 2 / 6 | call-triggered probe of cooled text dims: targets per dim / total per pass |
+| `cooldown_autoprobe_enabled` / `cooldown_autoprobe_per_dim` / `cooldown_autoprobe_max_total` | true / 1 / 3 | call-triggered probe of cooled text dims: targets per dim / total per pass (conservative: the free-tier key pool is shared across servers) |
+| `cooldown_autoprobe_key_day_max` / `cooldown_autoprobe_key_ok_fresh_sec` | 2 / 43200 | per-KEY probe budget in 24 h (provider-aware, 1/day for request-metered tiers) and skip the key when real traffic succeeded within N s |
+| `cooldown_autoprobe_retired_enabled` / `cooldown_autoprobe_retired_gap_sec` | true / 20 | daily sweep of RETIRED keys starting after local midnight, one probe every N s; a successful probe un-retires |
 | `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO residual at least doubles (min +grow, rotate targets); min gap between probes; probe timeout |
 | `cooldown_autoprobe_multiply_24h` / `cooldown_autoprobe_skip_over_sec` | true / 7200 | KO increment × probes in the last 24h (1×, 2×, 3×…); cooled > 2h excluded from probing (ladder wakeup / last resort / time will retry) |
 | `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 900 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |

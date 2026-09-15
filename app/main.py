@@ -514,6 +514,9 @@ async def _watcher(interval: float) -> None:
             router.purge_expired()      # igiene: sticky/cooldown scaduti
             router.purge_draining()     # draining scaduti oltre il TTL
             _maybe_save_all()           # F26: stats+routing, stesso istante
+            # giro giornaliero sui RITIRATI: parte al primo tick dopo
+            # mezzanotte e li sonda con calma (un probe riuscito riabilita)
+            autoprobe.maybe_spawn_retired(router, forwarder)
             _maybe_save_cooldowns()     # cooldown attivi su disco
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
