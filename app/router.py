@@ -2843,6 +2843,48 @@ class Router:
         return (self._is_slow_dep(unique, ctx)
                 or self.is_slow_for_session(unique, session_id, ctx))
 
+    _DIM_GROUP_RE = __import__("re").compile(r"-(\d+)k$")
+
+    def climb_dim_group(self, group_name: str | None,
+                        ctx_est) -> str | None:
+        """SALITA DI DIM: se il payload non entra nel gruppo `-Nk` richiesto,
+        ritorna il gruppo dim PIU' PICCOLO (stesso profilo) il cui
+        max_input >= ctx_est; None se nessun dim basta o il gruppo non e'
+        un dim testo. Il routing poi pesca lì (il floor warm segue la nuova
+        richiesta, m0204)."""
+        try:
+            cx = int(ctx_est or 0)
+        except (TypeError, ValueError):
+            return None
+        if cx <= 0 or not group_name:
+            return None
+        m = self._DIM_GROUP_RE.search(group_name)
+        if m is None or self.config.group_caps.get(group_name) is not None \
+                or self._is_renewal_bucket(group_name):
+            return None
+        head = group_name[:m.start()]
+        cur_mx = 0
+        best = None
+        for g, deps in (self.config.groups or {}).items():
+            if self.config.group_caps.get(g) is not None \
+                    or self._is_renewal_bucket(g):
+                continue
+            mm = self._DIM_GROUP_RE.search(g)
+            if mm is None or g[:mm.start()] != head:
+                continue
+            try:
+                mx = max((int(d.get("max_input_tokens") or 0) for d in deps),
+                         default=0)
+            except (TypeError, ValueError):
+                continue
+            if g == group_name:
+                cur_mx = mx
+            if mx >= cx and (best is None or mx < best[1]):
+                best = (g, mx)
+        if best and best[0] != group_name and best[1] > cur_mx:
+            return best[0]
+        return None
+
     def _warm_allow_slow(self) -> bool:
         return bool(getattr(self.policy, "warm_pool_allow_slow", True))
 

@@ -276,7 +276,9 @@ def _coalesce_key(payload: dict, extra: str = "") -> str:
     """SHA-256 del payload intero serializzato in modo deterministico."""
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                      default=str)
-    return hashlib.sha256((extra + "|" + raw).encode()).hexdigest()
+    # NB: `extra` puo' essere None (profile assente): era un 500 trasparente
+    # al client ("unsupported operand type(s) for +") su ogni non-stream.
+    return hashlib.sha256(((extra or "") + "|" + raw).encode()).hexdigest()
 
 
 async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
@@ -1466,39 +1468,51 @@ async def chat_completions(request: Request, response: Response):
         except Exception:
             _max_grp = 0
         if _max_grp > 0 and ctx_est and ctx_est > int(_max_grp * 1.05):
-            from .ctxcompact import (compact_tool_outputs,
-                                     ctxcompact_config_from_policy)
-            # NB: CtxCompactConfig NON e' un dataclass -> niente
-            # `dataclasses.replace` (TypeError a runtime: era il bug di
-            # viemmegi). E' un'istanza fresca per chiamata: si muta il campo.
-            _ccf = ctxcompact_config_from_policy(router.policy)
-            _ccf.min_saved_tokens = 0
-            _img = getattr(router.policy, "image_token_estimate", 0) or 0
-            _forced, _frep = compact_tool_outputs(
-                payload.get("messages") or [], _ccf, max_in=_max_grp,
-                estimator=lambda ms: estimate_tokens(
-                    ms, router.policy.estimate_divisor, _img))
-            if _frep.get("changed"):
-                payload["messages"] = _forced
-                metrics.inc("nx_ctx_compacted_forced")
-                log.info("[ctx-overflow] compattazione forzata per %s: %s",
-                         group_or_explicit,
-                         {k: _frep.get(k) for k in (
-                             "stubbed", "deduped", "args_trimmed",
-                             "saved_chars")})
-            ctx_est = estimate_tokens(payload.get("messages") or [],
-                                      router.policy.estimate_divisor, _img,
-                                      tools=payload.get("tools"))
-            if ctx_est > int(_max_grp * 1.05):
-                metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
-                return JSONResponse(status_code=400, content={
-                    "error": {"code": "context_length_exceeded",
-                              "message": "ctx ~%d oltre il max_input %d del "
-                                         "gruppo %s, anche dopo la "
-                                         "compattazione" % (
-                                             ctx_est, _max_grp,
-                                             group_or_explicit),
-                              "type": "invalid_request_error"}})
+            # SALITA DI DIM (regola dell'utente): se la richiesta non entra
+            # nel warm/-dim chiesto si SALE alla dim PIU' PICCOLA che la
+            # contiene; compattazione forzata e 400 restano solo quando
+            # NESSUN dim della scala basta.
+            _up = router.climb_dim_group(group_or_explicit, ctx_est)
+            if _up:
+                log.info("[dim] ctx≈%d non entra in %s (max %d): salgo a %s",
+                         ctx_est, group_or_explicit, _max_grp, _up)
+                group_or_explicit = _up
+                if explicit_req and session_id:
+                    router.sticky_set(session_id, _up)
+            else:
+                from .ctxcompact import (compact_tool_outputs,
+                                         ctxcompact_config_from_policy)
+                # NB: CtxCompactConfig NON e' un dataclass -> niente
+                # `dataclasses.replace` (TypeError a runtime: era il bug di
+                # viemmegi). E' un'istanza fresca per chiamata: si muta il campo.
+                _ccf = ctxcompact_config_from_policy(router.policy)
+                _ccf.min_saved_tokens = 0
+                _img = getattr(router.policy, "image_token_estimate", 0) or 0
+                _forced, _frep = compact_tool_outputs(
+                    payload.get("messages") or [], _ccf, max_in=_max_grp,
+                    estimator=lambda ms: estimate_tokens(
+                        ms, router.policy.estimate_divisor, _img))
+                if _frep.get("changed"):
+                    payload["messages"] = _forced
+                    metrics.inc("nx_ctx_compacted_forced")
+                    log.info("[ctx-overflow] compattazione forzata per %s: %s",
+                             group_or_explicit,
+                             {k: _frep.get(k) for k in (
+                                 "stubbed", "deduped", "args_trimmed",
+                                 "saved_chars")})
+                ctx_est = estimate_tokens(payload.get("messages") or [],
+                                          router.policy.estimate_divisor, _img,
+                                          tools=payload.get("tools"))
+                if ctx_est > int(_max_grp * 1.05):
+                    metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
+                    return JSONResponse(status_code=400, content={
+                        "error": {"code": "context_length_exceeded",
+                                  "message": "ctx ~%d oltre il max_input %d del "
+                                             "gruppo %s, anche dopo la "
+                                             "compattazione" % (
+                                                 ctx_est, _max_grp,
+                                                 group_or_explicit),
+                                  "type": "invalid_request_error"}})
         # ESPLICITO: nessun filtro (la lettera della richiesta vince); il retry
         # ruota solo nel gruppo. BASE: need+ctx con catena del mondo scelta da
         # initial_pick (dims per testo, cap-chain per -C).
