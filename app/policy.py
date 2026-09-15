@@ -603,6 +603,11 @@ class Policy:
     warm_refill_enabled: bool = True
     warm_ready_min: int = 3
     warm_refill_default_out_tokens: int = 4096
+    # Modelli PREFERITI nei bucket -go/-fallback (lista separata da virgole o
+    # YAML list): se nel bucket c'e' ALMENO una chiave viva di uno di questi
+    # modelli, la scelta cade su quella (regola utente: "-go sempre
+    # deepseek-v4.1-flash se disponibile"); altrimenti comportamento normale.
+    go_preferred_models: str = ""
     # TETTO DI SPECULATIVO IN VOLO PER SESSIONE: canari refill/legacy e
     # A/loser staccati come probe contano TUTTI; il gate del refill non
     # accende un altro canario se la sessione ne ha gia' `max_inflight` in
@@ -2187,6 +2192,11 @@ class Policy:
             if str(cm) not in ("linear", "exponential"):
                 raise ValueError("cooldown_mode non valido: ammessi linear|exponential")
             p.cooldown_mode = str(cm)
+        _gpm = raw.get("go_preferred_models")
+        if _gpm is not None:
+            if isinstance(_gpm, (list, tuple)):
+                _gpm = ",".join(str(x) for x in _gpm)
+            p.go_preferred_models = str(_gpm).strip().lower()
         _set_int(p, raw, "cooldown_base_min", minimum=1)
         _set_int(p, raw, "cooldown_linear_mult_min", minimum=0)
         _set_int(p, raw, "ladder_skip_after", minimum=1)

@@ -4717,6 +4717,10 @@ class Router:
             # sessione vince sul tier (stessa chiave = KV-cache calda, i
             # crediti si "sommano" un account alla volta: al 429 il holder
             # si esclude da solo e il pick prosegue nell'ordine normale).
+            # MODELLI PREFERITI (regola utente: -go sempre deepseek-v4.1-flash
+            # se disponibile): se nel bucket ci sono chiavi VIVE del modello
+            # preferito, restringi a loro — il holder non scavalca la scelta.
+            deps = self._filter_go_preferred(deps)
             if prefer_holder:
                 _ch = self.cache_holder(need=need, ctx=ctx)
                 if _ch and any(_ch["unique"] == d["unique"] for d in deps):
@@ -4940,6 +4944,17 @@ class Router:
                 return None
 
         if preferred:
+            # MODELLI PREFERITI nei bucket -go/-fallback (regola utente): se
+            # tra i candidati vivi del bucket c'e' il modello preferito,
+            # prendi il PRIMO quello (l'ordine della catena fa comunque
+            # ruotare le chiavi gemelle del modello).
+            _pm = self._go_pref()
+            if _pm:
+                _hit = [d for d in preferred
+                        if self._is_go_bucket(d.get("group") or "")
+                        and self._go_pref_hit(d)]
+                if _hit:
+                    return _hit[0]
             return preferred[0]
         return None
 
@@ -5514,6 +5529,31 @@ class Router:
         except Exception:                              # noqa: BLE001
             return _tier[0]
 
+    # ---------------------------------- MODELLI PREFERITI nei bucket -go/-fb
+    def _go_pref(self) -> list[str]:
+        raw = str(getattr(self.policy, "go_preferred_models", "") or "")
+        return [s.strip().lower() for s in raw.split(",") if s.strip()]
+
+    def _is_go_bucket(self, group: str) -> bool:
+        gs = self.config.go_suffix or "-go"
+        fs = self.config.fallback_suffix or "-fallback"
+        g = str(group or "")
+        return g.endswith(gs) or g.endswith(fs)
+
+    def _go_pref_hit(self, dep: dict) -> bool:
+        mod = str(dep.get("model") or "").lower()
+        return bool(mod) and any(p in mod for p in self._go_pref())
+
+    def _filter_go_preferred(self, deps: list[dict]) -> list[dict]:
+        """Nei bucket -go/-fallback: se tra i candidati vivi ce n'e' ALMENO
+        uno col modello preferito (regola utente: -go -> sempre
+        deepseek-v4.1-flash se disponibile), RESTRINGI a quelli; altrimenti
+        comportamento normale (il preferito non c'e', non si blocca nulla)."""
+        if not self._go_pref() or not deps:
+            return deps
+        same = [d for d in deps if self._go_pref_hit(d)]
+        return same or deps
+
     def warm_fill_canary(self, profile: str | None, cur_dep: dict,
                          need: frozenset[str] | None, ctx: int | None,
                          out_tokens: int | None,
@@ -5557,7 +5597,15 @@ class Router:
         # sono mai candidati (FREE only).
         _by: dict[str, list[dict]] = {}
         _order: list[str] = []
-        for u in self._ladder_for_group(cur_dep.get("group") or ""):
+        # FISSATO (regola utente "scava il -dim ESPPLICITO"): il ladder parte
+        # dalla dim RICHIESTA, non dal gruppo della holder (che puo' essere
+        # piu' alta: una sessione ancorata a -1000k non vedrebbe mai le free
+        # -200k). Se la dim richiesta non da' ladder, ripiega su quello corrente.
+        _lad = self._ladder_for_group(requested_group
+                                      or cur_dep.get("group") or "")
+        if not _lad:
+            _lad = self._ladder_for_group(cur_dep.get("group") or "")
+        for u in _lad:
             if u in ex:
                 continue
             d = self.config.deployment_by_unique(u)
@@ -5658,7 +5706,12 @@ class Router:
         fb_suf = self.config.fallback_suffix or "-fallback"
         _by: dict[str, list[dict]] = {}
         _order: list[str] = []
-        for u in self._ladder_for_group(cur_dep.get("group") or ""):
+        # FISSATO: anche la Sveglia scava dalla dim RICHIESTA (vedi refill).
+        _lad = self._ladder_for_group(requested_group
+                                      or cur_dep.get("group") or "")
+        if not _lad:
+            _lad = self._ladder_for_group(cur_dep.get("group") or "")
+        for u in _lad:
             if u in ex:
                 continue
             d = self.config.deployment_by_unique(u)
