@@ -61,7 +61,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         _THOUGHT_SIG_RE, is_provider_error_body,
                         is_provider_fault_body,
                         is_embedded_provider_error,
-                        media_reject_signature, _client_attribution,
+                        media_reject_signature, media_input_needed,
+                        _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         set_retry_after_floors,
                         set_stream_stall_sec,
@@ -3331,7 +3332,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # rotto, semplicemente non accetta quel tipo di input -> ruota
             # SENZA cooldown (un altro deployment multimodale lo accetta),
             # mai pass-through del 400 al client.
-            media_sig = bool(media_reject_signature(detail))
+            # MA solo se la richiesta HA davvero media: alcuni proxy (llm7/
+            # Cloudflare) rispondono "does not support vision input" a
+            # richieste di puro testo -> in quel caso il dep e' rotto per
+            # QUESTA richiesta e va in cooldown come un KO normale.
+            _media_raw = bool(media_reject_signature(detail))
+            media_sig = _media_raw and media_input_needed(need)
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
             prov_fault = is_provider_fault_body(detail)
             quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False
@@ -3360,6 +3366,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "payload_schema"
             elif media_sig:
                 reason = "media_reject"
+            elif _media_raw:
+                # falso rifiuto di modalita': niente media nella richiesta ->
+                # modello rotto per questa richiesta, cooldown normale.
+                reason = "model_feature"
             elif thought_sig:
                 reason = "thought_signature"
             elif quota_exhausted:
@@ -3406,14 +3416,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     or upstream401
                     or empty_body
                     or prov_fault
-                    or media_sig
+                    or _media_raw
                     or err.status == -402)
                 # né thought_signature né il body d'errore provider né
                 # il 403 sono rifiuti di modalita': non alimentano l'auto-
                 # learn (hook).
                 if (provider_side and hook and not thought_sig
                         and not prov_err and not upstream403
-                        and not upstream401 and not prov_fault):
+                        and not upstream401 and not prov_fault
+                        and media_sig):
                     try:
                         hook(dep["model"], detail)
                     except Exception:

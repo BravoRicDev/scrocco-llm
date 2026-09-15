@@ -155,6 +155,98 @@ def test_streaming_media_reject_never_passthrough(monkeypatch):
     assert good["unique"] in seen
 
 
+# --------------------------- "vision" fuorviante su richiesta di solo testo
+def _vision_400_stream_harness(monkeypatch):
+    import app.main as M
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    cfg, router, broken, good = _mk()
+    router.fallback_next = lambda *a, **k: good
+    seen = []
+
+    class _Fwd:
+        async def stream_response(self, d, payload, **kwargs):
+            seen.append(d["unique"])
+            if d["unique"] == broken["unique"]:
+                raise UpstreamError(-400, VISION_400)
+
+            async def _g():
+                yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                yield (b'data: {"choices":[{"delta":{},'
+                       b'"finish_reason":"stop"}]}\n\n')
+                yield b"data: [DONE]\n\n"
+            return _g()
+
+    monkeypatch.setattr(M, "router", router)
+    monkeypatch.setattr(M, "config", cfg)
+    monkeypatch.setattr(M, "forwarder", _Fwd())
+    return M, router, broken, good, seen, JSONResponse, StreamingResponse
+
+
+def test_vision_fuorviante_su_testo_va_in_cooldown(monkeypatch):
+    """llm7/Cloudflare risponde "does not support vision input" a una
+    richiesta di PURO TESTO: non e' un rifiuto di modalita', il deployment
+    e' rotto per QUESTA richiesta -> cooldown normale (prima restava vivo e
+    veniva ritentato a ogni richiesta)."""
+    M, router, broken, good, seen, JSONResponse, StreamingResponse = \
+        _vision_400_stream_harness(monkeypatch)
+
+    async def _run():
+        payload = {"model": broken["model"],
+                   "messages": [{"role": "user", "content": "x"}]}
+        return await M._stream_with_fallback(
+            "test", broken, payload, need=frozenset({"text"}), scope="chain")
+
+    resp = asyncio.run(_run())
+    assert isinstance(resp, StreamingResponse)
+    assert b"ok" in asyncio.run(_drain(resp))
+    assert broken["unique"] in router._cooldown      # KO vero -> cooldown
+
+
+def test_vision_vera_non_punisce_il_deployment(monkeypatch):
+    """Con media REALE nella richiesta il rifiuto di modalita' resta un
+    rifiuto di modalita': si ruota senza cooldown."""
+    M, router, broken, good, seen, JSONResponse, StreamingResponse = \
+        _vision_400_stream_harness(monkeypatch)
+
+    async def _run():
+        payload = {"model": broken["model"],
+                   "messages": [{"role": "user", "content": "x"}]}
+        return await M._stream_with_fallback(
+            "test", broken, payload, need=frozenset({"vision"}), scope="chain")
+
+    resp = asyncio.run(_run())
+    assert isinstance(resp, StreamingResponse)
+    assert b"ok" in asyncio.run(_drain(resp))
+    assert broken["unique"] not in router._cooldown
+
+
+def test_vision_fuorviante_nonstream_va_in_cooldown():
+    import httpx
+
+    cfg, router, broken, good = _mk()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "openrouter.ai":
+            return httpx.Response(400, content=VISION_400.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        router.fallback_next = lambda *a, **k: good
+        return await fwd.call_with_fallback(
+            router, "test", broken,
+            {"model": "x", "messages": [{"role": "user", "content": "x"}]},
+            need=frozenset({"text"}))
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == good["unique"]
+    assert broken["unique"] in router._cooldown
+
+
 # ------------------------------------------------- stream_options non-stream
 def test_nonstream_toglie_stream_options():
     """Osservato in produzione: il client manda `stream_options` in una

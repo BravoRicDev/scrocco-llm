@@ -1725,6 +1725,18 @@ def media_reject_signature(detail: str) -> bool:
     return any(m in low for m in _MEDIA_REJECT_MARKERS)
 
 
+# capability di INPUT media: se la richiesta non ne ha bisogno, un rifiuto
+# "does not support vision input" non e' un rifiuto di modalita' ma un
+# modello/proxy rotto per QUESTA richiesta (caso llm7/Cloudflare che risponde
+# "vision" a richieste di puro testo) -> va in cooldown come un KO normale.
+MEDIA_INPUT_CAPS = frozenset({"vision", "image", "audio", "video"})
+
+
+def media_input_needed(need) -> bool:
+    """True se la richiesta richiede capability di input media."""
+    return bool(set(need or ()) & MEDIA_INPUT_CAPS)
+
+
 class Forwarder:
     def __init__(self, client: httpx.AsyncClient | None = None,
                  keepalive_pool: bool = False):
@@ -3064,7 +3076,8 @@ truncation_hook=None,
                             or -err.status == 402:
                         metrics.inc("nx_upstream_calls_total",
                                     (cur, "provider_4xx"))
-                        if media_strike_hook and media_reject_signature(detail):
+                        if media_strike_hook and media_reject_signature(detail) \
+                                and media_input_needed(need):
                             try:
                                 media_strike_hook(dep["model"], detail)
                             except Exception as exc:   # mai bloccare il fallback
@@ -3185,25 +3198,43 @@ truncation_hook=None,
                     # stesso payload -> ruota (strike per l'auto-learn), mai
                     # pass-through del 400 al client.
                     if media_reject_signature(detail):
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "media_reject"))
                         last_err = err
-                        if media_strike_hook:
-                            try:
-                                media_strike_hook(dep["model"], detail)
-                            except Exception as exc:
-                                log.debug("[strike] hook error: %s", exc)
-                        nxt = _pick(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
-                                                   requested_group=requested_group)
-                        if nxt is None:
-                            log.warning("[fallback] %s %s rifiuto modalita': "
-                                        "nessuna alternativa -> 503",
-                                        cur, -err.status)
-                            raise
-                        log.warning("[fallback] %s %s rifiuto modalita' -> %s",
-                                    cur, -err.status, nxt["unique"])
-                        dep = nxt
+                        if media_input_needed(need):
+                            metrics.inc("nx_upstream_calls_total",
+                                        (cur, "media_reject"))
+                            if media_strike_hook:
+                                try:
+                                    media_strike_hook(dep["model"], detail)
+                                except Exception as exc:
+                                    log.debug("[strike] hook error: %s", exc)
+                            nxt = _pick(profile, dep, need, scope,
+                                                       ctx=ctx, tried=tried,
+                                                       requested_group=requested_group)
+                            if nxt is None:
+                                log.warning("[fallback] %s %s rifiuto modalita': "
+                                            "nessuna alternativa -> 503",
+                                            cur, -err.status)
+                                raise
+                            log.warning("[fallback] %s %s rifiuto modalita' -> %s",
+                                        cur, -err.status, nxt["unique"])
+                            dep = nxt
+                            continue
+                        # FALSO rifiuto di modalita': la richiesta NON ha media
+                        # (caso llm7/Cloudflare che risponde "does not support
+                        # vision input" a puro testo). Il modello e' rotto per
+                        # QUESTA richiesta -> cooldown normale + rotazione, cosi'
+                        # non viene ritentato a ogni richiesta.
+                        metrics.inc("nx_upstream_calls_total",
+                                    (cur, "model_feature"))
+                        log.warning("[fallback] %s %s 'vision' ma la richiesta "
+                                    "non ha media -> cooldown normale",
+                                    cur, -err.status)
+                        _fail_cur(seconds=err.retry_after,
+                                  reason="model_feature",
+                                  status=abs(err.status) if err.status else None)
+                        dep = _pick(profile, dep, need, scope, ctx=ctx,
+                                    tried=tried,
+                                    requested_group=requested_group)
                         continue
                     raise
                 metrics.inc("nx_upstream_calls_total", (cur, "error"))
