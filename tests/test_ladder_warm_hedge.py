@@ -197,6 +197,12 @@ def test_hedge_canaries_esclude_non_stream(router):
     b = r.config.groups[D200][0]
     r.stats_for(b["unique"]).json_fallback = 2
     assert r._is_known_nonstream(b["unique"]) is True
+    # DEFAULT (nonstream_canary_allowed=True): un dep che ignora stream:true
+    # viene adattato a SSE e resta eleggibile: si giudica la consegna finale.
+    cands = r.hedge_canaries("test", a, None, 64000, {a["unique"]}, None, k=2)
+    assert any(d["unique"] == b["unique"] for d in cands)
+    # Col knob False si torna alla semantica storica (solo SSE nativo)
+    r.policy.nonstream_canary_allowed = False
     cands = r.hedge_canaries("test", a, None, 64000, {a["unique"]}, None, k=2)
     assert all(d["unique"] != b["unique"] for d in cands)
 

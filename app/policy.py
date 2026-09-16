@@ -614,6 +614,13 @@ class Policy:
     # corsa. Nel caso migliore il warm si trova anche 6-7 caldi transienti
     # (nessun vero spreco: se arrivano tutti buoni "durera' di piu'").
     warm_refill_max_inflight: int = 6
+    # UN DEP CHE IGNORA stream:true (risponde JSON) viene ADATTATO a SSE dal
+    # forwarder e CONSEGNATO: non e' un guasto, e' una consegna diversa. Con
+    # True (default) resta eleggibile come canario / sveglia / sostituto in
+    # gara: si giudica la CONSEGNA finale, non la forma del transport (regola
+    # utente: "sia stream che non stream indistintamente"). False = pool
+    # sostituti limitato ai soli dep che parlano SSE nativo.
+    nonstream_canary_allowed: bool = True
     # SVEglia: il terzo canario del refill cerca un dep in cooldown da 429 da
     # ALMENO questo tempo (default 1h) e, se risponde, lo riporta caldo.
     warm_refill_wake_min_cooldown_age_sec: float = 3600.0
@@ -1933,6 +1940,13 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.wake_max_attempts non valido: {_v!r}")
                 p.warm_refill_wake_max_attempts = int(_v)
+            if "nonstream_canary_allowed" in wp:
+                p.nonstream_canary_allowed = _coerce_bool(
+                    wp["nonstream_canary_allowed"],
+                    "warm_pool.nonstream_canary_allowed")
+        if raw.get("nonstream_canary_allowed") is not None:
+            p.nonstream_canary_allowed = _coerce_bool(
+                raw["nonstream_canary_allowed"], "nonstream_canary_allowed")
 
         ca = raw.get("cache_aware")
         if ca is not None:

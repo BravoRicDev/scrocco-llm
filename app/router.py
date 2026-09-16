@@ -5512,6 +5512,22 @@ class Router:
         s = self._stats.get(unique)
         return bool(s and getattr(s, "json_fallback", 0) >= 2)
 
+    def _nonstream_blocked(self, unique: str) -> bool:
+        """True se il dep va ESCLUSO dai pool sostituti perche' noto
+        non-stream e la policy non lo ammette. Con
+        `nonstream_canary_allowed` (default True) un dep che ignora
+        stream:true viene ADATTATO a SSE e CONSEGNATO: vale la consegna
+        finale, non la forma del transport (regola utente: "sia stream che
+        non stream indistintamente"). False storica = solo SSE nativo."""
+        if not self._is_known_nonstream(unique):
+            return False
+        try:
+            allowed = bool(getattr(self.policy, "nonstream_canary_allowed",
+                                   True))
+        except Exception:                          # noqa: BLE001
+            allowed = True
+        return not allowed
+
     def hedge_canaries(self, profile: str | None, dep: dict,
                        need: frozenset[str] | None, ctx: int | None,
                        tried: set[str] | None, requested_group: str | None,
@@ -5567,7 +5583,7 @@ class Router:
             mxi = int(d.get("max_input_tokens") or 0)
             if floor and mxi and mxi < floor * 1000:
                 continue                       # mai sotto la dim richiesta
-            if self._is_known_nonstream(u):
+            if self._nonstream_blocked(u):
                 continue
             if g != cur_g:
                 if cur:
@@ -6150,7 +6166,7 @@ class Router:
                 continue
             if self.is_cooled_down(u) or self._gemini_blocked(d):
                 continue
-            if self._is_known_nonstream(u):
+            if self._nonstream_blocked(u):
                 continue
             if self._owned_by_any_session(u):
                 continue                               # occupato da qualcuno
@@ -6272,7 +6288,7 @@ class Router:
                 continue
             if self._endpoint_quarantined(d) or self._gemini_blocked(d):
                 continue
-            if self._is_known_nonstream(u):
+            if self._nonstream_blocked(u):
                 continue
             if self._owned_by_any_session(u):
                 continue
