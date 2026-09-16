@@ -3088,6 +3088,7 @@ truncation_hook=None,
             # Fallback + warm sticky handoff: se il prossimo deployment e' della
             # stessa famiglia dello sticky corrente, sposta lo sticky su di lui
             # (la sessione riparte warm invece che fredda).
+            k.setdefault("out_tokens", _outb)
             _n = router.fallback_next(*a, **k)
             if _n is None:
                 return None
@@ -3731,7 +3732,8 @@ truncation_hook=None,
                             fake_escalations += 1
                             if fake_escalations <= _fc.max_escalations:
                                 nxt = router.force_escalation(
-                                    dep, need, ctx, tried=tried) \
+                                    dep, need, ctx, tried=tried,
+                                    out_tokens=_outb) \
                                     if profile else None
                                 if nxt is not None:
                                     dep = nxt

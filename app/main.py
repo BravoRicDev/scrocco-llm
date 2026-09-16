@@ -1722,7 +1722,9 @@ async def chat_completions(request: Request, response: Response):
                                   session_id=session_id,
                                   warm=_warm,
                                   prefer_holder=_paid_holder,
-                                  prefer_fast=not stream)
+                                  prefer_fast=not stream,
+                                  out_tokens=refill_out_budget(payload,
+                                                               router.policy))
     if dep is None:
         # F31: se il motivo e' l'overflow (tutti i dep del gruppo hanno
         # max_input < ctx) NON e' un disservizio ma un errore del client:
@@ -2767,7 +2769,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                      if fresh_only else None)
             cands = router.hedge_canaries(
                 profile, dep, need, ctx, tried_set, requested_group,
-                k=max(1, int(k)), exclude=_excl, fresh_only=bool(fresh_only))
+                k=max(1, int(k)), exclude=_excl, fresh_only=bool(fresh_only),
+                out_tokens=out_tokens)
     except Exception:
         cands = []
     if _skip_classic:
@@ -2978,7 +2981,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 with contextlib.suppress(Exception):
                     _lc = router.hedge_canaries(
                         profile, dep, need, ctx, tried_set, requested_group,
-                        k=1, exclude=None, fresh_only=False)
+                        k=1, exclude=None, fresh_only=False,
+                        out_tokens=out_tokens)
                 _xu = set((raced or {}).get("uniq") or ())
                 _xk2 = set((raced or {}).get("keys") or ())
                 for _cc in canaries:
@@ -3432,6 +3436,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         """fallback_next + P1-5: salta gli host che hanno gia' fallito a
         livello provider in QUESTA richiesta; se non ne restano, torna al
         candidato saltato (mai lasciare la richiesta senza risposta)."""
+        k.setdefault("out_tokens",
+                     refill_out_budget(payload, router.policy))
         _n = router.fallback_next(*a, **k)
         if _n is None or dep_host(_n) not in skip_hosts:
             return _n
@@ -3909,8 +3915,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # gia' stata appesa al payload).
                 nxt = dep
             elif verdict == "fake_tool_call":
-                nxt = router.force_escalation(dep, need, ctx,
-                                              tried=tried_set) \
+                nxt = router.force_escalation(
+                    dep, need, ctx, tried=tried_set,
+                    out_tokens=refill_out_budget(payload, router.policy)) \
                     if profile else None
             else:
                 # Su troncatura/risposta-vuota preferiamo un candidato PIU'
@@ -3923,6 +3930,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     router.fallback_next(profile, dep, need, scope, ctx=ctx,
                                          tried=tried_set,
                                          requested_group=requested_group,
+                                         out_tokens=refill_out_budget(
+                                             payload, router.policy),
                                          prefer_capable=_cap_pref)
                     if profile else None)
             log.warning("[fallback] stream %s pre-contenuto verdict=%s fr=%s "
@@ -4711,7 +4720,9 @@ async def images_generations(request: Request):
     if dep is None:
         dep = router.pick_deployment(group_or_explicit, need)
     if dep is None and auth.profile:
-        dep = router.fallback_after(auth.profile, None, need)
+        dep = router.fallback_after(auth.profile, None, need,
+                                    out_tokens=refill_out_budget(
+                                        payload, router.policy))
     if dep is None:
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment disponibile per image_gen",
@@ -4846,7 +4857,9 @@ async def images_generations(request: Request):
                 router.mark_failed(cur, seconds=err.retry_after,
                                    status=abs(err.status) if err.status else None)
             metrics.inc("nx_images_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
+            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
+                                       out_tokens=refill_out_budget(
+                                           payload, router.policy)) \
                 if profile else None
             if nxt is None:
                 break
@@ -4890,7 +4903,9 @@ def _audio_route(profile: str | None, model: str, raw_model: str,
     if dep is None:
         dep = router.pick_deployment(group_or_explicit, need)
     if dep is None and profile:
-        dep = router.fallback_after(profile, None, need)
+        dep = router.fallback_after(profile, None, need,
+                                    out_tokens=refill_out_budget(
+                                        payload, router.policy))
     if dep is None:
         return None, profile, JSONResponse(status_code=503, content={
             "error": {"message": f"nessun deployment disponibile per {sorted(need) or model}",
@@ -4993,7 +5008,9 @@ async def audio_speech(request: Request):
                 router.mark_failed(cur, seconds=err.retry_after,
                                    status=abs(err.status) if err.status else None)
             metrics.inc("nx_tts_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
+            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
+                                       out_tokens=refill_out_budget(
+                                           payload, router.policy)) \
                 if profile else None
             if nxt is None:
                 break
@@ -5130,7 +5147,9 @@ async def _audio_transcribe(request: Request, path: str):
                 router.mark_failed(cur, seconds=err.retry_after,
                                    status=abs(err.status) if err.status else None)
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
+            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
+                                       out_tokens=refill_out_budget(
+                                           payload, router.policy)) \
                 if profile else None
             if nxt is None:
                 break
@@ -5209,9 +5228,13 @@ async def videos_generations(request: Request):
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
         dep = router.initial_pick(auth.profile, group_or_explicit,
-                                  None if explicit_req else need)
+                                  None if explicit_req else need,
+                                  out_tokens=refill_out_budget(payload,
+                                                               policy))
     if dep is None and auth.profile and not explicit_req:
-        dep = router.fallback_after(auth.profile, None, need)
+        dep = router.fallback_after(auth.profile, None, need,
+                                    out_tokens=refill_out_budget(
+                                        payload, router.policy))
     if dep is None:
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment video_gen disponibile",
@@ -5331,7 +5354,9 @@ async def videos_generations(request: Request):
                 router.mark_failed(cur, seconds=err.retry_after,
                                    status=abs(err.status) if err.status else None)
             metrics.inc("nx_videos_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried) \
+            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
+                                       out_tokens=refill_out_budget(
+                                           payload, router.policy)) \
                 if (profile := auth.profile or
                     config.profile_of_base(model.split("__")[0])
                     or config.profile_of_base(model)) else None

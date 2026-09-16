@@ -5655,7 +5655,8 @@ class Router:
                     min_cooldown_age: float | None = None,
                      limit: int = 0,
                      tried: set[str] | None = None,
-                     allow_slow: bool = False) -> dict | None:
+                     allow_slow: bool = False,
+                     out_tokens: int | None = None) -> dict | None:
         """Cammina una catena piatta di univoci saltando cooled-down,
         deployment senza le capacità `need`, (se ctx) sopra max_input e —
         per richieste pure-testo su catene dims — i multimodali finché
@@ -5739,6 +5740,12 @@ class Router:
             # guardia universale (vedi pick_deployment): _cap_fits e' no-op
             # sicura quando ctx e' None o max_input<=0.
             if not self._cap_fits(dep, ctx):
+                return None
+            # capacita' REALE per questa richiesta: un dep che sta nel
+            # contesto ma non ha spazio per l'output richiesto non e' un
+            # candidato valido (vale anche per canary/prestiti).
+            if (out_tokens is not None and out_tokens > 0
+                    and not self.dep_deliverable(dep, need, ctx, out_tokens)):
                 return None
             return dep
 
@@ -5834,7 +5841,8 @@ class Router:
                        need: frozenset[str] | None, ctx: int | None,
                        tried: set[str] | None, requested_group: str | None,
                        k: int = 2, exclude: set[str] | None = None,
-                       fresh_only: bool = False) -> list[dict]:
+                       fresh_only: bool = False,
+                       out_tokens: int | None = None) -> list[dict]:
         """Fino a `k` candidati NUOVI per la gara sul primo contenuto.
 
         Regole: mai A ne' i gia' provati; mai bucket pagati (-go/-fallback);
@@ -5843,7 +5851,9 @@ class Router:
         diversi da quello di A, poi (se serve) quello di A. Con
         `fresh_only=True` (eletto warm lento) si esclude TUTTO il warm della
         sessione (vogliamo candidati nuovi) e si preferiscono i MENO USATI
-        nelle 24h."""
+        nelle 24h. Con `out_tokens` si richiede anche la capacita' REALE di
+        consegnare l'output (altrimenti un canary puo' nascere su un dep che
+        sta nel contesto ma non ha spazio per rispondere)."""
         k = max(1, int(k))
         a_u = dep.get("unique")
         ex = set(tried or ())
@@ -5902,7 +5912,8 @@ class Router:
                 break
             if fresh_only:
                 us = sorted(us, key=lambda u: self.usage_weight_24h(u))
-            got = self._walk_chain(us, None, need, ctx, tried=ex)
+            got = self._walk_chain(us, None, need, ctx, tried=ex,
+                                   out_tokens=out_tokens)
             if got is not None and got["unique"] not in taken:
                 taken.add(got["unique"])
                 ex.add(got["unique"])
@@ -6019,10 +6030,16 @@ class Router:
                    ctx: int | None = None,
                    tried: set[str] | None = None,
                    failed_unique: str | None = None,
-                   include_borrowed: bool = False) -> list[dict]:
+                   include_borrowed: bool = False,
+                   out_tokens: int | None = None) -> list[dict]:
         """Tier "caldi": free-dims che QUESTA sessione ha gia' servito con
         SUCCESSO entro la finestra warm, ancora vivi (no cooldown/retired/
         draining) e compatibili con `need` + `max_input`/contesto (`_cap_fits`).
+
+        Con `out_tokens` (budget di output della richiesta) si richiede anche
+        `dep_deliverable(..., out_tokens)`: un caldo che sta nel contesto ma
+        non ha spazio per produrre l'output richiesto NON e' un caldo "buono"
+        (vale anche per i prestiti). Default None = solo `_cap_fits`.
 
         Con `include_borrowed=True` (prestito dei warm) in coda vengono
         accodati anche i warm di ALTRE sessioni "in disuso" (vedi
@@ -6106,6 +6123,9 @@ class Router:
                 continue
             if not self._cap_fits(dep, ctx):
                 continue
+            if (out_tokens is not None and out_tokens > 0
+                    and not self.dep_deliverable(dep, need, ctx, out_tokens)):
+                continue
             out.append(dep)
         if not out:
             if not include_borrowed:
@@ -6136,6 +6156,10 @@ class Router:
                 if need and not self._dep_supports(dep, need):
                     continue
                 if not self._cap_fits(dep, ctx):
+                    continue
+                if (out_tokens is not None and out_tokens > 0
+                        and not self.dep_deliverable(dep, need, ctx,
+                                                     out_tokens)):
                     continue
                 borr.append(dep)
             if borr:
@@ -6532,7 +6556,8 @@ class Router:
             return []
         allowed = self._warm_allowed(profile, group_name)
         pool = self._warm_pool(session_id, allowed, need, ctx, tried,
-                               failed_unique, include_borrowed=include_borrowed)
+                               failed_unique, include_borrowed=include_borrowed,
+                               out_tokens=out_tokens)
         return [d for d in pool
                 if self.dep_deliverable(d, need, ctx, out_tokens)]
 
@@ -6994,7 +7019,8 @@ class Router:
                      session_id: str | None = None,
                      warm: bool = True,
                      prefer_holder: bool = False,
-                     prefer_fast: bool = False) -> dict | None:
+                     prefer_fast: bool = False,
+                     out_tokens: int | None = None) -> dict | None:
         """Prima selezione dentro un gruppo; nessun candidato vivo ->
         cammina la catena DEL MONDO del gruppo (cap-chain per -C, testo
         per dims/-go/-fallback). Sostituisce pick+fallback_after in main.
@@ -7017,7 +7043,8 @@ class Router:
                 _warm = self._warm_pool(
                     session_id, self._warm_allowed(_pname, group_name),
                     need=need, ctx=ctx,
-                    include_borrowed=self._borrow_selectable())
+                    include_borrowed=self._borrow_selectable(),
+                    out_tokens=out_tokens)
                 if _warm:
                     _dep = _warm[0]
                     # P3 (non-stream): se l'eletto e' LENTO e c'e' un caldo
@@ -7194,7 +7221,8 @@ class Router:
                                failed_unique: str | None,
                                need: frozenset[str] | None = None,
                                ctx: int | None = None,
-                               tried: set[str] | None = None) -> dict | None:
+                               tried: set[str] | None = None,
+                               out_tokens: int | None = None) -> dict | None:
         """Cammina la scala testo con early-escalation e cooldown lineare.
 
         Sequenza (8 step):
@@ -7300,7 +7328,8 @@ class Router:
         #    -go/-fallback) il pool e' vuoto di fatto -> nessun effetto.
         _warm = self._warm_pool(current_session(), set(ladder), need, ctx,
                                 tried, failed_unique,
-                                include_borrowed=self._borrow_selectable())
+                                include_borrowed=self._borrow_selectable(),
+                                out_tokens=out_tokens)
         if _warm:
             _dep = _warm[0]
             log.info("[warm] ladder -> %s (caldo proprio, max_in=%s)",
@@ -7538,17 +7567,20 @@ class Router:
 
     def fallback_after(self, profile: str, failed_unique: str | None,
                        need: frozenset[str] | None = None,
-                       ctx: int | None = None) -> dict | None:
+                       ctx: int | None = None,
+                       out_tokens: int | None = None) -> dict | None:
         """Prossimo deployment vivo nella catena TESTO piatta del profilo
         (dims crescenti -> -go -> -fallback), filtrata da need. Con
         escalation graduale del rilassamento cooldown."""
         return self._walk_ladder_resilient(self.config.chains.get(profile, []),
-                                           failed_unique, need, ctx)
+                                           failed_unique, need, ctx,
+                                           out_tokens=out_tokens)
 
     def force_escalation(self, cur_dep: dict,
                          need: frozenset[str] | None = None,
                          ctx: int | None = None,
-                         tried: set[str] | None = None) -> dict | None:
+                         tried: set[str] | None = None,
+                         out_tokens: int | None = None) -> dict | None:
         """Salta DIRETTAMENTE ai gradini -go/-fallback del ladder.
 
         Usato dal rilevamento fake tool-call: niente scala dims, si va
@@ -7563,7 +7595,8 @@ class Router:
         if not esc:
             return None
         return self._walk_ladder_resilient(esc, cur_dep["unique"], need,
-                                           ctx, tried=tried)
+                                           ctx, tried=tried,
+                                           out_tokens=out_tokens)
 
     def _capable_first(self, ladder: list[str], cur_dep: dict) -> list[str]:
         """Riordina il ladder (lista di UNIQUE, vedi _ladder_for_group) per la
@@ -7635,7 +7668,8 @@ class Router:
                       ctx: int | None = None,
                       tried: set[str] | None = None,
                       requested_group: str | None = None,
-                      prefer_capable: bool = False) -> dict | None:
+                      prefer_capable: bool = False,
+                      out_tokens: int | None = None) -> dict | None:
         """Prossimo tentativo DOPO un fallimento, con regole di SCOPO:
 
         - scope="chain": catena DEL MONDO del deployment corrente — cap-group
@@ -7670,7 +7704,8 @@ class Router:
                     None, self._warm_allowed(_pname, req_grp),
                     need=need, ctx=ctx, tried=tried,
                     failed_unique=cur_dep.get("unique"),
-                    include_borrowed=self._borrow_selectable())
+                    include_borrowed=self._borrow_selectable(),
+                    out_tokens=out_tokens)
                 if _warm:
                     _wd = _warm[0]
                     log.info("[warm] fallback -> %s (caldo proprio, max_in=%s)",
@@ -7708,7 +7743,8 @@ class Router:
                     _lad = self._capable_first(_lad, cur_dep)
                 nxt = self._walk_ladder_resilient(
                     _lad,
-                    cur_dep["unique"], need, ctx, tried=tried)
+                    cur_dep["unique"], need, ctx, tried=tried,
+                    out_tokens=out_tokens)
                 if nxt is not None and nxt["group"] != cur_dep["group"]:
                     log.info("[ladder] rotazione %s -> %s",
                              cur_dep["group"], nxt["group"])
@@ -7743,7 +7779,8 @@ class Router:
                 return self._walk_chain(chain, cur_dep["unique"], need, ctx,
                                         prefer_model=prefer, tried=tried)
             # cap senza catena registrata: ripiega sulla catena testo filtrata
-            return self.fallback_after(profile or "", cur_dep["unique"], need, ctx)
+            return self.fallback_after(profile or "", cur_dep["unique"], need,
+                                       ctx, out_tokens=out_tokens)
         if self.policy.dims_ladder_floor:
             # auto: stessa scala unica, partendo dalla dim corrente (mai giù),
             # con escalation graduale del rilassamento cooldown.
@@ -7758,11 +7795,13 @@ class Router:
                 _lad = self._capable_first(_lad, cur_dep)
             nxt = self._walk_ladder_resilient(
                 _lad,
-                cur_dep["unique"], need, ctx, tried=tried)
+                cur_dep["unique"], need, ctx, tried=tried,
+                out_tokens=out_tokens)
             if nxt is not None:
                 return nxt
             return None                     # scala finita: errore a monte
-        return self.fallback_after(profile or "", cur_dep["unique"], need, ctx)
+        return self.fallback_after(profile or "", cur_dep["unique"], need,
+                                   ctx, out_tokens=out_tokens)
 
     def capability_chains(self, profile: str) -> dict[str, list[str]]:
         """Capacità -> catena completa dei univoci (primario → go → fallback).
