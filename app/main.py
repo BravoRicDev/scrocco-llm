@@ -81,7 +81,9 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         classify_error_class,
                         dep_host, is_provider_level,
                         restore_reasoning, is_unclear_error,
-                        QUOTA_MIN_COOLDOWN_S)
+                        QUOTA_MIN_COOLDOWN_S,
+                        maybe_account_quota_cooldown,
+)
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
                        learn_no_thinking)
 from .health import health_loop
@@ -2611,7 +2613,15 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             # PAYLOAD (tutte le chiavi del provider lo rifiutano): la chiave
             # e' sana -> nessuna penale (la richiesta principale ripara).
             _rk = reasoning_err_kind(str(exc))
-            if _rk is not None:
+            _qacct = 0
+            with contextlib.suppress(Exception):
+                _qacct = maybe_account_quota_cooldown(
+                    router, B, getattr(exc, "status", None), str(exc))
+            if _qacct:
+                log.info("[hedge] canary %s: quota dell'account esaurita -> "
+                         "%d chiavi dell'account in pausa fino al reset",
+                         _bu, _qacct)
+            elif _rk is not None:
                 log.info("[hedge] canary %s: payload della famiglia reasoning "
                          "(%s) (chiave sana, nessuna penale)", _bu, _rk)
                 with contextlib.suppress(Exception):
@@ -3494,6 +3504,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # 413/400 "context length": il provider ha rivelato il VERO
             # limite di input -> ridimensiona il deployment (regola utente).
             note_context_limit(router, dep, err.status, detail, ctx)
+            # QUOTA DI ACCOUNT (Cloudflare & co.): la quota e' dell'account,
+            # non della chiave -> metti in pausa TUTTE le chiavi sorelle fino
+            # al reset invece di ruotarle a vuoto una per una.
+            with contextlib.suppress(Exception):
+                maybe_account_quota_cooldown(router, dep, err.status, detail)
             # D5 anche in STREAMING: 4xx deployment-side (firma provider-side,
             # modello inesistente oppure 404) -> fallback pre-byte invece di
             # pass-through. Gli altri 4xx restano errori del client.

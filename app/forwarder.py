@@ -286,10 +286,19 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                     pass
                 metrics.inc("nx_hedge_total", ("probe_ok",))
             elif raised is not None:
+                # QUOTA DI ACCOUNT (Cloudflare & co.): la quota e' dell'account
+                # -> pausa le chiavi sorelle fino al reset, non ruotarle a vuoto.
+                _qacct = 0
+                with contextlib.suppress(Exception):
+                    _qacct = maybe_account_quota_cooldown(
+                        router, dep, getattr(raised, "status", None),
+                        str(raised))
+                if _qacct:
+                    metrics.inc("nx_hedge_total", ("probe_quota_acct",))
                 # Payload REPLAY-REASONING: non e' colpa della chiave (tutte
                 # le chiavi del provider rifiutano lo stesso payload) ->
                 # nessuna penale, la richiesta principale lo ripara.
-                _rkind = reasoning_err_kind(str(raised))
+                _rkind = reasoning_err_kind(str(raised)) if not _qacct else None
                 if _rkind is not None:
                     metrics.inc("nx_hedge_total", ("probe_payload",))
                     # Il probe ha scoperto la natura del problema: impariamo il
@@ -303,7 +312,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                             learn_strip_reasoning(router, dep.get("model"))
                         elif _rkind == "history":
                             learn_no_thinking(router, dep.get("model"))
-                else:
+                elif not _qacct:
                     try:
                         _sec = getattr(raised, "retry_after", None)
                         if isinstance(_sec, (int, float)) and _sec > 0:
@@ -1100,6 +1109,70 @@ def maybe_host_transient_cooldown(router, dep: dict | None, status,
     log.warning("[host-cd] %s: 502 mid-stream da %s -> host %s in pausa "
                 "%.0fs", (dep or {}).get("unique"), host, host, sec)
     return True
+
+
+# ------------------------------------------------- QUOTA DI ACCOUNT (CF)
+_ACCOUNT_PATH_RE = re.compile(r"/accounts/([A-Za-z0-9_-]+)/", re.IGNORECASE)
+
+
+def dep_account_key(dep: dict | None) -> str:
+    """Chiave di ACCOUNT del deployment: l'id account nel path dell'endpoint
+    (es. Cloudflare `/client/v4/accounts/<id>/ai/...`). Le chiavi di uno
+    stesso account CONDIVIDONO la quota."""
+    url = str((dep or {}).get("api_base") or (dep or {}).get("endpoint") or "")
+    m = _ACCOUNT_PATH_RE.search(url)
+    return m.group(1).lower() if m else ""
+
+
+def maybe_account_quota_cooldown(router, dep: dict | None, status,
+                                 detail) -> int:
+    """Quota GIORNALIERA di un ACCOUNT (Cloudflare Workers AI: "you have used
+    up your daily free allocation of ... neurons"): la quota e' dell'ACCOUNT,
+    non della singola chiave -> cooldown fino al reset su TUTTE le chiavi
+    dell'account. Senza questo la cascata riprova a vuoto ogni ~90s le decine
+    di chiavi sorelle (osservato su mioaruba: 154 chiavi CF bruciate a vuoto).
+    Ritorna il numero di deployment messi in cooldown."""
+    if not _QUOTA_EXHAUSTED_RE.search(str(detail or "")):
+        return 0
+    acct = dep_account_key(dep)
+    if not acct:
+        return 0
+    secs = parse_quota_reset_seconds(detail) or QUOTA_MIN_COOLDOWN_S
+    try:
+        st = abs(int(status or 0)) or None
+    except (TypeError, ValueError):
+        st = None
+    n = 0
+    seen: set[str] = set()
+    try:
+        groups = router.config.groups
+    except Exception:                              # noqa: BLE001
+        groups = {}
+    for lst in groups.values():
+        for d in lst:
+            u = d.get("unique")
+            if not u or u in seen:
+                continue
+            if dep_account_key(d) != acct:
+                continue
+            seen.add(u)
+            with contextlib.suppress(Exception):
+                # Gia' in pausa "sostanziosa" (il residuo EFFETTIVO e' cappato
+                # da max_cooldown_sec, quindi confrontare i valori esatti e'
+                # inaffidabile): non riscrivere, per non accorciare un
+                # cooldown piu' lungo.
+                if router.is_cooled_down(u) and \
+                        router.cooldown_residual(u) >= QUOTA_MIN_COOLDOWN_S:
+                    continue
+                router.mark_failed(u, seconds=secs,
+                                   reason="quota_exhausted_account",
+                                   status=st)
+                n += 1
+    if n:
+        log.warning("[quota-acct] %s: quota giornaliera dell'account %s "
+                    "esaurita -> %d deployment dell'account in pausa %.0fs",
+                    (dep or {}).get("unique"), acct, n, secs)
+    return n
 
 
 # ---------------------------------------------------------- MAX_INPUT 413
@@ -3199,6 +3272,11 @@ truncation_hook=None,
                 if getattr(err, "final", False):
                     raise                    # decisione definitiva: non ruotare
                 detail = err.detail or ""
+                # QUOTA DI ACCOUNT: la quota e' dell'account (non della
+                # chiave) -> pausa fino al reset TUTTE le chiavi sorelle.
+                with contextlib.suppress(Exception):
+                    maybe_account_quota_cooldown(router, dep, err.status,
+                                                 detail)
                 # ATTEMPT TRAIL (P0): un record per hop fallito, con la classe
                 # d'errore onesta (finisce nel body del 503 finale).
                 try:

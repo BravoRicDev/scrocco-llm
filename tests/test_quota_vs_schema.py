@@ -161,3 +161,97 @@ def test_nonstream_quota_cf_va_in_cooldown_lungo():
     assert data["choices"][0]["message"]["content"] == "ok"
     assert used["unique"] == good["unique"]
     assert router.cooldown_residual(broken["unique"]) > QUOTA_MIN_COOLDOWN_S
+
+
+# ------------------------------------------------- quota di ACCOUNT (CF)
+_CSV_ACCT = (
+    "commento,modello,provider,endpoint,data,context,max_input,"
+    "priority,scrocco-llm-test,caps\n"
+    "a,qs-cf1,cloudflare,https://api.cloudflare.com/client/v4/accounts/"
+    "ACC1/ai/v1,paid,128,8000,5,K1,\n"
+    "a,qs-cf2,cloudflare,https://api.cloudflare.com/client/v4/accounts/"
+    "ACC1/ai/v1,paid,128,8000,5,K2,\n"
+    "a,qs-cf3,cloudflare,https://api.cloudflare.com/client/v4/accounts/"
+    "ACC2/ai/v1,paid,128,8000,5,K3,\n"
+    "a,qs-ok,groq,https://ok.test/v1,paid,128,8000,5,K4,\n")
+
+
+def _mk_acct():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(_CSV_ACCT)
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    router = Router(cfg, Policy.from_dict({}))
+    os.unlink(path)
+    by = {}
+    for deps in cfg.groups.values():
+        for d in deps:
+            by[d["api_key"]] = d
+    return cfg, router, by
+
+
+def test_dep_account_key():
+    from app.forwarder import dep_account_key
+    assert dep_account_key({"api_base": "https://api.cloudflare.com/client/v4/"
+                            "accounts/abcdef123/ai/v1"}) == "abcdef123"
+    assert dep_account_key({"endpoint": "https://api.cloudflare.com/client/v4/"
+                            "accounts/ABC/ai/v1"}) == "abc"
+    assert dep_account_key({"api_base": "https://api.groq.com/openai/v1"}) == ""
+    assert dep_account_key({}) == ""
+
+
+def test_quota_account_manda_in_pausa_tutte_le_chiavi_dell_account():
+    from app.forwarder import maybe_account_quota_cooldown
+    cfg, router, by = _mk_acct()
+    n = maybe_account_quota_cooldown(router, by["K1"], 429, CF_QUOTA)
+    assert n == 2                                   # ACC1: K1 + K2
+    for k in ("K1", "K2"):
+        assert router.cooldown_residual(by[k]["unique"]) > QUOTA_MIN_COOLDOWN_S
+    # account diverso e provider diverso: intatti
+    assert router.cooldown_residual(by["K3"]["unique"]) == 0.0
+    assert router.cooldown_residual(by["K4"]["unique"]) == 0.0
+    # richiamata: non accorcia ne' riparte
+    r1 = router.cooldown_residual(by["K1"]["unique"])
+    assert maybe_account_quota_cooldown(router, by["K1"], 429, CF_QUOTA) == 0
+    assert router.cooldown_residual(by["K1"]["unique"]) >= r1 - 1.0
+
+
+def test_quota_senza_account_non_tocca_nulla():
+    from app.forwarder import maybe_account_quota_cooldown
+    cfg, router, by = _mk_acct()
+    assert maybe_account_quota_cooldown(router, by["K4"], 429, CF_QUOTA) == 0
+    assert router.cooldown_residual(by["K4"]["unique"]) == 0.0
+
+
+def test_nonstream_quota_cf_manda_in_pausa_anche_la_gemella_dell_account():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(_CSV_ACCT)
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    router = Router(cfg, Policy.from_dict({}))
+    os.unlink(path)
+    by = {}
+    for deps in cfg.groups.values():
+        for d in deps:
+            by[d["api_key"]] = d
+    broken, good = by["K1"], by["K4"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.cloudflare.com":
+            return httpx.Response(429, content=CF_QUOTA.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        router.fallback_next = lambda *a, **k: good
+        return await fwd.call_with_fallback(
+            router, "test", broken,
+            {"model": "x", "messages": [{"role": "user", "content": "x"}]})
+
+    data, used = asyncio.run(_run())
+    assert used["unique"] == good["unique"]
+    # la chiave colpita E la gemella dello stesso account sono in pausa
+    for k in ("K1", "K2"):
+        assert router.cooldown_residual(by[k]["unique"]) > QUOTA_MIN_COOLDOWN_S
