@@ -3517,7 +3517,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # anche al tentativo di replay reasoning).
             prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
             prov_fault = is_provider_fault_body(detail)
-            quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if prov_err else False
+            # QUOTA: la firma basta da sola. Alcuni provider (Cloudflare
+            # Workers AI) usano un envelope {"errors":[{...}]} che NON passa
+            # `prov_err`, ma il messaggio di quota e' inequivocabile.
+            quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if (
+                prov_err or abs(int(err.status or 0)) == 429) else False
             transient = bool(_PROVIDER_TRANSIENT_RE.search(detail))
             # 403 di qualsiasi tipo: chiave/progetto rifiutato dal provider ->
             # deployment-side (mai colpa della richiesta), ruota (mai al client).
@@ -3539,6 +3543,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # motivo della classificazione deployment-side (per il log)
             if isinstance(err, StreamLoopDetected):
                 reason = "loop_detected"
+            elif quota_exhausted:
+                # QUOTA prima dello schema: la quota va in cooldown (fino al
+                # reset), non ruotata a vuoto senza cooldown.
+                reason = "quota_exhausted"
             elif schema_sig:
                 reason = "payload_schema"
             elif media_sig:
@@ -3549,8 +3557,6 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 reason = "model_feature"
             elif thought_sig:
                 reason = "thought_signature"
-            elif quota_exhausted:
-                reason = "quota_exhausted"
             elif prov_err:
                 reason = "provider_error_body"
             elif transient:
@@ -3594,6 +3600,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     or empty_body
                     or prov_fault
                     or _media_raw
+                    or quota_exhausted
+                    # 429 (anche a status negativo, es. body non-standard di
+                    # un aggregatore): chiave/quota satura = deployment-side,
+                    # MAI un errore della richiesta -> ruota, mai pass-through.
+                    or err.status == -429
                     or err.status == -402)
                 # né thought_signature né il body d'errore provider né
                 # il 403 sono rifiuti di modalita': non alimentano l'auto-

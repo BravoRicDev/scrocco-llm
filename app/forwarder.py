@@ -595,7 +595,24 @@ _QUOTA_EXHAUSTED_RE = re.compile(
     r"GoUsageLimitError"
     r"|\"limitName\"\s*:\s*\"(monthly|weekly)\""
     r"|usage limit reached"
-    r"|insufficient.quota",
+    r"|insufficient.quota"
+    # Cloudflare Workers AI: quota GIORNALIERA esaurita. Il body e'
+    # {"errors":[{"message":"AiError: you have used up your daily free
+    # allocation of 10,000 neurons, please upgrade ...","code":4006}]}:
+    # e' una QUOTA, non un rifiuto di schema del payload (il vecchio
+    # \baierror\b in _PAYLOAD_SCHEMA_RE la classificava come schema e la
+    # faceva ruotare SENZA cooldown, bruciando tutte le chiavi sorelle).
+    r"|used up your (?:daily|monthly) free allocation"
+    r"|free allocation of [\d.,]+ ?(?:k|m)? ?neurons",
+    re.IGNORECASE)
+# Quota a finestra GIORNALIERA (reset a mezzanotte): senza un hint esplicito
+# "Resets in ..." il cooldown ragionevole e' fino alla mezzanotte UTC, non 10
+# minuti (altrimenti si riprova la stessa quota esaurita ogni 10 min).
+_DAILY_QUOTA_RE = re.compile(
+    r"daily free allocation"
+    r"|used up your daily"
+    r"|daily (?:quota|limit) (?:reached|exceeded|exhausted)"
+    r"|reached (?:your|the) daily",
     re.IGNORECASE)
 # parses: "Resets in 9 days", "Resets in 4 hours", "Resets in 30 minutes"
 _QUOTA_RESET_RE = re.compile(
@@ -612,6 +629,12 @@ def parse_quota_reset_seconds(detail: str | None) -> float:
         return 0.0
     m = _QUOTA_RESET_RE.search(detail)
     if not m:
+        if _DAILY_QUOTA_RE.search(detail):
+            # quota giornaliera senza reset dichiarato: il provider azzera a
+            # mezzanotte (UTC per Cloudflare) -> aspettiamo quella.
+            _to_mid = 86400.0 - (time.time() % 86400.0)
+            return max(QUOTA_MIN_COOLDOWN_S,
+                       min(QUOTA_MAX_COOLDOWN_S, _to_mid))
         return QUOTA_MIN_COOLDOWN_S   # riconosciuto esausto ma senza reset:
                                        # minimo sicuro (riprova tra 10min)
     n, unit = int(m.group(1)), m.group(2).lower()
@@ -654,8 +677,7 @@ _THOUGHT_SIG_RE = re.compile(r"thought[_ ]signature", re.IGNORECASE)
 # unsupported" / "'role:assistant' ... reasoning ... unsupported". Un altro
 # provider lo accetta (o lo ignora): ruota senza cooldown.
 _PAYLOAD_SCHEMA_RE = re.compile(
-    r"\baierror\b"
-    r"|oneof at '/?[^']*' not met"
+    r"oneof at '/?[^']*' not met"
     r"|type mismatch of '/messages/\d+/content'"
     r"|'array' not in 'string'|'string' not in 'array'"
     r"|required properties at '/messages/\d+' are"
@@ -931,12 +953,15 @@ def classify_error_class(status, detail: str | None = None) -> str:
         return "thought_signature"
     if _MODEL_MISSING_RE.search(d):
         return "model_missing"
+    # QUOTA prima dello schema: un body di quota puo' contenere parole che
+    # somigliano a un rifiuto di schema (CF "AiError: ... free allocation") e
+    # la quota va in cooldown, non ruotata a vuoto.
+    if _QUOTA_EXHAUSTED_RE.search(d):
+        return "quota"
     if _PAYLOAD_SCHEMA_RE.search(d):
         return "payload_schema"
     if media_reject_signature(d):
         return "media"
-    if _QUOTA_EXHAUSTED_RE.search(d):
-        return "quota"
     if st == 402:
         return "out_of_credits"
     if st == 401:
@@ -3273,8 +3298,7 @@ truncation_hook=None,
                 # chiave e la catena non spreca tentativi su altre key soggette
                 # allo stesso limite. Parità col percorso streaming
                 # (main._stream_with_fallback).
-                if is_provider_error_body(detail) \
-                        and _QUOTA_EXHAUSTED_RE.search(detail):
+                if _QUOTA_EXHAUSTED_RE.search(detail):
                     _qcd = (parse_quota_reset_seconds(detail)
                             or QUOTA_MIN_COOLDOWN_S)
                     metrics.inc("nx_upstream_calls_total",
