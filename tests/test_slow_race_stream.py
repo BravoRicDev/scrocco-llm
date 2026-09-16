@@ -149,3 +149,64 @@ def test_stream_slow_race_spenta_non_parte(monkeypatch, caplog):
         out = _stream(monkeypatch, cfg, router, fwd, good, _PAYLOAD)
     assert _content_of(out) == "ok"
     assert not any("[slow-race]" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# Regressione: l'APERTURA di un canary (refill) non deve bloccare il loop.
+# `_open_canary` fa `await forwarder.stream_response` (attende le headers):
+# con l'apertura sequenziale un provider lento bloccava il loop e il `break`
+# sul vincitore scavalcava il check del timer -> nessun `[slow-race]`.
+_ROW_A = "a,dep-a,groq,https://a.test/v1,free,128,200000,5,K-A,text\n"
+_ROW_R = "a,dep-r,groq,https://r.test/v1,free,128,200000,5,K-R,text\n"
+_ROW_G = "a,dep-g,groq,https://g.test/v1,free,128,200000,5,K-G,text\n"
+
+
+class _FwdSlowOpen:
+    """`open_delay_dep` impiega `open_delay` s PRIMA di dare le headers."""
+
+    def __init__(self, slow_dep, open_delay_dep, open_delay=0.5,
+                 slow_sleep=0.3):
+        self.slow = slow_dep
+        self.delay = open_delay_dep
+        self.open_delay = open_delay
+        self.slow_sleep = slow_sleep
+        self.calls = []
+
+    async def stream_response(self, d, payload, **kw):
+        self.calls.append(d["unique"])
+        if d["unique"] == self.delay:
+            await asyncio.sleep(self.open_delay)      # headers LENTE
+        if d["unique"] == self.slow:
+            async def _g():
+                yield _chunk({"choices": [
+                    {"index": 0, "delta": {"content": "sto arrivando"},
+                     "finish_reason": None}]})
+                await asyncio.sleep(self.slow_sleep)
+                yield _chunk({"choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                yield b"data: [DONE]\n\n"
+            return _g()
+
+        async def _g2():
+            yield _sse("ok")
+        return _g2()
+
+
+def test_stream_slow_race_parte_con_apertura_refill_lenta(monkeypatch,
+                                                          caplog):
+    cfg, router, by_key = _mk(_HDR + _ROW_A + _ROW_R + _ROW_G, slow_ms=100)
+    a, r, g = by_key["K-A"], by_key["K-R"], by_key["K-G"]
+    router.policy.warm_refill_enabled = True
+    monkeypatch.setattr(router, "warm_fill_canary", lambda *a_, **k: [r])
+    monkeypatch.setattr(router, "warm_wake_canary", lambda *a_, **k: None)
+    monkeypatch.setattr(router, "hedge_canaries", lambda *a_, **k: [g])
+    fwd = _FwdSlowOpen(a["unique"], r["unique"], open_delay=0.5,
+                       slow_sleep=0.3)
+    with caplog.at_level(logging.INFO, logger="nx.main"):
+        out = _stream(monkeypatch, cfg, router, fwd, a, _PAYLOAD)
+    assert g["unique"] in fwd.calls, \
+        "il canario lento deve partire anche se l'apertura del refill e' lenta"
+    assert _content_of(out) == "ok", "vince chi consegna prima"
+    assert any("[slow-race]" in rec.getMessage() for rec in caplog.records), \
+        "il timer deve scattare comunque"
+    assert router.is_cooled_down(a["unique"]) is False

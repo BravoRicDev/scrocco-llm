@@ -2883,25 +2883,32 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                      _bu, type(exc).__name__)
             return None
 
+    # Apertura dei canari in PARALLELO e NON bloccante: `_open_canary` fa
+    # `await forwarder.stream_response` (attende le HEADERS dell'upstream) e
+    # con l'apertura sequenziale un provider lento bloccava il loop della
+    # gara, rimandando/saltando il timer della gara lenta (e il `break` sul
+    # vincitore scavalcava il check del timer). Ora ogni apertura e' un TASK:
+    # le risoluzioni vengono raccolte DENTRO il loop, cosi' il timer scatta
+    # SEMPRE a `slow_race_ms`.
     canaries: list[dict] = []
+    _tasks: dict = {}
     for B in cands:
-        _c = await _open_canary(B, wake=bool(_W is not None and B is _W))
-        if _c is not None:
-            canaries.append(_c)
-    if not canaries:
+        _tasks[asyncio.ensure_future(
+            _open_canary(B, wake=bool(_W is not None and B is _W)))] = None
+    if not cands:
         if _slow_dl is None:
             metrics.inc("nx_hedge_total", ("no_canary",))
             return dep, gen, t_att, *await futA
     else:
         log.info("[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
                  dep.get("unique"), hedge_ms,
-                 ",".join(c["dep"]["unique"] for c in canaries))
+                 ",".join(B.get("unique", "") for B in cands))
     futs: dict = {futA: None}
     for c in canaries:
         futs[c["fut"]] = c
     results: dict = {}
     winner = None
-    running = set(futs)
+    running = set(futs) | set(_tasks)
     _slow_opened = _slow_dl is None
     while running:
         _to = (max(0.0, _slow_dl - time.monotonic())
@@ -2912,7 +2919,19 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         # canari finiscono insieme, gli altri resterebbero con l'eccezione
         # non recuperata e il loro verdetto andrebbe perso.
         running = set(pending)
+        _add: set = set()
         for f in completed:
+            if f in _tasks:
+                # apertura di un canary conclusa: raccogli il record (None =
+                # non disponibile) e metti in gara la sua attesa.
+                _tasks.pop(f, None)
+                with contextlib.suppress(BaseException):
+                    _c = f.result()
+                    if _c is not None:
+                        canaries.append(_c)
+                        futs[_c["fut"]] = _c
+                        _add.add(_c["fut"])
+                continue
             if f in results:
                 continue
             try:
@@ -2922,6 +2941,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             if results[f][0] == "content":
                 winner = f
                 break
+        running |= _add
         if winner is not None:
             break
         # ---- GARA LENTA: timer scaduto -> UN canario in piu' -------------
@@ -2972,27 +2992,50 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                     log.info("[slow-race] %s: nessun canario libero "
                              "(chiavi/uniq in gara escluse)", dep.get("unique"))
                 else:
-                    _c2 = await _open_canary(_lc[0])
-                    if _c2 is not None:
-                        canaries.append(_c2)
-                        futs[_c2["fut"]] = _c2
-                        running.add(_c2["fut"])
-                        if raced is not None:
-                            raced.setdefault("uniq", set()).add(
-                                _c2["dep"]["unique"])
-                            raced.setdefault("keys", set()).add(
-                                str(_c2["dep"].get("api_key") or ""))
-                        log.info("[hedge] slow-race: %s in gara con A (fuori "
-                                 "dal tetto)", _c2["dep"]["unique"])
+                    # Apertura NON bloccante anche qui: il canario lento entra
+                    # in gara appena arrivano le headers (task in coda).
+                    _t2 = asyncio.ensure_future(_open_canary(_lc[0]))
+                    _tasks[_t2] = None
+                    running.add(_t2)
+                    if raced is not None:
+                        raced.setdefault("uniq", set()).add(_lc[0]["unique"])
+                        raced.setdefault("keys", set()).add(
+                            str(_lc[0].get("api_key") or ""))
+                    log.info("[hedge] slow-race: %s in gara con A (fuori "
+                             "dal tetto)", _lc[0]["unique"])
     if winner is None:
+        # fallback: risolvi prima le aperture ancora in corso, poi attendi
+        # tutti i verdetti (A compreso).
         for f in list(running):
+            if f in _tasks:
+                _tasks.pop(f, None)
+                running.discard(f)
+                with contextlib.suppress(BaseException):
+                    _c = f.result() if f.done() else await f
+                    if _c is not None:
+                        canaries.append(_c)
+                        futs[_c["fut"]] = _c
+                        running.add(_c["fut"])
+        for f in list(running):
+            if f in results:
+                continue
             try:
                 results[f] = await f
             except BaseException:
                 results[f] = ("error", [], None, {})
         winner = futA
+    # pulizia: le aperture mai risolte (canary troppo lenti) vengono
+    # annullate per non lasciare task orfane.
+    for _t in list(_tasks):
+        if not _t.done():
+            _t.cancel()
+    if _tasks:
+        await asyncio.gather(*list(_tasks), return_exceptions=True)
+        _tasks.clear()
     # ---------------------------------------------------------- A vince ----
     if winner is futA:
+        if not canaries:
+            metrics.inc("nx_hedge_total", ("no_canary",))
         metrics.inc("nx_hedge_total", ("won_a",))
         _race = (dep["unique"], max(0.0, (time.monotonic() - t_att) * 1000.0))
         for c in canaries:
