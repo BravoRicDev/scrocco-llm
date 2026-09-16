@@ -2185,6 +2185,113 @@ def media_input_needed(need) -> bool:
     return bool(set(need or ()) & MEDIA_INPUT_CAPS)
 
 
+# --------------------------------------------------------------- image_gen
+# Modelli immagine esposti come CHAT (es. Gemini image via shim OpenAI-compat
+# `/v1beta/openai`): l'endpoint NATIVO /images/generations puo' mancare oppure
+# rifiutare lo schema OpenAI `{"prompt": ...}`. Google risponde:
+#   400 'Invalid JSON payload received. Unknown name "prompt": Cannot find field.'
+# In quel caso la STESSA richiesta va ritentata su /chat/completions con
+# `messages` + `modalities:["image"]` (vedi image_chat_payload).
+_IMAGES_PAYLOAD_UNSUPPORTED_RE = re.compile(
+    r"unknown name|unknown field|cannot find field|invalid json payload"
+    r"|invalid argument|unrecognized|unexpected (?:field|property|parameter)"
+    r"|additional propert|unknown parameter|does not support"
+    r"|no such endpoint|method not allowed|unsupported media type",
+    re.IGNORECASE)
+
+# Rifiuti di CONTENUTO/policy: la richiesta e' rifiutata per policy, NON perche'
+# lo schema sia inadatto. Ritentarla via chat fallirebbe identicamente e
+# addosserebbe al deployment un errore del client -> vanno ESCLUSI.
+_IMAGE_CONTENT_REJECT_RE = re.compile(
+    r"\bsafety\b|content policy|policy violation|prohibited|recitation"
+    r"|responsible ai|\bblocked\b|\bflagged\b", re.IGNORECASE)
+
+
+def image_chat_fallback_signature(status: int | None,
+                                  detail: str | None) -> bool:
+    """True se un errore dell'endpoint NATIVO /images/generations suggerisce che
+    il modello vada servito via chat/completions: endpoint assente (404/405),
+    media-type non accettato (415) o schema immagine non riconosciuto
+    (400/403/422 con firma "campo/argomento non valido"). I rifiuti di
+    contenuto/policy sono esclusi (non dipendono dallo schema)."""
+    d = (detail or "").strip()
+    if _IMAGE_CONTENT_REJECT_RE.search(d):
+        return False
+    st = abs(int(status)) if status else 0
+    if st in (404, 405, 415):
+        return True
+    if st not in (400, 403, 422):
+        return False
+    return bool(_IMAGES_PAYLOAD_UNSUPPORTED_RE.search(d))
+
+
+def image_chat_payload(payload: dict, model: str) -> dict:
+    """Converte un body OpenAI /images/generations in un body chat/completions
+    per i modelli immagine serviti come chat (`messages` + `modalities`).
+
+    Le opzioni specifiche dell'endpoint immagini (n, size, quality, style,
+    response_format, user, stream) non hanno equivalente chat e vengono
+    scartate; gli altri campi vengono preservati (es. `seed`)."""
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str):
+        prompt = "" if prompt is None else str(prompt)
+    out: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "modalities": ["image"],
+    }
+    n = payload.get("n")
+    if isinstance(n, int) and n > 1:
+        out["n"] = n
+    out.update({k: v for k, v in payload.items()
+                if k not in ("model", "prompt", "n", "size", "quality",
+                             "style", "response_format", "user", "stream")})
+    return out
+
+
+def _image_item(obj) -> dict | None:
+    """Normalizza UNA immagine nelle forme note -> {url}|{b64_json}."""
+    if isinstance(obj, str):
+        return {"url": obj} if obj else None
+    if not isinstance(obj, dict):
+        return None
+    src = obj.get("image_url")
+    if isinstance(src, dict) and src.get("url"):
+        return {"url": src["url"]}
+    if obj.get("url"):
+        return {"url": obj["url"]}
+    if obj.get("b64_json"):
+        return {"b64_json": obj["b64_json"]}
+    data = obj.get("data")
+    if isinstance(data, str) and data:
+        return {"b64_json": data}
+    return None
+
+
+def extract_chat_images(data: dict) -> list[dict]:
+    """Estrae le immagini (schema OpenAI images) da una risposta
+    chat/completions di un modello immagine. Forme coperte:
+    `choices[].message.images[]` (Gemini shim), content multimodale e URL
+    `data:image...` testuale."""
+    items: list[dict] = []
+    choices = data.get("choices") if isinstance(data, dict) else None
+    for ch in choices or []:
+        msg = (ch or {}).get("message") or {}
+        for im in msg.get("images") or []:
+            it = _image_item(im)
+            if it:
+                items.append(it)
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                it = _image_item(part)
+                if it:
+                    items.append(it)
+        elif isinstance(content, str) and content.startswith("data:image"):
+            items.append({"url": content})
+    return items
+
+
 def dep_host(dep: dict) -> str:
     """Hostname dell'endpoint di un deployment (chiave di skip/quarantena)."""
     url = str((dep or {}).get("api_base") or (dep or {}).get("endpoint") or "")
@@ -2629,9 +2736,9 @@ truncation_hook=None,
             **_session_headers(dep, profile=profile, client_ip=client_ip,
                                session=session, attribution=attribution),
         }
-        url = f"{dep['api_base']}/chat/completions"
-        _google = is_gemini_deployment(dep)
-        log.debug("[upstream] %s POST %s (stream=%s, google=%s)", dep.get("unique", "?"), url, payload.get("stream", False), _google)
+        url = f"{dep['api_base']}/images/generations"
+        log.debug("[upstream] %s POST %s (images, stream=%s)",
+                  dep.get("unique", "?"), url, payload.get("stream", False))
         try:
             resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body, headers=headers,
                                           timeout=httpx.Timeout(connect=10.0,

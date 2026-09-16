@@ -64,6 +64,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         is_embedded_provider_error,
                         media_reject_signature, media_input_needed,
                         media_modality_signature,
+                        image_chat_fallback_signature, image_chat_payload,
+                        extract_chat_images,
                         _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         _QUOTA_RESET_RE,
@@ -4380,6 +4382,8 @@ async def images_generations(request: Request):
                 or -status == 402                # chiave senza crediti (deployment)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
                 or (router.policy.images_chat_fallback
+                    and image_chat_fallback_signature(err.status, detail))
+                or (router.policy.images_chat_fallback
                     and (-status == 400 or -status == 403)
                     and ("openai_error" in detail
                          or "bad_response_status_code" in detail)))
@@ -4394,30 +4398,27 @@ async def images_generations(request: Request):
                 tried.add(f"{cur}::chat")
                 log.info("[images] %s: /images/generations non disponibile "
                          "(status=%s): ritenta via chat", cur, -status or "?")
-                chat_payload = {
-                    "model": raw_model,
-                    "messages": [{"role": "user", "content":
-                                  str(payload.get("prompt"))}],
-                    "modalities": ["image"],
-                }
+                chat_payload = image_chat_payload(payload, raw_model)
                 try:
                     data = await forwarder.call(dep, chat_payload,
                                                 session=_sess, client_ip=_cip,
                                                 attribution=_attr)
                     router.note_result(cur, (time.monotonic() - t0) * 1000)
                     metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
-                    # normalizza: estrae l'immagine dal messaggio se presente
-                    out = data
-                    if isinstance(data, dict):
+                    # normalizza: estrae le immagini dal messaggio se presenti
+                    if not isinstance(data, dict):
+                        out = data
+                    else:
                         out = dict(data)
                         out["nx_deployment"] = cur
-                        out.setdefault("via", "chat")
-                        msg = ((data.get("choices") or [{}])[0].get("message")
-                               or {})
-                        img = msg.get("images") or msg.get("content")
-                        if img:
-                            out["data"] = (img if isinstance(img, list)
-                                           else [{"b64_json_or_url_fallback": img}])
+                        out["via"] = "chat"
+                        imgs = extract_chat_images(data)
+                        if imgs:
+                            out["data"] = imgs
+                            out.setdefault("created", int(time.time()))
+                        else:
+                            log.warning("[images] chat su %s: nessuna immagine "
+                                        "riconosciuta nella risposta", cur)
                     _emit_summary(ses=session_id or "-", req=raw_model,
                                   grp=dep["group"], dep=cur,
                                   tries=len(attempts), fb=len(attempts) - 1,
