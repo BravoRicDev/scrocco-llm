@@ -3477,7 +3477,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         tried_set.add(dep["unique"])
         _was_dormant = router.is_cooled_down(dep["unique"])
         def _fail(u, *, seconds=None, reason=None, status=None,
-                  provenance=None):
+                  provenance=None, kind=None):
+            if kind is not None:
+                # errore che IMPONE una strategia (es. PERMANENT_DEAD ->
+                # retirement): nessun cooldown, la decisione e' del lifecycle.
+                return router.mark_failed(u, reason=reason, status=status,
+                                          kind=kind)
             if _was_dormant:
                 _r = router.mark_failed_double_residual(u, reason=reason, status=status)
             else:
@@ -4265,9 +4270,21 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # reason/status propagati SEMPRE: senza, sul path streaming
                 # restavano morti key-soft 429, budget-guard learning,
                 # _punish_concurrency e le classi di cooldown (F18).
-                _fail(dep["unique"], seconds=_cd, reason=reason,
-                      status=abs(err.status) if err.status else None,
-                      provenance=_prov_q)
+                if fwd.is_insufficient_balance(detail):
+                    # BILANCIO ESAURITO: ritira il DEPLOYMENT (sblocco manuale).
+                    if ses:
+                        _cur = router.dep_sticky_get(ses)
+                        if _cur and _cur == dep["unique"]:
+                            router.dep_sticky_release(ses)
+                    _fail(dep["unique"], reason="insufficient_balance",
+                          status=402, kind=fwd.ErrorKind.PERMANENT_DEAD)
+                    log.warning("[fallback] stream %s 402 'insufficient "
+                                "balance': DEPLOYMENT RITIRATO (sblocco "
+                                "manuale)", dep["unique"])
+                else:
+                    _fail(dep["unique"], seconds=_cd, reason=reason,
+                          status=abs(err.status) if err.status else None,
+                          provenance=_prov_q)
             nxt = _next_filtered(profile, dep, need, scope, ctx=ctx,
                                  tried=tried_set,
                                  requested_group=requested_group) \

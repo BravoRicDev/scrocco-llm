@@ -756,6 +756,12 @@ _QUOTA_EXHAUSTED_RE = re.compile(
     r"|free.models?[ -]?per[ -]?day"
     r"|free model requests per day",
     re.IGNORECASE)
+# BILANCIO CREDITI ESAURITO ("insufficient balance"): condizione
+# dell'account, NON transitoria. PRIORITA' su `_QUOTA_EXHAUSTED_RE` perche'
+# i body la accompagnano con "type":"insufficient_quota" (che altrimenti la
+# farebbe classificare come quota -> cooldown breve, con retry a ripetizione).
+_INSUFFICIENT_BALANCE_RE = re.compile(
+    r"insufficient[\s_-]*(?:account[\s_-]*)?balance", re.IGNORECASE)
 # Quota a finestra GIORNALIERA (reset a mezzanotte): senza un hint esplicito
 # "Resets in ..." il cooldown ragionevole e' fino alla mezzanotte UTC, non 10
 # minuti (altrimenti si riprova la stessa quota esaurita ogni 10 min).
@@ -1122,6 +1128,15 @@ def is_unclear_error(status: int | None, detail: str | None) -> bool:
                 or _REASONING_REPLAY_RE.search(d)
                 or media_reject_signature(d) or is_provider_fault_body(d)
                 or ban_signature_hit(d))
+
+def is_insufficient_balance(detail: str | None) -> bool:
+    """True se il body dichiara bilancio CREDITI esaurito ("insufficient
+    balance"): condizione dell'account, non transitoria -> il deployment va
+    RITIRATO (sblocco manuale), non messo in cooldown. Vale per ogni provider."""
+    if not detail:
+        return False
+    return bool(_INSUFFICIENT_BALANCE_RE.search(detail))
+
 
 def classify_error_class(status, detail: str | None = None) -> str:
     """Classe d'errore "onesta" per l'ATTEMPT TRAIL mostrato al client: un
@@ -3875,6 +3890,27 @@ truncation_hook=None,
                 # chiave e la catena non spreca tentativi su altre key soggette
                 # allo stesso limite. Parità col percorso streaming
                 # (main._stream_with_fallback).
+                if is_insufficient_balance(detail):
+                    # BILANCIO ESAURITO ("insufficient balance"): condizione
+                    # dell'account -> ritira il DEPLOYMENT (sblocco manuale),
+                    # NON cooldown. Priorita' sulla quota: i body la
+                    # accompagnano con "type":"insufficient_quota".
+                    metrics.inc("nx_upstream_calls_total",
+                                (cur, "insufficient_balance"))
+                    last_err = err
+                    if ses:
+                        _st = router.dep_sticky_get(ses)
+                        if _st and _st == cur:
+                            router.dep_sticky_release(ses)
+                    router.mark_failed(cur, reason="insufficient_balance",
+                                       status=402,
+                                       kind=ErrorKind.PERMANENT_DEAD)
+                    log.warning("[fallback] %s 402 'insufficient balance': "
+                                "DEPLOYMENT RITIRATO (sblocco manuale)", cur)
+                    dep = _pick(profile, dep, need, scope, ctx=ctx,
+                                tried=tried,
+                                requested_group=requested_group)
+                    continue
                 if _QUOTA_EXHAUSTED_RE.search(detail):
                     _qcd = (parse_quota_reset_seconds(detail)
                             or QUOTA_MIN_COOLDOWN_S)

@@ -38,7 +38,8 @@ HEALTH_FILE_NAME = "key_health.json"
 _PERMANENT_MARKERS = ("permanent_dead", "not_found", "model_missing",
                       "upstream_401", "upstream_402", "upstream_403",
                       "http_401", "http_402", "http_403", "auth",
-                      "forbidden", "unauthorized", "invalid_api_key")
+                      "forbidden", "unauthorized", "invalid_api_key",
+                      "insufficient_balance")
 
 STREAK_DEAD_THRESHOLD = 5          # fail_streak minimo per "dead_suspect"
 SUCCESS_EMA_FLOOR = 0.1            # sotto questo tasso la chiave e' sospetta
@@ -102,6 +103,12 @@ class KeyHealth:
             return (rec or {}).get("state") if rec else None
         if fail_streak == 0 or (
                 success_ema is not None and success_ema > SUCCESS_EMA_FLOOR):
+            if rec and rec.get("state") == "retired" \
+                    and self.is_permanently_retired(unique):
+                # Ritiro PERMANENTE (es. insufficient_balance): si sblocca
+                # SOLO a mano (POST /admin/deployments/unretire), mai da un
+                # successo isolato.
+                return "retired"
             if rec:
                 self.data.pop(unique, None)
                 log.info("[keyhealth] %s torna healthy", unique)
