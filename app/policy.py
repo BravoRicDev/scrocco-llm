@@ -714,6 +714,17 @@ class Policy:
     warm_borrow_enabled: bool = True
     warm_borrow_idle_sec: float = 240.0
     warm_borrow_selectable: bool = True
+    # GARA LENTA: se il primo tentativo sta ANCORA generando dopo
+    # `*_slow_race_after_ms` (0 = spenta) parte `stream_slow_race_canaries`
+    # (default 1) canario e la gara va fino alla chiusura. Al client va chi
+    # consegna PRIMA (nessuna regola nuova), ma l'ELEZIONE per la richiesta
+    # successiva va a chi ha IMPIEGATO MENO nel proprio tentativo (tempo
+    # proprio, non "chi e' arrivato prima"): il piu' veloce diventa holder,
+    # il piu' lento viene marcato "lento per la sessione". Nessuna
+    # generazione viene mai buttata: i perdenti restano probe reali.
+    stream_slow_race_after_ms: int = 120000
+    nonstream_slow_race_after_ms: int = 120000
+    stream_slow_race_canaries: int = 1
     # UN DEP CHE IGNORA stream:true (risponde JSON) viene ADATTATO a SSE dal
     # forwarder e CONSEGNATO: non e' un guasto, e' una consegna diversa. Con
     # True (default) resta eleggibile come canario / sveglia / sostituto in
@@ -2176,6 +2187,28 @@ class Policy:
                 p.nonstream_canary_allowed = _coerce_bool(
                     wp["nonstream_canary_allowed"],
                     "warm_pool.nonstream_canary_allowed")
+            if wp.get("slow_race_after_ms") is not None:
+                _v = wp["slow_race_after_ms"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.slow_race_after_ms non valido: {_v!r}")
+                p.stream_slow_race_after_ms = int(_v)
+            if wp.get("nonstream_slow_race_after_ms") is not None:
+                _v = wp["nonstream_slow_race_after_ms"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        "warm_pool.nonstream_slow_race_after_ms non valido: "
+                        f"{_v!r}")
+                p.nonstream_slow_race_after_ms = int(_v)
+            if wp.get("slow_race_canaries") is not None:
+                _v = wp["slow_race_canaries"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 1:
+                    raise ValueError(
+                        f"warm_pool.slow_race_canaries non valido: {_v!r}")
+                p.stream_slow_race_canaries = int(_v)
         if raw.get("warm_borrow_enabled") is not None:
             p.warm_borrow_enabled = _coerce_bool(
                 raw["warm_borrow_enabled"], "warm_borrow_enabled")
@@ -2190,6 +2223,18 @@ class Policy:
         if raw.get("nonstream_canary_allowed") is not None:
             p.nonstream_canary_allowed = _coerce_bool(
                 raw["nonstream_canary_allowed"], "nonstream_canary_allowed")
+        for _k, _attr in (("stream_slow_race_after_ms",
+                           "stream_slow_race_after_ms"),
+                          ("nonstream_slow_race_after_ms",
+                           "nonstream_slow_race_after_ms"),
+                          ("stream_slow_race_canaries",
+                           "stream_slow_race_canaries")):
+            if raw.get(_k) is not None:
+                _v = raw[_k]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(f"{_k} non valido: {_v!r}")
+                setattr(p, _attr, int(_v))
 
         ca = raw.get("cache_aware")
         if ca is not None:

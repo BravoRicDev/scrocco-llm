@@ -317,7 +317,8 @@ _NS_PROBES: set = set()
 
 
 def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
-                    wake: bool = False) -> None:
+                    wake: bool = False,
+                    race: tuple[str, float] | None = None) -> None:
     u = dep.get("unique", "?")
     with contextlib.suppress(Exception):
         router.note_probe_started(ses, u)
@@ -339,7 +340,11 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                 if isinstance(ch0, dict):
                     msg = ch0.get("message") or {}
                     txt = msg.get("content")
-                    ok = (isinstance(txt, str) and bool(txt.strip())
+                    # QUALSIASI consegna conta per il warm (regola utente):
+                    # `delivered` = c'e' contenuto; `ok` = contenuto PULITO
+                    # (non troncato) -> solo quello puo' eleggere l'holder.
+                    delivered = isinstance(txt, str) and bool(txt.strip())
+                    ok = (delivered
                           and ch0.get("finish_reason") != "length")
             if ok:
                 try:
@@ -351,6 +356,29 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                 except Exception:
                     pass
                 metrics.inc("nx_hedge_total", ("probe_ok",))
+                # ELEZIONE per TEMPO DI TENTATIVO: se questo probe ha
+                # generato in MENO tempo del vincitore della gara diventa
+                # l'holder della sessione (il giro dopo parte da lui), e chi
+                # e' stato piu' lento viene marcato "lento per la sessione".
+                # Guardia: si promuove solo se l'holder attuale e' ancora il
+                # vincitore (per non calpestare un esito piu' recente).
+                if race is not None:
+                    with contextlib.suppress(Exception):
+                        _d = (time.monotonic() - t0) * 1000.0
+                        _wu, _wd = race
+                        _cur = router._cache_ok().get(ses)
+                        _cur_u = _cur[0] if _cur else None
+                        if _d < float(_wd) and _cur_u in (None, _wu):
+                            router.note_session_success(
+                                ses, u, latency_ms=_d, ctx_est=ctx)
+                            router._note_session_slow(
+                                ses, _wu, latency_ms=float(_wd), ctx_est=ctx)
+                            log.info("[slow-race] holder -> %s (tentativo "
+                                     "%.0fs vs %s %.0fs)", u, _d / 1000.0,
+                                     _wu, float(_wd) / 1000.0)
+                        else:
+                            router._note_session_slow(
+                                ses, u, latency_ms=_d, ctx_est=ctx)
             elif raised is not None:
                 # QUOTA DI ACCOUNT (Cloudflare & co.): la quota e' dell'account
                 # -> pausa le chiavi sorelle fino al reset, non ruotarle a vuoto.
@@ -389,10 +417,16 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                     except Exception:
                         pass
                     metrics.inc("nx_hedge_total", ("probe_fail",))
+            elif delivered:
+                # Canary che ha CONSEGNATO ma troncato (finish_reason=length):
+                # va comunque in warm, nessuna penale (regola utente).
+                with contextlib.suppress(Exception):
+                    router.note_warm_owner(ses, u)
+                metrics.inc("nx_hedge_total", ("probe_partial",))
             else:
                 metrics.inc("nx_hedge_total", ("probe_drop",))
             log.info("[probe-ns] %s: %s", u,
-                      "in warm" if ok else
+                      "in warm" if (ok or delivered) else
                       ("cooldown" if raised is not None else "vuoto, inerme"))
         finally:
             try:
@@ -3011,6 +3045,62 @@ truncation_hook=None,
                     _degraded = router.degraded_active()
                 except Exception:
                     _degraded = False
+                def _open_canary(label: str):
+                    """Apre UN canario (o sveglia un cooldown 429 maturo) e lo
+                    mette in volo accanto ad A. Ritorna (dep, fut, t0, wake)
+                    oppure None. Usata dal gate refill e dalla GARA LENTA."""
+                    _age = 3600.0
+                    try:
+                        _age = float(getattr(
+                            _pol, "warm_refill_wake_min_cooldown_age_sec",
+                            3600.0) or 3600.0)
+                    except Exception:
+                        _age = 3600.0
+                    _b = None
+                    _wake = False
+                    try:
+                        _b = router.warm_fill_canary(
+                            profile, dep, need, ctx, _outb,
+                            tried=tried | _raced,
+                            requested_group=requested_group,
+                            exclude_keys=_raced_keys, exclude_uniq=_raced)
+                    except Exception:
+                        _b = None
+                    if _b is None:
+                        try:
+                            _b = router.warm_wake_canary(
+                                profile, dep, need, ctx, _outb,
+                                tried=tried | _raced,
+                                requested_group=requested_group,
+                                exclude_keys=_raced_keys, exclude_uniq=_raced,
+                                min_age_sec=_age)
+                        except Exception:
+                            _b = None
+                        if _b is not None:
+                            _wake = True
+                            log.info("[refill] ns: sveglia %s (429 maturo)",
+                                     _b["unique"])
+                    if _b is None:
+                        return None
+                    log.info("[%s] ns: canario %s (order=%s, chiavi "
+                             "warm+in-volo escluse=%d)", label, _b["unique"],
+                             _b.get("order"), len(_raced_keys))
+                    _raced.add(_b["unique"])
+                    _raced_keys.add(str(_b.get("api_key") or ""))
+                    _pb = dict(payload)
+                    inject_identity(_pb, _b)
+                    router.note_start(_b["unique"], ctx)
+                    _tb = time.monotonic()
+                    _fb = asyncio.ensure_future(self.call(
+                        _b, _pb, profile=profile or "", ctx_est=ctx,
+                        client_ip=client_ip, session=session,
+                        attribution=attribution,
+                        rate_hook=lambda u2, rl:
+                        router.note_rate_limit(u2, rl)))
+                    with contextlib.suppress(Exception):
+                        router.note_probe_started(ses, _b["unique"])
+                    return _b, _fb, _tb, _wake
+
                 if (_refill_on and _ready_min and not _degraded
                         and _refill_rounds < _maxif
                         and _fly < _maxif
@@ -3041,82 +3131,75 @@ truncation_hook=None,
                                 requested_group or dep.get("group"))
                         except Exception:
                             pass
-                        try:
-                            _B = router.warm_fill_canary(
-                                profile, dep, need, ctx, _outb,
-                                tried=tried | _raced,
-                                requested_group=requested_group,
-                                exclude_keys=_raced_keys,
-                                exclude_uniq=_raced)
-                        except Exception:
-                            _B = None
-                        if _B is None:
-                            # TERZO canario (ns): prova a SVEGLIARE un 429
-                            # dormiente da almeno 1h (regola utente).
-                            try:
-                                _age = float(getattr(
-                                    _pol,
-                                    "warm_refill_wake_min_cooldown_age_sec",
-                                    3600.0) or 3600.0)
-                            except Exception:
-                                _age = 3600.0
-                            try:
-                                _B = router.warm_wake_canary(
-                                    profile, dep, need, ctx, _outb,
-                                    tried=tried | _raced,
-                                    requested_group=requested_group,
-                                    exclude_keys=_raced_keys,
-                                    exclude_uniq=_raced,
-                                    min_age_sec=_age)
-                            except Exception:
-                                _B = None
-                            if _B is not None:
-                                _wake_b = True
-                                log.info("[refill] ns: sveglia %s (429 "
-                                         "maturo)", _B["unique"])
-                        if _B is not None:
-                            log.info("[refill] ns: canario %s (order=%s, "
-                                     "chiavi warm+in-volo escluse=%d)",
-                                     _B["unique"], _B.get("order"),
-                                     len(_raced_keys))
-                            _raced.add(_B["unique"])
-                            _raced_keys.add(str(_B.get("api_key") or ""))
-                            pB = dict(payload)
-                            inject_identity(pB, _B)
-                            router.note_start(_B["unique"], ctx)
-                            _tB = time.monotonic()
-                            _fB = asyncio.ensure_future(self.call(
-                                _B, pB, profile=profile or "",
-                                ctx_est=ctx, client_ip=client_ip,
-                                session=session, attribution=attribution,
-                                rate_hook=lambda u2, rl:
-                                router.note_rate_limit(u2, rl)))
-                            with contextlib.suppress(Exception):
-                                router.note_probe_started(ses, _B["unique"])
-                        else:
+                        _op = _open_canary("refill")
+                        if _op is None:
                             log.info("[refill] ns %s: nessun canario free "
                                      "consegnabile (chiavi escluse=%d)",
                                      cur, len(_raced_keys))
+                        else:
+                            _B, _fB, _tB, _wake_b = _op
+                futA = None
                 if _fB is None:
-                    data = await self.call(dep, payload,
-                                   profile=profile or "",
-                                   ctx_est=ctx,
-                                   client_ip=client_ip, session=session,
-                                   attribution=attribution,
-                                   rate_hook=lambda u, rl: router.note_rate_limit(
-                                       u, rl))
-                else:
+                    # GARA LENTA (non-stream): se il primo tentativo sta
+                    # ancora generando oltre la soglia si apre UN canario e si
+                    # tiene per buono il PRIMO che consegna; A resta in volo
+                    # (e se ha generato in MENO tempo diventa holder).
+                    data = None
+                    _ns_slow = 0
+                    if not _degraded:
+                        try:
+                            _ns_slow = int(getattr(
+                                _pol, "nonstream_slow_race_after_ms", 0) or 0)
+                        except Exception:
+                            _ns_slow = 0
+                    _A = dep
+                    _tA = t0
+                    if _ns_slow > 0:
+                        futA = asyncio.ensure_future(self.call(
+                            _A, payload, profile=profile or "",
+                            ctx_est=ctx, client_ip=client_ip,
+                            session=session, attribution=attribution,
+                            rate_hook=lambda u4, rl:
+                            router.note_rate_limit(u4, rl)))
+                        _d_s, _ = await asyncio.wait(
+                            {futA}, timeout=_ns_slow / 1000.0)
+                        if futA in _d_s:
+                            data = futA.result()
+                            futA = None
+                        else:
+                            log.info("[slow-race] ns %s in generazione da "
+                                     "%.0fs (> %.0fs) -> canario in gara",
+                                     cur, time.monotonic() - _tA,
+                                     _ns_slow / 1000.0)
+                            _raced.add(cur)
+                            _raced_keys.add(str(dep.get("api_key") or ""))
+                            _op = _open_canary("slow-race")
+                            if _op is None:
+                                data = await futA
+                                futA = None
+                            else:
+                                _B, _fB, _tB, _wake_b = _op
+                    if _fB is None and data is None:
+                        data = await self.call(dep, payload,
+                                       profile=profile or "",
+                                       ctx_est=ctx,
+                                       client_ip=client_ip, session=session,
+                                       attribution=attribution,
+                                       rate_hook=lambda u, rl: router.note_rate_limit(
+                                           u, rl))
+                if _fB is not None:
                     # GARA 2-alla-volta: vince chi risponde PER PRIMO con
                     # successo; l'altro resta in volo come probe (mai
                     # cancellato) e se consegna entra in warm.
                     _A = dep
                     _tA = t0
-                    futA = asyncio.ensure_future(self.call(
-                        _A, payload, profile=profile or "",
-                        ctx_est=ctx, client_ip=client_ip,
-                        session=session, attribution=attribution,
-                        rate_hook=lambda u3, rl:
-                        router.note_rate_limit(u3, rl)))
+                    if futA is None:
+                        futA = asyncio.ensure_future(self.call(
+                            _A, payload, profile=profile or "",
+                            ctx_est=ctx, client_ip=client_ip,
+                            session=session, attribution=attribution,
+                            rate_hook=lambda u3, rl:
+                            router.note_rate_limit(u3, rl)))
                     data = None
                     served_A = None
                     errA = None
@@ -3153,11 +3236,18 @@ truncation_hook=None,
                             _spawn_ns_probe(router, _B, _fB, _tB, ctx, ses,
                                             wake=_wake_b)
                         raise errA if errA is not None else errB
+                    if served_A:
+                        _race = (_A["unique"], max(
+                            0.0, (time.monotonic() - _tA) * 1000.0))
+                    else:
+                        _race = (_B["unique"], max(
+                            0.0, (time.monotonic() - _tB) * 1000.0))
                     _spawn_ns_probe(router,
                                     _B if served_A else _A,
                                     _fB if served_A else futA,
                                     _tB if served_A else _tA, ctx, ses,
-                                    wake=bool(_wake_b and served_A))
+                                    wake=bool(_wake_b and served_A),
+                                    race=_race)
                     if not served_A:
                         log.info("[refill] consegna %s (piu' veloce di %s, "
                                  "che finisce come probe senza penale)",

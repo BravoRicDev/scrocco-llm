@@ -10,6 +10,12 @@ const router = Router();
 // Mappa metadati: -> tipo di cast per il campo (scalari, liste, mappe).
 const META = {
   scalar: {
+    // GARA LENTA (slow-race): se il primo tentativo sta ancora generando
+    // dopo N ms si apre un canario e si tiene buono il primo che consegna.
+    // 0 = disattivata. Sono le stesse chiavi della TUI (sezione Warm).
+    "stream_slow_race_after_ms": "int",
+    "nonstream_slow_race_after_ms": "int",
+    "stream_slow_race_canaries": "int",
     "server.host": "str",
     "server.port": "int",
     "server.ssl_enabled": "bool",
@@ -48,6 +54,15 @@ const META = {
 const LISTS = META.list;
 const MAPS = META.map;
 
+// Manopole che il riassunto compatto `effective` puo' non esporre (nuove):
+// le rendiamo comunque editabili in /policy/edit, prefillando SOLO queste
+// chiavi dal `configured` (nessun segreto).
+const EXTRA_FIELDS = [
+  "stream_slow_race_after_ms",
+  "nonstream_slow_race_after_ms",
+  "stream_slow_race_canaries",
+];
+
 router.get("/policy", requireAuth, authorize("policy", "read"), async (req, res, next) => {
   try {
     const policy = await gateway.get("/admin/policy");
@@ -61,7 +76,11 @@ router.get("/policy", requireAuth, authorize("policy", "read"), async (req, res,
 router.get("/policy/edit", requireAuth, authorize("policy", "update"), async (req, res, next) => {
   try {
     const policy = await gateway.get("/admin/policy");
-    res.render("policy/edit", { policy, meta: { scalar: META.scalar, list: META.list, map: META.map } });
+    const conf = (policy && policy.configured) || {};
+    const extra = {};
+    EXTRA_FIELDS.forEach((f) => { extra[f] = conf[f]; });
+    res.render("policy/edit", { policy, extra,
+      meta: { scalar: META.scalar, list: META.list, map: META.map } });
   } catch (err) {
     if (err instanceof GatewayError) return res.status(502).render("error", { message: "Gateway: " + err.message });
     next(err);
@@ -73,18 +92,28 @@ const fieldSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean()]).nullable().optional(),
 });
 
-function buildNested(segments, value) {
-  const root = {};
-  let cur = root;
-  segments.forEach((seg, i) => {
-    if (i === segments.length - 1) {
-      cur[seg] = value;
-    } else {
-      cur[seg] = {};
-      cur = cur[seg];
-    }
-  });
-  return root;
+// ATTENZIONE: il merge lato gateway e' SHALLOW a livello di BLOCCO
+// (`_apply_policy_patch`: `merged[k] = v`), quindi inviare solo la foglia
+// CANCELLA gli altri campi dello stesso blocco (es. `adaptive.learn`
+// avrebbe azzerato il resto di `adaptive`). Qui si ricostruisce il blocco
+// COMPLETO partendo dal documento del gateway (configured, o effective
+// come ripiego) e si sostituisce solo la foglia richiesta.
+function buildPatch(policy, field, value) {
+  const parts = field.split(".");
+  if (parts.length === 1) return { [parts[0]]: value };
+  const conf = (policy && policy.configured) || {};
+  const eff = (policy && policy.effective) || {};
+  const base = conf[parts[0]] ?? eff[parts[0]];
+  const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
+  const block = isObj(base) ? JSON.parse(JSON.stringify(base)) : {};
+  let node = block;
+  for (let i = 1; i < parts.length - 1; i++) {
+    const nxt = node[parts[i]];
+    node[parts[i]] = isObj(nxt) ? { ...nxt } : {};
+    node = node[parts[i]];
+  }
+  node[parts[parts.length - 1]] = value;
+  return { [parts[0]]: block };
 }
 
 function resolveValue(policy, field) {
@@ -161,7 +190,7 @@ router.post("/policy/field", requireAuth, authorize("policy", "update"), async (
     return res.redirect("/policy/edit?flash=" + encodeURIComponent(cast.msg ?? "valore non valido") + "&flashType=error");
   }
 
-  const patch = buildNested(field.split("."), cast.value);
+  const patch = buildPatch(policy, field, cast.value);
 
   try {
     await gateway.patch("/admin/policy", { json: patch });

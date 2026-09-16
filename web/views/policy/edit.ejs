@@ -69,6 +69,16 @@ function collectRows(obj, prefix, out, visited) {
 }
 
 const rows = collectRows(eff, "", [], new Set());
+// Manopole in whitelist ma assenti dal riassunto `effective`: le mostriamo
+// comunque cosi' se ne puo' impostare il valore.
+const extraVals = (extra && typeof extra === "object") ? extra : {};
+Object.keys(extraVals).forEach((f) => {
+  if (rows.some((r) => r.field === f)) return;
+  const v = extraVals[f];
+  rows.push({ field: f, value: (v === undefined || v === null) ? "" : v,
+              type: typeOf(f, v),
+              section: f.split(".").slice(0, -1).join(".") || "—" });
+});
 // indice per sezione/build table attualmente singola
 %>
 <h1>Modifica policy del gateway</h1>
