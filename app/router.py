@@ -2531,6 +2531,17 @@ class Router:
         if ds_enabled and hasattr(self, '_stats') and unique in self._stats:
             stats = self._stats[unique]
             hist = stats.latency_history or []
+            # Finestra dei campioni per il dynamic scoring (`dynamic_scoring_
+            # history_window`): la manopola era dichiarata/esposta in
+            # /admin/tuning ma NON usata -> la classifica usava sempre tutta
+            # la storia. Ora si limita agli ultimi N campioni (0 = tutta).
+            try:
+                _win = int(getattr(self.policy,
+                                   "dynamic_scoring_history_window", 0) or 0)
+            except (TypeError, ValueError):
+                _win = 0
+            if _win > 0:
+                hist = hist[-_win:]
             if hist and len(hist) >= 3:
                 # F1/F9: i campioni sono (bucket, ctx, latenza). p95 SUL BUCKET
                 # della richiesta quando ci sono >=3 campioni li', altrimenti su

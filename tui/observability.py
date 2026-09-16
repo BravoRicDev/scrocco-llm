@@ -17,7 +17,13 @@ class ObservabilityScreen(ModalScreen):
     """5 viste osservabilita: chiamate live, errori, classifica, sessioni, statistiche."""
 
     BINDINGS = [Binding("escape", "close", "Chiudi"),
-                Binding("r", "refresh", "Ricarica")]
+                Binding("r", "refresh", "Ricarica"),
+                # 1-5 cambiano vista (il titolo lo prometteva e non c'era).
+                Binding("1", "tab('tab-live')", "Live", show=False),
+                Binding("2", "tab('tab-err')", "Errori", show=False),
+                Binding("3", "tab('tab-lb')", "Classifica", show=False),
+                Binding("4", "tab('tab-sess')", "Sessioni", show=False),
+                Binding("5", "tab('tab-stats')", "Statistiche", show=False)]
 
     def __init__(self, client: GatewayClient, initial: str = "tab-live"):
         super().__init__()
@@ -25,7 +31,7 @@ class ObservabilityScreen(ModalScreen):
         self.initial = initial
 
     def compose(self):
-        with VerticalScroll():
+        with VerticalScroll(id="modal-box"):
             yield Label("[b cyan]OSSERVABILITA[/]  "
                         "[dim]1-5 cambia vista · r ricarica · esc chiudi[/]", id="form-title")
             with TabbedContent(initial=self.initial, id="obs-tabs"):
@@ -53,6 +59,10 @@ class ObservabilityScreen(ModalScreen):
         panel = self._active_panel()
         if panel is not None:
             panel.run_worker(panel.refresh_data(), exclusive=True)
+
+    def action_tab(self, pane_id: str) -> None:
+        tc = self.query_one("#obs-tabs", TabbedContent)
+        tc.active = pane_id
 
     def action_close(self) -> None:
         self.dismiss(None)

@@ -16,7 +16,8 @@ from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from . import tui_config as cfg
-from .gateway_client import GatewayClient, GatewayError
+from .gateway_client import (GatewayClient, GatewayError,
+                             backup_filenames)
 from .modals import ConfirmModal, TextInputModal
 
 OPS = [
@@ -197,12 +198,18 @@ class OperationsScreen(ModalScreen):
 
     async def _op_backups(self) -> None:
         res = await self.client.backups()
-        csvs = res.get("csv") or []
-        yamls = res.get("yaml") or []
+        csvs = backup_filenames(res.get("csv"))
+        yamls = backup_filenames(res.get("yaml"))
         self._status(f"[green]{len(csvs)} CSV · {len(yamls)} YAML[/]")
-        names = list(csvs) + list(yamls)
-        self._result("CSV:\n  " + "\n  ".join(map(str, csvs)) +
-                     "\nYAML:\n  " + "\n  ".join(map(str, yamls)))
+        names = csvs + yamls
+        _show = 25
+        def _fmt(lst: list[str]) -> str:
+            head = "\n  ".join(lst[:_show])
+            if len(lst) > _show:
+                head += f"\n  … (+{len(lst) - _show})"
+            return head or "-"
+        self._result("CSV:\n  " + _fmt(csvs) +
+                     "\nYAML:\n  " + _fmt(yamls))
         if not names:
             return
         pick = await self._ask("Nome backup da RIPRISTINARE (vuoto = annulla)")

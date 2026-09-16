@@ -54,6 +54,26 @@ def load_master_key(env_file: str | Path | None = None) -> str:
     return ""
 
 
+def backup_filenames(entries: object) -> list[str]:
+    """Normalizza la risposta di GET /admin/backups a una lista di filename.
+
+    Il gateway ritorna `[{"filename","size","mtime"}]` (le versioni vecchie
+    potevano ritornare stringhe): senza normalizzare, il nome scelto
+    dall'utente non matcherebbe mai l'elenco e il ripristino fallirebbe.
+    """
+    out: list[str] = []
+    for b in (entries or []):                     # type: ignore[union-attr]
+        if b is None:
+            continue
+        if isinstance(b, dict):
+            nm = str(b.get("filename") or b.get("name") or "")
+        else:
+            nm = str(b)
+        if nm:
+            out.append(nm)
+    return out
+
+
 class GatewayClient:
     """Wrapper async minimo sopra httpx per tutte le route admin."""
 
@@ -327,25 +347,6 @@ class GatewayClient:
     async def unretire(self, unique: str) -> dict:
         """Riattiva un deployment ritirato."""
         return await self.post("/admin/deployments/unretire", {"unique": unique})
-
-    async def purge_profile(self, profile: str) -> dict:
-        """Elimina la colonna profilo dal CSV (richiede 0 deployment)."""
-        return await self.post("/admin/profiles/purge", {"profile": profile})
-
-    async def playground(self, model: str, messages: list[dict],
-                         profile: str | None = None,
-                         max_tokens: int | None = None) -> dict:
-        """Simula una chat (read-only, trace di routing)."""
-        body: dict = {"model": model, "messages": messages}
-        if profile:
-            body["profile"] = profile
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
-        return await self.post("/admin/playground", body)
-
-    async def history(self, limit: int = 50) -> dict:
-        """Journal operazioni (total, entries)."""
-        return await self.get("/admin/history", {"limit": int(limit)})
 
     async def purge_profile(self, profile: str) -> dict:
         """Elimina la colonna profilo dal CSV (richiede 0 deployment)."""

@@ -155,8 +155,23 @@ class ClientKeysScreen(ModalScreen[None]):
                 Binding("c", "copy_hint", "Copia", show=False)]
 
     def action_copy_hint(self) -> None:
-        # placeholder: copy masked key hint to clipboard if available
-        pass
+        """Copia l'elenco sk-<profilo> negli appunti (il terminale deve
+        supportare OSC52: se non c'e' clipboard si avvisa e basta)."""
+        prof = ""
+        try:
+            t = self.query_one("#keys-t", DataTable)
+            if t.cursor_row is not None and t.row_count:
+                prof = str(self.profiles[t.cursor_row]) \
+                    if t.cursor_row < len(self.profiles) else ""
+        except Exception:                            # noqa: BLE001
+            prof = ""
+        text = (f"sk-{prof}" if prof
+                else "\n".join(f"sk-{p}" for p in self.profiles))
+        try:
+            self.app.copy_to_clipboard(text)
+            self.app.notify(f"copiato: {text}", timeout=4)
+        except Exception as e:                       # noqa: BLE001
+            self.app.notify(f"clipboard non disponibile ({e})", severity="warning")
 
     def __init__(self, profiles: list[str], master_masked: str,
                  proxy_prefix: str):

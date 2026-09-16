@@ -63,7 +63,11 @@ class MainScreen(Screen):
         Binding("P", "persisted_scores", "Persistiti"),
         Binding("H", "provider_health", "Provider"),
         Binding("Z", "ops_hub", "Operazioni"),
-        Binding("f1", "help", "Aiuto", key_display="?"),
+        # `?` e' la convenzione documentata nell'aiuto (e in modals.py):
+        # il binding deve restare su question_mark; F1 funziona comunque,
+        # ma non deve rubare la visualizzazione di `?`.
+        Binding("question_mark", "help", "Aiuto", key_display="?"),
+        Binding("f1", "help", "Aiuto", show=False),
     ]
 
     def __init__(self):

@@ -74,19 +74,29 @@ class ErrorsPanel(Vertical):
                     else "-"
                 )
                 st = ev.get("status")
-                sev = isinstance(st, int) and st >= 500
-                st_txt = f"[red]{st}[/]" if sev else (f"[yellow]{st}[/]" if isinstance(st, int) and 400 <= st < 500 else str(st))
+                # il gateway registra gli errori UPSTREAM con status NEGATIVO
+                # (es. -403/-429/-500): la severita' e i conteggi vanno
+                # calcolati sul valore assoluto, altrimenti un -500 non e'
+                # rosso e un -429 non entra nel contatore 429.
+                stn = abs(st) if isinstance(st, int) else None
+                sev = stn is not None and stn >= 500
+                st_txt = (f"[red]{st}[/]" if sev
+                          else (f"[yellow]{st}[/]"
+                                if stn is not None and 400 <= stn < 500
+                                else str(st)))
                 tipo = ev.get("error_type") or "-"
                 msg = (ev.get("error_message") or "-").replace("\n", " ")
                 if len(msg) > cfg.ERROR_MSG_MAX_CHARS + 1:
                     msg = msg[:cfg.ERROR_MSG_MAX_CHARS] + "…"
                 t.add_row(ora, st_txt, tipo, msg)
                 # riepilogo
-                if isinstance(st, int) and st == 429:
+                if stn is None:
+                    other += 1
+                elif stn == 429:
                     c429 += 1
-                elif isinstance(st, int) and 400 <= st < 500:
+                elif 400 <= stn < 500:
                     c4xx += 1
-                elif isinstance(st, int) and st >= 500:
+                elif stn >= 500:
                     c500 += 1
                 else:
                     other += 1

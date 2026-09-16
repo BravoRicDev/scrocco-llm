@@ -15,6 +15,8 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Label, TextArea
 
+from .modals import ConfirmModal
+
 
 class RawEditorScreen(ModalScreen):
     """Editor testuale grezzo con carica/salva via callback async."""
@@ -74,6 +76,17 @@ class RawEditorScreen(ModalScreen):
         self._loading = True
         try:
             new_text = self.query_one("#raw-area", TextArea).text
+            # Sostituzione INTEGRALE del file: chiedi conferma (le altre
+            # operazioni distruttive della TUI la chiedono sempre).
+            try:
+                ok = await self.app.push_screen_wait(ConfirmModal(
+                    f"Salvare {self._title}? Sostituisce il file su disco "
+                    "(il gateway fa un backup automatico prima)."))
+            except Exception:                        # noqa: BLE001
+                ok = True
+            if not ok:
+                self.query_one("#raw-status", Label).update("[yellow]annullato[/]")
+                return
             try:
                 res = await self._saver(new_text)
             except Exception as exc:                 # noqa: BLE001
@@ -85,5 +98,12 @@ class RawEditorScreen(ModalScreen):
                 ok = False
             self.query_one("#raw-status", Label).update(
                 "[green]salvato[/]" if ok else "[red]salvataggio rifiutato[/]")
+            if ok:
+                # la configurazione a runtime e' cambiata: ricarica la UI,
+                # altrimenti le schermate restano stantie.
+                try:
+                    await self.app.refresh_data()
+                except Exception:                    # noqa: BLE001
+                    pass
         finally:
             self._loading = False

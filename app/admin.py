@@ -26,6 +26,7 @@ from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
+import re
 import yaml
 import httpx
 from fastapi import APIRouter, Request
@@ -1204,9 +1205,7 @@ async def put_policy_raw(request: Request):
 
 
 # --------------------------------------------------- backups (list + restore)
-import re as _re                              # noqa: E402
-
-_BACKUP_NAME_RE = _re.compile(r"^(keys_rotation-|gateway\.yaml-)[A-Za-z0-9._-]+$")
+_BACKUP_NAME_RE = re.compile(r"^(keys_rotation-|gateway\.yaml-)[A-Za-z0-9._-]+$")
 
 
 def _backups_dir(gw) -> Path:
@@ -1403,13 +1402,12 @@ def membership_removal_candidates(modello: str, cap: str) -> list[dict]:
 
 # --------------------------------------------------------- capabilities audit
 def _audit_slug(name: str) -> str:
-    import re as _re
     s = name.strip().lower()
     for p in ("openai/", "mistral/", "nvidia/", "cloudflare/", "meta-llama/",
               "models/"):
         if s.startswith(p):
             s = s[len(p):]
-    return _re.sub(r"[^a-z0-9]+", "", s)
+    return re.sub(r"[^a-z0-9]+", "", s)
 
 
 def _free_guess(mid: str, item: dict, base: str) -> bool:
@@ -3215,7 +3213,6 @@ async def stats_models(request: Request, window: str = "7d"):
     if denied:
         return denied
     gw = _gw()
-    router = gw.router
 
     # Parse window
     window_days = 7.0
@@ -3252,32 +3249,33 @@ async def stats_models(request: Request, window: str = "7d"):
                 "calls": 0, "ok": 0, "fail": 0,
                 "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                 "duration_ms_sum": 0, "fb": 0, "qc": 0,
+                "cost": 0.0, "cost_est": 0.0,
             }
         by_model[model]["calls"] += 1
+        # ok/fail dal LEDGER (non dai contatori runtime per-deployment, che
+        # sovrascriverebbero il modello con quelli di UN solo deployment).
+        if _ledger_row_ok(r):
+            by_model[model]["ok"] += 1
+        else:
+            by_model[model]["fail"] += 1
         u = r.get("usage") or {}
         by_model[model]["prompt_tokens"] += u.get("prompt_tokens", 0)
         by_model[model]["completion_tokens"] += u.get("completion_tokens", 0)
         by_model[model]["total_tokens"] += u.get("total_tokens", 0)
+        by_model[model]["cost"] += float(u.get("cost") or 0)
+        by_model[model]["cost_est"] += float(u.get("cost_est") or 0)
         by_model[model]["duration_ms_sum"] += r.get("dur_ms", 0)
         if r.get("fb"):
             by_model[model]["fb"] += 1
         if r.get("qc"):
             by_model[model]["qc"] += 1
 
-    # Aggiungi stats runtime
-    for unique, s in router._stats.items():
-        dep = gw.config.deployment_by_unique(unique) or {}
-        model = dep.get("model", unique.split("__")[0] if unique else "unknown")
-        if model in by_model:
-            by_model[model]["ok"] = s.ok_count
-            by_model[model]["fail"] = s.fail_count
-
     # Costruisci classifica
     ranking = []
     for model, stats in by_model.items():
         calls = stats["calls"]
-        ok = stats.get("ok", 0) or calls  # fallback
-        fail = stats.get("fail", 0)
+        ok = stats["ok"]
+        fail = stats["fail"]
         total = ok + fail
         success_rate = round(ok / total * 100, 2) if total > 0 else 100.0
         avg_latency = round(stats["duration_ms_sum"] / calls) if calls > 0 else 0
@@ -3292,6 +3290,8 @@ async def stats_models(request: Request, window: str = "7d"):
             "prompt_tokens": stats["prompt_tokens"],
             "completion_tokens": stats["completion_tokens"],
             "total_tokens": stats["total_tokens"],
+            "cost_reported_usd": round(stats["cost"], 6),
+            "cost_estimated_usd": round(stats["cost_est"], 6),
             "fb_rate_percent": round(stats["fb"] / calls * 100, 2) if calls > 0 else 0,
             "qc_rate_percent": round(stats["qc"] / calls * 100, 2) if calls > 0 else 0,
         })
