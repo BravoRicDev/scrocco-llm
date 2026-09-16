@@ -3248,7 +3248,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         _nv = len(router.warm_valid_for(
                             session, profile,
                             requested_group or dep.get("group"),
-                            need, ctx, _need_out, tried=tried_set))
+                            need, ctx, _need_out, tried=tried_set,
+                            include_borrowed=True))
                     except Exception:
                         _nv = _ready
                     _refill = _nv < _ready

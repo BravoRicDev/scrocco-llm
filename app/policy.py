@@ -694,6 +694,20 @@ class Policy:
     # corsa. Nel caso migliore il warm si trova anche 6-7 caldi transienti
     # (nessun vero spreco: se arrivano tutti buoni "durera' di piu'").
     warm_refill_max_inflight: int = 6
+    # PRESTITO DEI WARM ("passaggio di mano"): quando piu' sessioni (es. i
+    # subagent di Hermes, ognuno con prompt separato) si accumulano, ognuna
+    # "sequestra" i propri warm e i canary delle altre non trovano piu' nulla
+    # di buono. Un warm di un'ALTRA sessione il cui DEPLOYMENT (non la
+    # sessione!) e' fermo da almeno `borrow_idle_sec` e non ha richieste in
+    # volo viene considerato "prestabile": conta nei 3 ready (cosi' il canary
+    # non parte) ed entra nel pool IN CODA, dopo i propri (priorita' di
+    # consumo: propri >> condivisi in disuso). Al primo successo su un
+    # prestato la proprieta' si trasferisce da sola (note_session_success) e
+    # il vecchio owner, ricontando, decidera' se gli serve un canary.
+    # `selectable=False` = i prestati contano SOLO per i 3 ready.
+    warm_borrow_enabled: bool = True
+    warm_borrow_idle_sec: float = 240.0
+    warm_borrow_selectable: bool = True
     # UN DEP CHE IGNORA stream:true (risponde JSON) viene ADATTATO a SSE dal
     # forwarder e CONSEGNATO: non e' un guasto, e' una consegna diversa. Con
     # True (default) resta eleggibile come canario / sveglia / sostituto in
@@ -2139,10 +2153,34 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.wake_max_attempts non valido: {_v!r}")
                 p.warm_refill_wake_max_attempts = int(_v)
+            if "borrow_enabled" in wp:
+                p.warm_borrow_enabled = _coerce_bool(
+                    wp["borrow_enabled"], "warm_pool.borrow_enabled")
+            if wp.get("borrow_idle_sec") is not None:
+                _v = wp["borrow_idle_sec"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.borrow_idle_sec non valido: {_v!r}")
+                p.warm_borrow_idle_sec = float(_v)
+            if "borrow_selectable" in wp:
+                p.warm_borrow_selectable = _coerce_bool(
+                    wp["borrow_selectable"], "warm_pool.borrow_selectable")
             if "nonstream_canary_allowed" in wp:
                 p.nonstream_canary_allowed = _coerce_bool(
                     wp["nonstream_canary_allowed"],
                     "warm_pool.nonstream_canary_allowed")
+        if raw.get("warm_borrow_enabled") is not None:
+            p.warm_borrow_enabled = _coerce_bool(
+                raw["warm_borrow_enabled"], "warm_borrow_enabled")
+        if raw.get("warm_borrow_idle_sec") is not None:
+            _v = raw["warm_borrow_idle_sec"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
+                raise ValueError(f"warm_borrow_idle_sec non valido: {_v!r}")
+            p.warm_borrow_idle_sec = float(_v)
+        if raw.get("warm_borrow_selectable") is not None:
+            p.warm_borrow_selectable = _coerce_bool(
+                raw["warm_borrow_selectable"], "warm_borrow_selectable")
         if raw.get("nonstream_canary_allowed") is not None:
             p.nonstream_canary_allowed = _coerce_bool(
                 raw["nonstream_canary_allowed"], "nonstream_canary_allowed")

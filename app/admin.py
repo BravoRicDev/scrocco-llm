@@ -613,6 +613,12 @@ async def state(request: Request):
                 "ttl_sec": int(getattr(pol, "warm_pool_ttl_sec", 0) or 0),
                 "max_attempts": int(getattr(pol, "warm_pool_max_attempts", 0) or 0),
                 "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
+                "borrow_enabled": bool(getattr(pol, "warm_borrow_enabled", True)),
+                "borrow_idle_sec": float(
+                    getattr(pol, "warm_borrow_idle_sec", 240.0) or 0.0),
+                "borrow_selectable": bool(
+                    getattr(pol, "warm_borrow_selectable", True)),
+                "borrowable_now": len(gw.router._lendable_set()),
             },
             "endpoint_quarantine": gw.router.endpoint_quarantine_view(),
             "degraded": gw.router.degraded_view(),

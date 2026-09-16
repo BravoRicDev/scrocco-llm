@@ -5847,10 +5847,17 @@ class Router:
                    need: frozenset[str] | None = None,
                    ctx: int | None = None,
                    tried: set[str] | None = None,
-                   failed_unique: str | None = None) -> list[dict]:
+                   failed_unique: str | None = None,
+                   include_borrowed: bool = False) -> list[dict]:
         """Tier "caldi": free-dims che QUESTA sessione ha gia' servito con
         SUCCESSO entro la finestra warm, ancora vivi (no cooldown/retired/
         draining) e compatibili con `need` + `max_input`/contesto (`_cap_fits`).
+
+        Con `include_borrowed=True` (prestito dei warm) in coda vengono
+        accodati anche i warm di ALTRE sessioni "in disuso" (vedi
+        `_lendable_set`), senza mai scalzare i propri: la priorita' di consumo
+        resta propri >> condivisi, e al primo successo su un prestato la
+        proprieta' si trasferisce da sola (note_session_success).
 
         Lista ORDINATA: cache-holder di sessione, poi MRU (`last_used`), poi
         `order`, poi `max_input` crescente. Vuota se disabilitato, senza
@@ -5897,18 +5904,98 @@ class Router:
                 continue
             out.append(dep)
         if not out:
+            if not include_borrowed:
+                return []
+        else:
+            out.sort(key=lambda dep: (
+                0 if holder and dep["unique"] == holder else 1,
+                -(self.stats_for(dep["unique"]).last_used or 0.0),
+                int(dep.get("order", ORDER_LAST)),
+                int(dep.get("max_input_tokens") or 0),
+            ))
+        if include_borrowed:
+            _own = {d["unique"] for d in out}
+            borr: list[dict] = []
+            for u in self._lendable_set(now):
+                if u in _own or u in skip or u == failed_unique:
+                    continue
+                if allowed is not None and u not in allowed:
+                    continue
+                ent = d.get(u)
+                if ent and ent[0] == sid:            # e' gia' un nostro warm
+                    continue
+                dep = self.config.deployment_by_unique(u)
+                if dep is None or self.is_retired(u) or self.is_draining(u):
+                    continue
+                if self._endpoint_quarantined(dep):
+                    continue
+                if self.is_cooled_down(u) or self._gemini_blocked(dep):
+                    continue
+                if self._is_demoted_dep(u, sid, ctx,
+                                        allow_slow=self._warm_allow_slow()):
+                    continue
+                if need and not self._dep_supports(dep, need):
+                    continue
+                if not self._cap_fits(dep, ctx):
+                    continue
+                borr.append(dep)
+            if borr:
+                borr.sort(key=lambda dep: (
+                    -(self.stats_for(dep["unique"]).last_used or 0.0),
+                    int(dep.get("order", ORDER_LAST)),
+                    int(dep.get("max_input_tokens") or 0),
+                ))
+                log.info("[warm] prestito: %d dep da altre sessioni (fermi "
+                         "da >=%.0fs) accodati al pool di %s",
+                         len(borr),
+                         float(getattr(self.policy, "warm_borrow_idle_sec",
+                                       240.0) or 0.0), sid)
+                out = out + borr
+        if not out:
             return []
-        out.sort(key=lambda dep: (
-            0 if holder and dep["unique"] == holder else 1,
-            -(self.stats_for(dep["unique"]).last_used or 0.0),
-            int(dep.get("order", ORDER_LAST)),
-            int(dep.get("max_input_tokens") or 0),
-        ))
         max_n = max(0, int(getattr(self.policy, "warm_pool_max_attempts", 0) or 0))
         if max_n > 0:
             out = out[:max_n]
         log.debug("[warm] pool=%d sid=%s: %s", len(out), sid,
                   ",".join(d["unique"] for d in out[:6]))
+        return out
+
+    def _borrow_selectable(self) -> bool:
+        """I prestati sono anche SELEZIONABILI (in coda ai propri) o solo
+        contati per i 3 ready? `warm_borrow_selectable=False` = solo conteggio."""
+        return (bool(getattr(self.policy, "warm_borrow_enabled", True))
+                and bool(getattr(self.policy, "warm_borrow_selectable", True)))
+
+    def _lendable_set(self, now: float | None = None) -> set[str]:
+        """Warm "prestabili" a livello GLOBALE (memo ~5s): il dep ha un owner
+        vivo, e' fermo da `warm_borrow_idle_sec` (idle del DEPLOYMENT, non
+        della sessione) e non ha richieste in volo. Non dipende dalla
+        sessione corrente: chi lo consuma scarta i propri (priorita' propri)."""
+        if not getattr(self.policy, "warm_borrow_enabled", True):
+            return set()
+        now = time.time() if now is None else now
+        cache = getattr(self, "_lendable_cache", None)
+        if cache is not None and (now - cache[0]) < 5.0:
+            return cache[1]
+        out: set[str] = set()
+        idle = float(getattr(self.policy, "warm_borrow_idle_sec", 240.0) or 0.0)
+        try:
+            guard = self._guard_sec()
+            for u, ent in list(self._dep_sess().items()):
+                if not ent or not ent[0]:
+                    continue
+                try:
+                    if (now - float(ent[1] or 0.0)) >= guard:
+                        continue                       # owner decaduto
+                    if int(getattr(self.stats_for(u), "inflight", 0) or 0) > 0:
+                        continue                       # in volo: non e' fermo
+                except Exception:                      # noqa: BLE001
+                    continue
+                if self._dep_idle_age(u, now) >= idle:
+                    out.add(u)
+        except Exception:                              # noqa: BLE001
+            return set()
+        self._lendable_cache = (now, out)
         return out
 
     # ---------------------------------------------------- WARM REFILL (cascata)
@@ -6000,6 +6087,59 @@ class Router:
             return (time.time() - ent[1]) < self._guard_sec()
         except Exception:                              # noqa: BLE001
             return False
+
+    # ------------------------------------------------- PRESTITO DEI WARM
+    def _dep_idle_age(self, unique: str, now: float | None = None) -> float:
+        """Secondi dall'ultimo USO di QUESTO deployment (non della sessione!).
+
+        `DepStats.last_used` e' toccato da note_start a ogni tentativo; se 0
+        (mai usato da quando e' in memoria) si ripiega sul ts di proprieta'.
+        Ritorna 0.0 nel dubbio, cioe' "usato adesso" (prudente: non si presta).
+        """
+        now = time.time() if now is None else now
+        try:
+            lu = float(self.stats_for(unique).last_used or 0.0)
+        except Exception:                              # noqa: BLE001
+            lu = 0.0
+        if lu <= 0.0:
+            ent = self._dep_sess().get(unique)
+            if ent:
+                try:
+                    lu = float(ent[1] or 0.0)
+                except Exception:                      # noqa: BLE001
+                    lu = 0.0
+        if lu <= 0.0:
+            return 0.0
+        return max(0.0, now - lu)
+
+    def _borrowable(self, unique: str, now: float | None = None) -> bool:
+        """True se `unique` e' un warm PRESTABILE: owner di un'ALTRA sessione
+        ancora vivo, il DEPLOYMENT fermo da almeno `warm_borrow_idle_sec` e
+        nessuna richiesta in volo su di lui (una generazione lunga non e'
+        "fermo"). Nessun requisito sul numero di warm del proprietario: anche
+        lui conta propri+prestati e decidera' da solo se gli serve un canary."""
+        if not getattr(self.policy, "warm_borrow_enabled", True):
+            return False
+        ent = self._dep_sess().get(unique)
+        if not ent:
+            return False
+        now = time.time() if now is None else now
+        try:
+            owner, ts = ent[0], float(ent[1] or 0.0)
+        except Exception:                              # noqa: BLE001
+            return False
+        sid = current_session()
+        if not owner or owner == sid:
+            return False
+        if (now - ts) >= self._guard_sec():            # owner decaduto
+            return False
+        try:
+            if int(getattr(self.stats_for(unique), "inflight", 0) or 0) > 0:
+                return False
+        except Exception:                              # noqa: BLE001
+            return False
+        idle = float(getattr(self.policy, "warm_borrow_idle_sec", 240.0) or 0.0)
+        return self._dep_idle_age(unique, now) >= idle
 
     # ------------------------------------------- PROBES IN VOLO (tetto 4/sess)
     # Contiamo TUTTO lo speculativo ancora in corsa per la sessione (canari
@@ -6115,29 +6255,40 @@ class Router:
                        need: frozenset[str] | None, ctx: int | None,
                        out_tokens: int | None,
                        tried: set[str] | None = None,
-                       failed_unique: str | None = None) -> list[dict]:
+                       failed_unique: str | None = None,
+                       include_borrowed: bool = False) -> list[dict]:
         """I caldi della sessione che possono EFFETTIVAMENTE servire questa
         richiesta (need + ctx + output assicurato): e' COSI' che si contano i
-        "3 pronti-caldi" del refill, non il numero grezzo del pool."""
+        "3 pronti-caldi" del refill, non il numero grezzo del pool.
+
+        Con `include_borrowed=True` contano anche i warm PRESTABILI di altre
+        sessioni (fermi da `warm_borrow_idle_sec`): e' cosi' che si evita di
+        sprecare un canary quando le carte utili ci sono gia'."""
         if not profile:
             return []
         allowed = self._warm_allowed(profile, group_name)
         pool = self._warm_pool(session_id, allowed, need, ctx, tried,
-                               failed_unique)
+                               failed_unique, include_borrowed=include_borrowed)
         return [d for d in pool
                 if self.dep_deliverable(d, need, ctx, out_tokens)]
 
     def warm_api_keys(self, session_id: str | None, pname: str | None,
-                      group_name: str | None) -> set[str]:
+                      group_name: str | None,
+                      include_borrowed: bool | None = None) -> set[str]:
         """Chiavi api gia' rappresentate (stessa api_key) dai deployment nel
         warm della
         sessione: un probe di refill NON deve testare una chiave che abbiamo
-        gia' nel parco dei caldi."""
+        gia' nel parco dei caldi. Con i prestiti attivi si considerano anche
+        le chiavi dei prestabili (sono comunque a disposizione)."""
         if not pname:
             return set()
+        if include_borrowed is None:
+            include_borrowed = bool(getattr(self.policy,
+                                            "warm_borrow_selectable", True))
         try:
             pool = self._warm_pool(session_id,
-                                   self._warm_allowed(pname, group_name))
+                                   self._warm_allowed(pname, group_name),
+                                   include_borrowed=include_borrowed)
         except Exception:                          # noqa: BLE001
             return set()
         return {str(d.get("api_key") or "") for d in pool
@@ -6496,7 +6647,8 @@ class Router:
             if _pname:
                 _warm = self._warm_pool(
                     session_id, self._warm_allowed(_pname, group_name),
-                    need=need, ctx=ctx)
+                    need=need, ctx=ctx,
+                    include_borrowed=self._borrow_selectable())
                 if _warm:
                     _dep = _warm[0]
                     # P3 (non-stream): se l'eletto e' LENTO e c'e' un caldo
@@ -6769,7 +6921,8 @@ class Router:
         #    = univoci della scala corrente: in `force_escalation` (solo
         #    -go/-fallback) il pool e' vuoto di fatto -> nessun effetto.
         _warm = self._warm_pool(current_session(), set(ladder), need, ctx,
-                                tried, failed_unique)
+                                tried, failed_unique,
+                                include_borrowed=self._borrow_selectable())
         if _warm:
             _dep = _warm[0]
             log.info("[warm] ladder -> %s (caldo proprio, max_in=%s)",
@@ -7138,7 +7291,8 @@ class Router:
                 _warm = self._warm_pool(
                     None, self._warm_allowed(_pname, req_grp),
                     need=need, ctx=ctx, tried=tried,
-                    failed_unique=cur_dep.get("unique"))
+                    failed_unique=cur_dep.get("unique"),
+                    include_borrowed=self._borrow_selectable())
                 if _warm:
                     _wd = _warm[0]
                     log.info("[warm] fallback -> %s (caldo proprio, max_in=%s)",

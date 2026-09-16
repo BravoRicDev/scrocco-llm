@@ -88,6 +88,19 @@ SCALAR_ROWS: list[tuple[str, str, str, str]] = [
      "Playground: tentativi max", "int"),
     ("Runtime", "min_output_floor",
      "Pavimento token output (refill)", "int"),
+    # --- Warm: refill a cascata + PRESTITO dei warm fra sessioni ---
+    ("Warm", "warm_pool.refill_enabled",
+     "Refill a cascata attivo (true/false)", "bool"),
+    ("Warm", "warm_pool.ready_min",
+     "Warm pronti-caldi richiesti (refill)", "int"),
+    ("Warm", "warm_pool.max_inflight",
+     "Tetto speculativo in volo per sessione", "int"),
+    ("Warm", "warm_pool.borrow_enabled",
+     "Prestito warm fra sessioni (true/false)", "bool"),
+    ("Warm", "warm_pool.borrow_idle_sec",
+     "Prestito warm: dep fermo da (s)", "num"),
+    ("Warm", "warm_pool.borrow_selectable",
+     "Prestito warm: selezionabile, non solo conteggio (true/false)", "bool"),
     ("HTTP upstream", "upstream_connect_timeout_sec",
      "Timeout connect (s)", "num"),
     ("HTTP upstream", "upstream_read_timeout_sec",
@@ -185,23 +198,46 @@ class AdvancedPolicyScreen(ModalScreen[None]):
         return "" if v is None else str(v)
 
     def _eff_get(self, dotted: str) -> Any:
-        """Lettura annidata nell'effective: 'capability_routing.enabled'."""
-        cur: Any = self.effective
-        for part in dotted.split("."):
-            if not isinstance(cur, dict):
-                return None
-            cur = cur.get(part)
-        return cur
+        """Lettura annidata: prima `effective` (riassunto runtime), poi
+        `configured` (yaml completo: copre i blocchi non riassunti, es.
+        warm_pool)."""
+        for base in (self.effective, self.configured):
+            cur: Any = base
+            for part in dotted.split("."):
+                if not isinstance(cur, dict):
+                    cur = None
+                    break
+                cur = cur.get(part)
+            if cur is not None:
+                return cur
+        return None
 
-    @staticmethod
-    def _nested_patch(dotted: str, value: Any) -> dict:
+    def _nested_patch(self, dotted: str, value: Any) -> dict:
         """{'capability_routing.enabled': True} -> {'capability_routing':
-        {'enabled': True}} (merge server-side sul blocco esistente)."""
+        {'enabled': True, ...TUTTI gli altri campi del blocco...}}.
+
+        ATTENZIONE: il merge server-side e' SHALLOW a livello di blocco
+        (`_apply_policy_patch`: `merged[k] = v`), quindi inviare solo la
+        sotto-chiave CANCELLA gli altri campi dello stesso blocco (es.
+        capability_routing.enabled avrebbe azzerato model_capabilities).
+        Qui si ricostruisce il blocco COMPLETO a partire da `configured`
+        (yaml integrale) e si sostituisce solo la foglia richiesta.
+        """
         parts = dotted.split(".")
         root = parts[0]
         if len(parts) == 1:
             return {root: value}
-        return {root: {".".join(parts[1:]): value}}
+        cur = self.configured.get(root)
+        if not isinstance(cur, dict):
+            cur = self.effective.get(root)
+        block: dict = dict(cur) if isinstance(cur, dict) else {}
+        node = block
+        for part in parts[1:-1]:
+            nxt = node.get(part)
+            node[part] = dict(nxt) if isinstance(nxt, dict) else {}
+            node = node[part]
+        node[parts[-1]] = value
+        return {root: block}
 
     def _add_row(self, section: str, label: str, value: str, meta: tuple):
         t = self.query_one("#pol-table", DataTable)

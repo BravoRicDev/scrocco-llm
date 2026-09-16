@@ -3021,7 +3021,8 @@ truncation_hook=None,
                         _nv = len(router.warm_valid_for(
                             ses, profile,
                             requested_group or dep.get("group"),
-                            need, ctx, _outb, tried=tried | _raced))
+                            need, ctx, _outb, tried=tried | _raced,
+                            include_borrowed=True))
                     except Exception:
                         _nv = _ready_min
                     if _nv < _ready_min:
