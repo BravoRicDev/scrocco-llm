@@ -3024,20 +3024,24 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             except BaseException:
                 results[f] = ("error", [], None, {})
         winner = futA
-    # pulizia: le aperture mai risolte (canary troppo lenti) vengono
-    # annullate per non lasciare task orfane.
-    for _t in list(_tasks):
-        if not _t.done():
-            _t.cancel()
-    if _tasks:
-        await asyncio.gather(*list(_tasks), return_exceptions=True)
-        _tasks.clear()
+    # REGOLA UTENTE: mai bloccare in volo e mai buttare via un canary — le
+    # aperture ancora in corso NON vengono annullate: restano in background e,
+    # appena arrivano le headers, la loro attesa entra in gara come probe reale
+    # (chi consegna va in warm, anche se lento).
+    def _handover_late(race):
+        for _t in list(_tasks):
+            _tasks.pop(_t, None)
+            _pt = asyncio.ensure_future(
+                _probe_late_open(_t, session, ctx, hold, race))
+            _PROBE_TASKS.add(_pt)
+            _pt.add_done_callback(_PROBE_TASKS.discard)
     # ---------------------------------------------------------- A vince ----
     if winner is futA:
         if not canaries:
             metrics.inc("nx_hedge_total", ("no_canary",))
         metrics.inc("nx_hedge_total", ("won_a",))
         _race = (dep["unique"], max(0.0, (time.monotonic() - t_att) * 1000.0))
+        _handover_late(_race)
         for c in canaries:
             _spawn_probe(c["dep"], c["gen"], c["fut"], results.get(c["fut"]),
                          session, ctx, hold, wake=bool(c.get("wake")),
@@ -3062,6 +3066,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     # A NON viene annullata: finisce la sua risposta in background come probe
     # reale (se consegna pulita entra in warm, altrimenti si scarta).
     _race = (w["dep"]["unique"], max(0.0, (time.monotonic() - w["t0"]) * 1000.0))
+    _handover_late(_race)
     _spawn_probe(dep, gen, futA, results.get(futA), session, ctx, hold,
                  t0=t_att, race=_race)
     for c in canaries:
@@ -3246,6 +3251,25 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
     t = asyncio.ensure_future(_run())
     _PROBE_TASKS.add(t)
     t.add_done_callback(_PROBE_TASKS.discard)
+
+
+async def _probe_late_open(open_task, session, ctx, hold: bool,
+                           race: tuple[str, float] | None) -> None:
+    """Apertura di un canary conclusa DOPO la fine della gara.
+
+    L'apertura era rimasta in volo (headers lente): NON la si annulla — si
+    aspetta il record e lo si stacca come probe reale, cosi' chi consegna
+    entra comunque nel warm della sessione (regola utente: qualsiasi canary
+    deve poter portare a segno, anche se lento; mai bloccare la risposta).
+    """
+    rec = None
+    with contextlib.suppress(BaseException):
+        rec = await open_task
+    if not rec:
+        return
+    _spawn_probe(rec["dep"], rec["gen"], rec["fut"], None, session, ctx,
+                 hold, wake=bool(rec.get("wake")), t0=rec.get("t0"),
+                 race=race)
 
 
 def _spawn_wake_sweep(payload: dict, profile: str | None, cur_dep: dict,

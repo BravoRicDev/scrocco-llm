@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 
 import app.main as M
 from app.config import GatewayConfig
@@ -210,3 +211,88 @@ def test_stream_slow_race_parte_con_apertura_refill_lenta(monkeypatch,
     assert any("[slow-race]" in rec.getMessage() for rec in caplog.records), \
         "il timer deve scattare comunque"
     assert router.is_cooled_down(a["unique"]) is False
+
+
+class _FwdDelay:
+    """A ritarda il primo byte; `open_delay_dep` consegna le headers dopo
+    `open_delay` (apertura lenta, come un provider che tarda a rispondere)."""
+
+    def __init__(self, slow_dep, open_delay_dep, first_content=0.3,
+                 close_after=0.1, open_delay=0.5):
+        self.slow = slow_dep
+        self.delay = open_delay_dep
+        self.first_content = first_content
+        self.close_after = close_after
+        self.open_delay = open_delay
+        self.calls = []
+
+    async def stream_response(self, d, payload, **kw):
+        self.calls.append(d["unique"])
+        if d["unique"] == self.delay:
+            await asyncio.sleep(self.open_delay)      # headers LENTE
+        if d["unique"] == self.slow:
+            async def _g():
+                await asyncio.sleep(self.first_content)
+                yield _chunk({"choices": [
+                    {"index": 0, "delta": {"content": "sto arrivando"},
+                     "finish_reason": None}]})
+                await asyncio.sleep(self.close_after)
+                yield _chunk({"choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                yield b"data: [DONE]\n\n"
+            return _g()
+
+        async def _g2():
+            yield _sse("ok")
+        return _g2()
+
+
+def test_stream_canary_in_volo_non_viene_cancellato(monkeypatch, caplog):
+    """REGRESSIONE: apertura PRE-looop bloccante + canary mai cancellato.
+
+    A ritarda il primo byte (0.3s) e chiude (0.4s) DURANTE l'apertura lenta
+    (0.5s) del canary classico: col codice VECCHIO il primo `asyncio.wait`
+    trovava futA gia' completo, il `break` sul vincitore scavalcava il timer
+    e `[slow-race]` non compariva mai. Inoltre il canary rimasto in volo NON
+    deve essere cancellato: se consegna, entra in warm (regola utente).
+    """
+    cfg, router, by_key = _mk(_HDR + _ROW_A + _ROW_R + _ROW_G, slow_ms=100)
+    a, r, g = by_key["K-A"], by_key["K-R"], by_key["K-G"]
+    _n = {"h": 0}
+
+    def _hedge(*a_, **k):
+        _n["h"] += 1
+        return [r] if _n["h"] == 1 else [g]
+    monkeypatch.setattr(router, "hedge_canaries", _hedge)
+    monkeypatch.setattr(router, "warm_fill_canary", lambda *a_, **k: [])
+    monkeypatch.setattr(router, "warm_wake_canary", lambda *a_, **k: None)
+    warmed: list[str] = []
+    monkeypatch.setattr(router, "note_warm_owner",
+                        lambda sid, u: warmed.append(u))
+    fwd = _FwdDelay(a["unique"], r["unique"], first_content=0.3,
+                    close_after=0.1, open_delay=0.5)
+    monkeypatch.setattr(M, "router", router)
+    monkeypatch.setattr(M, "config", cfg)
+    monkeypatch.setattr(M, "forwarder", fwd)
+
+    async def _run():
+        with caplog.at_level(logging.INFO, logger="nx.main"):
+            resp = await M._stream_with_fallback(
+                "test", a, _PAYLOAD, need=frozenset({"text"}), scope="chain")
+            out = b""
+            async for chunk in resp.body_iterator:
+                out += chunk if isinstance(chunk, bytes) else chunk.encode()
+        t0 = time.monotonic()          # attende l'handover dei canary in volo
+        while M._PROBE_TASKS and time.monotonic() - t0 < 3.0:
+            await asyncio.sleep(0.02)
+        return out
+
+    out = asyncio.run(_run())
+    assert any("[slow-race]" in rec.getMessage() for rec in caplog.records), \
+        "il timer deve scattare anche con l'apertura di un canary bloccata"
+    assert g["unique"] in fwd.calls, "il canario del timer deve partire"
+    assert r["unique"] in fwd.calls, "il canary classico era stato aperto"
+    assert r["unique"] in warmed, \
+        "il canary in volo NON va cancellato: se consegna entra in warm"
+    assert _content_of(out) == "ok"
+
