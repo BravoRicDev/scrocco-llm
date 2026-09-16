@@ -54,9 +54,12 @@ class TestMessage:
             "function": {"name": "bash", "arguments": "{}"}}])
         assert message_fake_pattern(data, _payload(), FakeCallConfig()) is None
 
-    def test_ignore_without_tools(self):
+    def test_rileva_anche_senza_tools(self):
+        # Richiesta esplicita 2026-09-16: i marker di tool-call testuali
+        # vengono bloccati SEMPRE, anche se la richiesta non dichiara `tools`.
         assert message_fake_pattern(_msg("<edit>x</edit>"),
-                                    _payload(False), FakeCallConfig()) is None
+                                    _payload(False),
+                                    FakeCallConfig()) == "<edit>"
 
     def test_content_list_parts(self):
         data = _msg([{"type": "text", "text": "<bash> ls"}])

@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 
 log = logging.getLogger("nx.texttoolparse")
 
-DEFAULT_FORMATS: tuple[str, ...] = ("tool_call_json", "function_xml",
-                                    "antml", "argkv", "bare_json")
+DEFAULT_FORMATS: tuple[str, ...] = ("tool_call_json", "nemotron",
+                                    "function_xml", "antml", "argkv",
+                                    "bare_json")
 
 
 class TextToolcallConfig:
@@ -86,7 +87,16 @@ _ANTML_FN = re.compile(
     r"antml:invoke\s+name\s*=\s*\"([^\"]+)\"(.*?)(?:</antml:invoke>|$)", re.S)
 _ANTML_PARAM = re.compile(
     r"<parameter\s+name\s*=\s*\"([^\"]+)\"[^>]*>(.*?)</parameter>", re.S)
-_TOOLCALL_TAG = re.compile(r"<tool_call>(.*?)</tool_call>", re.S)
+_TOOLCALL_TAG = re.compile(
+    r"(?:<tool_call>|<\|tool_call>)(.*?)(?:</tool_call>|<tool_call\|>)", re.S)
+# Formato NATIVO Nemotron/Ling: `<|tool_call>call:NAME{key:<|"|>v<|"|>}<tool_call|>`
+_QUOTE_TOK = re.escape('<|"|>')
+_NEMOTRON_CALL = re.compile(
+    r"<\|tool_call>\s*call:\s*([A-Za-z0-9_.:\-]+)\s*\{(.*?)\}\s*"
+    r"(?:<tool_call\|>|</tool_call>|<\|tool_call>|$)", re.S)
+_NEMOTRON_PARAM = re.compile(
+    r"([A-Za-z0-9_\-]+)\s*:\s*(?:" + _QUOTE_TOK + r"(.*?)" + _QUOTE_TOK
+    + r"|([^,}]+))", re.S)
 _ARGKV = re.compile(
     r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
 _NAME_ATTR = re.compile(r"name\s*=\s*[\"']([^\"']+)[\"']")
@@ -203,6 +213,24 @@ def _toolcall_json_calls(content: str) -> list[dict]:
     return calls
 
 
+def _nemotron_calls(content: str) -> list[dict]:
+    """Formato nativo Nemotron/Ling: `<|tool_call>call:NAME{...}<tool_call|>`.
+
+    Normalizza anche il nome: opencode/Nemotron a volte lo espongono come
+    `tool_<id>_<nome>` (id interno del client) -> si recupera `<nome>`.
+    """
+    calls: list[dict] = []
+    for m in _NEMOTRON_CALL.finditer(content):
+        name = re.sub(r"^tool_[A-Za-z0-9]+_", "", m.group(1).strip())
+        args = {}
+        for k, qv, bv in _NEMOTRON_PARAM.findall(m.group(2)):
+            args[k] = _coerce_value(qv if qv is not None else bv)
+        c = _call(name, args)
+        if c:
+            calls.append(c)
+    return calls
+
+
 def _argkv_calls(content: str) -> list[dict]:
     kvs = _ARGKV.findall(content)
     if not kvs:
@@ -248,6 +276,7 @@ _PARSERS = {
     "function_xml": _xml_calls,
     "antml": _antml_calls,
     "tool_call_json": _toolcall_json_calls,
+    "nemotron": _nemotron_calls,
     "argkv": _argkv_calls,
     "bare_json": _bare_json_calls,
 }
@@ -323,6 +352,7 @@ def apply_to_message(message: dict, tools, cfg: TextToolcallConfig):
 # coppie (apertura, chiusura). La chiusura mancante = risposta troncata/finta.
 _TOOLCALL_PAIRS: tuple[tuple[str, str], ...] = (
     ("<tool_call>", "</tool_call>"),
+    ("<|tool_call>", "<tool_call|>"),
     ("<function_call>", "</function_call>"),
     ("<tool_calls>", "</tool_calls>"),
     ("<function_calls>", "</function_calls>"),
@@ -335,7 +365,7 @@ _TOOLCALL_PAIRS: tuple[tuple[str, str], ...] = (
 # potrebbe ancora formarsi nel chunk successivo -> si trattiene la coda.
 _PARTIAL_OPENERS: tuple[str, ...] = (
     "<tool_call>", "<function_call>", "<tool_calls>", "<function_calls>",
-    "<function=", "antml:invoke", "</function>", "<invoke",
+    "<function=", "antml:invoke", "</function>", "<invoke", "<|tool_call>",
 )
 
 

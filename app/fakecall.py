@@ -24,6 +24,9 @@ import logging
 log = logging.getLogger("nx.fakecall")
 
 # Pattern XML/antml molto specifici: il modello "scrive" la chiamata.
+# Include anche i marker NATIVI dei template con pipe (NVIDIA Nemotron /
+# Ling-inclusionAI): il modello li emette come TESTO nel content/reasoning,
+# es. `<|tool_call>call:tool_x_read{filePath:<|"|>/tmp/a<|"|>}<tool_call|>`.
 DEFAULT_PATTERNS: tuple[str, ...] = (
     "<arg_key>",
     "<arg_value>",
@@ -44,7 +47,19 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     "<write",
     "</write>",
     "antml:",
+    # --- marker nativi con pipe (Nemotron/Ling) ---
+    "<|tool_response>",
+    "<tool_response|>",
+    "<|tool_calls>",
+    "<tool_calls|>",
+    "<|tool_call>",
+    "<tool_call|>",
+    "<|tool",
 )
+
+# Token di virgoletta del template Nemotron: da SOSTITUIRE (non rimuovere)
+# con una virgoletta normale, cosi' il testo resta leggibile.
+QUOTE_TOKEN = '<|"|>'
 
 FAKE_CALL_REASON = "tool_call reso come testo"
 
@@ -117,6 +132,96 @@ def looks_like_fake_tool_call(text, cfg: FakeCallConfig | None = None) -> str | 
     return None
 
 
+# --------------------------------------------- sanitizzazione (STRIP token)
+# GARANZIA "MAI NELLA RISPOSTA": questi marker di template non devono MAI
+# comparire nel `content` consegnato al client, in nessun caso (nemmeno sul
+# bucket di escalation, dove la rotazione e' disattivata per non fare loop).
+# Il reasoning NON viene toccato: li' i token non fanno danno.
+_STRIP_ORDER: tuple[str, ...] = tuple(
+    sorted(set(DEFAULT_PATTERNS), key=len, reverse=True))
+# Token da tenere in hold (inclusa la virgoletta, che viene SOSTITUITA): un
+# marker spezzato tra due chunk non deve mai sfuggire.
+_HOLD_TOKENS: tuple[str, ...] = tuple(
+    sorted(set(DEFAULT_PATTERNS) | {QUOTE_TOKEN}, key=len, reverse=True))
+
+
+def strip_template_tokens(text):
+    """Rimuove i marker di tool-call testuali dal testo (idempotente)."""
+    if not isinstance(text, str) or not text:
+        return text
+    out = text.replace(QUOTE_TOKEN, '"')
+    for tok in _STRIP_ORDER:
+        if tok and tok in out:
+            out = out.replace(tok, "")
+    return out
+
+
+class TemplateTokenStripper:
+    """Rimuove i marker dal content gestendo token spezzati tra chunk SSE.
+
+    `feed(text)` ritorna il testo "sicuro" da emettere (trattenendo una coda
+    che potrebbe essere il prefisso di un marker); `flush()` svuota la coda
+    residua a fine stream.
+    """
+
+    MAX_TAIL = max((len(t) for t in _HOLD_TOKENS), default=0) - 1
+
+    def __init__(self):
+        self.tail = ""
+
+    def feed(self, text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        s = self.tail + text
+        keep = 0
+        limit = min(len(s), self.MAX_TAIL)
+        for k in range(limit, 2, -1):
+            frag = s[-k:]
+            if any(t.startswith(frag) for t in _HOLD_TOKENS):
+                keep = k
+                break
+        if not keep and len(s) >= 2 and s[-2:] == "<|":
+            keep = 2                      # prefisso minimo dei marker nativi
+        if keep:
+            body, self.tail = s[:-keep], s[-keep:]
+        else:
+            body, self.tail = s, ""
+        return strip_template_tokens(body)
+
+    def flush(self) -> str:
+        if not self.tail:
+            return ""
+        out = strip_template_tokens(self.tail)
+        self.tail = ""
+        return out
+
+
+def sanitize_message(message: dict) -> bool:
+    """STRIP dei marker nel `content` di un messaggio assistant (in-place).
+
+    Ritorna True se il contenuto e' cambiato. Non tocca tool_calls/reasoning.
+    """
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        new = strip_template_tokens(content)
+        if new != content:
+            message["content"] = new
+            return True
+        return False
+    if isinstance(content, list):
+        changed = False
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                new = strip_template_tokens(part["text"])
+                if new != part["text"]:
+                    part["text"] = new
+                    changed = True
+        return changed
+    return False
+
+
 def _content_text(message: dict):
     """Estrae il testo da `content` (stringa o lista di parti)."""
     content = message.get("content")
@@ -139,11 +244,12 @@ def message_fake_pattern(data: dict, payload: dict,
                          cfg: FakeCallConfig) -> str | None:
     """Pattern fake rilevato in una risposta NON-streaming, o None.
 
-    Si attiva solo se la richiesta dichiara `tools`, la risposta NON ha
-    `tool_calls` strutturati e il content contiene un pattern di tool-call
-    testuale.
+    Si attiva se la risposta NON ha `tool_calls` strutturati e il content
+    contiene un pattern di tool-call testuale. NON richiede piu' che la
+    richiesta dichiari `tools`: i marker di template (Nemotron/Ling) possono
+    comparire anche senza tools dichiarati e vanno comunque bloccati.
     """
-    if not cfg.enabled or not payload.get("tools"):
+    if not cfg.enabled:
         return None
     try:
         message = data["choices"][0]["message"]

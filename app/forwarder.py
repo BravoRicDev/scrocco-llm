@@ -61,7 +61,7 @@ from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          TruncatedToolcallSSEFilter, create_tool_repair_config,
                          repair_tool_calls)
 from .fakecall import (fake_config_from_policy, is_escalation_group,
-                       message_fake_pattern)
+                       message_fake_pattern, sanitize_message)
 from .histnorm import hist_config_from_policy, normalize_messages
 from .sampling import (sampling_config_from_policy,
                        apply_sampling_defaults, response_loop_reason,
@@ -3592,31 +3592,48 @@ truncation_hook=None,
                         503, "loop rilevato, catena esaurita",
                         final=True)
                 # ---- FAKE TOOL-CALL: tool-call reso come testo ----
-                if (_fc.enabled and payload.get("tools") and not _text_parsed
-                        and not is_escalation_group(
-                            dep.get("group"), router.config.go_suffix,
-                            router.config.fallback_suffix)):
+                if _fc.enabled and not _text_parsed:
                     _pat = message_fake_pattern(data, payload, _fc)
                     if _pat:
                         metrics.inc("nx_fake_toolcall_total", (cur, "detected"))
-                        log.warning("[fake-tool-call] %s: tool-call reso come "
-                                    "testo (pattern=%s), escalation", cur, _pat)
-                        _fail_cur(reason="fake_tool_call")
-                        last_broken = (data, dep)
-                        fake_escalations += 1
-                        if fake_escalations <= _fc.max_escalations:
-                            nxt = router.force_escalation(
-                                dep, need, ctx, tried=tried) \
-                                if profile else None
-                            if nxt is not None:
-                                dep = nxt
-                                continue
-                        raise UpstreamError(
-                            503, "fake tool-call: catena di escalation "
-                                 "esaurita", final=True)
+                        _esc = is_escalation_group(
+                            dep.get("group"), router.config.go_suffix,
+                            router.config.fallback_suffix)
+                        if _esc:
+                            # sul bucket di escalation non c'e' dove ruotare:
+                            # si logga e si lascia al sanitizzatore (strip).
+                            log.warning("[fake-tool-call] %s: tool-call reso come "
+                                        "testo (pattern=%s) su bucket di "
+                                        "escalation -> strip", cur, _pat)
+                        else:
+                            log.warning("[fake-tool-call] %s: tool-call reso come "
+                                        "testo (pattern=%s), escalation", cur, _pat)
+                            # ROTAZIONE SENZA PENALITA': nessun _fail_cur
+                            # (il modello ha solo reso la chiamata come testo).
+                            last_broken = (data, dep)
+                            fake_escalations += 1
+                            if fake_escalations <= _fc.max_escalations:
+                                nxt = router.force_escalation(
+                                    dep, need, ctx, tried=tried) \
+                                    if profile else None
+                                if nxt is not None:
+                                    dep = nxt
+                                    continue
+                            raise UpstreamError(
+                                503, "fake tool-call: catena di escalation "
+                                     "esaurita", final=True)
                 # successo pulito: se siamo atterrati su un gruppo piu' alto
                 # rispetto a quello richiesto, ricorda il winner (scorciatoia
                 # per le prossime richieste su QUEL bucket richiesto).
+                # STRIP dei marker di template (Nemotron/Ling): non devono mai
+                # comparire nel content consegnato (nemmeno su -go/-fallback).
+                try:
+                    _msg = ((data or {}).get("choices") or [{}])[0].get(
+                        "message") if isinstance(data, dict) else None
+                    if isinstance(_msg, dict) and sanitize_message(_msg):
+                        metrics.inc("nx_template_tokens_stripped_total", (cur,))
+                except Exception:
+                    pass
                 log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", cur, len(tried), time.monotonic() - _t0)
                 _q = 0.6 if _text_parsed else (
                     0.7 if tr_result.get("repaired") else 1.0)

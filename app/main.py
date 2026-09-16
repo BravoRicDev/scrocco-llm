@@ -2046,6 +2046,68 @@ def _sse_data_objs(chunk: bytes):
             continue
 
 
+def _strip_sse_content(chunk: bytes, stripper) -> bytes:
+    """STRIP dei marker di template (Nemotron/Ling) da `delta.content` in SSE.
+
+    GARANZIA: i marker di tool-call testuali non devono MAI raggiungere il
+    client. Il `stripper` e' stateful (gestisce token spezzati tra chunk).
+    Il `reasoning_content` NON viene toccato.
+    """
+    if not isinstance(chunk, bytes) or b'"content"' not in chunk:
+        return chunk
+    out_lines = []
+    changed = False
+    for line in chunk.split(b"\n"):
+        st = line.strip()
+        if not st.startswith(b"data:"):
+            out_lines.append(line)
+            continue
+        body = st[5:].strip()
+        if not body or body == b"[DONE]":
+            out_lines.append(line)
+            continue
+        try:
+            obj = json.loads(body)
+        except Exception:
+            out_lines.append(line)
+            continue
+        hit = False
+        terminal = False
+        for ch in (obj.get("choices") or []) if isinstance(obj, dict) else []:
+            if not isinstance(ch, dict):
+                continue
+            if ch.get("finish_reason"):
+                terminal = True
+            d = ch.get("delta")
+            if isinstance(d, dict) and isinstance(d.get("content"), str):
+                new = stripper.feed(d["content"])
+                if new != d["content"]:
+                    d["content"] = new
+                    hit = True
+        if terminal and getattr(stripper, "tail", None):
+            flushed = stripper.flush()
+            if flushed:
+                for ch in (obj.get("choices") or []):
+                    d = ch.get("delta") if isinstance(ch, dict) else None
+                    if isinstance(d, dict) and isinstance(d.get("content"), str):
+                        d["content"] = d["content"] + flushed
+                        hit = True
+                        break
+                else:
+                    try:
+                        obj["choices"][0].setdefault("delta", {})["content"] = flushed
+                        hit = True
+                    except Exception:
+                        pass
+        if hit:
+            out_lines.append(b"data: " + json.dumps(
+                obj, ensure_ascii=False).encode("utf-8"))
+            changed = True
+        else:
+            out_lines.append(line)
+    return b"\n".join(out_lines) if changed else chunk
+
+
 def _delta_has_content(obj) -> bool:
     """True se un oggetto chunk OpenAI-style porta contenuto reale
     (answer, reasoning o tool_call)."""
@@ -3125,7 +3187,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     # Tool repair config per streaming
     from .toolrepair import create_tool_repair_config
     from .fakecall import (fake_config_from_policy, is_escalation_group,
-                           looks_like_fake_tool_call)
+                           looks_like_fake_tool_call, TemplateTokenStripper)
     _tr_cfg = create_tool_repair_config({
         "tool_repair": {
             "enabled": router.policy.tool_repair_enabled,
@@ -3461,19 +3523,27 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     log.warning("[text-toolcall] stream %s: %d "
                                 "tool-call recuperati dal testo",
                                 dep["unique"], len(_parsed))
-            if (verdict == "content" and _fc.enabled and payload.get("tools")
-                    and not is_escalation_group(
-                        dep.get("group"), router.config.go_suffix,
-                        router.config.fallback_suffix)):
+            if (verdict == "content" and _fc.enabled):
                 _pat = looks_like_fake_tool_call(
                     _buffered_answer_text(prebuf), _fc)
                 if _pat:
                     metrics.inc("nx_fake_toolcall_total", (dep["unique"], "detected"))
-                    log.warning("[fake-tool-call] stream %s: tool-call reso "
-                                "come testo (pattern=%s), escalation",
-                                dep["unique"], _pat)
-                    _quality = 0.3
-                    verdict = "fake_tool_call"
+                    _esc = is_escalation_group(
+                        dep.get("group"), router.config.go_suffix,
+                        router.config.fallback_suffix)
+                    if _esc:
+                        # sul bucket di escalation non c'e' dove ruotare senza
+                        # loop: si logga e si lascia al sanitizzatore (strip dei
+                        # marker), cosi' il client non li vede mai.
+                        log.warning("[fake-tool-call] stream %s: tool-call reso "
+                                    "come testo (pattern=%s) su bucket di "
+                                    "escalation -> strip", dep["unique"], _pat)
+                    else:
+                        log.warning("[fake-tool-call] stream %s: tool-call reso "
+                                    "come testo (pattern=%s), escalation",
+                                    dep["unique"], _pat)
+                        _quality = 0.3
+                        verdict = "fake_tool_call"
             if verdict == "content":
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
@@ -3535,7 +3605,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 if verdict == "timeout":
                     _fail(dep["unique"], reason="timeout")
                 elif verdict == "fake_tool_call":
-                    _fail(dep["unique"], reason="fake_tool_call")
+                    # ROTAZIONE SENZA PENALITA' (richiesta esplicita): il modello
+                    # non e' rotto, ha solo reso la chiamata come testo ->
+                    # nessun cooldown/streak, si ruota e basta.
+                    log.info("[fake-tool-call] %s: rotazione senza cooldown",
+                             dep["unique"])
                 else:
                     _fail(dep["unique"], seconds=_soft_cd(
                         router.stats_for(dep["unique"]).fail_count_24h))
@@ -4113,21 +4187,28 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
 
         try:
             monitor = asyncio.create_task(_watch_disconnect())
+            # STRIP dei marker di template (Nemotron/Ling): nessun marker di
+            # tool-call testuale deve arrivare al client (anche sul bucket di
+            # escalation, dove non ruotiamo).
+            _stripper = TemplateTokenStripper()
             # (D2/B) ordine: prima il prebuffer gia' letto da _peek_stream, poi
             # l'eventuale lettura rimasta in volo (`pending`), poi il resto.
             for chunk in prebuf:
-                yield _ingest(chunk)
+                yield _strip_sse_content(_ingest(chunk), _stripper)
             if pending is not None:
                 try:
-                    yield _ingest(await pending)
+                    yield _strip_sse_content(_ingest(await pending), _stripper)
                 except StopAsyncIteration:
                     finished = True
                 except Exception:
                     gen_broken = True     # upstream rotto a meta' frame
             if not finished and not gen_broken:
                 async for chunk in gen:
-                    yield _ingest(chunk)
+                    yield _strip_sse_content(_ingest(chunk), _stripper)
                 finished = True             # StopAsyncIteration: stream chiuso
+            if _stripper.tail:
+                log.debug("[strip-tokens] coda residua scartata a fine stream "
+                          "(len=%d)", len(_stripper.tail))
         except (GeneratorExit, asyncio.CancelledError):
             # disconnessione client o aborted dal monitor: chiudi l'upstream e
             # non punire il deployment (e' il client che e' andato via).
