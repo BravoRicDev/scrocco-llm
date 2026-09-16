@@ -5924,15 +5924,28 @@ class Router:
         if cur:
             tiers.append((cur_mxi, cur_g, cur))
         tiers.sort(key=lambda t: (t[1] == a_group, t[0]))
+        # ORDINE ANTI-RAFFICA: tutti i candidati eleggibili vengono ordinati
+        # col round-robin provider x slot-chiave (`_canary_sweep`) e POI
+        # validati uno a uno con `_walk_chain` (che mantiene i filtri reali).
+        _all: list[str] = []
+        for _mxi, _g, us in tiers:
+            _all.extend(us)
+        _cands: list[dict] = []
+        _seen: set[str] = set()
+        for u in _all:
+            if u in _seen:
+                continue
+            _seen.add(u)
+            d = self.config.deployment_by_unique(u)
+            if d is not None:
+                _cands.append(d)
         out: list[dict] = []
         taken: set[str] = set()
-        for _mxi, _g, us in tiers:
+        for d in self._canary_sweep(_cands, self._tiers_of(ex)):
             if len(out) >= k:
                 break
-            if fresh_only:
-                us = sorted(us, key=lambda u: self.usage_weight_24h(u))
-            got = self._walk_chain(us, None, need, ctx, tried=ex,
-                                   out_tokens=out_tokens)
+            got = self._walk_chain([d["unique"]], None, need, ctx,
+                                   tried=ex, out_tokens=out_tokens)
             if got is not None and got["unique"] not in taken:
                 taken.add(got["unique"])
                 ex.add(got["unique"])
@@ -6682,6 +6695,106 @@ class Router:
         except Exception:                              # noqa: BLE001
             return _tier[0]
 
+    def _sweep_provider_key(self, cands: list[dict],
+                            sampled_tiers: set[int] | None = None
+                            ) -> list[dict]:
+        """Round-robin PROVIDER x CHIAVE (regola utente): in ogni giro si
+        prende il candidato MIGLIORE di OGNI provider (in ordine stabile per
+        dim-fit) usando una chiave del provider NON ancora usata nel giro, poi
+        si passa al giro successivo (prov1/chiave2, prov2/chiave2, ...).
+        Dentro il provider l'ordine e' dim-fit > tier `order` > reputation >
+        uso 24h, cosi' si SCAVA la -dim richiesta prima di salire e si alternano
+        le chiavi (mai martellare la stessa). INDIPENDENTE dal modello."""
+        if not cands:
+            return []
+        by_prov: dict[str, list[dict]] = {}
+        p_fit: dict[str, tuple] = {}
+        for d in cands:
+            p = str(d.get("provider") or "")
+            by_prov.setdefault(p, []).append(d)
+            try:
+                _fit = self._group_dim_order_key(str(d.get("group") or ""))
+            except Exception:                          # noqa: BLE001
+                _fit = (1, 0)
+            _cur = p_fit.get(p)
+            if _cur is None or _fit < _cur:
+                p_fit[p] = _fit
+        provs = sorted(by_prov, key=lambda p: (p_fit.get(p, (1, 0)), p))
+
+        _sam = {int(t) for t in (sampled_tiers or ())}
+
+        def _key(d: dict):
+            try:
+                return (self._group_dim_order_key(str(d.get("group") or "")),
+                        1 if int(d.get("order", ORDER_LAST)) in _sam else 0,
+                        int(d.get("order", ORDER_LAST)),
+                        self._reputation_score(d["unique"], d, None),
+                        self.usage_weight_24h(d["unique"]))
+            except Exception:                          # noqa: BLE001
+                return ((1, 0), 1, ORDER_LAST, 0.0, 0.0)
+
+        queues = {p: sorted(by_prov[p], key=_key) for p in provs}
+        used_keys: dict[str, set] = {p: set() for p in provs}
+        remaining = sum(len(q) for q in queues.values())
+        out: list[dict] = []
+        while remaining > 0:
+            progressed = False
+            for p in provs:
+                q = queues[p]
+                if not q:
+                    continue
+                pick = None
+                for d in q:                            # prima chiave libera
+                    k = str(d.get("api_key") or "")
+                    if k not in used_keys[p]:
+                        pick = d
+                        break
+                if pick is None:                       # tutte le chiavi usate
+                    pick = q[0]
+                used_keys[p].add(str(pick.get("api_key") or ""))
+                q.remove(pick)
+                out.append(pick)
+                remaining -= 1
+                progressed = True
+            if not progressed:                         # noqa: SIM103
+                break
+        return out
+
+    def _canary_sweep(self, cands: list[dict],
+                      sampled_tiers: set[int] | None = None) -> list[dict]:
+        """Ordine ANTI-RAFFICA per la RICERCA dei canary (imbuto):
+          1) esclude i provider GIA' IN USO (warm/probe/inflight, ogni sessione);
+          2) esclude le singole api_key GIA' IN USO e i dep gia' in warm di
+             QUALSIASI sessione;
+          3) round-robin provider x slot-chiave su cio' che avanza;
+          4) FASCIA 2: se la fascia pulita e' vuota, riammette i provider in
+             uso ma SOLO con chiavi diverse da quelle in uso (mai la stessa).
+        I candidati arrivano gia' filtrati (FREE/cap/ctx/need/deliverable)."""
+        if not cands:
+            return []
+        if not getattr(self.policy, "canary_provider_sweep_enabled", True):
+            return list(cands)
+        # `canary_warm_last=False` = legacy: nessuna separazione per provider
+        # (resta solo l'esclusione delle chiavi in uso / dep in warm).
+        if getattr(self.policy, "canary_warm_last", True):
+            p_used = self._warm_providers()
+        else:
+            p_used = set()
+        k_used = self._in_use_keys()
+        clean: list[dict] = []
+        tail: list[dict] = []
+        for d in cands:
+            u = d.get("unique")
+            if not u or self._owned_by_any_session(u):
+                continue                               # gia' in warm: mai
+            k = str(d.get("api_key") or "")
+            if k and k in k_used:
+                continue                               # chiave in uso: mai
+            p = str(d.get("provider") or "")
+            (tail if p in p_used else clean).append(d)
+        return (self._sweep_provider_key(clean, sampled_tiers)
+                + self._sweep_provider_key(tail, sampled_tiers))
+
     # ---------------------------------- MODELLI PREFERITI nei bucket -go/-fb
     def _go_pref(self) -> list[str]:
         raw = str(getattr(self.policy, "go_preferred_models", "") or "")
@@ -6808,24 +6921,18 @@ class Router:
         # dimensione: senza questo, una -dim piu' profonda con `order` basso
         # veniva sondata prima di finire quella richiesta.
         _order.sort(key=self._group_dim_order_key)
-        # PRIMA passata: candidati di provider NON ancora in warm (tutte le -dim).
+        # ORDINE ANTI-RAFFICA: tutti i candidati eleggibili (provider nuovi +
+        # coda provider-in-uso) vengono ordinati col round-robin provider x
+        # slot-chiave (`_canary_sweep`) e si prende il PRIMO.
+        _cands: list[dict] = []
         for g in _order:
-            _c = _by.get(g)
-            if _c:
-                _pick = self._canary_cold_pick(
-                    _c, ctx, _sam0 | self._tiers_of(ex, g))
-                if _pick is not None:
-                    return _pick
-        # SECONDA passata (CODA): solo se nessun provider nuovo ha dato nulla.
-        if _last:
-            for g in _order:
-                _c = _by_tail.get(g)
-                if _c:
-                    _pick = self._canary_cold_pick(
-                        _c, ctx, _sam0 | self._tiers_of(ex, g))
-                    if _pick is not None:
-                        return _pick
-        return None
+            _cands.extend(_by.get(g) or [])
+        for g in _order:
+            _cands.extend(_by_tail.get(g) or [])
+        if not _cands:
+            return None
+        _ord = self._canary_sweep(_cands, _sam0 | self._tiers_of(ex))
+        return _ord[0] if _ord else None
 
     def session_api_keys(self) -> set[str]:
         """api_key dei dep posseduti da UNA QUALSIASI sessione viva.
@@ -6850,31 +6957,14 @@ class Router:
                 out.add(str(d["api_key"]))
         return out
 
-    def _warm_providers(self) -> set[str]:
-        """Provider (colonna `provider`) attualmente IN USO da UNA QUALSIASI
-        sessione, cioe':
-          1) provider di un dep con OWNER caldo (warm) vivo;
-          2) provider di un PROBE/canaro in volo (non e' ancora owner: quel
-             titolo si acquista al successo, quindi senza questo un'altra
-             chiave dello stesso provider partirebbe subito);
-          3) provider di un dep con una CHIAMATA REALE in corso (inflight>0).
-        Regola utente: le chiavi in warm restano ESCLUSE sempre; un candidato
-        pero' il cui PROVIDER e' gia' in uso non va scartato, va messo in CODA
-        dopo tutti i provider non ancora in uso, cosi' si sfruttano tutti i
-        provider senza martellare gli stessi. Serve a evitare la "rotazione
-        palese": alcuni provider non distinguono la cache per api-key, quindi
-        due chiavi dello stesso provider vedrebbero lo stesso contenuto."""
+    def _in_use_deps(self) -> set[str]:
+        """Unique "IN USO" da UNA QUALSIASI sessione:
+          1) dep con OWNER caldo (warm) vivo;
+          2) dep di un PROBE/canaro in volo (non ancora owner);
+          3) dep con una CHIAMATA REALE in corso (inflight>0).
+        Base comune per l'anti-raffica provider/chiave."""
         out: set[str] = set()
         now = time.time()
-
-        def _add(u: object) -> None:
-            us = str(u or "")
-            if not us:
-                return
-            d = self.config.deployment_by_unique(us)
-            if d and d.get("provider"):
-                out.add(str(d["provider"]))
-
         try:
             guard = self._guard_sec()
         except Exception:                              # noqa: BLE001
@@ -6888,7 +6978,7 @@ class Router:
                     continue
             except Exception:                          # noqa: BLE001
                 continue
-            _add(u)
+            out.add(str(u))
         # 2) PROBE IN VOLO (canari/sveglie, qualsiasi sessione).
         try:
             for _m in list(self._probes().values()):
@@ -6898,17 +6988,38 @@ class Router:
                             continue
                     except Exception:                  # noqa: BLE001
                         continue
-                    _add(u)
+                    out.add(str(u))
         except Exception:                              # noqa: BLE001
             pass
-        # 3) CHIAMATE REALI IN CORSO: stanno popolando la cache di quel
-        #    provider con QUESTO stesso contenuto.
+        # 3) CHIAMATE REALI IN CORSO.
         try:
             for u, s in list(self._stats.items()):
                 if int(getattr(s, "inflight", 0) or 0) > 0:
-                    _add(u)
+                    out.add(str(u))
         except Exception:                              # noqa: BLE001
             pass
+        return out
+
+    def _warm_providers(self) -> set[str]:
+        """Provider (colonna `provider`) attualmente IN USO da UNA QUALSIASI
+        sessione (warm, probe in volo, chiamata in corso). Serve all'anti-
+        raffica: un provider gia' in uso non va martellato con un'altra chiave."""
+        out: set[str] = set()
+        for u in self._in_use_deps():
+            d = self.config.deployment_by_unique(u)
+            if d and d.get("provider"):
+                out.add(str(d["provider"]))
+        return out
+
+    def _in_use_keys(self) -> set[str]:
+        """api_key "IN USO" da UNA QUALSIASI sessione (warm vivo, probe in
+        volo, chiamata in corso): il canary non ricicla una chiave gia'
+        impegnata, nemmeno quando riammette in coda un provider in uso."""
+        out: set[str] = set()
+        for u in self._in_use_deps():
+            d = self.config.deployment_by_unique(u)
+            if d and d.get("api_key"):
+                out.add(str(d["api_key"]))
         return out
 
     def warm_wake_canary(self, profile: str | None, cur_dep: dict,
@@ -7020,24 +7131,16 @@ class Router:
         # dimensione: senza questo, una -dim piu' profonda con `order` basso
         # veniva sondata prima di finire quella richiesta.
         _order.sort(key=self._group_dim_order_key)
-        # PRIMA passata: dormienti di provider NON ancora in warm (tutte le -dim).
+        # ORDINE ANTI-RAFFICA (come il refill): sweep provider x slot-chiave.
+        _cands: list[dict] = []
         for g in _order:
-            _c = _by.get(g)
-            if _c:
-                _pick = self._canary_cold_pick(
-                    _c, ctx, _sam0 | self._tiers_of(ex, g))
-                if _pick is not None:
-                    return _pick
-        # SECONDA passata (CODA): solo se nessun provider nuovo ha dato nulla.
-        if _last:
-            for g in _order:
-                _c = _by_tail.get(g)
-                if _c:
-                    _pick = self._canary_cold_pick(
-                        _c, ctx, _sam0 | self._tiers_of(ex, g))
-                    if _pick is not None:
-                        return _pick
-        return None
+            _cands.extend(_by.get(g) or [])
+        for g in _order:
+            _cands.extend(_by_tail.get(g) or [])
+        if not _cands:
+            return None
+        _ord = self._canary_sweep(_cands, _sam0 | self._tiers_of(ex))
+        return _ord[0] if _ord else None
 
     def initial_pick(self, profile: str | None, group_name: str,
                      need: frozenset[str] | None = None,

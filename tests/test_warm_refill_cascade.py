@@ -1197,8 +1197,9 @@ def test_canary_provider_in_volo_va_in_coda(router_prov):
 
 
 def test_canary_provider_in_volo_soft_ripiega(router_prov):
-    """La coda e' SOFT: mai esclusione totale. Se resta solo un provider in
-    volo, viene comunque scelto (seconda passata)."""
+    """La chiave in uso NON viene MAI riciclata: se resta solo un provider il
+    cui unico dep ha la chiave in volo, il canary non lo riusa (None). Se esiste
+    una SECONDA chiave dello stesso provider, quella rientra (fascia 2)."""
     r = router_prov
     small = _dep(r, f"{BASE}-32k", "K-S")
     mg = _dep(r, f"{BASE}-200k", "K-MG")
@@ -1207,7 +1208,29 @@ def test_canary_provider_in_volo_soft_ripiega(router_prov):
     c = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
                            requested_group=None, exclude_keys=set(),
                            exclude_uniq={mo["unique"]})
-    assert c and c["unique"] == mg["unique"]
+    assert c is None, "chiave in volo: mai riciclata, nessun altro candidato"
+
+
+def test_sweep_alterna_provider_e_chiave(router_prov):
+    """Sweep anti-raffica: prov1/k1, prov2/k1, prov1/k2, prov2/k2 — mai due
+    volte di fila lo stesso provider, e le chiavi di un provider ruotano."""
+    r = router_prov
+    ds = [
+        {"unique": "g1__m__0", "group": f"{BASE}-200k", "provider": "groq",
+         "api_key": "G1", "order": 0, "priority": 5, "model_preference": 0,
+         "max_input_tokens": 200000},
+        {"unique": "g2__m__0", "group": f"{BASE}-200k", "provider": "groq",
+         "api_key": "G2", "order": 0, "priority": 5, "model_preference": 0,
+         "max_input_tokens": 200000},
+        {"unique": "o1__m__0", "group": f"{BASE}-200k", "provider": "openrouter",
+         "api_key": "O1", "order": 0, "priority": 5, "model_preference": 0,
+         "max_input_tokens": 200000},
+        {"unique": "o2__m__0", "group": f"{BASE}-200k", "provider": "openrouter",
+         "api_key": "O2", "order": 0, "priority": 5, "model_preference": 0,
+         "max_input_tokens": 200000},
+    ]
+    seq = [d["unique"] for d in r._sweep_provider_key(ds)]
+    assert seq == ["g1__m__0", "o1__m__0", "g2__m__0", "o2__m__0"]
 
 
 def test_wake_provider_in_volo_va_in_coda(router_prov):

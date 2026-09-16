@@ -823,6 +823,10 @@ class Policy:
     # sessione lo conosce, e la gara sui canary cerca subito un sostituto.
     # Una chiave SATURA (soft-429/fault) resta SEMPRE fuori.
     warm_pool_allow_slow: bool = True
+    # ANTI-RAFFICA CANARY: la ricerca dei canary usa un round-robin
+    # provider x slot-chiave, escludendo prima i provider in uso e poi le
+    # chiavi in uso (i provider in uso rientrano solo con chiavi diverse).
+    canary_provider_sweep_enabled: bool = True
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
     # AUDIT prefisso (F4): impronta del prefisso canonico per sessione, per
@@ -2289,6 +2293,10 @@ class Policy:
             if "warm_pick_fastest" in wp:
                 p.warm_pick_fastest = _coerce_bool(
                     wp["warm_pick_fastest"], "warm_pool.warm_pick_fastest")
+            if "canary_provider_sweep" in wp:
+                p.canary_provider_sweep_enabled = _coerce_bool(
+                    wp["canary_provider_sweep"],
+                    "warm_pool.canary_provider_sweep")
         if raw.get("warm_borrow_enabled") is not None:
             p.warm_borrow_enabled = _coerce_bool(
                 raw["warm_borrow_enabled"], "warm_borrow_enabled")

@@ -326,6 +326,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
 
     async def _run():
         ok = False
+        delivered = False
         raised = None
         try:
             try:
