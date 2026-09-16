@@ -137,6 +137,28 @@ def test_slow_flag_clear_loggato(wr, caplog):
     assert any("NON piu' lento" in r.getMessage() for r in caplog.records)
 
 
+def test_slow_race_ms(wr):
+    assert wr._slow_race_ms() == 45000
+    wr.policy.stream_slow_race_after_ms = 30000
+    wr.policy.nonstream_slow_race_after_ms = 50000
+    assert wr._slow_race_ms() == 30000          # min dei valori positivi
+    wr.policy.stream_slow_race_after_ms = 0
+    wr.policy.nonstream_slow_race_after_ms = 0
+    assert wr._slow_race_ms() == 45000          # fallback
+
+
+def test_marchio_non_pulito_da_successo_lento(wr, caplog):
+    """Un dep marcato lento dal timer resta marcato anche se il successivo
+    successo e' "normale per la sua baseline" (107s): la regola relativa F1
+    da sola non deve riabilitarlo."""
+    s = _dep(wr, f"{BASE}-32k", "K-S")
+    wr.mark_session_slow("s1", s["unique"])
+    with caplog.at_level(logging.INFO, logger="nx.router"):
+        wr.note_session_success("s1", s["unique"], 107000, ctx_est=100)
+    assert wr.is_slow_for_session(s["unique"], "s1", 100) is True
+    assert not any("NON piu' lento" in r.getMessage() for r in caplog.records)
+
+
 def test_warm_pool_knob_off_ordine_legacy(wr):
     s, m, b = _warm3(wr)
     wr.policy.warm_pick_fastest = False

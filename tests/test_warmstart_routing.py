@@ -52,12 +52,14 @@ def test_roundtrip_families(pair):
     r1._dep_sess()[ua] = ("S", now)
     r1._sess_deps()["S"] = {ua}
     r1._sess_slow()["S"] = {ua: (now, False)}
+    r1._sess_slow_timer()["T"] = {ua: now}
     r1._ctx_frontier["S"] = (7, now)
     r1._esc()["scrocco-llm-test-200k"] = (ugo, now)
     snap = r1.dump_routing_state()
     rep = r2.load_routing_state(snap)
     assert rep["sticky"] == 1 and rep["holder"] == 1
     assert rep["warm_owner"] == 1 and rep["session_slow"] == 1
+    assert rep["session_slow_timer"] == 1
     assert rep["ctx_frontier"] == 1 and rep["esc_win"] == 1
     assert r2.dep_sticky_get("S") == ua
     assert r2.session_holder("S") == ua
@@ -66,6 +68,9 @@ def test_roundtrip_families(pair):
     # demote SOFT (hard=False): pesa solo sui contesti > 30k
     assert r2.is_slow_for_session(ua, "S", 50000) is True
     assert r2.is_slow_for_session(ua, "S", 5000) is False
+    # marchio del TIMER (sessione T): sticky e indipendente dal ctx
+    assert r2._sess_slow_timer().get("T", {}).get(ua) == now
+    assert r2.is_slow_for_session(ua, "T", 5000) is True
     # ownership: la sessione possiede ancora ua
     assert r2._dep_sess().get(ua, ("",))[0] == "S"
     assert r2._esc().get("scrocco-llm-test-200k", ("",))[0] == ugo
@@ -88,6 +93,7 @@ def test_garbage_never_crashes(pair):
     junk = {"sticky": {"S": ["g"]}, "session_last_ok": {"S": "nope"},
             "dep_last_session": {"x@y": ["S", "ts"]},
             "session_slow": {"S": {"u": [1e12, True]}},
+            "session_slow_timer": {"S": {"u": 1e12}},
             "ctx_frontier": {"S": ["b", "t"]},
             "esc_win": {"g": ("u", time.time())}}
     assert isinstance(r2.load_routing_state(junk), dict)

@@ -801,6 +801,17 @@ class Router:
             self._session_slow = d
         return d
 
+    def _sess_slow_timer(self) -> dict:
+        """Marchi 'lento' emessi dal TIMER della gara lenta (non dalla
+        euristica F1). Si ripuliscono solo con un successo ASSOLUTAMENTE
+        rapido (< soglia gara lenta): un dep che a 107s e' "normale per la
+        sua baseline" non deve riprendere la prima posizione della warm."""
+        d = getattr(self, "_session_slow_timer", None)
+        if d is None:
+            d = {}
+            self._session_slow_timer = d
+        return d
+
     # ------------------------------------------ ctxcompact watermark
     def ctx_boundary_floor(self, session_id: str | None) -> int:
         """Frontiera MASSIMA gia' applicata (con stub/dedup reali) a questa
@@ -2707,6 +2718,23 @@ class Router:
         return max(float(SLOW_LATENCY_ABS_FLOOR_MS),
                    float(SLOW_LATENCY_REL_MULT) * float(base))
 
+    def _slow_race_ms(self) -> int:
+        """Soglia ASSOLUTA della gara lenta (ms). Serve a decidere quando un
+        marchio "lento" si e' davvero riabilitato: solo un successo PIU'
+        RAPIDO di questa soglia lo ripulisce (la sola regola relativa F1 non
+        basta: un dep lento "di suo", es. 107s con baseline 111s, verrebbe
+        riabilitato subito)."""
+        vals: list[int] = []
+        for nm in ("stream_slow_race_after_ms",
+                   "nonstream_slow_race_after_ms"):
+            try:
+                v = int(getattr(self.policy, nm, 0) or 0)
+            except (TypeError, ValueError):
+                v = 0
+            if v > 0:
+                vals.append(v)
+        return min(vals) if vals else 45000
+
     # ---- caccia al sostituto: budget/backoff (anti-spreco) ---------------
     def hunt_allowed(self, session_id: str | None, ctx_est=None) -> bool:
         """False se per questa sessione/bucket la caccia e' in backoff (una
@@ -2788,6 +2816,14 @@ class Router:
         sid = session_id or current_session()
         if not sid:
             return False
+        # Marchio del TIMER della gara lenta: vale SEMPRE (indipendente da
+        # hard/soft e dal ctx), si ripulisce solo con un successo assoluto.
+        _tm = self._sess_slow_timer().get(sid)
+        if _tm and unique in _tm:
+            if time.time() - float(_tm[unique]) > self._warm_ttl():
+                _tm.pop(unique, None)
+            else:
+                return True
         m = self._sess_slow().get(sid)
         if not m:
             return False
@@ -2824,7 +2860,13 @@ class Router:
         Novita' F1: la demote scatta solo se la chiamata e' lenta ANCHE
         RELATIVAMENTE alla baseline del dep nello STESSO bucket di contesto
         e dello STESSO tipo di misura (`kind`, > SLOW_REL_BASELINE_MULT *):
-        un dep che serve abitualmente 100k in 95s non e' 'lento', e' cosi'."""
+        un dep che serve abitualmente 100k in 95s non e' 'lento', e' cosi'.
+
+        La RIPULITURA invece e' ASSOLUTA: il marchio cade solo con un
+        successo piu' rapido di `_slow_race_ms()` (soglia gara lenta). Cosi'
+        un dep marcato dal timer lento resta in fondo alla warm finche' non
+        dimostra di essere di nuovo veloce, anche se per la sua baseline
+        100s sono "normali"."""
         if not session_id or not unique:
             return
         if not getattr(self.policy, "warm_pool_enabled", True):
@@ -2856,6 +2898,13 @@ class Router:
         soft = (not hard) and lat is not None \
             and lat > max(SOFT_SLOW_LATENCY_MS, _thr * 0.6) \
             and heavy and relative_ok
+        # Marchio del TIMER della gara lenta: NON si ripulisce con la sola
+        # regola relativa (F1), ma solo con un successo ASSOLUTAMENTE rapido
+        # (< soglia gara lenta). Altrimenti un dep lento "di suo" (es. 107s
+        # con baseline 111s) verrebbe riabilitato subito e riprenderebbe la
+        # prima posizione della warm senza motivo.
+        t = self._sess_slow_timer()
+        tm = t.get(session_id)
         if hard or soft:
             _was = unique in (d.get(session_id) or {})
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
@@ -2869,13 +2918,25 @@ class Router:
         else:
             m = d.get(session_id)
             if m:
-                if m.pop(unique, None) is not None:
+                # se c'e' anche il marchio del TIMER, la pulizia la logga quel
+                # ramo sotto (evita doppioni)
+                if m.pop(unique, None) is not None \
+                        and not (tm and unique in tm):
                     metrics.inc("nx_slow_flag_total", ("clear",))
                     log.info("✅ [slow-flag] %s: NON piu' lento per la "
                              "sessione %s (successo rapido)", unique,
                              session_id)
                 if not m:
                     d.pop(session_id, None)
+        if tm and unique in tm:
+            if lat is not None and lat <= self._slow_race_ms():
+                tm.pop(unique, None)
+                metrics.inc("nx_slow_flag_total", ("clear",))
+                log.info("✅ [slow-flag] %s: NON piu' lento per la sessione "
+                         "%s (successo rapido, %.0fms)", unique, session_id,
+                         lat)
+            if not tm:
+                t.pop(session_id, None)
         if len(d) > 4096:
             _ttl = self._warm_ttl() * 4
             _now = time.time()
@@ -2886,6 +2947,16 @@ class Router:
                         m.pop(u, None)
                 if not m:
                     d.pop(sid, None)
+        t = self._sess_slow_timer()
+        if len(t) > 4096:
+            _ttl = self._warm_ttl() * 4
+            _now = time.time()
+            for sid, m in list(t.items()):
+                for u, ts in list(m.items()):
+                    if _now - float(ts) > _ttl:
+                        m.pop(u, None)
+                if not m:
+                    t.pop(sid, None)
 
     def mark_session_slow(self, session_id: str | None,
                           unique: str | None) -> None:
@@ -2911,12 +2982,18 @@ class Router:
             return
         _m = self._sess_slow().setdefault(session_id, {})
         _was = unique in _m
-        _m[unique] = (time.time(), True)
+        now = time.time()
+        _m[unique] = (now, True)
+        # Doppio marchio: `_session_slow` (persistito nel warmstart, visto da
+        # tutti i lettori) + `_session_slow_timer` (STICKY: ripulito solo da
+        # un successo assolutamente rapido, non dalla regola relativa F1).
+        self._sess_slow_timer().setdefault(session_id, {})[unique] = now
         if not _was:
             metrics.inc("nx_slow_flag_total", ("set",))
             log.info("🐢 [slow-flag] %s: marcato LENTO per la sessione %s "
                      "(timer gara lenta; NESSUN cooldown: va in fondo al warm "
-                     "fino al prossimo successo rapido)", unique, session_id)
+                     "fino al prossimo successo RAPIDO < %sms)",
+                     unique, session_id, self._slow_race_ms())
 
     def slow_race_allowed(self, session_id: str | None, profile: str | None,
                           group_name: str | None,
@@ -4587,6 +4664,18 @@ class Router:
                     continue
             if keep:
                 session_slow[str(sid)] = keep
+        dsl_t = self._sess_slow_timer()
+        session_slow_timer = {}
+        for sid, m in (dsl_t or {}).items():
+            keep = {}
+            for u, ts in (m or {}).items():
+                try:
+                    if now - float(ts) <= slow_ttl:
+                        keep[str(u)] = float(ts)
+                except (TypeError, ValueError):
+                    continue
+            if keep:
+                session_slow_timer[str(sid)] = keep
         return {
             "saved_at": now,
             "sticky": _pairs(getattr(self, "_sticky", None), sticky_ttl),
@@ -4602,6 +4691,7 @@ class Router:
                             if s2 == sid)
                 for sid in {str(v[0]) for v in deps_map.values()}},
             "session_slow": session_slow,
+            "session_slow_timer": session_slow_timer,
             "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
                                    guard),
             "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
@@ -4677,6 +4767,21 @@ class Router:
                 except (TypeError, ValueError, IndexError):
                     continue
         report["session_slow"] = n
+        dtm = self._sess_slow_timer()
+        n = 0
+        for sid, m in (data.get("session_slow_timer") or {}).items():
+            if not isinstance(m, dict):
+                continue
+            for u, ts in m.items():
+                try:
+                    fts = float(ts)
+                    if now - fts > slow_ttl or now < fts:
+                        continue
+                    dtm.setdefault(str(sid), {})[str(u)] = fts
+                    n += 1
+                except (TypeError, ValueError):
+                    continue
+        report["session_slow_timer"] = n
         dis = self._discovered()
         n = 0
         for u, lim in (data.get("discovered_max_input") or {}).items():
