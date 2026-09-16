@@ -123,7 +123,7 @@ def _run_probe(dep, gen, res, router, *, t0=None, race=None, ctx=100):
 
 
 def _run_peek(peek, stream_response, router, *, slow_race_ms=0, hedge_ms=60,
-              t_att_offset=0.0, session=SESSION):
+              t_att_offset=0.0, session=SESSION, hold=False, refill=False):
     closed = []
     genA = FakeGen(WINNER)
     old = (main._peek_stream, main.router, main.forwarder, main.inject_identity)
@@ -135,7 +135,8 @@ def _run_peek(peek, stream_response, router, *, slow_race_ms=0, hedge_ms=60,
             scope="chain", ctx=1, tried_set=set(), attempts=[],
             requested_group=None, session=session, client_ip="",
             attribution=None, hedge_ms=hedge_ms, _tr_cfg=None,
-            _tct_cfg=SimpleNamespace(cooldown_sec=1), slow_race_ms=slow_race_ms)
+            _tct_cfg=SimpleNamespace(cooldown_sec=1), slow_race_ms=slow_race_ms,
+            hold=hold, refill=refill)
         await _join_probes()
         return out, closed
 
@@ -208,6 +209,78 @@ def test_slow_race_rispetta_il_tetto_in_volo():
 
     out, _ = _run_peek(peek, _no_stream, r, slow_race_ms=100)
     assert out[0]["unique"] == WINNER
+
+
+# ---------------------------------------------------- slow-race + hedge (stream)
+def test_slow_race_scatta_con_a_gia_in_streaming():
+    """Con HOLD: A ha gia' emesso byte ma non chiude -> al timer parte il
+    canario lento e vince. L'hedge classico NON apre nulla (A sta streammando).
+    Nessuna penalita' per il lento."""
+    B = DEP_B()
+    r, notes = _fake_router(B=None)
+    r.hedge_canaries = lambda *a, **k: [B]
+    opened = []
+
+    async def sr(dep, payload, **kw):
+        opened.append(dep["unique"])
+        return FakeGen(dep["unique"])
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        fb = kw.get("first_byte")
+        if fb is not None:
+            fb.set()                      # il primo byte di A e' arrivato
+        if gen.name == B["unique"]:
+            await asyncio.sleep(0.02)
+        else:
+            await asyncio.sleep(0.6)      # A streamma lento, non chiude
+        return CONTENT
+
+    out, _closed = _run_peek(peek, sr, r, slow_race_ms=100, hedge_ms=50,
+                             hold=True)
+    assert opened == [B["unique"]], "un solo canario lento"
+    assert out[0]["unique"] == B["unique"] and out[3] == "content"
+    assert notes["fail"] == [], "nessuna cooldown per il lento"
+
+
+def test_slow_race_vale_anche_in_refill():
+    """In refill la cascata non trova canari -> il timer lento ne apre uno
+    comunque (fuori dal tetto per-sessione)."""
+    B = DEP_B()
+    r, notes = _fake_router(B=None)          # warm_fill_canary -> None
+    r.hedge_canaries = lambda *a, **k: [B]   # il picker lento trova B
+    opened = []
+
+    async def sr(dep, payload, **kw):
+        opened.append(dep["unique"])
+        return FakeGen(dep["unique"])
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        if gen.name == B["unique"]:
+            await asyncio.sleep(0.02)
+        else:
+            await asyncio.sleep(0.6)
+        return CONTENT
+
+    out, _ = _run_peek(peek, sr, r, slow_race_ms=100, hedge_ms=50, refill=True)
+    assert opened == [B["unique"]]
+    assert out[0]["unique"] == B["unique"]
+
+
+def test_slow_race_off_a_streaming_si_aspetta():
+    """slow_race_ms=0 e A in streaming: si aspetta A (nessun canario)."""
+    r, notes = _fake_router(B=DEP_B())
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        fb = kw.get("first_byte")
+        if fb is not None:
+            fb.set()
+        await asyncio.sleep(0.05)
+        return CONTENT
+
+    out, _ = _run_peek(peek, _no_stream, r, slow_race_ms=0, hedge_ms=50,
+                       hold=True)
+    assert out[0]["unique"] == WINNER
+    assert notes["start"] == []
 
 
 # ----------------------------------------------------------------- elezione

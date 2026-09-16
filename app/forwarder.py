@@ -3271,22 +3271,28 @@ truncation_hook=None,
                         else:
                             _B, _fB, _tB, _wake_b = _op
                 futA = None
+                # GARA LENTA (non-stream): soglia misurata dall'inizio del
+                # TENTATIVO di A. Vale SEMPRE, anche quando un canario di
+                # refill e' gia' in volo (il timer lento e' indipendente dal
+                # tetto per-sessione e non applica penali al lento).
+                _ns_slow = 0
+                if not _degraded:
+                    try:
+                        _ns_slow = int(getattr(
+                            _pol, "nonstream_slow_race_after_ms", 0) or 0)
+                    except Exception:
+                        _ns_slow = 0
+                _slow_dl = ((t0 + _ns_slow / 1000.0) if _ns_slow > 0
+                            else None)
                 if _fB is None:
-                    # GARA LENTA (non-stream): se il primo tentativo sta
-                    # ancora generando oltre la soglia si apre UN canario e si
-                    # tiene per buono il PRIMO che consegna; A resta in volo
-                    # (e se ha generato in MENO tempo diventa holder).
+                    # Se il primo tentativo sta ancora generando oltre la
+                    # soglia si apre UN canario e si tiene per buono il PRIMO
+                    # che consegna; A resta in volo (e se ha generato in MENO
+                    # tempo diventa holder).
                     data = None
-                    _ns_slow = 0
-                    if not _degraded:
-                        try:
-                            _ns_slow = int(getattr(
-                                _pol, "nonstream_slow_race_after_ms", 0) or 0)
-                        except Exception:
-                            _ns_slow = 0
                     _A = dep
                     _tA = t0
-                    if _ns_slow > 0:
+                    if _slow_dl is not None:
                         futA = asyncio.ensure_future(self.call(
                             _A, payload, profile=profile or "",
                             ctx_est=ctx, client_ip=client_ip,
@@ -3294,7 +3300,8 @@ truncation_hook=None,
                             rate_hook=lambda u4, rl:
                             router.note_rate_limit(u4, rl)))
                         _d_s, _ = await asyncio.wait(
-                            {futA}, timeout=_ns_slow / 1000.0)
+                            {futA}, timeout=max(
+                                0.0, _slow_dl - time.monotonic()))
                         if futA in _d_s:
                             data = futA.result()
                             futA = None
@@ -3320,9 +3327,10 @@ truncation_hook=None,
                                        rate_hook=lambda u, rl: router.note_rate_limit(
                                            u, rl))
                 if _fB is not None:
-                    # GARA 2-alla-volta: vince chi risponde PER PRIMO con
-                    # successo; l'altro resta in volo come probe (mai
-                    # cancellato) e se consegna entra in warm.
+                    # GARA (A + canario refill, eventualmente + canario
+                    # LENTO): vince chi risponde PER PRIMO con successo; gli
+                    # altri restano in volo come probe (mai cancellati) e se
+                    # consegnano entrano in warm.
                     _A = dep
                     _tA = t0
                     if futA is None:
@@ -3332,65 +3340,89 @@ truncation_hook=None,
                             session=session, attribution=attribution,
                             rate_hook=lambda u3, rl:
                             router.note_rate_limit(u3, rl)))
+                    _parts: list[dict] = [
+                        {"fut": futA, "dep": _A, "t": _tA,
+                         "wake": False, "a": True}]
+                    if _fB is not None:
+                        _parts.append({"fut": _fB, "dep": _B, "t": _tB,
+                                       "wake": _wake_b, "a": False})
+                    _pending = {p["fut"] for p in _parts}
+                    _slow_opened = _slow_dl is None
+                    _errs: list[BaseException] = []
                     data = None
-                    served_A = None
-                    errA = None
-                    errB = None
-                    _pend = {futA, _fB}
-                    while _pend:
+                    _win = None
+                    while _pending:
+                        _to = None
+                        if not _slow_opened:
+                            _to = max(0.0, _slow_dl - time.monotonic())
                         _cmp, _rest = await asyncio.wait(
-                            _pend, return_when=asyncio.FIRST_COMPLETED)
+                            _pending, timeout=_to,
+                            return_when=asyncio.FIRST_COMPLETED)
+                        _pending = set(_rest)
                         # NB: bisogna esaminare TUTTI i future completati in
-                        # questo giro, non solo uno: se A e B finiscono
-                        # insieme, scartare gli altri lascerebbe la loro
-                        # eccezione non recuperata (e il probe del loser non
-                        # partirebbe -> nessuna penale).
-                        _pend = set(_rest)
+                        # questo giro, non solo uno: scartare gli altri
+                        # lascerebbe la loro eccezione non recuperata (e il
+                        # probe del loser non partirebbe -> nessuna penale).
                         for _f in _cmp:
                             try:
                                 _r = _f.result()
                             except BaseException as exc:
-                                if _f is futA:
-                                    errA = exc
-                                else:
-                                    errB = exc
+                                _errs.append(exc)
                                 continue
                             data = _r
-                            served_A = (_f is futA)
+                            _win = _f
                             break
                         if data is not None:
                             break
+                        if not _slow_opened and time.monotonic() >= _slow_dl:
+                            _slow_opened = True
+                            log.info("[slow-race] ns %s in generazione da "
+                                     "%.0fs (> %.0fs) -> canario in gara",
+                                     cur, time.monotonic() - _tA,
+                                     _ns_slow / 1000.0)
+                            _raced.add(cur)
+                            _raced_keys.add(str(dep.get("api_key") or ""))
+                            _op = _open_canary("slow-race")
+                            if _op is not None:
+                                _C, _fC, _tC, _wake_c = _op
+                                _parts.append({"fut": _fC, "dep": _C,
+                                               "t": _tC, "wake": _wake_c,
+                                               "a": False})
+                                _pending.add(_fC)
+                                log.info("[hedge] slow-race: %s in gara con "
+                                         "A (fuori dal tetto)", _C["unique"])
                     if data is None:
-                        # entrambi giu': A finisce nell'handler errori
-                        # esistente (penali solite); B riceve la sua da probe
-                        # (il future e' gia' completato con l'eccezione).
-                        if _B is not None and errB is not None:
-                            _spawn_ns_probe(router, _B, _fB, _tB, ctx, ses,
-                                            wake=_wake_b)
-                        raise errA if errA is not None else errB
-                    if served_A:
-                        _race = (_A["unique"], max(
-                            0.0, (time.monotonic() - _tA) * 1000.0))
-                    else:
-                        _race = (_B["unique"], max(
-                            0.0, (time.monotonic() - _tB) * 1000.0))
-                    _spawn_ns_probe(router,
-                                    _B if served_A else _A,
-                                    _fB if served_A else futA,
-                                    _tB if served_A else _tA, ctx, ses,
-                                    wake=bool(_wake_b and served_A),
-                                    race=_race)
-                    if not served_A:
+                        # Nessuno ha consegnato: A finisce nell'handler errori
+                        # esistente (penali solite); gli altri ricevono la
+                        # loro da probe (future gia' completati con
+                        # l'eccezione).
+                        for p in _parts:
+                            if p["a"]:
+                                continue
+                            _spawn_ns_probe(router, p["dep"], p["fut"],
+                                            p["t"], ctx, ses, wake=p["wake"])
+                        raise (_errs[0] if _errs else UpstreamError(
+                            -503, "gara non-stream: nessun consegnato"))
+                    _wd = next(p for p in _parts if p["fut"] is _win)
+                    _race = (_wd["dep"]["unique"], max(
+                        0.0, (time.monotonic() - _wd["t"]) * 1000.0))
+                    for p in _parts:
+                        if p["fut"] is _win:
+                            continue
+                        _spawn_ns_probe(router, p["dep"], p["fut"], p["t"],
+                                        ctx, ses, wake=p["wake"],
+                                        race=_race)
+                    if not _wd["a"]:
                         log.info("[refill] consegna %s (piu' veloce di %s, "
                                  "che finisce come probe senza penale)",
-                                 _B["unique"], cur)
+                                 _wd["dep"]["unique"], cur)
                         with contextlib.suppress(Exception):
-                            router.note_probe_done(ses, _B["unique"])
-                        dep = _B
-                        cur = _B["unique"]
-                        t0 = _tB
+                            router.note_probe_done(ses, _wd["dep"]["unique"])
+                        dep = _wd["dep"]
+                        cur = _wd["dep"]["unique"]
+                        t0 = _wd["t"]
                         _was_dormant = False
-                        if _wake_b:
+                        if _wd["wake"]:
                             with contextlib.suppress(Exception):
                                 router.clear_cooldown(cur)   # sveglia ok
                             log.info("[refill] ns: sveglia riuscita, %s "

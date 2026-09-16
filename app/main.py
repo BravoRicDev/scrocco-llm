@@ -2693,37 +2693,26 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         if waiter is not None:
             waiter.cancel()
         return dep, gen, t_att, *await futA
-    # ---- GARA LENTA (slow-race) ----------------------------------------
-    # A sta ANCORA generando: se ha superato `slow_race_ms` (misurato
-    # dall'inizio del SUO tentativo: alla richiesta + slow_race_ms) non lo
-    # blocchiamo e non buttiamo la sua risposta: apriamo un canario e
-    # corriamo. Vince chi CONSEGNA prima (il hold non ha ancora committato
-    # nulla, quindi il client non ha visto niente). L'ELEZIONE dell'holder
-    # per la prossima richiesta non dipende da chi consegna prima ma dal
-    # tempo di TENTATIVO (vedi _spawn_probe).
-    _slow_race = False
-    if slow_race_ms > 0:
-        _rem = (slow_race_ms / 1000.0) - (time.monotonic() - t_att)
-        if _rem > 0:
-            _d_slow, _ = await asyncio.wait({futA}, timeout=_rem)
-            if futA in _d_slow:
-                if waiter is not None:
-                    waiter.cancel()
-                return dep, gen, t_att, *await futA
-        _slow_race = True
-        log.info("[slow-race] %s in generazione da %.0fs (> %.0fs) -> "
-                 "canario in gara", dep.get("unique"),
-                 time.monotonic() - t_att, slow_race_ms / 1000.0)
-        if waiter is not None:
-            waiter.cancel()
-    if waiter is not None and not _slow_race:
-        if waiter.done() and not refill:
-            # A ha emesso byte ma non ha chiuso: in hold E' la norma
-            # (risposta lunga), NON una gara da vincere: si aspetta A.
-            # In modalita' refill invece si gareggia comunque: il winner
-            # vince solo pre-byte (il client non ha ancora visto nulla) e A
-            # finita comunque in warm come probe.
-            return dep, gen, t_att, *await futA
+    # ---- DUE TRIGGER INDIPENDENTI --------------------------------------
+    # (1) HEDGE CLASSICO (invariato): se A non ha ancora emesso NIENTE si
+    #     aprono i canary classici/di refill; se A sta GIA' streammando lo si
+    #     lascia finire (in hold e' la norma: risposta lunga, nessuna gara
+    #     inutile). In refill si gareggia comunque (winner solo pre-byte).
+    # (2) GARA LENTA: timer indipendente a `slow_race_ms` dall'inizio del
+    #     TENTATIVO di A. Se A non ha ancora CONSEGNATO (hold: verdetto solo
+    #     a chiusura) apre UN canario (fuori dal tetto per-sessione) e lo
+    #     mette in gara. Nessuna penalita' per il "lento": A e i perdenti
+    #     restano probe reali.
+    _slow_dl = (t_att + slow_race_ms / 1000.0) if slow_race_ms > 0 else None
+    _a_streaming = bool(waiter is not None and waiter.done())
+    # con A gia' in streaming (e fuori refill) NON si aprono canary classici:
+    # si arma solo il timer lento.
+    _skip_classic = bool(_a_streaming and not refill)
+    if _a_streaming and not refill and _slow_dl is None:
+        # A ha emesso byte ma non ha chiuso e la gara lenta e' spenta: si
+        # aspetta A (comportamento storico).
+        return dep, gen, t_att, *await futA
+    if waiter is not None:
         waiter.cancel()
     # ---- candidati NUOVI per la gara -----------------------------------
     _W = None
@@ -2781,6 +2770,9 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 k=max(1, int(k)), exclude=_excl, fresh_only=bool(fresh_only))
     except Exception:
         cands = []
+    if _skip_classic:
+        # A gia' in streaming: nessun canario classico, solo il timer lento.
+        cands = []
     # TETTO per-sessione: apri solo i canari che stanno nel tetto (gli
     # in-volo contano tutti: refill, legacy, A/loser staccati come probe).
     if refill and cands:
@@ -2798,9 +2790,11 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         metrics.inc("nx_hedge_total", ("no_canary",))
         log.debug("[hedge] %s: nessun candidato nuovo (%s)", dep.get("unique"),
                   "warm-lento" if fresh_only else "cross-tier")
-        return dep, gen, t_att, *await futA
-    canaries: list[dict] = []
-    for B in cands:
+        if _slow_dl is None:
+            return dep, gen, t_att, *await futA
+    async def _open_canary(B, wake=False):
+        """Apre un canary e ne ritorna il record (o None se non disponibile:
+        in tal caso la chiave va in cooldown con le regole di sempre)."""
         _bu = B["unique"]
         tB = time.monotonic()
         p2 = dict(payload)
@@ -2834,9 +2828,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 _peek(genB, router.first_content_deadline_ms(_bu, ctx)))
             with contextlib.suppress(Exception):
                 router.note_probe_started(session, _bu)
-            canaries.append({"dep": B, "gen": genB, "t0": tB, "fut": futB,
-                             "wake": bool(_W is not None
-                                          and B is _W)})
+            return {"dep": B, "gen": genB, "t0": tB, "fut": futB,
+                    "wake": bool(wake)}
         except asyncio.CancelledError:
             if genB is not None:
                 await _discard_stream(genB, None)
@@ -2888,21 +2881,33 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                     pass
             log.info("[hedge] canary %s non disponibile (%s) -> cooldown",
                      _bu, type(exc).__name__)
+            return None
+
+    canaries: list[dict] = []
+    for B in cands:
+        _c = await _open_canary(B, wake=bool(_W is not None and B is _W))
+        if _c is not None:
+            canaries.append(_c)
     if not canaries:
-        metrics.inc("nx_hedge_total", ("no_canary",))
-        return dep, gen, t_att, *await futA
-    log.info("[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
-             dep.get("unique"), hedge_ms,
-             ",".join(c["dep"]["unique"] for c in canaries))
+        if _slow_dl is None:
+            metrics.inc("nx_hedge_total", ("no_canary",))
+            return dep, gen, t_att, *await futA
+    else:
+        log.info("[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
+                 dep.get("unique"), hedge_ms,
+                 ",".join(c["dep"]["unique"] for c in canaries))
     futs: dict = {futA: None}
     for c in canaries:
         futs[c["fut"]] = c
     results: dict = {}
     winner = None
     running = set(futs)
+    _slow_opened = _slow_dl is None
     while running:
+        _to = (max(0.0, _slow_dl - time.monotonic())
+               if not _slow_opened else None)
         completed, pending = await asyncio.wait(
-            running, return_when=asyncio.FIRST_COMPLETED)
+            running, timeout=_to, return_when=asyncio.FIRST_COMPLETED)
         # NB: esaminare TUTTI i completati del tick (non solo uno): se piu'
         # canari finiscono insieme, gli altri resterebbero con l'eccezione
         # non recuperata e il loro verdetto andrebbe perso.
@@ -2919,6 +2924,45 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 break
         if winner is not None:
             break
+        # ---- GARA LENTA: timer scaduto -> UN canario in piu' -------------
+        # INDIPENDENTE dal tetto per-sessione e dall'hedge classico: il
+        # "lento" non prende nessuna penale (resta probe reale).
+        if not _slow_opened and time.monotonic() >= _slow_dl:
+            _slow_opened = True
+            log.info("[slow-race] %s in generazione da %.0fs (> %.0fs) -> "
+                     "canario in gara", dep.get("unique"),
+                     time.monotonic() - t_att, slow_race_ms / 1000.0)
+            metrics.inc("nx_slow_race_total", ("open",))
+            _lc: list[dict] = []
+            with contextlib.suppress(Exception):
+                _lc = router.hedge_canaries(
+                    profile, dep, need, ctx, tried_set, requested_group,
+                    k=1, exclude=None, fresh_only=False)
+            _xu = set((raced or {}).get("uniq") or ())
+            _xk2 = set((raced or {}).get("keys") or ())
+            for _cc in canaries:
+                _xu.add(_cc["dep"]["unique"])
+                _xk2.add(str(_cc["dep"].get("api_key") or ""))
+            _lc = [B for B in _lc
+                   if B["unique"] not in _xu
+                   and str(B.get("api_key") or "") not in _xk2]
+            if not _lc:
+                metrics.inc("nx_slow_race_total", ("no_canary",))
+                log.info("[slow-race] %s: nessun canario libero "
+                         "(chiavi/uniq in gara escluse)", dep.get("unique"))
+            else:
+                _c2 = await _open_canary(_lc[0])
+                if _c2 is not None:
+                    canaries.append(_c2)
+                    futs[_c2["fut"]] = _c2
+                    running.add(_c2["fut"])
+                    if raced is not None:
+                        raced.setdefault("uniq", set()).add(
+                            _c2["dep"]["unique"])
+                        raced.setdefault("keys", set()).add(
+                            str(_c2["dep"].get("api_key") or ""))
+                    log.info("[hedge] slow-race: %s in gara con A (fuori dal "
+                             "tetto)", _c2["dep"]["unique"])
     if winner is None:
         for f in list(running):
             try:
@@ -3488,17 +3532,19 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                               ctx, _need_out,
                                               requested_group, session,
                                               _raced)
-            # GARA LENTA: se A sta ancora generando dopo N ms si apre un
+            # GARA LENTA: se A non ha ancora CONSEGNATO dopo N ms si apre 1
             # canario SENZA buttare via la risposta (regola utente): vince
             # chi consegna prima, ma per il giro successivo e' eletto chi ha
-            # impiegato meno nel proprio tentativo. Vale anche con l'hedge
-            # classico disattivato; in refill non serve (la cascata parte
-            # gia' subito con _h_ms=1).
+            # impiegato meno nel proprio tentativo. E' INDIPENDENTE
+            # dall'hedge classico (che resta attivo) e vale anche in refill;
+            # il canario lento NON concorre al tetto per-sessione.
+            # NB: il campo vive su Policy (non su qc_json): leggerlo da qcp
+            # lo lasciava sempre a 0 (bug: la gara lenta non partiva mai).
             _slow_ms = 0
             if not _degraded:
                 try:
-                    _slow_ms = int(
-                        getattr(qcp, "stream_slow_race_after_ms", 0) or 0)
+                    _slow_ms = int(getattr(
+                        router.policy, "stream_slow_race_after_ms", 0) or 0)
                 except Exception:
                     _slow_ms = 0
             _slow_only = bool(_slow_ms > 0 and not _refill)
@@ -3519,16 +3565,18 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         # la cascata parte SUBITO e con il proprio picker:
                         # indipendente dalla lentezza di A (regola utente).
                         _h_ms = 1
-                    elif _slow_only:
-                        # decide il timer lento dentro _hedge_peek: qui non
-                        # si aggiunge altro ritardo
-                        _h_ms = 1
                     else:
-                        # F13: ritardo calibrato sul bucket (TTFT fisiologico).
+                        # HEDGE CLASSICO invariato (F13: ritardo calibrato sul
+                        # bucket, TTFT fisiologico). La gara lenta NON lo
+                        # sostituisce: e' un timer separato dentro _hedge_peek.
                         try:
                             _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
                         except Exception:
                             _h_ms = _hedge_ms
+                    if _h_ms <= 0 and _slow_only:
+                        # hedge classico spento ma la gara lenta va armata:
+                        # _hedge_peek deve essere chiamato comunque.
+                        _h_ms = 1
                     _fresh_only = bool(_h_u and _h_u == dep["unique"])
             if _h_ms > 0:
                 _races_done += 1
@@ -3537,9 +3585,6 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 _dep_before = dep["unique"]
                 if _refill:
                     _hh_k = 2
-                elif _slow_only:
-                    _hh_k = max(1, int(getattr(
-                        qcp, "stream_slow_race_canaries", 1) or 1))
                 else:
                     _hh_k = (
                         max(1, int(getattr(qcp, "stream_hedge_tiers", 1) or 1))
@@ -3559,7 +3604,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
                     _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only,
                     hold=hold, refill=_refill,
-                    slow_race_ms=(0 if _refill else _slow_ms),
+                    slow_race_ms=_slow_ms,
                     out_tokens=_need_out or None, raced=_raced)
                 if _legacy:
                     # backoff "il buono non esiste": solo la gara legacy
