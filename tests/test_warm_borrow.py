@@ -257,3 +257,45 @@ def test_owner_decaduto_non_e_prestabile():
         assert r._owned_by_any_session(b1["unique"]) is False
     finally:
         _reset()
+
+
+def test_sessione_nuova_a_freddo_eredita_i_prestati():
+    """Caso CRONJOB: la sessione nuova non possiede NULLA. Prima il pool
+    tornava vuoto prima ancora di guardare i prestabili -> sparava canary e
+    riscopriva dep gia' pronti. Ora li eredita subito e i 'ready' li contano,
+    quindi il canary non parte."""
+    r = _mk()
+    try:
+        b1, b2 = _dep(r, "K-B1"), _dep(r, "K-B2")
+        _leave("cron1")
+        _own(r, "cron1", b1)
+        _own(r, "cron1", b2)
+        _age(r, b1, 300)
+        _age(r, b2, 300)
+
+        _leave("cron2")                      # sessione nuova, zero warm
+        assert not (r._sess_deps().get("cron2") or set())
+        r._lendable_cache = None
+        pool = r._warm_pool("cron2", None, include_borrowed=True)
+        assert {d["unique"] for d in pool} == {b1["unique"], b2["unique"]}
+        assert r._warm_pool("cron2", None, include_borrowed=False) == []
+        ready = r.warm_valid_for("cron2", "test", f"{BASE}-200k",
+                                 frozenset({"text"}), 100, 4096,
+                                 include_borrowed=True)
+        assert len(ready) == 2, "i prestati contano nei 3 ready"
+    finally:
+        _reset()
+
+
+def test_sessione_nuova_con_prestito_spento_non_vede_nulla():
+    r = _mk(warm_pool={"borrow_enabled": False})
+    try:
+        b1 = _dep(r, "K-B1")
+        _leave("cron1")
+        _own(r, "cron1", b1)
+        _age(r, b1, 300)
+        _leave("cron2")
+        r._lendable_cache = None
+        assert r._warm_pool("cron2", None, include_borrowed=True) == []
+    finally:
+        _reset()

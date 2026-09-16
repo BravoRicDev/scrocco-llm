@@ -659,8 +659,14 @@ class Policy:
     # ordinato per max_input crescente). Direzionale (ultimo successo):
     # due sessioni che partono nello stesso istante possono collidere una
     # volta, poi la vincente tiene il deployment. In-memory, mai persistito.
+    #
+    # 60 min (era 15): questa finestra e' anche quella che tiene in vita
+    # l'owner per il PRESTITO dei warm e il warm_pool ttl (vedi sotto). Serve
+    # al caso "cronjob": il primo giro senza warm produce 3+ caldi, finisce,
+    # e un secondo giro che parte mezz'ora dopo li trova ancora prestabili
+    # (tutto pronto, zero canary) invece di lasciarli tornare liberi.
     session_dep_guard_enabled: bool = True
-    session_dep_guard_sec: int = 900
+    session_dep_guard_sec: int = 3600
     # WARM POOL (tier "caldi"): PRIMA del -dim richiesto e della scala, si
     # esauriscono i FREE-dims che QUESTA sessione ha gia' servito con successo
     # (ancora vivi, non in cooldown, che reggono need+max_input). Riusa la

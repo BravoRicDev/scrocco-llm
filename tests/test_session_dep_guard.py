@@ -49,8 +49,9 @@ def test_other_session_recent_blocks_and_expires(router):
     # stessa sessione che l'ha usato: NON bloccata
     set_current_session("S-A")
     assert router.other_session_recent(a) is False
-    # scaduta la finestra: tornato normale
-    router._dep_last_session[a] = ("S-A", time.time() - 1000)
+    # scaduta la finestra: tornato normale (default-agnostico)
+    _over = router.policy.session_dep_guard_sec + 100
+    router._dep_last_session[a] = ("S-A", time.time() - _over)
     set_current_session("S-B")
     assert router.other_session_recent(a) is False
 
@@ -159,11 +160,14 @@ def test_success_keeps_all_owned_deps_alive(router):
 
 
 def test_activity_does_not_revive_expired(router):
-    """Dopo 15 min di silenzio il dep e' decaduto e NON viene resuscitato."""
+    """Dopo la finestra di silenzio il dep e' decaduto e NON viene
+    resuscitato (default: 60 min)."""
     a = _u(router, GROUP, "K-A")
     set_current_session("S-A")
     router.note_session_success("S-A", a)
-    router._dep_last_session[a] = ("S-A", time.time() - 1000)  # oltre la finestra
+    # oltre la finestra (default-agnostico: la finestra e' 3600 dal 60-min)
+    router._dep_last_session[a] = (
+        "S-A", time.time() - (router.policy.session_dep_guard_sec + 100))
     router.note_session_activity("S-A")
     set_current_session("S-B")
     assert router.other_session_recent(a) is False

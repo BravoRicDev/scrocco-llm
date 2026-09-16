@@ -119,7 +119,8 @@ def test_warm_pool_allowed_filter(router):
 def test_warm_pool_expired(router):
     b = _u(router, GROUP, "K-B")
     router.note_session_success("S-A", b)
-    router._dep_last_session[b] = ("S-A", time.time() - 1000)
+    router._dep_last_session[b] = (
+        "S-A", time.time() - (router.policy.session_dep_guard_sec + 100))
     assert router._warm_pool("S-A", _allowed(router)) == []
 
 

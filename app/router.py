@@ -5869,7 +5869,12 @@ class Router:
         if not sid:
             return []
         owned = self._sess_deps().get(sid)
-        if not owned:
+        # NB: con `include_borrowed` NON si esce se la sessione non possiede
+        # nulla. E' il caso del cronjob che riparte "a freddo": senza questo
+        # il pool tornava vuoto PRIMA di guardare i prestabili, quindi una
+        # sessione nuova non poteva ereditare il parco pronto (e sparava
+        # canary inutili). La priorita' resta comunque: propri >> prestati.
+        if not owned and not include_borrowed:
             return []
         d = self._dep_sess()
         ttl = self._warm_ttl()
@@ -5877,7 +5882,7 @@ class Router:
         skip = tried or set()
         holder = self.session_holder(sid)
         out: list[dict] = []
-        for u in owned:
+        for u in (owned or ()):
             if u in skip or u == failed_unique:
                 continue
             if allowed is not None and u not in allowed:
@@ -6664,9 +6669,18 @@ class Router:
                                          _dep["unique"], _alt["unique"])
                                 _dep = _alt
                                 break
-                    log.info("[warm] initial_pick %s -> %s (caldo proprio: "
-                             "my_success, max_in=%s)", group_name, _dep["unique"],
-                             int(_dep.get("max_input_tokens") or 0))
+                    if _dep["unique"] in self._lendable_set():
+                        log.info("[warm] initial_pick %s -> %s (caldo "
+                                 "PRESTATO da un'altra sessione, fermo da "
+                                 "%.0fs, max_in=%s)", group_name,
+                                 _dep["unique"],
+                                 self._dep_idle_age(_dep["unique"]),
+                                 int(_dep.get("max_input_tokens") or 0))
+                    else:
+                        log.info("[warm] initial_pick %s -> %s (caldo proprio: "
+                                 "my_success, max_in=%s)", group_name,
+                                 _dep["unique"],
+                                 int(_dep.get("max_input_tokens") or 0))
                     if session_id and not self._is_renewal_bucket(group_name):
                         if getattr(self.policy,
                                    "deployment_sticky_per_capability", False):

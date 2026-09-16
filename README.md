@@ -214,10 +214,12 @@ individual account limits instead of dying on the first 429.
   session that *successfully* served a free-dims deployment is remembered (an
   attempt alone never claims it); while that session is alive its deployments
   stay its own (ownership refreshed on every request), and another session
-  asking within `sec` (900) ignores them among the live keys — they remain
+  asking within `sec` (3600 = 60 min) ignores them among the live keys — they remain
   eligible only in a *pre-last-resort* tier (between the last `-dim` and `-go`,
   ordered by the smallest fitting `max_input`). `sec` seconds of silence and the
-  whole set is freed again. Only free-dims buckets are tracked (`-go`/`-fallback`
+  whole set is freed again (60 min: it also keeps the session alive long enough
+  for the warm BORROW hand-off, e.g. a cron job starting half an hour later
+  finds the previous run's warm ready). Only free-dims buckets are tracked (`-go`/`-fallback`
   and capability groups are never claimed). The routing session id comes from
   `x-opencode-session`/`x-session-affinity`/`x-session-id`, then the body, then
   the anonymous fingerprint.
@@ -625,7 +627,7 @@ template. The ones that matter most:
 | `cooldown_autoprobe_retired_enabled` / `cooldown_autoprobe_retired_gap_sec` | true / 20 | daily sweep of RETIRED keys starting after local midnight, one probe every N s; a successful probe un-retires |
 | `cooldown_autoprobe_min_age_sec` / `cooldown_autoprobe_grow_sec` / `cooldown_autoprobe_min_gap_sec` / `cooldown_autoprobe_timeout_sec` | 300 / 120 / 60 / 20 | probe only cooled ≥N s; on KO residual at least doubles (min +grow, rotate targets); min gap between probes; probe timeout |
 | `cooldown_autoprobe_multiply_24h` / `cooldown_autoprobe_skip_over_sec` | true / 7200 | KO increment × probes in the last 24h (1×, 2×, 3×…); cooled > 2h excluded from probing (ladder wakeup / last resort / time will retry) |
-| `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 900 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |
+| `session_dep_guard.enabled` / `session_dep_guard.sec` | true / 3600 | anti-usurpazione: un deployment free-dims servito con successo da un'ALTRA sessione negli ultimi N s resta eleggibile solo nel tier pre-ultima-spiaggia; N s di silenzio e torna libero |
 | `warm_pool.enabled` / `warm_pool.ttl_sec` / `warm_pool.max_attempts` / `warm_pool.allow_slow` | true / 0 / 0 / true | tier "caldi" prima del `-dim` e della scala: esaurisce i free-dims serviti con successo da QUESTA sessione (ordine: cache-holder, MRU, `order`, `max_input`); `ttl_sec=0` usa `session_dep_guard_sec`; `max_attempts=0` illimitato; esclude i dep lenti (EMA > 90s o lenti-per-sessione) e non pesca mai dim < richiesta |
 | `reputation_decay_halflife_sec` | 129600 | half-life (36h) for the time-decay of reputation scores; 0 = off |
 | `adaptive_timeout_enabled` / `adaptive_timeout_floor_sec` / `adaptive_timeout_multiplier` / `adaptive_timeout_max_sec` | true / 15 / 8 / 600 | per-deployment chat read timeout from latency EMA: `max(floor, avg*mult)`, capped |
