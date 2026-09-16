@@ -1,0 +1,7 @@
+# scrocco-llm · dipendenze della TUI interattiva (Textual)
+# Opzionali: servono solo per `./scrocco.sh` (interfaccia a schermo intero).
+# Senza queste, il launcher ripiega su `./scrocco.sh --cli` (tui/cli_lite.py).
+#
+#   pip install -r requirements-tui.txt
+#
+textual>=8.0,<9.0

@@ -43,6 +43,27 @@ _MAX_SSE_BYTES = 1_500_000     # cap sul totale dei byte SSE accumulati
 _B64_RE = re.compile(r"^[A-Za-z0-9+/\r\n=]+$")
 _DATA_RE = re.compile(r"^data:([\w.+-]+/[\w.+-]+)?;base64,", re.I)
 
+
+def set_sniff_caps(*, max_b64_chars=None, max_str_chars=None,
+                   max_sse_bytes=None) -> None:
+    """Applica da policy i cap di sicurezza dello sniffing (default = costanti)."""
+    global _MAX_B64_CHARS, _MAX_STR_CHARS, _MAX_SSE_BYTES
+    if max_b64_chars is not None:
+        try:
+            _MAX_B64_CHARS = max(1, int(max_b64_chars))
+        except (TypeError, ValueError):
+            pass
+    if max_str_chars is not None:
+        try:
+            _MAX_STR_CHARS = max(1, int(max_str_chars))
+        except (TypeError, ValueError):
+            pass
+    if max_sse_bytes is not None:
+        try:
+            _MAX_SSE_BYTES = max(1, int(max_sse_bytes))
+        except (TypeError, ValueError):
+            pass
+
 # Stato del rollup orario (protetto da _lock).
 _rollup: dict = {}
 _rollup_hour: int | None = None

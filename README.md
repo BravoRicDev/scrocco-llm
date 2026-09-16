@@ -493,6 +493,73 @@ curl localhost:4001/v1/chat/completions \
 Day-2 operations live in `GET /admin/guide` (master key) and
 [docs/AGENT.md](docs/AGENT.md). First-run recipe: [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md).
 
+### Observability & configuration TUI
+
+The Textual TUI (`scrocco.sh` → `tui/`) manages **everything** over the admin
+API — never touching the CSV directly. It needs the optional Textual
+dependency (`pip install -r requirements-tui.txt`); without it the launcher
+falls back to `./scrocco.sh --cli`. Observability views (keys `t` `l` `u`
+`O`):
+
+* **Live** calls, **Errors**, **Leaderboard** (deployments);
+* **Sessions**: active-session state (sticky, dep-sticky, cache holder,
+  dep-guard, slow demote) **plus** a session leaderboard (calls, ok/fail,
+  success %, tokens, **preferred model**). Press `ENTER` on a session to open
+  its **detail**: the ranking of every deployment that successfully served
+  that session, its preferred model and token totals;
+* **Statistics**: token generated/consumed (1h/24h), cache hit rate,
+  coalescing, success rate, **preferred model** (observed + configured
+  `go_preferred_models`) and the full model ranking.
+
+Config management from the TUI: `M` opens the **MCP config** browser
+(catalogue + execute any configuration tool with JSON arguments), `T`
+shows the **effective tuning** parameters (router/forwarder/admin/storage),
+and the raw editors `V` (policy YAML) and `G` (deployment CSV) guarantee
+that **every** backend setting is editable from the terminal.
+
+`P` shows the **persisted per-deployment scores**, `H` the **provider
+health**, and `Z` opens the **operations hub** which covers every remaining
+admin action with a dedicated UI: key **probe** (single/bulk), **unretire**,
+**profile purge**, **capabilities audit/seed**, **pressure inspect/clear**,
+**backup list/restore**, **insights**, **history**, **guide** and the
+**playground** routing simulator.
+
+TUI runtime knobs (previously hardcoded) are configurable via `TUI_*`
+environment variables — defaults equal the historical values:
+`TUI_REFRESH_LIVE_SEC`/`TUI_REFRESH_ERRORS_SEC`/`TUI_REFRESH_SESSIONS_SEC`/
+`TUI_REFRESH_LEADERBOARD_SEC`/`TUI_REFRESH_STATS_SEC` (auto-refresh cadence),
+`TUI_LIVE_MAX_ROWS`, `TUI_MODEL_RANKING_MAX`, `TUI_OPS_ROWS_MAX`,
+`TUI_OPS_HISTORY_MAX`, `TUI_OPS_PRESSURE_LIMIT`, `TUI_RESULT_MAX_CHARS`,
+`TUI_MCP_RESULT_MAX_CHARS`, `TUI_ERROR_MSG_MAX_CHARS`,
+`TUI_HTTP_ERR_SNIPPET_CHARS`.
+
+### MCP configuration protocol
+
+The whole configuration surface is exposed as a Model Context Protocol
+server, so agents can drive the gateway over JSON-RPC 2.0:
+
+* `GET  /admin/mcp/config/tools` → tool catalogue (name/description/schema)
+* `POST /admin/mcp/config/execute` → run one tool: `{tool, arguments}`
+* `POST /admin/mcp/config/call` → JSON-RPC 2.0 (`initialize`, `tools/list`,
+  `tools/call`)
+
+48 tools cover policy, deployments (CRUD + bulk), profiles, CSV, backups,
+capabilities, runtime state, cooldowns, sessions (incl. `sessions_detail`),
+statistics (incl. `stats_sessions`, `tuning_get`), persisted scores
+(`deployments_stats`), provider health (`providers_health`), guide
+(`guide_get`), insights, logs and the playground. Legacy tool aliases are
+accepted alongside canonical names.
+
+The same configuration surface is reachable through the **web layer** too:
+`/api/v1/stats/*`, `/api/v1/sessions[/:id]`, `/api/v1/tuning`,
+`/api/v1/policy/raw`, `/api/v1/csv`, `/api/v1/backups`,
+`/api/v1/logs/*`, `/api/v1/profiles/purge`, `/api/v1/pressure/*`,
+`/api/v1/playground`, `/api/v1/mcp/config/*`. The web MCP (`POST /api/mcp`)
+auto-discovers these routes and exposes them as tools (`stats_summary`,
+`sessions_detail`, `tuning_get`, `mcp_config_execute`, …), so agents can
+configure the gateway
+from either MCP surface.
+
 ## Architecture
 
 ```
@@ -533,6 +600,8 @@ HOW / WHY decisions were made. Read it before changing code.
 | `app/bootstrap.py` | agent self-setup playbook endpoints |
 | `app/keyhealth.py` | persistent dead-key evidence, retirement lifecycle |
 | `app/ledger.py` | usage/cost ledger feeding `/admin/insights` |
+| `tui/` | Textual TUI: deployment CRUD, policy editor, observability (live/errors/leaderboard/sessions/statistics), session detail, MCP config browser, tuning view |
+| `app/admin.py` (MCP) | MCP config protocol: `/admin/mcp/config/{tools,execute,call}` (48 tools, JSON-RPC 2.0) |
 
 ## Tuning (policy)
 
@@ -583,6 +652,22 @@ template. The ones that matter most:
 | `tool_repair.fake_call.enabled` | true | detect tool-calls rendered as text and escalate directly to -go/-fallback |
 | `tool_repair.fake_call.max_escalations` | 2 | max direct escalations before a retryable 503 |
 | `cache_aware.prefer_last_success` | true | on failover prefer the session's last-success deployment (free buckets only) |
+| `latency_rotate_threshold_ms` / `soft_slow_latency_ms` / `soft_slow_ctx_min` | 90000 / 60000 / 30000 | HARD slow threshold (demote for all requests) / SOFT threshold (only heavy requests above `soft_slow_ctx_min`) |
+| `ctx_bucket_edges` | `[8000, 32000, 128000]` | right edges of the context-size buckets used for the per-bucket latency/TTFT EMAs |
+| `ttft_rate_min_ctx` / `ttft_rate_floor_ms` | 8000 / 250 | below this context the prefill rate is ignored; absolute floor of the TTFT extrapolation |
+| `slow_latency_abs_floor_ms` / `slow_latency_rel_mult` / `slow_latency_min_peers` / `slow_rel_baseline_mult` | 45000 / 2.0 / 5 / 2.0 | size-aware "slow" detection: beyond `max(floor, mult × fleet median)`, needs `min_peers` peers; session demote needs `> rel_baseline_mult × baseline` |
+| `slow_gen_mult` / `slow_typical_completion_tokens` | 6.0 / 600 | fallback generation-time estimate (`ttft × mult`, or typical completion tokens ÷ gen rate) |
+| `effort_capable_bonus` / `latency_penalty_per_sec` / `effort_intel_weight` | 1.5 / 0.5 / 10.0 | intelligence bias on `reasoning_effort`; score penalty per second over the hard threshold; reputation weight per effort |
+| `provider_bias_normalization` / `dynamic_scoring.history_window` | `log` / 100 | provider-bias normalization (`log`/`sqrt`/`none`) and the dynamic-scoring history window |
+| `model_missing_cooldown_sec` / `quota_min_cooldown_sec` / `quota_max_cooldown_sec` | 86400 / 600 / 604800 | cooldown for a missing model / quota cooldown floor and ceiling |
+| `provider_transient_cooldown_sec` / `permission_denied_cooldown_sec` / `stream_loop_cooldown_sec` / `retry_body_cap_sec` / `min_output_floor` | 60 / 1800 / 300 / 300 / 4096 | transient provider fault / 401-403 / stream loop / Retry-After body cap / minimum output-token floor |
+| `probe_concurrency` / `probe_timeout_sec` / `playground_timeout_sec` / `playground_max_attempts` | 5 / 20 / 90 / 128 | admin probe concurrency & timeout; playground timeout & max attempts |
+| `scoring_weights` | `{ATTEMPT_PROVIDER:1, …}` | reputation-scoring weights (lower score = better); partial maps merge over the defaults |
+| `coalesce_cache_max` / `video_job_ttl_sec` | 64 / 86400 | in-memory coalescing cache size; async video-job snapshot TTL (s) |
+| `keyhealth_streak_dead_threshold` / `keyhealth_success_ema_floor` | 5 / 0.1 | key-health classification: min fail-streak for `dead_suspect`; success-EMA floor below which a key is suspect |
+| `ctxcompact_min_protected_msgs` | 8 | context compaction: trailing messages always kept intact |
+| `toolrepair_max_unwrap_depth` | 5 | tool-repair: max JSON unwrap depth |
+| `sniff_max_b64_chars` / `sniff_max_str_chars` / `sniff_max_sse_bytes` | 2048 / 20000 / 1500000 | sniffing safety caps: base64 string, text string, total SSE bytes |
 | `cache_aware.holder_ttl_sec` | 3600 | how long the per-session cache holder is remembered |
 | `cache_aware.skip_probe_when_holder` | true | skip the escalation-pin probe when the pinned winner is the holder |
 | `cache_aware.context_truncation.enabled` | true | stub old tool outputs (overflow / absolute / cache-cold switch triggers) |
@@ -605,6 +690,16 @@ template. The ones that matter most:
 | `slow_latency_abs_floor_ms` / `slow_latency_rel_mult` / `slow_latency_min_peers` | 45000 / 2.0 / 5 | size-aware "slow" threshold: `max(floor, rel x atteso)` where the expectation is the fleet median in the context bucket -> global median -> prefill/gen rate -> 90s legacy |
 | `hunt_backoff_sec` / `hunt_max_per_window` / `hunt_window_sec` | 600 / 5 / 3600 | substitute-hunt budget: after a race that found nothing better, no new races for that session+bucket for N sec; hard cap of races per window |
 | `request_coalescing_cache_sec` | 0 | also serve an identical non-stream payload arriving within this many seconds after the leader completed (credits/cost halved for tight retries/subagents); 0 = in-flight only |
+| `upstream_connect_timeout_sec` / `upstream_read_timeout_sec` / `upstream_write_timeout_sec` / `upstream_pool_timeout_sec` | 10 / 180 / 30 / 10 | httpx transport timeouts toward upstreams (the adaptive per-deployment read timeout scales from `upstream_read_timeout_sec`) |
+| `upstream_max_keepalive_connections` / `upstream_max_connections` / `upstream_keepalive_expiry_sec` | 30 / 100 / 120 | httpx connection-pool limits; changing them recreates the cached clients at the next request |
+| `retryable_status_codes` | `null` | override the retryable HTTP status set (default `{408,409,429} ∪ 5xx`) |
+| `effort_incompatible_hosts` | `null` | override the host list incompatible with `effort` models (default `["api.groq.com"]`) |
+
+Every effective value is inspectable at `GET /admin/tuning` (also exposed to
+the TUI with `T` and to MCP as `tuning_get`). Storage knobs
+(`LEDGER_MAX_BYTES`, `LEDGER_KEEP`, `LEDGER_SUMMARY_MIN_ROWS`,
+`METRICS_LATENCY_MAX`, `JOURNAL_MAX_BYTES`, `JOURNAL_KEEP`) are configurable
+via environment variables.
 
 ## Security model
 
@@ -623,7 +718,8 @@ template. The ones that matter most:
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # full suite (421 passing)
+pip install -r requirements-tui.txt      # opzionale: TUI Textual (./scrocco.sh)
+python3 -m pytest tests/ -q          # full suite (1532 passing)
 ```
 
 CI runs the suite and builds the image on push

@@ -52,6 +52,7 @@ from . import journal, metrics
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from . import sniff
 from . import autoprobe
+from . import forwarder as fwd
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PERMISSION_DENIED_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
@@ -69,6 +70,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         set_stream_stall_sec,
                         set_adaptive_timeout, set_latency_lookup,
                         set_reasoning_reserve,
+                        apply_cooldown_policy,
                         set_estimate_defaults, set_ttft_lookup,
                         set_nonstream_hook,
                         set_stall_bucket,
@@ -213,6 +215,7 @@ set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
                      max_sec=policy.adaptive_timeout_max_sec)
 set_reasoning_reserve(1.0 - float(getattr(policy,
                       "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
+apply_cooldown_policy(policy)
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 set_schemaout_config(_so_cfg_from_policy(policy))
 configure_estimate(adaptive=policy.estimate_adaptive_enabled,
@@ -243,6 +246,17 @@ PERSIST_ROUTING = os.environ.get("GATEWAY_PERSIST_ROUTING", "1") != "0"
 # MAPPING IN MEMORIA con TTL: al restart i job in corso si perdono -> 404 con hint.
 _videos_jobs: dict[str, dict] = {}
 VIDEO_JOB_TTL_SEC = 24 * 3600
+
+
+def set_video_job_ttl_sec(value=None) -> None:
+    """TTL dei job video in memoria (policy `video_job_ttl_sec`, default 24h)."""
+    global VIDEO_JOB_TTL_SEC
+    if value is not None:
+        try:
+            VIDEO_JOB_TTL_SEC = max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+
 # i TEST settano GATEWAY_PERSIST_STATS=0: nessuna contaminazione col live
 PERSIST_STATS = os.environ.get("GATEWAY_PERSIST_STATS", "1") != "0"
 
@@ -267,6 +281,71 @@ _inflight_lock = asyncio.Lock()
 # la chiamata upstream. Cache SOLO successi non-stream, cap 64 entry.
 _coalesce_cache: dict[str, dict] = {}
 _COALESCE_CACHE_MAX = 64
+
+
+def set_coalesce_cache_max(value=None) -> None:
+    """Cap entry della cache di coalescing (policy `coalesce_cache_max`)."""
+    global _COALESCE_CACHE_MAX
+    if value is not None:
+        try:
+            _COALESCE_CACHE_MAX = max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+
+
+def _apply_misc_policy(pol) -> None:
+    """Propaga i parametri di policy alle costanti runtime dei moduli minori.
+
+    Chiamata all'avvio e ad ogni hot-reload. Non cambia la logica: i default
+    restano identici alle costanti storiche dei moduli."""
+    set_video_job_ttl_sec(getattr(pol, "video_job_ttl_sec", None))
+    set_coalesce_cache_max(getattr(pol, "coalesce_cache_max", None))
+    try:
+        sniff.set_sniff_caps(
+            max_b64_chars=getattr(pol, "sniff_max_b64_chars", None),
+            max_str_chars=getattr(pol, "sniff_max_str_chars", None),
+            max_sse_bytes=getattr(pol, "sniff_max_sse_bytes", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        from .keyhealth import set_health_thresholds
+        set_health_thresholds(
+            streak_dead=getattr(pol, "keyhealth_streak_dead_threshold", None),
+            success_ema_floor=getattr(
+                pol, "keyhealth_success_ema_floor", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        from .ctxcompact import set_min_protected_msgs
+        set_min_protected_msgs(
+            getattr(pol, "ctxcompact_min_protected_msgs", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        from .toolrepair import set_max_unwrap_depth
+        set_max_unwrap_depth(getattr(pol, "toolrepair_max_unwrap_depth", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        fwd.set_upstream_http(
+            connect=getattr(pol, "upstream_connect_timeout_sec", None),
+            read=getattr(pol, "upstream_read_timeout_sec", None),
+            write=getattr(pol, "upstream_write_timeout_sec", None),
+            pool=getattr(pol, "upstream_pool_timeout_sec", None),
+            max_keepalive=getattr(
+                pol, "upstream_max_keepalive_connections", None),
+            max_connections=getattr(pol, "upstream_max_connections", None),
+            keepalive_expiry=getattr(
+                pol, "upstream_keepalive_expiry_sec", None))
+        fwd.set_retryable_status(
+            getattr(pol, "retryable_status_codes", None))
+        fwd.set_effort_incompatible_hosts(
+            getattr(pol, "effort_incompatible_hosts", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
+_apply_misc_policy(policy)
 
 
 def _coalesce_cache_take(key: str, now: float):
@@ -668,6 +747,8 @@ async def _watcher(interval: float) -> None:
                         1.0 - float(getattr(
                             fresh, "cache_ctx_reasoning_headroom_ratio",
                             0.7) or 0.0))
+                    apply_cooldown_policy(fresh)
+                    _apply_misc_policy(fresh)
                     set_schemaout_config(
                         _so_cfg_from_policy(fresh))
                     forwarder._keepalive_pool = fresh.http_keepalive_pool
@@ -3629,14 +3710,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             router.dep_sticky_release(ses)
                 elif reason in ("provider_transient", "empty_error_body"):
                     _cd = router.escalate_cooldown(
-                        PROVIDER_TRANSIENT_COOLDOWN_S,
+                        fwd.PROVIDER_TRANSIENT_COOLDOWN_S,
                         router.stats_for(dep["unique"]).fail_count_24h)
                 elif reason == "model_missing":
-                    _cd = MODEL_MISSING_COOLDOWN_S
+                    _cd = fwd.MODEL_MISSING_COOLDOWN_S
                 elif reason == "upstream_403":
                     # Key/progetto rifiutato dal provider: cooldown lungo +
                     # rilascia lo sticky, la sessione riparte su un'altra key.
-                    _cd = PERMISSION_DENIED_COOLDOWN_S
+                    _cd = fwd.PERMISSION_DENIED_COOLDOWN_S
                     if ses:
                         cur = router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
@@ -3644,7 +3725,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 elif reason == "upstream_401":
                     # Chiave assente/invalidata/revocata: stessa gestione del
                     # 403 (cooldown lungo + rilascio sticky).
-                    _cd = PERMISSION_DENIED_COOLDOWN_S
+                    _cd = fwd.PERMISSION_DENIED_COOLDOWN_S
                     if ses:
                         cur = router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
@@ -3652,7 +3733,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 elif reason == "loop_detected":
                     # Loop degenere in streaming: cooldown medio, si ruota
                     # subito (un'altra chiave/modello puo' rispondere).
-                    _cd = STREAM_LOOP_COOLDOWN_S
+                    _cd = fwd.STREAM_LOOP_COOLDOWN_S
                 else:
                     _cd = err.retry_after
                 # reason propagato solo per il TIMEOUT (mark_failed applica il
@@ -3956,8 +4037,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 (dep["unique"], "loop"))
                     log.warning("[watchdog] stream in LOOP da %s (chunks=%d): "
                                 "kill precoce, cooldown %ds",
-                                dep["unique"], chunks, STREAM_LOOP_COOLDOWN_S)
-                    _fail(dep["unique"], seconds=STREAM_LOOP_COOLDOWN_S,
+                                dep["unique"], chunks, fwd.STREAM_LOOP_COOLDOWN_S)
+                    _fail(dep["unique"], seconds=fwd.STREAM_LOOP_COOLDOWN_S,
                           reason="loop_detected")
                 elif gen_broken or (not seen_done and not saw_finish_reason):
                     # troncamento GENUINO: stream rotto a meta' oppure niente

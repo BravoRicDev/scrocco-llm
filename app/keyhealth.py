@@ -44,6 +44,23 @@ STREAK_DEAD_THRESHOLD = 5          # fail_streak minimo per "dead_suspect"
 SUCCESS_EMA_FLOOR = 0.1            # sotto questo tasso la chiave e' sospetta
 
 
+def set_health_thresholds(*, streak_dead=None, success_ema_floor=None) -> None:
+    """Applica le soglie di classificazione dalla policy (default = costanti).
+
+    Non cambia la logica: con valori assenti restano i default storici."""
+    global STREAK_DEAD_THRESHOLD, SUCCESS_EMA_FLOOR
+    if streak_dead is not None:
+        try:
+            STREAK_DEAD_THRESHOLD = max(1, int(streak_dead))
+        except (TypeError, ValueError):
+            pass
+    if success_ema_floor is not None:
+        try:
+            SUCCESS_EMA_FLOOR = max(0.0, float(success_ema_floor))
+        except (TypeError, ValueError):
+            pass
+
+
 class KeyHealth:
     """Store su disco con update throttled (pattern adaptive_stats)."""
 

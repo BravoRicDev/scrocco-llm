@@ -633,6 +633,12 @@ class Router:
             self.apply_quirks()
         except Exception as exc:                      # pragma: no cover
             log.warning("[quirk] applicazione fallita: %r", exc)
+        # TUNING DA POLICY: allinea le costanti di modulo ai valori dichiarati
+        # (default = valore storico: se non configurati, nulla cambia).
+        try:
+            self.sync_runtime_constants()
+        except Exception as exc:                      # pragma: no cover
+            log.warning("[router] sync tuning fallito: %r", exc)
 
     # ------------------------------------------------- escalation winner
     def _esc(self) -> dict:
@@ -3816,11 +3822,115 @@ class Router:
     QUIRK_FLAGS = ("thinking_replay", "strip_reasoning", "no_thinking",
                    "hold_until_finish", "media_defer")
 
+    def sync_runtime_constants(self) -> dict:
+        """Propaga i parametri di tuning della policy nelle costanti di
+        modulo del router. Ogni default coincide col valore storico: se il
+        parametro non e' configurato, il comportamento NON cambia. Ritorna la
+        mappa dei soli valori effettivamente modificati."""
+        p = self.policy
+
+        def _num(name: str, val, cast):
+            try:
+                return cast(val)
+            except (TypeError, ValueError):
+                return globals().get(name)
+
+        changed: dict[str, dict] = {}
+
+        def _set(name: str, val):
+            old = globals().get(name)
+            if old != val:
+                globals()[name] = val
+                changed[name] = {"old": old, "new": val}
+
+        _set("LATENCY_ROTATE_THRESHOLD_MS", _num(
+            "LATENCY_ROTATE_THRESHOLD_MS",
+            getattr(p, "latency_rotate_threshold_ms",
+                    LATENCY_ROTATE_THRESHOLD_MS), int))
+        _set("SOFT_SLOW_LATENCY_MS", _num(
+            "SOFT_SLOW_LATENCY_MS",
+            getattr(p, "soft_slow_latency_ms", SOFT_SLOW_LATENCY_MS), int))
+        _set("SOFT_SLOW_CTX_MIN", _num(
+            "SOFT_SLOW_CTX_MIN",
+            getattr(p, "soft_slow_ctx_min", SOFT_SLOW_CTX_MIN), int))
+        edges = getattr(p, "ctx_bucket_edges", None) or list(CTX_BUCKETS)
+        try:
+            edges_t = tuple(int(e) for e in edges)
+        except (TypeError, ValueError):
+            edges_t = tuple(CTX_BUCKETS)
+        _set("CTX_BUCKETS", edges_t)
+        _set("CTX_BUCKET_COUNT", len(edges_t) + 1)
+        _set("TTFT_RATE_MIN_CTX", _num(
+            "TTFT_RATE_MIN_CTX",
+            getattr(p, "ttft_rate_min_ctx", TTFT_RATE_MIN_CTX), int))
+        _set("TTFT_RATE_FLOOR_MS", _num(
+            "TTFT_RATE_FLOOR_MS",
+            getattr(p, "ttft_rate_floor_ms", TTFT_RATE_FLOOR_MS), float))
+        _set("SLOW_LATENCY_ABS_FLOOR_MS", _num(
+            "SLOW_LATENCY_ABS_FLOOR_MS",
+            getattr(p, "slow_latency_abs_floor_ms",
+                    SLOW_LATENCY_ABS_FLOOR_MS), float))
+        _set("SLOW_LATENCY_REL_MULT", _num(
+            "SLOW_LATENCY_REL_MULT",
+            getattr(p, "slow_latency_rel_mult", SLOW_LATENCY_REL_MULT), float))
+        _set("SLOW_LATENCY_MIN_PEERS", _num(
+            "SLOW_LATENCY_MIN_PEERS",
+            getattr(p, "slow_latency_min_peers",
+                    SLOW_LATENCY_MIN_PEERS), int))
+        _set("SLOW_GEN_MULT", _num(
+            "SLOW_GEN_MULT",
+            getattr(p, "slow_gen_mult", SLOW_GEN_MULT), float))
+        _set("SLOW_TYPICAL_COMPLETION_TOKENS", _num(
+            "SLOW_TYPICAL_COMPLETION_TOKENS",
+            getattr(p, "slow_typical_completion_tokens",
+                    SLOW_TYPICAL_COMPLETION_TOKENS), float))
+        _set("SLOW_REL_BASELINE_MULT", _num(
+            "SLOW_REL_BASELINE_MULT",
+            getattr(p, "slow_rel_baseline_mult",
+                    SLOW_REL_BASELINE_MULT), float))
+        _set("EFFORT_CAPABLE_BONUS", _num(
+            "EFFORT_CAPABLE_BONUS",
+            getattr(p, "effort_capable_bonus", EFFORT_CAPABLE_BONUS), float))
+        _set("LATENCY_PENALTY_PER_SEC", _num(
+            "LATENCY_PENALTY_PER_SEC",
+            getattr(p, "latency_penalty_per_sec",
+                    LATENCY_PENALTY_PER_SEC), float))
+        _pbn = str(getattr(p, "provider_bias_normalization",
+                           PROVIDER_BIAS_NORMALIZATION) or "log").lower()
+        if _pbn in ("log", "sqrt", "none"):
+            _set("PROVIDER_BIAS_NORMALIZATION", _pbn)
+        # Pesi reputazione: SW e' un dict importato per riferimento, quindi lo
+        # aggiorniamo IN PLACE (SW["..."] ovunque vede i nuovi valori). I pesi
+        # sono configurabili da policy.scoring_weights; i default coincidono
+        # con constants.SCORING_WEIGHTS, quindi senza config NON cambia nulla.
+        sw_cfg = getattr(p, "scoring_weights", None)
+        if isinstance(sw_cfg, dict) and sw_cfg:
+            for wk in list(SW.keys()):
+                if wk in sw_cfg:
+                    try:
+                        nv = float(sw_cfg[wk])
+                    except (TypeError, ValueError):
+                        continue
+                    if SW.get(wk) != nv:
+                        changed.setdefault("SCORING_WEIGHTS", {})[wk] = nv
+                        SW[wk] = nv
+        if changed:
+            log.info("[router] tuning da policy applicato: %s",
+                     ", ".join(sorted(changed)))
+        return changed
+
     def apply_quirks(self) -> int:
         """Applica IN MEMORIA i quirk dichiarati in policy ai deployment
         il cui modello matcha il glob (case-insensitive), mappandoli sui flag
         esistenti. Non riscrive il CSV: e' conoscenza dichiarativa locale.
         Ritorna il numero di coppie (deployment, flag) applicate."""
+        # Allinea SEMPRE le costanti di tuning ai valori di policy correnti
+        # (anche quando non ci sono quirk): il hot-reload della policy le
+        # propaga senza restart.
+        try:
+            self.sync_runtime_constants()
+        except Exception as exc:                      # pragma: no cover
+            log.warning("[router] sync tuning fallito: %r", exc)
         quirks = list(getattr(self.policy, "quirks", None) or [])
         self._applied_quirks = []
         if not quirks:

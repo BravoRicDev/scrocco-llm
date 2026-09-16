@@ -8,6 +8,7 @@ persistence: history lives in logs/Grafana, not in the gateway.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -23,7 +24,8 @@ _gauges: dict[str, Any] = {}
 # I5: LRU limitata — senza tetto la cardinalita' di
 # nx_upstream_latency_ms{unique=...} cresceva per sempre (scrape pesanti,
 # Grafana che esplode). 512 unique in volo sono piu' che sufficienti.
-_LATENCY_MAX = 512
+# Configurabile via env METRICS_LATENCY_MAX.
+_LATENCY_MAX = int(os.environ.get("METRICS_LATENCY_MAX", "512") or "512")
 _latency_sum: "OrderedDict[str, float]" = OrderedDict()
 _latency_count: "OrderedDict[str, float]" = OrderedDict()
 

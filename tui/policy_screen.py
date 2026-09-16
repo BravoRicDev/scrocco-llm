@@ -62,6 +62,46 @@ SCALAR_ROWS: list[tuple[str, str, str, str]] = [
      "Sanity QC: scarta risposte VUOTE non-streaming (true/false)", "bool"),
     ("QC", "qc_sanity.min_chars",
      "Sanity QC: min caratteri contenuti (0 = solo null)", "int"),
+    # --- runtime/memoria & limiti vari (prima hardcoded) ---
+    ("Runtime", "coalesce_cache_max",
+     "Cap cache coalescing (entry)", "int"),
+    ("Runtime", "video_job_ttl_sec", "TTL job video (s)", "int"),
+    ("Runtime", "keyhealth_streak_dead_threshold",
+     "Salute chiavi: fail_streak minimo dead_suspect", "int"),
+    ("Runtime", "keyhealth_success_ema_floor",
+     "Salute chiavi: success EMA minimo", "num"),
+    ("Runtime", "ctxcompact_min_protected_msgs",
+     "Ctx-compact: messaggi finali protetti", "int"),
+    ("Runtime", "toolrepair_max_unwrap_depth",
+     "Tool-repair: profondità max unwrap", "int"),
+    ("Runtime", "sniff_max_b64_chars",
+     "Sniff: cap stringa base64 (char)", "int"),
+    ("Runtime", "sniff_max_str_chars",
+     "Sniff: cap stringa testo (char)", "int"),
+    ("Runtime", "sniff_max_sse_bytes",
+     "Sniff: cap byte SSE accumulati", "int"),
+    ("Runtime", "probe_concurrency", "Probe: concorrenza", "int"),
+    ("Runtime", "probe_timeout_sec", "Probe: timeout (s)", "num"),
+    ("Runtime", "playground_timeout_sec",
+     "Playground: timeout (s)", "num"),
+    ("Runtime", "playground_max_attempts",
+     "Playground: tentativi max", "int"),
+    ("Runtime", "min_output_floor",
+     "Pavimento token output (refill)", "int"),
+    ("HTTP upstream", "upstream_connect_timeout_sec",
+     "Timeout connect (s)", "num"),
+    ("HTTP upstream", "upstream_read_timeout_sec",
+     "Timeout read (s)", "num"),
+    ("HTTP upstream", "upstream_write_timeout_sec",
+     "Timeout write (s)", "num"),
+    ("HTTP upstream", "upstream_pool_timeout_sec",
+     "Timeout pool (s)", "num"),
+    ("HTTP upstream", "upstream_max_keepalive_connections",
+     "Pool: keep-alive max", "int"),
+    ("HTTP upstream", "upstream_max_connections",
+     "Pool: connessioni max", "int"),
+    ("HTTP upstream", "upstream_keepalive_expiry_sec",
+     "Pool: expiry keep-alive (s)", "num"),
 ]
 
 # liste (virgola) — valori validati dal gateway al PATCH
@@ -72,11 +112,25 @@ LIST_ROWS: list[tuple[str, str, str]] = [
      "Regex hot-word RAGIONE (separate da |)"),
     ("Hot-word", "speed_hotwords",
      "Regex hot-word VELOCITÀ (separate da |)"),
+    ("HTTP upstream", "effort_incompatible_hosts",
+     "Host incompatibili 'effort' (virgola; vuoto = default)"),
+]
+
+# liste di INTERI (virgola) — valori validati dal gateway al PATCH
+INTLIST_ROWS: list[tuple[str, str, str]] = [
+    ("HTTP upstream", "retryable_status_codes",
+     "Codici HTTP ritentabili (virgola; vuoto = default 408/409/429/5xx)"),
 ]
 
 MAP_ROWS: list[tuple[str, str, str]] = [
     ("Capacità", "capability_routing.model_capabilities",
      "Pattern→capacità · formato: glob:cap,cap ; separati da ;"),
+]
+
+# Mappe numeriche chiave→numero (es. pesi reputazione).
+NUMMAP_ROWS: list[tuple[str, str, str]] = [
+    ("Reputazione", "scoring_weights",
+     "Pesi reputazione · formato: CHIAVE: numero ; ... (più basso = meglio)"),
 ]
 
 
@@ -166,6 +220,9 @@ class AdvancedPolicyScreen(ModalScreen[None]):
         for _sec, key, label in LIST_ROWS:
             self._add_row(_sec, label, self._fmt(self._eff_get(key)),
                           ("list", key))
+        for _sec, key, label in INTLIST_ROWS:
+            self._add_row(_sec, label, self._fmt(self._eff_get(key)),
+                          ("intlist", key))
         for _sec, key, label in MAP_ROWS:
             m = self._eff_get(key) or {}
             n = len(m)
@@ -173,6 +230,11 @@ class AdvancedPolicyScreen(ModalScreen[None]):
             val = (f"{n} pattern" if n else "(vuota)") + \
                   f"  [dim]es. {sample}[/]" if n else "(vuota)"
             self._add_row(_sec, label, val, ("map", key))
+        for _sec, key, label in NUMMAP_ROWS:
+            m = self._eff_get(key) or {}
+            val = ("; ".join(f"{k}={m[k]}" for k in sorted(m))
+                   if m else "(vuota)")
+            self._add_row(_sec, label, val, ("nummap", key))
         per_profile = dict(eff.get("profile_step_up_pct") or {})
         profiles_attr = getattr(self.app, "profiles", None)
         known_names = set(per_profile)
@@ -212,6 +274,9 @@ class AdvancedPolicyScreen(ModalScreen[None]):
             if kk == key:
                 return lbl
         for _s, kk, lbl in LIST_ROWS:
+            if kk == key:
+                return lbl
+        for _s, kk, lbl in INTLIST_ROWS:
             if kk == key:
                 return lbl
         return str(key)
@@ -356,6 +421,57 @@ class AdvancedPolicyScreen(ModalScreen[None]):
                                 severity="error")
                 return
             await self._patch(self._nested_patch(key, parsed))
+            return
+
+        if typ == "nummap":
+            cur_map: dict = dict(current_raw or {})
+            default = "; ".join(f"{k}: {cur_map[k]}"
+                                for k in sorted(cur_map))
+            new = await self.app.push_screen_wait(TextInputModal(
+                f"[b]{label}[/b]\n[dim]una entry per 'CHIAVE: numero' · più "
+                "entry separate da ; · chiavi: ATTEMPT_PROVIDER ATTEMPT_KEY "
+                "FAIL_DEPLOYMENT FAIL_TRANSIENT FAIL_PROVIDER FAIL_KEY "
+                "SUCCESS_DEPLOYMENT SUCCESS_PROVIDER SUCCESS_KEY[/]",
+                default=default))
+            if new is None:
+                return
+            parsed: dict[str, float] = {}
+            try:
+                for chunk in new.split(";"):
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+                    k, _, v = chunk.partition(":")
+                    k = k.strip()
+                    if not k:
+                        raise ValueError(chunk)
+                    parsed[k] = float(v.strip())
+            except ValueError:
+                self.app.notify("formato: CHIAVE: numero ; CHIAVE2: numero",
+                                severity="error")
+                return
+            await self._patch(self._nested_patch(key, parsed))
+            return
+
+        if typ == "intlist":
+            default = (", ".join(str(x) for x in current_raw)
+                       if isinstance(current_raw, list) else "")
+            new = await self.app.push_screen_wait(TextInputModal(
+                f"[b]{label}[/b]\n[dim]lista di interi separati da virgole · "
+                "vuoto = default storico[/]", default=default))
+            if new is None or new.strip() == default.strip():
+                return
+            try:
+                items = [int(float(x.strip()))
+                         for x in new.split(",") if x.strip()]
+                for it in items:
+                    if not 100 <= it <= 599:
+                        raise ValueError(it)
+            except ValueError:
+                self.app.notify("servono codici HTTP interi (100..599)",
+                                severity="error")
+                return
+            await self._patch(self._nested_patch(key, items))
             return
 
         sep = ", " if typ == "list" else ""

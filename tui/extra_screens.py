@@ -154,6 +154,10 @@ class ClientKeysScreen(ModalScreen[None]):
     BINDINGS = [Binding("escape", "close", "Chiudi"),
                 Binding("c", "copy_hint", "Copia", show=False)]
 
+    def action_copy_hint(self) -> None:
+        # placeholder: copy masked key hint to clipboard if available
+        pass
+
     def __init__(self, profiles: list[str], master_masked: str,
                  proxy_prefix: str):
         super().__init__()

@@ -17,8 +17,13 @@ from textual.widgets.option_list import Option
 
 from .extra_screens import CapacitiesScreen, ClientKeysScreen, ExpiringScreen
 from .observability import ObservabilityScreen
+from .obs_leaderboard import PersistedScoresScreen, ProviderHealthScreen
 from .form import DeploymentFormScreen
 from .gateway_client import DEFAULT_BASE, GatewayClient, GatewayError
+from .mcp_screen import McpConfigScreen as McpScreen
+from .ops_screen import OperationsScreen
+from .tuning_screen import TuningScreen
+from .raw_editor import RawEditorScreen
 from .modals import (ConfirmModal, HelpScreen, InfoModal, TextInputModal,
                      TypedConfirmModal)
 from .policy_screen import AdvancedPolicyScreen
@@ -48,7 +53,17 @@ class MainScreen(Screen):
         Binding("O", "observability", "Osserva"),
         Binding("S", "release_sessions", "Rilascia sess."),
         Binding("slash", "filter_focus", "Filtra", key_display="/"),
-        Binding("question_mark", "help", "Aiuto", key_display="?"),
+        Binding("t", "stats", "Statistiche"),
+        Binding("l", "leaderboard", "Classifica"),
+        Binding("u", "sessions", "Sessioni"),
+        Binding("M", "mcp", "MCP config"),
+        Binding("T", "tuning", "Tuning"),
+        Binding("V", "raw_policy", "Policy raw"),
+        Binding("G", "raw_csv", "CSV raw"),
+        Binding("P", "persisted_scores", "Persistiti"),
+        Binding("H", "provider_health", "Provider"),
+        Binding("Z", "ops_hub", "Operazioni"),
+        Binding("f1", "help", "Aiuto", key_display="?"),
     ]
 
     def __init__(self):
@@ -72,7 +87,7 @@ class MainScreen(Screen):
         t = self.query_one("#deps", DataTable)
         for label, width in DEP_COLUMNS:
             t.add_column(label, key=label, width=width)
-        self.run_worker(self.app.refresh_data(), exclusive=False)
+        self.run_worker(self.app.refresh_data, exclusive=False)
 
     # ------------------------------------------------------------- helpers
     def current_profile(self) -> str | None:
@@ -267,6 +282,57 @@ class MainScreen(Screen):
     def action_filter_focus(self) -> None:
         self.query_one("#filter", Input).focus()
 
+
+    def action_stats(self) -> None:
+        """Apre direttamente la vista statistiche."""
+        self.app.push_screen(ObservabilityScreen(self.app.client,
+                                                 initial="tab-stats"))
+
+    def action_leaderboard(self) -> None:
+        """Apre direttamente la vista classifica."""
+        self.app.push_screen(ObservabilityScreen(self.app.client,
+                                                 initial="tab-lb"))
+
+    def action_sessions(self) -> None:
+        """Apre direttamente la vista sessioni."""
+        self.app.push_screen(ObservabilityScreen(self.app.client,
+                                                 initial="tab-sess"))
+
+    def action_mcp(self) -> None:
+        """Apre il browser/esecutore dei tool MCP di configurazione."""
+        self.app.push_screen(McpScreen(self.app.client))
+
+    def action_tuning(self) -> None:
+        """Apre la vista dei parametri di tuning effettivi."""
+        self.app.push_screen(TuningScreen(self.app.client))
+
+    def action_raw_policy(self) -> None:
+        """Editor grezzo della policy YAML (copre OGNI manopola)."""
+        self.app.push_screen(RawEditorScreen(
+            "POLICY YAML GREZZA",
+            self.app.client.policy_raw,
+            self.app.client.put_policy_raw))
+
+    def action_raw_csv(self) -> None:
+        """Editor grezzo del CSV delle configurazioni."""
+        self.app.push_screen(RawEditorScreen(
+            "CSV CONFIGURAZIONI GREZZO",
+            self.app.client.csv_raw,
+            self.app.client.put_csv_raw))
+
+    def action_persisted_scores(self) -> None:
+        """Punteggi persistiti per deployment (adaptive_stats.json)."""
+        self.app.push_screen(PersistedScoresScreen(self.app.client))
+
+    def action_provider_health(self) -> None:
+        """Salute aggregata per provider."""
+        self.app.push_screen(ProviderHealthScreen(self.app.client))
+
+    def action_ops_hub(self) -> None:
+        """Hub operativo: probe, unretire, purge, capabilities, pressure,
+        backups, insights, history, guide, playground."""
+        self.app.push_screen(OperationsScreen(self.app.client))
+
     def action_new_profile(self) -> None:
         self.run_worker(self._new_profile_flow(), exclusive=True)
 
@@ -380,6 +446,11 @@ class GatewayTUI(App[None]):
 #deps { border: round $accent-lighten-1; }
 #filter { dock: bottom; }
 ModalScreen { align: center middle; }
+#ops-box { width: 80%; height: 80%; padding: 1 2;
+           border: round $accent; background: $surface; }
+#ops-menu { width: 1fr; height: 1fr; }
+#ops-status { height: 1; padding: 0 1; }
+#ops-result { height: 1fr; padding: 0 1; }
 #modal-box, #form-box, #help-box, #adv-box {
     width: auto; max-width: 92%; padding: 1 2;
     border: round $accent; background: $surface; }
@@ -393,7 +464,7 @@ Select { margin-bottom: 1; }
 Input { margin-bottom: 1; }
 """
 
-    BINDINGS = [Binding("ctrl+c", "quit", "Esci", priority=True)]
+    BINDINGS = [Binding("ctrl+c", "quit_app", "Esci", priority=True)]
 
     def __init__(self, base_url: str | None = None,
                  master_key: str | None = None, driver=None):

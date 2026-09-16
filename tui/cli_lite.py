@@ -23,8 +23,11 @@ def _p(msg: str, default: str = "") -> str:
 
 async def show_state(cli: GatewayClient) -> None:
     st = await cli.state()
-    print(f"servizio={st['service_name']}  prefisso={st['prefix']}  "
-          f"deployment={st['deployments']} ({len(st['profiles'])} profili)")
+    svc = st.get("service") or st.get("service_name") or "?"
+    profs = st.get("profiles") or []
+    prof_count = len(profs) if isinstance(profs, list) else len(profs.get("names", [])) if isinstance(profs, dict) else 0
+    print(f"servizio={svc}  prefisso={st.get('prefix','?')}  "
+          f"deployment={st.get('deployments','?')} ({prof_count} profili)")
     print(f"cooldown attivi={len(st['cooldowns_active'])}  "
           f"sticky={len(st['sticky_sessions'])}")
     pol = st["policy"]

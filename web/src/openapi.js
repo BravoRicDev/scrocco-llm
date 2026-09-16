@@ -33,6 +33,25 @@ const SUMMARIES = {
   "POST /api/v1/system/sessions/release": "Rilascia sessioni sticky",
   "POST /api/v1/capabilities/seed": "Semina capacità dalla mappa modelli",
   "POST /api/v1/capabilities/audit": "Audit copertura capacità",
+  "GET /api/v1/stats/summary": "Statistiche aggregate (token/cache/success/modello preferito)",
+  "GET /api/v1/stats/tokens": "Token generati/consumati per modello/profilo/giorno",
+  "GET /api/v1/stats/cache": "Hit rate cache e coalescing",
+  "GET /api/v1/stats/models": "Classifica modelli (success, latenza, token)",
+  "GET /api/v1/stats/deployments": "Classifica deployment",
+  "GET /api/v1/stats/providers": "Statistiche per provider",
+  "GET /api/v1/stats/sessions": "Classifica sessioni (token/successi/modello preferito)",
+  "GET /api/v1/sessions": "Sessioni attive (sticky/cache/dep-guard/slow)",
+  "GET /api/v1/sessions/:id": "Dettaglio sessione + classifica deployment",
+  "GET /api/v1/tuning": "Parametri di tuning effettivi a runtime",
+  "GET /api/v1/policy/raw": "Policy YAML grezza",
+  "PUT /api/v1/policy/raw": "Sostituisce la policy YAML",
+  "GET /api/v1/csv": "CSV configurazioni grezzo",
+  "PUT /api/v1/csv": "Sostituisce il CSV configurazioni",
+  "GET /api/v1/backups": "Elenca i backup di configurazione",
+  "POST /api/v1/backups/restore": "Ripristina un backup di configurazione",
+  "GET /api/v1/mcp/config/tools": "Catalogo tool MCP di configurazione",
+  "POST /api/v1/mcp/config/execute": "Esegue un tool MCP di configurazione",
+  "POST /api/v1/mcp/config/call": "Chiamata JSON-RPC 2.0 all'MCP config",
 };
 
 const TAG_FOR = (p) => {
@@ -46,6 +65,12 @@ const TAG_FOR = (p) => {
   if (p.includes("/guide")) return "guide";
   if (p.includes("/system")) return "system";
   if (p.includes("/capabilities")) return "capabilities";
+  if (p.includes("/stats")) return "stats";
+  if (p.includes("/sessions")) return "sessions";
+  if (p.includes("/tuning")) return "tuning";
+  if (p.includes("/csv")) return "csv";
+  if (p.includes("/backups")) return "backups";
+  if (p.includes("/mcp/config")) return "mcp";
   return "api";
 };
 
@@ -101,6 +126,8 @@ const SPEC = {
     { name: "capabilities" }, { name: "state" }, { name: "history" },
     { name: "insights" }, { name: "bootstrap" }, { name: "guide" },
     { name: "system" }, { name: "api" },
+    { name: "stats" }, { name: "sessions" }, { name: "tuning" },
+    { name: "csv" }, { name: "backups" }, { name: "mcp" },
   ],
   paths: buildPaths(),
   components: {

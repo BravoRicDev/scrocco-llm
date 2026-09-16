@@ -64,6 +64,40 @@ A forbidden action → `403`.
 | POST | `/api/v1/capabilities/seed` | `{dry_run?}` | seed |
 | POST | `/api/v1/capabilities/audit` | — | audit |
 | PATCH | `/api/v1/policy` | partial policy object | **admin** |
+| GET | `/api/v1/stats/summary` | — | read |
+| GET | `/api/v1/stats/tokens` | `window` (`24h`, `7d`, …) | read |
+| GET | `/api/v1/stats/cache` | — | read |
+| GET | `/api/v1/stats/models` | `window` | read |
+| GET | `/api/v1/stats/deployments` | `profile`, `sort`, `order` | read |
+| GET | `/api/v1/stats/providers` | — | read |
+| GET | `/api/v1/stats/sessions` | `window`, `limit` | read |
+| GET | `/api/v1/sessions` | — | read |
+| GET | `/api/v1/sessions/:id` | `window` | read |
+| GET | `/api/v1/tuning` | — | read |
+| GET | `/api/v1/deployments/stats` | `profile` | read |
+| GET | `/api/v1/providers/health` | — | read |
+| GET | `/api/v1/stats/models` | `window` | read |
+| GET | `/api/v1/stats/deployments` | `profile`, `sort`, `order` | read |
+| GET | `/api/v1/stats/providers` | — | read |
+| GET | `/api/v1/stats/sessions` | `window`, `limit` | read |
+| GET | `/api/v1/sessions` | — | read |
+| GET | `/api/v1/sessions/:id` | `window` | read |
+| GET | `/api/v1/tuning` | — | read |
+| GET | `/api/v1/policy/raw` | — | read |
+| PUT | `/api/v1/policy/raw` | `{raw}` | **admin** |
+| GET | `/api/v1/csv` | — | read |
+| PUT | `/api/v1/csv` | `{raw}` | **admin** |
+| GET | `/api/v1/backups` | — | read |
+| POST | `/api/v1/backups/restore` | `{filename}` | restore |
+| GET | `/api/v1/logs/calls` | `limit?` | read |
+| GET | `/api/v1/logs/errors` | `limit?` | read |
+| POST | `/api/v1/profiles/purge` | `{profile}` | purge |
+| POST | `/api/v1/pressure/inspect` | `{limit?}` | cooldowns |
+| POST | `/api/v1/pressure/clear` | `{unique?\|model?}` | cooldowns |
+| POST | `/api/v1/playground` | `{model, messages, profile?, max_tokens?}` | use |
+| GET | `/api/v1/mcp/config/tools` | — | read |
+| POST | `/api/v1/mcp/config/execute` | `{tool, arguments?}` | execute |
+| POST | `/api/v1/mcp/config/call` | JSON-RPC 2.0 (`initialize`/`tools/list`/`tools/call`) | execute |
 
 Full machine-readable spec: `GET /api/v1/openapi.json` · human page: `/api/v1/docs`.
 

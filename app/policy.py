@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from .constants import SCORING_WEIGHTS as DEFAULT_SCORING_WEIGHTS
+
 log = logging.getLogger("nx.policy")
 
 DEFAULT_HOTWORDS = [
@@ -399,6 +401,80 @@ class Policy:
     cooldown_sec: int = 600
     hotwords_window: int = 3
     hotwords: list[str] = field(default_factory=lambda: list(DEFAULT_HOTWORDS))
+    # Pesi del sistema di reputazione (prima hardcoded in constants.SCORING_WEIGHTS).
+    # Punteggio piu' BASSO = meglio. Chiavi ammesse: ATTEMPT_PROVIDER,
+    # ATTEMPT_KEY, FAIL_DEPLOYMENT, FAIL_TRANSIENT, FAIL_PROVIDER, FAIL_KEY,
+    # SUCCESS_DEPLOYMENT, SUCCESS_PROVIDER, SUCCESS_KEY.
+    scoring_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_SCORING_WEIGHTS))
+
+    # -------------------------------------------------------- routing tuning
+    # Parametri di rotazione adattiva che prima erano costanti hardcoded in
+    # router.py. Ogni valore ha un default identico al valore storico; il
+    # router li legge DA POLICY con fallback al valore costante, cosi' il
+    # comportamento NON cambia se non configurato esplicitamente.
+    latency_rotate_threshold_ms: int = 90000   # soglia HARD (demote per tutti)
+    soft_slow_latency_ms: int = 60000          # soglia SOFT (solo ctx pesanti)
+    soft_slow_ctx_min: int = 30000
+    # Bordi DESTRI dei bucket di contesto: <8000->0; 8000..31999->1;
+    # 32000..127999->2; >=128000->3.
+    ctx_bucket_edges: list[int] = field(default_factory=lambda: [8000, 32000, 128000])
+    ttft_rate_min_ctx: int = 8000
+    ttft_rate_floor_ms: float = 250.0
+    slow_latency_abs_floor_ms: float = 45000.0
+    slow_latency_rel_mult: float = 2.0
+    slow_latency_min_peers: int = 5
+    slow_gen_mult: float = 6.0
+    slow_typical_completion_tokens: float = 600.0
+    slow_rel_baseline_mult: float = 2.0
+    effort_capable_bonus: float = 1.5
+    latency_penalty_per_sec: float = 0.5
+    # ---------------------------------------------------------- ops tuning
+    # Parametri operativi di admin (prima hardcoded): probe di validazione
+    # chiavi e playground di prova. Default = valori storici.
+    probe_concurrency: int = 5
+    probe_timeout_sec: float = 20.0
+    playground_timeout_sec: float = 90.0
+    playground_max_attempts: int = 128
+    # Durate dei cooldown "di categoria" (prima hardcoded in forwarder.py).
+    # Default = valori storici; modificabili via gateway.yaml senza restart.
+    model_missing_cooldown_sec: int = 86400
+    quota_min_cooldown_sec: float = 600.0
+    quota_max_cooldown_sec: float = 604800.0        # 7 giorni
+    provider_transient_cooldown_sec: float = 60.0
+    permission_denied_cooldown_sec: float = 1800.0
+    stream_loop_cooldown_sec: float = 300.0
+    retry_body_cap_sec: float = 300.0
+    min_output_floor: int = 4096
+    # ------------------------------------- runtime/memoria & limiti vari
+    # Cap e TTL di strutture in memoria + soglie di classificazione/limiti di
+    # sicurezza (prima hardcoded in main/keyhealth/ctxcompact/toolrepair/sniff).
+    # Default = valori storici; nessun cambiamento di comportamento.
+    coalesce_cache_max: int = 64
+    video_job_ttl_sec: int = 86400
+    keyhealth_streak_dead_threshold: int = 5
+    keyhealth_success_ema_floor: float = 0.1
+    ctxcompact_min_protected_msgs: int = 8
+    toolrepair_max_unwrap_depth: int = 5
+    sniff_max_b64_chars: int = 2048
+    sniff_max_str_chars: int = 20000
+    sniff_max_sse_bytes: int = 1500000
+    # ------------------------------------- HTTP upstream (forwarder)
+    # Timeout e pool connessioni del client httpx verso gli upstream, prima
+    # hardcoded in forwarder.py. Default = valori storici.
+    upstream_connect_timeout_sec: float = 10.0
+    upstream_read_timeout_sec: float = 180.0
+    upstream_write_timeout_sec: float = 30.0
+    upstream_pool_timeout_sec: float = 10.0
+    upstream_max_keepalive_connections: int = 30
+    upstream_max_connections: int = 100
+    upstream_keepalive_expiry_sec: float = 120.0
+    # None = usa il default storico ({408,409,429} ∪ 5xx). Se impostato,
+    # SOSTITUISCE l'insieme dei codici considerati ritentabili.
+    retryable_status_codes: list[int] | None = None
+    # None = usa il default storico ("api.groq.com",). Se impostato,
+    # SOSTITUISCE la lista degli host incompatibili con i modelli "effort".
+    effort_incompatible_hosts: list[str] | None = None
 
     # hot-word di VELOCITÀ ("veloce", "fai in fretta"...): non forzano il
     # gruppo massimo ma scelgono il gruppo PIÙ RAPIDO (EMA latenza) tra
@@ -458,12 +534,16 @@ class Policy:
         default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
     effort_intel_weight: float = 10.0
 
-    # DYNAMIC SCORING: feature osservate per-deployment (latency p95, error rate, throughput)
+# DYNAMIC SCORING: feature osservate per-deployment (latency p95, error rate, throughput)
     # per aggiustare il punteggio di reputazione oltre l'EMA di latenza base.
     dynamic_scoring_enabled: bool = True
     dynamic_scoring_latency_p95_weight: float = 1.0   # peso per latency p95 (ms/1000)
     dynamic_scoring_error_rate_weight: float = 2.0    # peso per error rate (0-1 * 100)
     dynamic_scoring_throughput_weight: float = 0.5    # peso per throughput (tok/s / 100)
+    dynamic_scoring_history_window: int = 100         # campioni per EMA dinamica
+
+    # Provider bias normalization: "log" (default), "sqrt", "none"
+    provider_bias_normalization: str = "log"
 
     # CIRCUIT BREAKER per API Key: previene il martellamento di chiavi rotte/esauste
     circuit_breaker_enabled: bool = True
@@ -1188,7 +1268,109 @@ class Policy:
                     or not (0.0 <= float(_srel) <= 100.0):
                 raise ValueError("slow_latency_rel_mult deve essere 0..100")
             p.slow_latency_rel_mult = float(_srel)
+        # ---------------------------------------------------- routing tuning
+        _set_int(p, raw, "latency_rotate_threshold_ms", minimum=0)
+        _set_int(p, raw, "soft_slow_latency_ms", minimum=0)
+        _set_int(p, raw, "soft_slow_ctx_min", minimum=0)
+        _set_int(p, raw, "ttft_rate_min_ctx", minimum=0)
+        _cbe = raw.get("ctx_bucket_edges")
+        if _cbe is not None:
+            if not isinstance(_cbe, (list, tuple)) or not _cbe:
+                raise ValueError("ctx_bucket_edges deve essere una lista non vuota")
+            _edges: list[int] = []
+            for _e in _cbe:
+                if isinstance(_e, bool) or not isinstance(_e, (int, float)):
+                    raise ValueError("ctx_bucket_edges: elementi non numerici")
+                _edges.append(int(_e))
+            if _edges != sorted(_edges):
+                raise ValueError("ctx_bucket_edges deve essere crescente")
+            p.ctx_bucket_edges = _edges
+        for _name in ("ttft_rate_floor_ms", "slow_latency_abs_floor_ms",
+                      "slow_gen_mult", "slow_typical_completion_tokens",
+                      "slow_rel_baseline_mult",
+                      "effort_capable_bonus", "latency_penalty_per_sec"):
+            _v = raw.get(_name)
+            if _v is not None:
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                    raise ValueError(f"{_name} deve essere un numero")
+                setattr(p, _name, float(_v))
+        _pbn = raw.get("provider_bias_normalization")
+        if _pbn is not None:
+            _val = str(_pbn).strip().lower()
+            if _val not in ("log", "sqrt", "none"):
+                raise ValueError(
+                    "provider_bias_normalization deve essere log|sqrt|none")
+            p.provider_bias_normalization = _val
+        _set_int(p, raw, "dynamic_scoring_history_window", minimum=1)
+        # ---------------------------------------------------------- ops tuning
+        _set_int(p, raw, "probe_concurrency", minimum=1)
+        _set_int(p, raw, "playground_max_attempts", minimum=1)
+        for _name in ("probe_timeout_sec", "playground_timeout_sec"):
+            _v = raw.get(_name)
+            if _v is not None:
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or float(_v) < 0:
+                    raise ValueError(f"{_name} deve essere un numero >= 0")
+                setattr(p, _name, float(_v))
+        # ---------------------------------------------------- cooldown tuning
+        _set_int(p, raw, "model_missing_cooldown_sec", minimum=0)
+        _set_int(p, raw, "min_output_floor", minimum=1)
+        for _name in ("quota_min_cooldown_sec", "quota_max_cooldown_sec",
+                      "provider_transient_cooldown_sec",
+                      "permission_denied_cooldown_sec",
+                      "stream_loop_cooldown_sec", "retry_body_cap_sec"):
+            _v = raw.get(_name)
+            if _v is not None:
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or float(_v) < 0:
+                    raise ValueError(f"{_name} deve essere un numero >= 0")
+                setattr(p, _name, float(_v))
         _set_int(p, raw, "cooldown_timeout_sec", minimum=1)
+        # ------------------------------- runtime/memoria & limiti vari
+        _set_int(p, raw, "coalesce_cache_max", minimum=0)
+        _set_int(p, raw, "video_job_ttl_sec", minimum=0)
+        _set_int(p, raw, "keyhealth_streak_dead_threshold", minimum=1)
+        _set_int(p, raw, "ctxcompact_min_protected_msgs", minimum=0)
+        _set_int(p, raw, "toolrepair_max_unwrap_depth", minimum=0)
+        _set_int(p, raw, "sniff_max_b64_chars", minimum=1)
+        _set_int(p, raw, "sniff_max_str_chars", minimum=1)
+        _set_int(p, raw, "sniff_max_sse_bytes", minimum=1)
+        _kemf = raw.get("keyhealth_success_ema_floor")
+        if _kemf is not None:
+            if isinstance(_kemf, bool) or not isinstance(_kemf, (int, float)) \
+                    or float(_kemf) < 0:
+                raise ValueError(
+                    "keyhealth_success_ema_floor deve essere un numero >= 0")
+            p.keyhealth_success_ema_floor = float(_kemf)
+        # ------------------------------------------ HTTP upstream (forwarder)
+        for _name in ("upstream_connect_timeout_sec", "upstream_read_timeout_sec",
+                      "upstream_write_timeout_sec", "upstream_pool_timeout_sec",
+                      "upstream_keepalive_expiry_sec"):
+            _v = raw.get(_name)
+            if _v is not None:
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or float(_v) <= 0:
+                    raise ValueError(f"{_name} deve essere un numero > 0")
+                setattr(p, _name, float(_v))
+        _set_int(p, raw, "upstream_max_keepalive_connections", minimum=1)
+        _set_int(p, raw, "upstream_max_connections", minimum=1)
+        _rsc = raw.get("retryable_status_codes")
+        if _rsc is not None:
+            if not isinstance(_rsc, list) or not all(
+                    isinstance(x, int) and not isinstance(x, bool)
+                    and 100 <= x <= 599 for x in _rsc):
+                raise ValueError(
+                    "retryable_status_codes deve essere una lista di codici "
+                    "HTTP interi (100..599)")
+            p.retryable_status_codes = [int(x) for x in _rsc]
+        _eih = raw.get("effort_incompatible_hosts")
+        if _eih is not None:
+            if not isinstance(_eih, list) or not all(
+                    isinstance(x, str) and x for x in _eih):
+                raise ValueError(
+                    "effort_incompatible_hosts deve essere una lista di "
+                    "stringhe non vuote")
+            p.effort_incompatible_hosts = [str(x) for x in _eih]
         if "model_circuit_enabled" in raw:
             p.model_circuit_enabled = _coerce_bool(
                 raw.get("model_circuit_enabled"), "model_circuit_enabled")
@@ -1382,6 +1564,23 @@ class Policy:
         _set_int(p, raw, "max_fallback_tries", minimum=1)
         _set_int(p, raw, "hotwords_window", minimum=1)
         _set_int(p, raw, "step_up_pct", minimum=1, maximum=200)
+
+        if "scoring_weights" in raw:
+            sw = raw["scoring_weights"]
+            if not isinstance(sw, dict):
+                raise ValueError("scoring_weights deve essere un oggetto")
+            merged = dict(DEFAULT_SCORING_WEIGHTS)
+            for wk, wv in sw.items():
+                if wk not in DEFAULT_SCORING_WEIGHTS:
+                    raise ValueError(
+                        f"scoring_weights.{wk} non riconosciuto "
+                        f"(ammessi: {', '.join(sorted(DEFAULT_SCORING_WEIGHTS))})")
+                try:
+                    merged[wk] = float(wv)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"scoring_weights.{wk} deve essere un numero") from None
+            p.scoring_weights = merged
 
         for key, attr in (("proxy_prefix", "proxy_prefix"),
                           ("go_suffix", "go_suffix"),

@@ -88,6 +88,11 @@ def test_reload_swaps_and_snapshots(tmp_path):
     assert m0 is not None
 
     _write(csvp, CSV_BASE + "t@x.com,new-m,prov,https://x/v1,20,32,8000,0,K3,text,0\n")
+    # Garantisci un mtime STRETTAMENTE maggiore: su alcuni filesystem la
+    # risoluzione dei timestamp e' grossolana e due scritture ravvicinate
+    # possono condividere lo stesso st_mtime_ns (race di timing, non di logica).
+    _st = os.stat(csvp)
+    os.utime(csvp, ns=(_st.st_atime_ns, _st.st_mtime_ns + 1_000_000_000))
     m1 = maybe_reload(cfg, m0)
     assert m1 != m0
     assert len(cfg._last_rows) == 3
