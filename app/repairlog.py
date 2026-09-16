@@ -1,4 +1,4 @@
-"""Tracciamento delle riparazioni/salvataggi di tool-call.
+"""Tracciamento delle riparazioni/salvataggi applicati alle risposte.
 
 [IT] COSA: ogni volta che una risposta upstream viene "aggiustata" prima di
 essere servita al client, si registra l'evento (a) nel LOG a schermo con un
@@ -6,7 +6,7 @@ prefisso distinguibile e (b) in modo PERSISTENTE su var/repair_ledger.jsonl
 (append-only, rotazione per dimensione) cosi' i conteggi sopravvivono ai
 restart.
 
-Due TIPOLOGIE (family), con sotto-tipi (kind):
+Tre TIPOLOGIE (family), con sotto-tipi (kind):
   - "repair"  : una tool-call STRUTTURATA con argomenti JSON rotti viene
                 riparata.
                 kind = repair_args          (moves reali di repair_arguments)
@@ -14,9 +14,17 @@ Due TIPOLOGIE (family), con sotto-tipi (kind):
   - "salvage" : una tool-call NON strutturata viene RECUPERATA.
                 kind = salvage_text         (resa come testo, texttoolparse)
                 kind = salvage_truncated    (tag tool-call rotto/troncato)
+  - "struct"  : l'OUTPUT STRUTTURATO (JSON/JSON-Schema) viene aggiustato.
+                kind = struct_cleaned       (JSON puro estratto da fence/prosa)
+                kind = struct_repaired      (JSON riparato schema-driven)
+                kind = struct_invalid       (non conforme, non riparabile)
+                kind = struct_corrective    (retry correttivo inviato)
 
-[EN] WHAT: unified accounting of served tool-call repairs/salvages: screen
-log + persistent JSONL ledger (survives restarts), split by family/kind.
+`outcome`: "ok" = aggiustamento applicato, "fail" = non riuscito,
+"abort" = chiusura forzata di emergenza.
+
+[EN] WHAT: unified accounting of served repairs/salvages: screen log +
+persistent JSONL ledger (survives restarts), split by family/kind.
 WHY: the streaming repair path used to be silent, so the number of
 successful repairs could not be answered from logs.
 """
@@ -34,15 +42,19 @@ from . import metrics
 
 log = logging.getLogger("nx.repair")
 
-# Le due TIPOLOGIE di riparazione (family) e i loro sotto-tipi (kind).
+# Le TIPOLOGIE di riparazione (family) e i loro sotto-tipi (kind).
 FAMILY: dict[str, str] = {
     "repair_args": "repair",            # argomenti JSON riparati
     "repair_trunc_close": "repair",     # JSON chiuso perche' troncato
     "salvage_text": "salvage",          # tool-call recuperata dal testo
     "salvage_truncated": "salvage",     # tool-call recuperata da tag rotto
+    "struct_cleaned": "struct",         # JSON puro estratto da fence/prosa
+    "struct_repaired": "struct",        # JSON riparato schema-driven
+    "struct_invalid": "struct",         # output strutturato non recuperabile
+    "struct_corrective": "struct",      # retry correttivo inviato
 }
 KINDS: tuple[str, ...] = tuple(FAMILY)
-FAMILIES: tuple[str, ...] = ("repair", "salvage")
+FAMILIES: tuple[str, ...] = ("repair", "salvage", "struct")
 
 _LEDGER_MAX_BYTES = int(
     os.environ.get("REPAIR_LEDGER_MAX_BYTES", str(4 * 1024 * 1024)) or

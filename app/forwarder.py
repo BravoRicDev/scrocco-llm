@@ -3486,6 +3486,14 @@ truncation_hook=None,
                                 (cur, _so_rep.get("status")))
                     log.info("[struct-out] %s: %s", cur,
                              _so_rep.get("status"))
+                    repairlog.note(
+                        "struct_cleaned"
+                        if _so_rep.get("status") == "cleaned"
+                        else "struct_repaired",
+                        source="nostream", outcome="ok", dep=cur,
+                        model=dep.get("model", ""),
+                        detail=",".join(_so_rep.get("moves") or [])
+                        or _so_rep.get("status"))
                 # ---- L1 #2B: loop detector ----
                 _loop_reason = None
                 if _sm.loop.enabled and not _text_parsed:
@@ -3536,6 +3544,11 @@ truncation_hook=None,
                             log.warning("[retry] %s contenuto non "
                                         "valido (%s): retry correttivo",
                                         cur, reason)
+                            repairlog.note("struct_corrective",
+                                           source="nostream", outcome="ok",
+                                           dep=cur,
+                                           model=dep.get("model", ""),
+                                           detail="json")
                             continue
                         qc_failed.append((cur, reason))
                         metrics.inc("nx_qc_discarded_total",
@@ -3573,10 +3586,17 @@ truncation_hook=None,
                         log.warning("[retry] %s contenuto non "
                                     "conforme (%s): retry correttivo",
                                     cur, _r5)
+                        repairlog.note("struct_corrective",
+                                       source="nostream", outcome="ok",
+                                       dep=cur, model=dep.get("model", ""),
+                                       detail="schema")
                         continue
                     metrics.inc("nx_struct_out_total", (cur, "invalid"))
                     log.warning("[struct-out] %s non conforme (%s): "
                                 "ruoto", cur, _r5)
+                    repairlog.note("struct_invalid", source="nostream",
+                                   outcome="fail", dep=cur,
+                                   model=dep.get("model", ""), detail=_r5)
                     _fail_cur()
                     last_broken = (data, dep)
                     qc_failed.append((cur, "schema"))
