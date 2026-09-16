@@ -6039,6 +6039,16 @@ class Router:
                 continue
         return out
 
+    def _group_dim_order_key(self, group: str) -> tuple[int, int]:
+        """Chiave di ordinamento DIM-MAJOR (regola utente): prima TUTTE le
+        -dim, dalla piu' bassa (quella richiesta) in su, poi i gruppi non-dim.
+        Serve a far SCAVARE al canary/sveglia la -dim richiesta fino
+        all'esaurimento prima di salire a quella superiore."""
+        m = self.DIM_SUFFIX_RE.search(str(group or ""))
+        if not m:
+            return (1, 0)
+        return (0, int(m.group(1)))
+
     def _canary_cold_pick(self, cands: list[dict], ctx: int | None,
                           sampled_tiers: set[int] | None = None
                           ) -> dict | None:
@@ -6193,6 +6203,13 @@ class Router:
                 _order.append(g)
             _by[g].append(d)
         _sam0 = {int(t) for t in (sampled_tiers or ())}
+        # DIM-MAJOR (regola utente): si SCAVA la -dim richiesta fino
+        # all'esaurimento e solo dopo si sale alla successiva; dentro la -dim
+        # la scelta resta "come a freddo" (tier round-robin + spread dei piu'
+        # usati). L'ordine del ladder (tier-major) non decide piu' il salto di
+        # dimensione: senza questo, una -dim piu' profonda con `order` basso
+        # veniva sondata prima di finire quella richiesta.
+        _order.sort(key=self._group_dim_order_key)
         for g in _order:
             _pick = self._canary_cold_pick(
                 _by[g], ctx, _sam0 | self._tiers_of(ex, g))
@@ -6316,6 +6333,13 @@ class Router:
                 _order.append(g)
             _by[g].append(d)
         _sam0 = {int(t) for t in (sampled_tiers or ())}
+        # DIM-MAJOR (regola utente): si SCAVA la -dim richiesta fino
+        # all'esaurimento e solo dopo si sale alla successiva; dentro la -dim
+        # la scelta resta "come a freddo" (tier round-robin + spread dei piu'
+        # usati). L'ordine del ladder (tier-major) non decide piu' il salto di
+        # dimensione: senza questo, una -dim piu' profonda con `order` basso
+        # veniva sondata prima di finire quella richiesta.
+        _order.sort(key=self._group_dim_order_key)
         for g in _order:
             _pick = self._canary_cold_pick(
                 _by[g], ctx, _sam0 | self._tiers_of(ex, g))
