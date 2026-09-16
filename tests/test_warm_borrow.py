@@ -6,7 +6,8 @@ delle altre non trovano piu' nulla. Un warm di un'ALTRA sessione il cui
 DEPLOYMENT e' fermo da >= warm_borrow_idle_sec (idle del deployment, NON della
 sessione) e senza richieste in volo diventa "prestabile":
   - conta nei 3 ready  -> il canary non spreca una chiamata;
-  - entra nel pool IN CODA (priorita' di consumo: propri >> condivisi);
+  - entra nel pool in un BLOCCO UNICO a tre fasce (propri non lenti >
+    prestati non lenti > lenti comuni);
   - al primo successo su un prestato la proprieta' si trasferisce da sola.
 """
 import os
@@ -200,6 +201,28 @@ def test_selectable_false_conta_solo_per_i_ready():
                             include_borrowed=r._borrow_selectable())
         assert [d["unique"] for d in pool] == [a1["unique"]], \
             "ma non sono selezionabili dal pool dei picker"
+    finally:
+        _reset()
+
+
+def test_blocco_unico_proprio_lento_dopo_prestato_veloce():
+    """Blocco 1 = propri NON lenti, blocco 2 = prestati NON lenti, blocco 3 =
+    lenti comuni: un proprio lento (flag timer >45s) NON precede un prestato
+    sano."""
+    r = _mk()
+    try:
+        a1 = _dep(r, "K-A1")
+        b1 = _dep(r, "K-B1")
+        _leave("sesA")
+        _own(r, "sesA", a1)
+        _leave("sesB")
+        _own(r, "sesB", b1)
+        _age(r, b1, 300)
+        r.mark_session_slow("sesA", a1["unique"])   # flag timer >45s
+        _leave("sesA")
+        pool = r._warm_pool("sesA", None, include_borrowed=True)
+        assert [d["unique"] for d in pool] == [b1["unique"], a1["unique"]], \
+            "il prestato sano viene prima del proprio lento"
     finally:
         _reset()
 

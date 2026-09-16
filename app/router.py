@@ -812,6 +812,25 @@ class Router:
             self._session_slow_timer = d
         return d
 
+    def _slow_timer_flagged(self, unique: str,
+                            session_id: str | None = None) -> bool:
+        """True se `unique` porta il flag del TIMER della gara lenta (>45s)
+        per questa sessione (non scaduto). E' il SOLO flag che decide i
+        blocchi del warm pool (propri/prestati/lenti); hard/soft di
+        `_sess_slow` restano fuori da quella partizione."""
+        if not unique:
+            return False
+        sid = session_id or current_session()
+        if not sid:
+            return False
+        tm = self._sess_slow_timer().get(sid)
+        if not tm or unique not in tm:
+            return False
+        if time.time() - float(tm[unique]) > self._warm_ttl():
+            tm.pop(unique, None)
+            return False
+        return True
+
     # ------------------------------------------ ctxcompact watermark
     def ctx_boundary_floor(self, session_id: str | None) -> int:
         """Frontiera MASSIMA gia' applicata (con stub/dedup reali) a questa
@@ -2818,12 +2837,8 @@ class Router:
             return False
         # Marchio del TIMER della gara lenta: vale SEMPRE (indipendente da
         # hard/soft e dal ctx), si ripulisce solo con un successo assoluto.
-        _tm = self._sess_slow_timer().get(sid)
-        if _tm and unique in _tm:
-            if time.time() - float(_tm[unique]) > self._warm_ttl():
-                _tm.pop(unique, None)
-            else:
-                return True
+        if self._slow_timer_flagged(unique, sid):
+            return True
         m = self._sess_slow().get(sid)
         if not m:
             return False
@@ -3001,19 +3016,23 @@ class Router:
                           out_tokens: int | None = None,
                           tried: set[str] | None = None) -> bool:
         """True se il canary LENTO puo' essere aperto: la sessione ha MENO di
-        `slow_race_max_warm` warm validi per QUESTA richiesta (need + ctx +
-        output, include i prestati). A warm pieno il canary finirebbe solo per
-        riempire la lista di altri lenti: si salta. Cap <= 0 = nessun gate."""
+        `slow_race_max_warm` warm NON LENTI validi per QUESTA richiesta (need +
+        ctx + output, include i prestati). Il flag "lento" e' SOLO quello del
+        timer >45s (`_slow_timer_flagged`): un pool fatto di soli lenti non
+        blocca il canario (li si lascia esaurire, senza penalita'). Cap <= 0 =
+        nessun gate."""
         cap = int(getattr(self.policy, "slow_race_max_warm", 6) or 0)
         if cap <= 0:
             return True
         if not session_id or not profile:
             return True
         try:
-            n = len(self.warm_valid_for(
+            pool = self.warm_valid_for(
                 session_id, profile, group_name, need, ctx, out_tokens,
                 tried=tried,
-                include_borrowed=self._borrow_selectable()))
+                include_borrowed=self._borrow_selectable())
+            n = sum(1 for d in pool
+                    if not self._slow_timer_flagged(d["unique"], session_id))
         except Exception:
             return True
         return n < cap
@@ -6041,18 +6060,22 @@ class Router:
         non ha spazio per produrre l'output richiesto NON e' un caldo "buono"
         (vale anche per i prestiti). Default None = solo `_cap_fits`.
 
-        Con `include_borrowed=True` (prestito dei warm) in coda vengono
-        accodati anche i warm di ALTRE sessioni "in disuso" (vedi
-        `_lendable_set`), senza mai scalzare i propri: la priorita' di consumo
-        resta propri >> condivisi, e al primo successo su un prestato la
-        proprieta' si trasferisce da sola (note_session_success).
+        Con `include_borrowed=True` (prestito dei warm) entrano anche i warm
+        di ALTRE sessioni "in disuso" (vedi `_lendable_set`). Propri e prestati
+        formano UN UNICO blocco ordinato (non piu' propri-accodati-poi-
+        prestati); al primo successo su un prestato la proprieta' si trasferisce
+        da sola (note_session_success).
 
-        Lista ORDINATA: i NON lenti prima (holder di sessione "eletto" per
-        primo, poi il piu' veloce per EMA di latenza se `warm_pick_fastest`),
-        i FLAGGATI "lenti per la sessione" in FONDO; tie-break MRU (`last_used`),
-        `order`, `max_input` crescente. Vuota se disabilitato, senza sessione,
-        o senza candidati. `allowed` limita al MONDO richiesto (catena del
-        profilo); None = nessun filtro di mondo."""
+        Lista ORDINATA in TRE FASCE, decise SOLO dal flag del TIMER lento
+        (>45s, `_slow_timer_flagged`):
+          1. propri NON lenti  — holder "eletto" per primo, poi il piu' veloce
+             per EMA di latenza (se `warm_pick_fastest`);
+          2. prestati NON lenti — piu' veloce prima;
+          3. lenti comuni (propri + prestati) — piu' veloce prima.
+        I lenti RESTANO nel pool (nessuna esclusione), solo in fondo. Tie-break
+        MRU (`last_used`), `order`, `max_input` crescente. Vuota se disabilitato,
+        senza sessione, o senza candidati. `allowed` limita al MONDO richiesto
+        (catena del profilo); None = nessun filtro di mondo."""
         if not getattr(self.policy, "warm_pool_enabled", True):
             return []
         sid = session_id or current_session()
@@ -6073,14 +6096,18 @@ class Router:
         holder = self.session_holder(sid)
         _fast = bool(getattr(self.policy, "warm_pick_fastest", True))
 
+        _own_set = set(owned or ())
+
         def _wkey(dep: dict):
-            # Ordine: (1) FLAG "lento per la sessione" -> in FONDO (restano
-            # in warm, ma dopo tutti i sani: e' il flag, non solo la
-            # latenza); (2) holder ("eletto") primo tra i non flaggati;
-            # (3) con `warm_pick_fastest` il piu' VELOCE (EMA di latenza nel
-            # bucket di contesto), ignoti in coda; (4) tie-break MRU,
-            # `order`, `max_input`.
+            # Ordine a TRE FASCE, con il SOLO flag del TIMER lento (>45s) a
+            # decidere la fascia: (1) propri non lenti (holder "eletto" primo,
+            # poi il piu' veloce per EMA); (2) prestati non lenti (piu' veloce);
+            # (3) lenti comuni propri+prestati (piu' veloce). I lenti restano
+            # nel pool: cambia solo la posizione.
             u = dep["unique"]
+            _slow = self._slow_timer_flagged(u, sid)
+            _own = u in _own_set
+            _blk = 0 if (_own and not _slow) else (1 if not _slow else 2)
             if _fast:
                 try:
                     _l = self.bucket_latency_ms(u, ctx)
@@ -6090,8 +6117,8 @@ class Router:
                 _lat = (0, _l) if _l is not None else (1, 0.0)
             else:
                 _lat = (0, 0.0)
-            return (1 if self.is_slow_for_session(u, sid, ctx) else 0,
-                    0 if (holder and u == holder) else 1,
+            return (_blk,
+                    0 if (_blk == 0 and holder and u == holder) else 1,
                     _lat[0], _lat[1],
                     -(self.stats_for(u).last_used or 0.0),
                     int(dep.get("order", ORDER_LAST)),
@@ -6127,11 +6154,8 @@ class Router:
                     and not self.dep_deliverable(dep, need, ctx, out_tokens)):
                 continue
             out.append(dep)
-        if not out:
-            if not include_borrowed:
-                return []
-        else:
-                out.sort(key=_wkey)
+        if not out and not include_borrowed:
+            return []
         if include_borrowed:
             _own = {d["unique"] for d in out}
             borr: list[dict] = []
@@ -6163,13 +6187,14 @@ class Router:
                     continue
                 borr.append(dep)
             if borr:
-                borr.sort(key=_wkey)
                 log.info("[warm] prestito: %d dep da altre sessioni (fermi "
-                         "da >=%.0fs) accodati al pool di %s",
+                         "da >=%.0fs) nel blocco prestati di %s",
                          len(borr),
                          float(getattr(self.policy, "warm_borrow_idle_sec",
                                        240.0) or 0.0), sid)
                 out = out + borr
+        if out:
+            out.sort(key=_wkey)     # blocco unico: propri > prestati > lenti
         if not out:
             return []
         max_n = max(0, int(getattr(self.policy, "warm_pool_max_attempts", 0) or 0))
@@ -6180,8 +6205,9 @@ class Router:
         return out
 
     def _borrow_selectable(self) -> bool:
-        """I prestati sono anche SELEZIONABILI (in coda ai propri) o solo
-        contati per i 3 ready? `warm_borrow_selectable=False` = solo conteggio."""
+        """I prestati sono anche SELEZIONABILI (nel blocco prestati, dopo i
+        propri non lenti) o solo contati per i 3 ready?
+        `warm_borrow_selectable=False` = solo conteggio."""
         return (bool(getattr(self.policy, "warm_borrow_enabled", True))
                 and bool(getattr(self.policy, "warm_borrow_selectable", True)))
 

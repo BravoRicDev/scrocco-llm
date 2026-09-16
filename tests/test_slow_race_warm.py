@@ -2,11 +2,13 @@
 
 - soglia lenta di default a 45s (stream e non-stream);
 - il canary lento si apre SOLO se la sessione ha < `slow_race_max_warm` warm
-  validi (prestati inclusi), altrimenti niente canario (metric `warm_full`);
+  NON LENTI validi (prestati inclusi), altrimenti niente canario (metric
+  `warm_full`); un pool di soli lenti NON blocca il canario;
 - al trigger il dep che sta ancora generando viene FLAGGATO "lento per la
   sessione" subito (anche se poi vince la gara);
-- i flaggati restano in WARM ma vanno IN FONDO: l'holder non flaggato resta
-  primo, altrimenti serve il piu' veloce (EMA di latenza) fra i capaci.
+- i flaggati restano in WARM ma vanno nella terza fascia: l'ordine e' tre
+  blocchi (propri non lenti > prestati non lenti > lenti comuni), decisi dal
+  SOLO flag del timer >45s, e dentro ogni blocco vale l'EMA di latenza.
 """
 from __future__ import annotations
 
@@ -160,6 +162,16 @@ def test_marchio_non_pulito_da_successo_lento(wr, caplog):
     assert not any("NON piu' lento" in r.getMessage() for r in caplog.records)
 
 
+def test_warm_pool_lenti_comuni_piu_veloce_prima(wr):
+    s, m, b = _warm3(wr)
+    wr.mark_session_slow("s1", s["unique"])     # lento (EMA 5000ms)
+    wr.mark_session_slow("s1", b["unique"])     # lento (EMA 100ms)
+    pool = wr._warm_pool("s1", None, None, 100)
+    # blocco 3 = lenti comuni, dal piu' veloce: b prima di s; m (non lento) primo
+    assert [d["unique"] for d in pool] == [m["unique"], b["unique"],
+                                           s["unique"]]
+
+
 def test_warm_pool_knob_off_ordine_legacy(wr):
     s, m, b = _warm3(wr)
     wr.policy.warm_pick_fastest = False
@@ -215,6 +227,19 @@ def test_slow_race_allowed_non_conta_prestiti_non_selezionabili(wr):
     wr.policy.warm_borrow_selectable = False     # solo conteggio, non si usa
     assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k",
                                 frozenset(), 100, 1000) is True
+
+
+def test_slow_race_allowed_conta_solo_i_non_lenti(wr):
+    """Un pool fatto di soli LENTI non chiude il gate: il canario parte e i
+    lenti si lasciano esaurire (nessuna penalita')."""
+    m = _dep(wr, f"{BASE}-200k", "K-M")
+    wr.note_warm_owner("s1", m["unique"])
+    wr.policy.slow_race_max_warm = 1
+    assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k",
+                                frozenset(), 100) is False
+    wr.mark_session_slow("s1", m["unique"])     # ora l'unico warm e' lento
+    assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k",
+                                frozenset(), 100) is True
 
 
 # ----------------------------------------------------- streaming (caller)
