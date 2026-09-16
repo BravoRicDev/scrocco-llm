@@ -1138,6 +1138,13 @@ def maybe_account_quota_cooldown(router, dep: dict | None, status,
     if not acct:
         return 0
     secs = parse_quota_reset_seconds(detail) or QUOTA_MIN_COOLDOWN_S
+    # PROVENIENZA: 'authoritative' solo se il provider ha DICHIARATO il reset
+    # ("Resets in ..."). La stima nostra (mezzanotte UTC / minimo) resta
+    # 'heuristic' -> la SVEglia puo' comunque tentare il risveglio (regola
+    # utente: lasciamo fare il tentativo anche se inutile; un KO raddoppia e
+    # non e' un problema, prima o poi ci ricapitiamo sopra).
+    _prov = "authoritative" if _QUOTA_RESET_RE.search(str(detail or "")) \
+        else "heuristic"
     try:
         st = abs(int(status or 0)) or None
     except (TypeError, ValueError):
@@ -1166,7 +1173,7 @@ def maybe_account_quota_cooldown(router, dep: dict | None, status,
                     continue
                 router.mark_failed(u, seconds=secs,
                                    reason="quota_exhausted_account",
-                                   status=st)
+                                   status=st, provenance=_prov)
                 n += 1
     if n:
         log.warning("[quota-acct] %s: quota giornaliera dell'account %s "
@@ -2259,6 +2266,8 @@ truncation_hook=None,
                 async def _adapted_gen() -> AsyncIterator[bytes]:
                     for b in adapted:
                         yield b
+                metrics.inc("nx_json_sse_total",
+                            (str(dep.get("provider") or "?"),))
                 log.info("[stream] %s ha ignorato stream:true -> risposta "
                          "JSON adattata a SSE", dep["unique"])
                 if _google:

@@ -1514,7 +1514,8 @@ class Router:
         # TETTO operatore sui cooldown STIMATI ('heuristic'): un retry
         # dichiarato dal provider (Retry-After/quota => 'authoritative') o un
         # credit/tier non si tocca MAI. 0 = nessun tetto.
-        if _prov == "heuristic":
+        _is_quota = str(reason or "").startswith("quota_exhausted")
+        if _prov == "heuristic" and not _is_quota:
             _ceil = max(0, int(getattr(pol, "cooldown_estimate_ceiling_sec",
                                        0) or 0))
             if _ceil > 0:
@@ -1553,7 +1554,8 @@ class Router:
         # dopo essere stato "svegliato" dal paracadute e aver fallito, non
         # deve essere ritentato a breve. clear_cooldown su successo lo azzera.
         thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10) or 10))
-        if s.fail_count_24h >= thr and kind != ErrorKind.QUOTA_RESET:
+        if s.fail_count_24h >= thr and kind != ErrorKind.QUOTA_RESET \
+                and not _is_quota:
             floor_cd = max(1.0, float(getattr(
                 pol, "chronic_fail_cooldown_sec", 7200) or 7200))
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
@@ -3031,10 +3033,18 @@ class Router:
 
     def _effective_cooldown_full(self, unique: str, full: float) -> float:
         """Durata efficace = durata grezza scalata dalla preferenza del
-        deployment, clampata a [1, max_cooldown_sec]."""
+        deployment, clampata a [1, max_cooldown_sec]. ECCEZIONE: i cooldown di
+        QUOTA (giornaliera/mensile) seguono il RESET dichiarato o stimato
+        (mezzanotte UTC / "Resets in 9 days") e non vanno tagliati dal ceiling
+        operatore, altrimenti la chiave torna prima del reset e si riprova a
+        vuoto (osservato: quota CF giornaliera tagliata a 5h)."""
         factor = self._pref_cooldown_factor(full, self._pref_for(unique))
         _pol = getattr(self, "policy", None)
         _mx = float(getattr(_pol, "max_cooldown_sec", 18000) or 18000)
+        _s = self._stats.get(unique)
+        _rs = str(getattr(_s, "last_reason", "") or "")
+        if _rs.startswith("quota_exhausted"):
+            _mx = max(_mx, 7 * 86400.0)     # QUOTA_MAX_COOLDOWN_S (7 giorni)
         return max(1.0, min(_mx, full * factor))
 
     def cooldown_residual(self, unique: str) -> float:
@@ -6276,7 +6286,8 @@ class Router:
                               or "")
             except Exception:                          # noqa: BLE001
                 _reason = ""
-            if _reason not in ("http_429", "quota_exhausted"):
+            if _reason not in ("http_429", "quota_exhausted",
+                               "quota_exhausted_account"):
                 continue             # solo 429/quota: mai svegliare un 403/ban
             # PROVENIENZA (P0): si sveglia SOLO un cooldown 'heuristic' (nostra
             # stima). Se il provider ha DICHIARATO quando torna (Retry-After /
