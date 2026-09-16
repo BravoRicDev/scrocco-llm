@@ -4343,10 +4343,14 @@ async def images_generations(request: Request):
              len(str(payload.get("prompt") or "")))
 
     tried: set[str] = set()
+    # Marker "chat gia' tentata" SEPARATI da `tried`: cosi' non consumano il
+    # budget di tentativi e la catena arriva davvero all'ultimo deployment
+    # (inclusi i fallback a pagamento).
+    chat_tried: set[str] = set()
     attempts: list[str] = []
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
-    while dep is not None and len(tried) < 32:
+    while dep is not None and len(tried) < 64:
         cur = dep["unique"]
         _was_dormant = router.is_cooled_down(cur)
         tried.add(cur)
@@ -4405,8 +4409,8 @@ async def images_generations(request: Request):
                     and ("openai_error" in detail
                          or "bad_response_status_code" in detail)))
             if (router.policy.images_chat_fallback and _chat_useful
-                    and f"{cur}::chat" not in tried):
-                tried.add(f"{cur}::chat")
+                    and cur not in chat_tried):
+                chat_tried.add(cur)
                 log.info("[images] %s: /images/generations non disponibile "
                          "(status=%s): ritenta via chat", cur, -status or "?")
                 chat_payload = image_chat_payload(payload, raw_model)

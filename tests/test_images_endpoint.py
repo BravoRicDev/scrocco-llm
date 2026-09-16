@@ -184,40 +184,50 @@ class _FakeForwarder:
 
 _CSV_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
                "priority,scrocco-llm-test,caps\n")
-_GOOGLE = ("https://generativelanguage.googleapis.com/v1beta/openai")
+_GOOGLE = "https://generativelanguage.googleapis.com/v1beta/openai"
+_FALLBACK_ROW = ("orfall,google/gemini-2.5-flash-image,openrouter,"
+                 "https://openrouter.ai/api/v1,fallback,128,0,0,"
+                 "sk-or-test-key,image_gen\n")
 
 
-@pytest.fixture()
-def client(monkeypatch, tmp_path):
+def _make_client(monkeypatch, tmp_path, csv_text):
     csv = tmp_path / "k.csv"
-    csv.write_text(
-        _CSV_HEADER
-        + f"seed,models/gemini-2.5-flash-image,google,{_GOOGLE},"
-          "free,8,8000,1,sk-test-key,image_gen\n"
-        # gruppo -image_gen-fallback (categoria 'fallback'): chiave a pagamento
-        + "orfall,google/gemini-2.5-flash-image,openrouter,"
-          "https://openrouter.ai/api/v1,fallback,128,0,0,sk-or-test-key,image_gen\n"
-    )
+    csv.write_text(csv_text)
     import app.main as m
-    orig_mk = m.authn.master_key
+    orig = (m.authn.master_key, m.config.csv_path,
+            m.router.policy.cap_groups_enabled)
     m.authn.master_key = "test-master-img"
-    orig_csv = m.config.csv_path
     m.LEDGER.flush()
     monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
     monkeypatch.setattr(m, "CSV_PATH", str(csv))
     monkeypatch.setattr(m.config, "csv_path", csv)
     m.config.reload()
     from app.ledger import Ledger
-    led = Ledger(tmp_path)
-    monkeypatch.setattr(m, "LEDGER", led)
-    orig_cap_groups = m.router.policy.cap_groups_enabled
+    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
     m.router.policy.cap_groups_enabled = True
-    yield TestClient(m.app), m
-    m.router.policy.cap_groups_enabled = orig_cap_groups
+    return TestClient(m.app), m, orig
+
+
+def _teardown(m, orig):
+    m.router.policy.cap_groups_enabled = orig[2]
     m.router._cooldown.clear()
-    m.authn.master_key = orig_mk
-    m.config.csv_path = orig_csv
+    m.authn.master_key = orig[0]
+    m.config.csv_path = orig[1]
     m.config.reload()
+
+
+@pytest.fixture()
+def client(monkeypatch, tmp_path):
+    csv_text = (
+        _CSV_HEADER
+        + f"seed,models/gemini-2.5-flash-image,google,{_GOOGLE},"
+          "free,8,8000,1,sk-test-key,image_gen\n"
+        # gruppo -image_gen-fallback (categoria 'fallback'): chiave a pagamento
+        + _FALLBACK_ROW
+    )
+    c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
+    yield c, m
+    _teardown(m, orig)
 
 
 MK = {"Authorization": "Bearer test-master-img"}
@@ -317,3 +327,34 @@ def test_e2e_nativo_ok_passthrough(client, monkeypatch):
     assert r.json()["data"][0]["url"] == "https://img/native.png"
     assert fwd.images_calls == ["google"]
     assert fwd.chat_calls == []
+
+
+def test_e2e_catena_non_troncata_dai_marker_chat(monkeypatch, tmp_path):
+    """Con molti deployment primari che falliscono (ognuno tentando la chat),
+    i marker `::chat` NON devono consumare il budget tentativi: la catena deve
+    arrivare fino all'ULTIMO deployment (il fallback a pagamento)."""
+    rows = _CSV_HEADER
+    for i in range(20):
+        rows += (f"g{i},models/gemini-2.5-flash-image,google,{_GOOGLE},"
+                 f"free,8,8000,{i + 1},sk-test-key-{i},image_gen\n")
+    rows += _FALLBACK_ROW
+    c, m, orig = _make_client(monkeypatch, tmp_path, rows)
+    try:
+        def native(dep, p):
+            return (404, "not found")
+
+        def chat(dep, p):
+            # i google falliscono anche via chat; solo il fallback consegna
+            if dep.get("provider") == "openrouter":
+                return _IMG_ONLY(dep, p)
+            return (429, "rate limited")
+
+        fwd = _fun(monkeypatch, m, native=native, chat=chat)
+        r = c.post("/v1/images/generations", headers=MK,
+                   json={"model": "scrocco-llm-test", "prompt": "x"})
+        assert r.status_code == 200, r.text
+        assert fwd.images_calls[-1] == "openrouter"
+        assert fwd.images_calls.count("openrouter") == 1
+        assert len(fwd.images_calls) == 21
+    finally:
+        _teardown(m, orig)
