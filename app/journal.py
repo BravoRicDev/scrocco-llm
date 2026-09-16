@@ -15,8 +15,16 @@ import time
 from pathlib import Path
 
 # FIX: rotazione per DIMENSIONE del journal (prima cresceva senza limiti).
-JOURNAL_MAX_BYTES = 20 * 1024 * 1024        # 20MB prima della rotazione
-JOURNAL_KEEP = 2                              # segmenti ruotati conservati (.1, .2)
+# Configurabili via ambiente (come LEDGER_MAX_BYTES/LEDGER_KEEP in ledger.py).
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+JOURNAL_MAX_BYTES = _env_int("JOURNAL_MAX_BYTES", 20 * 1024 * 1024)
+JOURNAL_KEEP = _env_int("JOURNAL_KEEP", 2)
 
 
 def _paths(var_dir: str | Path) -> tuple[Path, Path]:

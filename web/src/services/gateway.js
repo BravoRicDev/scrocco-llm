@@ -567,6 +567,58 @@ const routes = [
   ["GET", /^\/bootstrap\/status$/, () => deepClone(getMock().bootstrapStatus)],
   ["GET", /^\/bootstrap\/providers$/, () => deepClone(getMock().bootstrapProviders)],
   ["GET", /^\/bootstrap$/, () => deepClone(getMock().bootstrap)],
+
+  // --- osservabilità & configurazione (mock minimale) ---
+  ["GET", /^\/admin\/stats\/summary$/, () => ({
+    runtime: { uptime_seconds: Math.floor(process.uptime()) },
+    tokens_1h: { calls: 0, total_tokens: 0 }, tokens_24h: { calls: 0, total_tokens: 0 },
+    cache: { hit_rate: 0, hits: 0, total_requests: 0 },
+    success_rate: { total_ok: 0, total_fail: 0, total_calls: 0, rate_percent: 100.0 },
+    model_ranking: [], preferred_model: null, preferred_models_config: { go_preferred_models: [] },
+  })],
+  ["GET", /^\/admin\/stats\/tokens$/, () => ({ window: "24h", by_model: {}, by_profile: {}, by_day: {} })],
+  ["GET", /^\/admin\/stats\/cache$/, () => ({ cache_hit_rate_percent: 0, cache_hits: 0, coalesce_hits: 0 })],
+  ["GET", /^\/admin\/stats\/models$/, () => ({ window: "7d", models_count: 0, ranking: [] })],
+  ["GET", /^\/admin\/stats\/deployments$/, () => ({ count: 0, deployments: [] })],
+  ["GET", /^\/admin\/stats\/providers$/, () => ({ providers: [] })],
+  ["GET", /^\/admin\/stats\/sessions$/, () => ({ sessions_count: 0, sessions: [] })],
+  ["GET", /^\/admin\/sessions$/, () => ({
+    sticky_sessions: deepClone(getMock().sticky_sessions || []),
+    dep_sticky_sessions: [], session_deps: [], cache_holders: [], slow_demoted: [],
+    totals: { sticky: 0, dep_sticky: 0, session_deps: 0, cache_holders: 0, slow_demoted: 0 },
+  })],
+  ["GET", /^\/admin\/sessions\/([^/]+)$/, (q, b, m) => ({
+    session_id: decodeURIComponent(m[1]), preferred_model: null,
+    deployments: [], successful_deployments: [],
+    totals: { calls: 0, ok: 0, fail: 0, deployments: 0, total_tokens: 0, success_rate_percent: 100.0 },
+  })],
+  ["GET", /^\/admin\/tuning$/, () => ({ router: {}, forwarder: {}, admin: {}, storage: {}, policy_effective: {} })],
+  ["GET", /^\/admin\/policy\/raw$/, () => ({ path: "gateway.yaml", raw: getMock().policyRaw || "" })],
+  ["PUT", /^\/admin\/policy\/raw$/, (q, body) => {
+    const s = getMock();
+    s.policyRaw = body?.raw || "";
+    return { ok: true, validated: true, reloaded: true };
+  }],
+  ["GET", /^\/admin\/csv$/, () => ({ path: "keys_rotation.csv", raw: "", parsed: { header: [], rows: [] }, count: 0, backups: [] })],
+  ["PUT", /^\/admin\/csv$/, () => ({ ok: true, count: 0 })],
+  ["GET", /^\/admin\/backups$/, () => ({ count: 0, backups: [] })],
+  ["POST", /^\/admin\/backups\/restore$/, (q, body) => ({ ok: true, restored: body?.filename || null })],
+  ["GET", /^\/admin\/mcp\/config\/tools$/, () => ({ count: 0, tools: [] })],
+  ["POST", /^\/admin\/mcp\/config\/execute$/, (q, body) => ({
+    content: [{ type: "text", text: JSON.stringify({ ok: true, tool: body?.tool || null }) }], isError: false,
+  })],
+  ["POST", /^\/admin\/mcp\/config\/call$/, (q, body) => ({
+    jsonrpc: "2.0", id: body?.id ?? null, result: { ok: true, method: body?.method || null },
+  })],
+  ["GET", /^\/admin\/logs\/calls$/, () => ({ count: 0, calls: [] })],
+  ["GET", /^\/admin\/logs\/errors$/, () => ({ count: 0, errors: [] })],
+  ["POST", /^\/admin\/profiles\/purge$/, (q, body) => ({ ok: true, purged: body?.profile || null, columns: [0, 0] })],
+  ["POST", /^\/admin\/pressure\/inspect$/, () => ({
+    cooldowns_total: 0, cooldowns: [], model_bench: {}, endpoint_quarantine: {},
+    key_leases: [], repair_exempt: [], model_fail_window: {},
+  })],
+  ["POST", /^\/admin\/pressure\/clear$/, () => ({ cleared: [] })],
+  ["POST", /^\/admin\/playground$/, (q, body) => ({ ok: true, model: body?.model || null, trace: [], content: "", used: {} })],
 ];
 
 async function mockRequest(method, pathname, query, body) {

@@ -58,4 +58,71 @@ router.get("/api/v1/bootstrap/providers", requireAuth, authorize("bootstrap", "r
 router.get("/api/v1/guide", requireAuth, authorize("guide", "read"),
   proxyText("/admin/guide", "guide"));
 
+router.get("/api/v1/logs/calls", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/logs/calls", "observability"));
+
+router.get("/api/v1/logs/errors", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/logs/errors", "observability"));
+
+// --------------------------------------------------- statistics & sessions
+// Superficie di osservabilità/configurazione (prima solo in TUI): ora esposta
+// anche qui cosi' l'MCP web la scopre e gli agenti la possono usare.
+router.get("/api/v1/stats/summary", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/summary", "observability"));
+
+router.get("/api/v1/stats/tokens", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/tokens", "observability"));
+
+router.get("/api/v1/stats/cache", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/cache", "observability"));
+
+router.get("/api/v1/stats/models", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/models", "observability"));
+
+router.get("/api/v1/stats/deployments", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/deployments", "observability"));
+
+router.get("/api/v1/stats/providers", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/providers", "observability"));
+
+router.get("/api/v1/stats/sessions", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/stats/sessions", "observability"));
+
+router.get("/api/v1/sessions", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/sessions", "observability"));
+
+router.get("/api/v1/sessions/:id", requireAuth, authorize("observability", "read"),
+  async (req, res) => {
+    try {
+      const data = await gateway.get(
+        `/admin/sessions/${encodeURIComponent(req.params.id)}`,
+        { params: req.query });
+      res.json(data);
+    } catch (err) { fail(res, err); }
+  });
+
+router.get("/api/v1/tuning", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/tuning", "observability"));
+
+// persisted deployment scores / provider health (observability)
+router.get("/api/v1/deployments/stats", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/deployments/stats", "observability"));
+
+router.get("/api/v1/providers/health", requireAuth, authorize("observability", "read"),
+  proxyJson("/admin/providers/health", "observability"));
+
+// raw policy / CSV (master-only a monte; qui solo se autorizzati)
+router.get("/api/v1/policy/raw", requireAuth, authorize("policy", "read"),
+  proxyJson("/admin/policy/raw", "policy"));
+
+router.get("/api/v1/csv", requireAuth, authorize("csv", "read"),
+  proxyJson("/admin/csv", "csv"));
+
+router.get("/api/v1/backups", requireAuth, authorize("config_snapshots", "read"),
+  proxyJson("/admin/backups", "config_snapshots"));
+
+// --------------------------------------------------- MCP config protocol
+router.get("/api/v1/mcp/config/tools", requireAuth, authorize("mcp_config", "read"),
+  proxyJson("/admin/mcp/config/tools", "mcp_config"));
+
 export default router;

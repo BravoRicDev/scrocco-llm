@@ -2,10 +2,137 @@ from __future__ import annotations
 
 import time
 
+from textual.binding import Binding
 from textual.containers import Vertical
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Label, Input
 
+from . import tui_config as cfg
 from .gateway_client import GatewayClient, GatewayError
+
+
+class PersistedScoresScreen(ModalScreen):
+    """Punteggi PERSISTITI per deployment (var/adaptive_stats.json).
+
+    Fonte: GET /admin/deployments/stats — ok/fail cumulativi, latenza EMA,
+    ultimo motivo, timestamp. Sopravvivono al restart."""
+
+    BINDINGS = [Binding("escape", "close", "Chiudi"),
+                Binding("r", "refresh", "Ricarica")]
+
+    def __init__(self, client: GatewayClient):
+        super().__init__()
+        self.client = client
+        self._loading: bool = False
+
+    def compose(self):
+        with Vertical(id="persist-box"):
+            yield Label("[b cyan]PUNTEGGI PERSISTITI[/]  "
+                        "[dim]r ricarica · esc chiudi[/]", id="persist-title")
+            yield DataTable(id="persist-t", zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        t = self.query_one("#persist-t", DataTable)
+        t.add_columns(("deployment","dep"), ("ok","ok"), ("fail","fail"), ("latenza EMA ms","ema"), ("ultimo motivo","reason"), ("ultimo uso","age"))
+        self.run_worker(self.refresh_data(), exclusive=True)
+
+    async def refresh_data(self) -> None:
+        if self._loading:
+            return
+        self._loading = True
+        try:
+            try:
+                data = await self.client.deployments_stats()
+            except GatewayError as e:
+                self.query_one("#persist-title", Label).update(
+                    f"[red]errore punteggi: {e}[/]")
+                return
+            rows = data.get("rows", [])
+            t = self.query_one("#persist-t", DataTable)
+            t.clear()
+            for r in rows:
+                dep = (r.get("unique") or r.get("dep") or "-")
+                dep = dep.rsplit("__", 1)[-1]
+                ts = r.get("last_used")
+                age = "-" if not ts else f"{int((time.time() - ts) // 60)}m fa"
+                t.add_row(dep, str(r.get("ok", 0)), str(r.get("fail", 0)),
+                          str(r.get("ema_latency_ms") or "-"),
+                          str(r.get("last_reason") or "-"), age)
+            self.query_one("#persist-title", Label).update(
+                f"[b cyan]PUNTEGGI PERSISTITI[/]  [dim]{len(rows)} righe "
+                f"· r ricarica · esc chiudi[/]")
+        finally:
+            self._loading = False
+
+    def action_refresh(self) -> None:
+        self.run_worker(self.refresh_data(), exclusive=True)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class ProviderHealthScreen(ModalScreen):
+    """Salute aggregata per provider: contatori, circuit breaker, latenze.
+
+    Fonte: GET /admin/providers/health."""
+
+    BINDINGS = [Binding("escape", "close", "Chiudi"),
+                Binding("r", "refresh", "Ricarica")]
+
+    def __init__(self, client: GatewayClient):
+        super().__init__()
+        self.client = client
+        self._loading: bool = False
+
+    def compose(self):
+        with Vertical(id="provh-box"):
+            yield Label("[b cyan]SALUTE PROVIDER[/]  "
+                        "[dim]r ricarica · esc chiudi[/]", id="provh-title")
+            yield DataTable(id="provh-t", zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        t = self.query_one("#provh-t", DataTable)
+        t.add_columns(("provider","provider"), ("modelli","models"), ("dep","deps"), ("chiamate","calls"), ("success%","success"), ("ema ms","ema"), ("breaker","breaker"))
+        self.run_worker(self.refresh_data(), exclusive=True)
+
+    async def refresh_data(self) -> None:
+        if self._loading:
+            return
+        self._loading = True
+        try:
+            try:
+                data = await self.client.providers_health()
+            except GatewayError as e:
+                self.query_one("#provh-title", Label).update(
+                    f"[red]errore provider: {e}[/]")
+                return
+            provs = data.get("providers") or []
+            if isinstance(provs, dict):
+                provs = list(provs.values())
+            t = self.query_one("#provh-t", DataTable)
+            t.clear()
+            for p in sorted(provs, key=lambda x: x.get("total_calls", 0),
+                            reverse=True):
+                brk = p.get("circuit_breakers") or {}
+                brk_txt = "/".join(f"{k}:{brk[k]}" for k in sorted(brk))
+                t.add_row(p.get("provider") or "-",
+                          ",".join(p.get("models") or [])[:40],
+                          str(p.get("total_deployments", 0)),
+                          str(p.get("total_calls", 0)),
+                          str(p.get("success_rate", 0)),
+                          str(p.get("ema_latency_ms") or "-"),
+                          brk_txt or "-")
+            self.query_one("#provh-title", Label).update(
+                f"[b cyan]SALUTE PROVIDER[/]  [dim]{len(provs)} provider "
+                f"· r ricarica · esc chiudi[/]")
+        finally:
+            self._loading = False
+
+    def action_refresh(self) -> None:
+        self.run_worker(self.refresh_data(), exclusive=True)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class LeaderboardPanel(Vertical):
@@ -23,7 +150,7 @@ class LeaderboardPanel(Vertical):
             "[b cyan]CLASSIFICA DEPLOYMENT (7g)[/]  "
             "[dim]click intestazione = ordina · auto 15s · esc chiudi[/]\n"
             "[dim]fb%=fallback · qc%=scarto QC · wd%=watchdog · "
-            "tot buono/rosso ≥20%[/]",
+            "tot buono/rosso ≥20% · [b]p[/] persistiti · [b]h[/] provider[/]",
             id="obs-lb-title",
         )
         yield Input(placeholder="filtro profilo (vuoto = tutti)", id="obs-lb-profile")
@@ -52,7 +179,7 @@ class LeaderboardPanel(Vertical):
             t.add_column(label, key=key)
         self._loading = False
         self.run_worker(self.refresh_data(), exclusive=True)
-        self.set_interval(15.0, self._tick)
+        self.set_interval(cfg.REFRESH_LEADERBOARD_SEC, self._tick)
 
     def _tick(self) -> None:
         if not self._loading:

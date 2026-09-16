@@ -58,11 +58,79 @@ admin responses.
 | `POST /admin/deployments/unretire` | revive keys dead >7d after fixing them |
 | `GET /admin/state` · `GET /admin/history` | live routing state / operations journal |
 | `POST /admin/cooldowns/clear` · `POST /admin/sessions/release` | reset transient state |
+| `GET /admin/sessions` | active sessions: sticky, dep-sticky, cache holder, dep-guard, slow demote |
+| `GET /admin/sessions/{id}` | ONE session: deployment ranking (successful), preferred model, tokens |
 | `GET/PATCH /admin/policy` | validated hot-reload of behaviour knobs (`var/gateway.yaml`) |
+| `GET/PUT /admin/policy/raw` | raw YAML view / full validated replace |
 | `GET /admin/profiles` · `POST /admin/profiles/purge` | list / remove profile + its rows |
 | `GET /admin/insights[/summary]` | per profile/model/day usage and cost burn |
+| `GET /admin/stats/summary` | tokens (1h/24h), cache, success rate, model ranking, preferred model |
+| `GET /admin/stats/tokens?window=24h` | tokens by model/profile/day |
+| `GET /admin/stats/cache` | cache hit rate, coalescing, holders |
+| `GET /admin/stats/models?window=7d` | model leaderboard (success/latency/usage) |
+| `GET /admin/stats/deployments?sort=&order=` | per-deployment stats |
+| `GET /admin/stats/providers` | per-provider aggregate |
+| `GET /admin/stats/sessions?window=7d&limit=` | session leaderboard (tokens, ok/fail, preferred model) |
+| `GET /admin/tuning` | effective runtime tuning params (router/forwarder/admin/storage/misc) |
+| `GET/PUT /admin/csv` | raw CSV view / full validated replace |
+| `GET /admin/backups` · `POST /admin/backups/restore` | list / restore CSV+YAML snapshots |
+| `GET /admin/providers/health` · `GET /admin/pressure/inspect` | provider health / why deployments are skipped |
 | `POST /admin/reload` | force re-read of CSV + policy |
 | `POST /admin/capabilities/seed-from-map` · `/audit` | capability metadata upkeep |
+| `GET /admin/mcp/config/tools` | MCP tool catalogue (name/description/inputSchema) |
+| `POST /admin/mcp/config/execute` | execute an MCP tool: `{tool, arguments}` → MCP envelope |
+| `POST /admin/mcp/config/call` | JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`) |
+
+### MCP configuration protocol
+
+Every configuration operation is exposed as a **Model Context Protocol**
+tool so agents can drive the whole gateway over JSON-RPC 2.0:
+
+```
+POST /admin/mcp/config/call
+{"jsonrpc":"2.0","id":1,"method":"tools/call",
+ "params":{"name":"deploy_list","arguments":{"profile":"mioaruba"}}}
+```
+
+Canonical tool names (48): `policy_get`, `policy_patch`, `policy_raw_get`,
+`policy_raw_put`, `deploy_list|get|create|update|delete|bulk|expiring|probe|
+probe_bulk|unretire`, `profile_list|purge`, `csv_get|put`, `backup_list|
+restore`, `capabilities_seed|audit`, `state_get`, `history_get`,
+`reload_gateway`, `cooldowns_clear`, `pressure_clear|inspect`,
+`sessions_list|release|detail`, `stats_summary|tokens|cache|models|
+deployments|providers|sessions`, `tuning_get`, `deployments_stats`,
+`providers_health`, `guide_get`, `insights_get|summary`,
+`leaderboard_get`, `logs_calls|errors`, `playground`.
+Legacy aliases (`get_stats_summary`, `list_deployments`, …) are accepted too.
+
+## Terminal UI (`tui/`, Textual)
+
+`./scrocco.sh` launches the TUI, which drives the admin API only (never the
+CSV). Requires the optional Textual dependency
+(`pip install -r requirements-tui.txt`); without it the launcher prints the
+install hint and can fall back to `./scrocco.sh --cli`. Every backend setting
+is reachable from the terminal:
+
+| Key | View |
+|---|---|
+| `r` / `R` | reload local data / force remote CSV+policy reload |
+| `C` / `S` | clear all cooldowns / release all sticky sessions |
+| `n` `e` `d` | new / edit / delete deployment · `p` `x` new / delete profile |
+| `Y` | advanced policy editor · `m` capacities · `E` expirations · `k` client keys |
+| `O` | observability: live, errors, leaderboard, sessions, statistics |
+| `t` `l` `u` | statistics · deployment leaderboard · sessions (ENTER → detail) |
+| `M` | MCP config browser/executor (all 48 tools) |
+| `T` | effective runtime tuning · `P` persisted scores · `H` provider health |
+| `V` / `G` | raw policy YAML / raw deployment CSV editor |
+| `Z` | operations hub: probe, unretire, purge, capabilities, pressure, backups, insights, history, guide, playground |
+
+TUI runtime knobs are configurable via `TUI_*` env vars (defaults = the
+historical constants): `TUI_REFRESH_LIVE_SEC`, `TUI_REFRESH_ERRORS_SEC`,
+`TUI_REFRESH_SESSIONS_SEC`, `TUI_REFRESH_LEADERBOARD_SEC`,
+`TUI_REFRESH_STATS_SEC`, `TUI_LIVE_MAX_ROWS`, `TUI_MODEL_RANKING_MAX`,
+`TUI_OPS_ROWS_MAX`, `TUI_OPS_HISTORY_MAX`, `TUI_OPS_PRESSURE_LIMIT`,
+`TUI_RESULT_MAX_CHARS`, `TUI_MCP_RESULT_MAX_CHARS`,
+`TUI_ERROR_MSG_MAX_CHARS`, `TUI_HTTP_ERR_SNIPPET_CHARS`.
 
 ## Core recipes
 

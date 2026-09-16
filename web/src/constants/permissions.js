@@ -24,6 +24,7 @@ export const PERMISSIONS = {
     csv: allow(["read", "write"], ["admin"]),
     playground: allow(["use"], ["admin"]),
     config_snapshots: allow(["read", "restore"], ["admin"]),
+    mcp_config: allow(["read", "execute"], ["admin"]),
     alerts: allow(["read", "create", "update", "delete"], ["admin"]),
     audit: allow(["read"], ["admin"]),
     ui_settings: allow(["read", "write"], ["admin"]),
@@ -46,6 +47,10 @@ export const PERMISSIONS = {
     csv: allow(["read"], ["operator"]),
     playground: allow(["use"], ["operator"]),
     config_snapshots: allow(["read"], ["operator"]),
+    // execute resta admin-only: i tool MCP di config scrivono policy/CSV,
+    // e per l'operator quelle risorse sono read-only (csv: ["read"]) —
+    // concedergli "execute" sarebbe una scalata di privilegi per quella via.
+    mcp_config: allow(["read"], ["operator"]),
     audit: allow(["read"], ["operator"]),
     ui_settings: allow(["read", "write"], ["operator"]),
   },
@@ -65,6 +70,7 @@ export const PERMISSIONS = {
     api_tokens: allow(["list", "create", "revoke"], ["viewer"]),
     audit: allow(["read"], ["viewer"]),
     ui_settings: allow(["read", "write"], ["viewer"]),
+    mcp_config: allow(["read"], ["viewer"]),
   },
 };
 

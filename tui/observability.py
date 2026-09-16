@@ -9,45 +9,60 @@ from .gateway_client import GatewayClient
 from .obs_live import LiveCallsPanel
 from .obs_errors import ErrorsPanel
 from .obs_leaderboard import LeaderboardPanel
+from .obs_sessions import SessionsPanel
+from .obs_stats import StatsPanel
 
 
-class ObservabilityScreen(ModalScreen[None]):
-    """3 viste osservabilità: chiamate live, errori tracciati, classifica deployment."""
+class ObservabilityScreen(ModalScreen):
+    """5 viste osservabilita: chiamate live, errori, classifica, sessioni, statistiche."""
 
     BINDINGS = [Binding("escape", "close", "Chiudi"),
-                Binding("r", "refresh", "Ricarica")]
+                Binding("r", "refresh", "Ricarica"),
+                # 1-5 cambiano vista (il titolo lo prometteva e non c'era).
+                Binding("1", "tab('tab-live')", "Live", show=False),
+                Binding("2", "tab('tab-err')", "Errori", show=False),
+                Binding("3", "tab('tab-lb')", "Classifica", show=False),
+                Binding("4", "tab('tab-sess')", "Sessioni", show=False),
+                Binding("5", "tab('tab-stats')", "Statistiche", show=False)]
 
-    def __init__(self, client: GatewayClient):
+    def __init__(self, client: GatewayClient, initial: str = "tab-live"):
         super().__init__()
         self.client = client
+        self.initial = initial
 
     def compose(self):
         with VerticalScroll(id="modal-box"):
-            yield Label("[b cyan]OSSERVABILITÀ[/] · [dim]1/2/3 cambia vista · "
-                        "r ricarica · esc chiudi[/]", id="form-title")
-            with TabbedContent(initial="tab-live"):
+            yield Label("[b cyan]OSSERVABILITA[/]  "
+                        "[dim]1-5 cambia vista · r ricarica · esc chiudi[/]", id="form-title")
+            with TabbedContent(initial=self.initial, id="obs-tabs"):
                 with TabPane("Live", id="tab-live"):
                     yield LiveCallsPanel(self.client)
                 with TabPane("Errori", id="tab-err"):
                     yield ErrorsPanel(self.client)
                 with TabPane("Classifica", id="tab-lb"):
                     yield LeaderboardPanel(self.client)
+                with TabPane("Sessioni", id="tab-sess"):
+                    yield SessionsPanel(self.client)
+                with TabPane("Statistiche", id="tab-stats"):
+                    yield StatsPanel(self.client)
 
     def _active_panel(self):
-        tc = self.query_one(TabbedContent)
+        tc = self.query_one("#obs-tabs", TabbedContent)
         pane = tc.active
         mapping = {"tab-live": LiveCallsPanel, "tab-err": ErrorsPanel,
-                   "tab-lb": LeaderboardPanel}
+                   "tab-lb": LeaderboardPanel, "tab-sess": SessionsPanel,
+                   "tab-stats": StatsPanel}
         cls = mapping.get(pane)
         return self.query_one(cls) if cls else None
 
     def action_refresh(self) -> None:
         panel = self._active_panel()
         if panel is not None:
-            self.run_worker(panel.refresh_data(), exclusive=True)
+            panel.run_worker(panel.refresh_data(), exclusive=True)
+
+    def action_tab(self, pane_id: str) -> None:
+        tc = self.query_one("#obs-tabs", TabbedContent)
+        tc.active = pane_id
 
     def action_close(self) -> None:
         self.dismiss(None)
-
-    # se TabbedContent non supporta i binding numerici, ignorali: r + click
-    # sui tab bastano.

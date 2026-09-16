@@ -344,6 +344,16 @@ def _mixed_quoting(args_str: str) -> tuple[str, bool]:
 _MAX_UNWRAP_DEPTH = 5
 
 
+def set_max_unwrap_depth(value=None) -> None:
+    """Applica da policy la profondita' massima di unwrapping (default = 5)."""
+    global _MAX_UNWRAP_DEPTH
+    if value is not None:
+        try:
+            _MAX_UNWRAP_DEPTH = max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+
+
 def _collapse_once(args_str: str) -> tuple[str, bool]:
     """Un solo livello di unwrapping: stringa-esca JSON o array mono-elemento."""
     try:

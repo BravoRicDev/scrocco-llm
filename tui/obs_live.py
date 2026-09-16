@@ -5,6 +5,7 @@ from datetime import datetime
 from textual.containers import Vertical
 from textual.widgets import DataTable, Label
 
+from . import tui_config as cfg
 from .gateway_client import GatewayClient, GatewayError
 
 
@@ -30,7 +31,7 @@ def _short_dep(d) -> str:
 class LiveCallsPanel(Vertical):
     """Vista scorrimento chiamate live. Popolata da TASK B1."""
 
-    _MAX = 500
+    _MAX = cfg.LIVE_MAX_ROWS
 
     def __init__(self, client: GatewayClient):
         super().__init__()
@@ -63,7 +64,7 @@ class LiveCallsPanel(Vertical):
         t.add_column("status", key="status")
         self._loading = False
         self.run_worker(self.refresh_data(), exclusive=True)
-        self.set_interval(2.0, self._tick)
+        self.set_interval(cfg.REFRESH_LIVE_SEC, self._tick)
 
     def _tick(self) -> None:
         if not self._loading:
