@@ -51,6 +51,7 @@ from .auth import AuthManager, AuthResult
 from . import journal, metrics
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from . import sniff
+from . import repairlog
 from . import autoprobe
 from . import forwarder as fwd
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
@@ -185,6 +186,8 @@ policy = Policy.load_or_default(POLICY_PATH)
 # disattivato (l'abilitazione e' live via policy/env) — nessun costo se spento.
 sniff.configure(str(VAR_DIR / "debug-sniff.log"),
                 policy.debug_sniff_retention_hours)
+# Ledger persistente delle riparazioni tool-call (log a schermo + JSONL).
+repairlog.configure(str(VAR_DIR))
 config = GatewayConfig(CSV_PATH, proxy_prefix=policy.proxy_prefix,
                        go_suffix=policy.go_suffix,
                        fallback_suffix=policy.fallback_suffix,
@@ -654,6 +657,7 @@ async def _watcher(interval: float) -> None:
             _maybe_save_cooldowns()     # cooldown attivi su disco
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
+            await repairlog.flush_async()  # ledger riparazioni: idem
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
             # l'evidenza su disco (throttled dal tick stesso)
             try:
@@ -866,6 +870,9 @@ async def lifespan(_app: FastAPI):
         _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
         _rows = LEDGER.flush_sync()              # ledger: nessuna riga persa
         log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
+        _rrows = repairlog.flush_sync()          # ledger riparazioni
+        if _rrows:
+            log.info("[shutdown] repair flush_sync: %d righe salvate", _rrows)
 
 
 app = FastAPI(title=policy.service_name, version="0.2.0", lifespan=lifespan)
@@ -2741,9 +2748,13 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         p2 = dict(payload)
         inject_identity(p2, B, router=router)
 
-        def _hookB(_salvaged, _u=_bu):
+        def _hookB(_salvaged, _u=_bu, _m=B.get("model", "")):
             metrics.inc("nx_truncated_toolcall_total",
                         (_u, "salvaged" if _salvaged else "dropped"))
+            repairlog.note("salvage_truncated", source="hedge",
+                           outcome="ok" if _salvaged else "fail",
+                           dep=_u, model=_m,
+                           detail="tag tool-call rotto (canary)")
             router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
                                reason="truncated_toolcall")
 
@@ -3282,6 +3293,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             _was=_trunc_was_dormant):
                 metrics.inc("nx_truncated_toolcall_total",
                             (_u, "salvaged" if _salvaged else "dropped"))
+                repairlog.note("salvage_truncated", source="stream",
+                               outcome="ok" if _salvaged else "fail",
+                               dep=_u, model=dep.get("model", ""),
+                               detail="tag tool-call rotto")
                 log.warning("[truncation] stream %s: tag tool-call rotto "
                             "(%s) -> declasso %ds", _u,
                             "salvato" if _salvaged else "scartato",
@@ -3520,9 +3535,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     metrics.inc("nx_text_toolcall_total",
                                 (dep["unique"], "parsed"))
                     _quality = 0.6
-                    log.warning("[text-toolcall] stream %s: %d "
-                                "tool-call recuperati dal testo",
-                                dep["unique"], len(_parsed))
+                    repairlog.note("salvage_text", source="stream",
+                                   outcome="ok", dep=dep["unique"],
+                                   model=dep.get("model", ""),
+                                   detail="tool-call resi come testo",
+                                   count=len(_parsed))
             if (verdict == "content" and _fc.enabled):
                 _pat = looks_like_fake_tool_call(
                     _buffered_answer_text(prebuf), _fc)

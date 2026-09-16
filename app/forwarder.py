@@ -48,6 +48,7 @@ import httpx
 from urllib.parse import urlsplit
 
 from . import metrics
+from . import repairlog
 from . import protocols as proto
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
                        learn_no_thinking)
@@ -3420,9 +3421,11 @@ truncation_hook=None,
                         _text_parsed = True
                         metrics.inc("nx_text_toolcall_total",
                                     (cur, "parsed"))
-                        log.info("[text-toolcall] %s: %d tool-call "
-                                 "recuperati dal testo", cur,
-                                 len(_tc_info))
+                        repairlog.note("salvage_text", source="nostream",
+                                       outcome="ok", dep=cur,
+                                       model=dep.get("model", ""),
+                                       detail="tool-call resi come testo",
+                                       count=len(_tc_info))
                 # ---- TOOLCALL TRUNCATION: tag aperto mai chiuso ----
                 if (_tt.enabled and payload.get("tools") and not _text_parsed
                         and getattr(router.policy,
@@ -3451,11 +3454,20 @@ truncation_hook=None,
                             _text_parsed = True
                             metrics.inc("nx_truncated_toolcall_total",
                                         (cur, "salvaged"))
-                            log.warning("[truncation] %s: tool-call salvata "
-                                        "da tag rotto (%d)", cur, len(_salv))
+                            repairlog.note("salvage_truncated",
+                                           source="nostream", outcome="ok",
+                                           dep=cur,
+                                           model=dep.get("model", ""),
+                                           detail="tag tool-call rotto",
+                                           count=len(_salv))
                         else:
                             metrics.inc("nx_truncated_toolcall_total",
                                         (cur, "rotate"))
+                            repairlog.note("salvage_truncated",
+                                           source="nostream", outcome="fail",
+                                           dep=cur,
+                                           model=dep.get("model", ""),
+                                           detail="tag tool-call non salvabile")
                             log.warning("[truncation] %s: tag tool-call rotto "
                                         "non salvabile -> ruoto (cooldown "
                                         "%ds)", cur, _cd)

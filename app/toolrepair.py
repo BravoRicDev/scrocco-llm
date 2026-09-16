@@ -31,6 +31,7 @@ from typing import Any
 
 from .thought_sig import is_gemini_deployment
 from . import metrics
+from . import repairlog
 from .texttoolparse import (TruncationConfig, has_unclosed_toolcall,
                             partial_opener_at_end, salvage_truncated_toolcall,
                             unclosed_toolcall_index)
@@ -526,6 +527,8 @@ def repair_tool_calls(data: dict, payload: dict, dep: dict,
 
     total_moves: list[str] = []
     any_repaired = False
+    repaired_count = 0
+    failed_count = 0
 
     for tc in tool_calls:
         if not isinstance(tc, dict):
@@ -559,17 +562,28 @@ def repair_tool_calls(data: dict, payload: dict, dep: dict,
                 fn["arguments"] = repaired_args
                 total_moves.extend(moves)
                 any_repaired = True
+                repaired_count += 1
                 result["tool"] = fn.get("name", "")
             except (ValueError, TypeError):
                 # Non riparabile, lascia come e' (QC lo catturera)
-                pass
+                failed_count += 1
+        else:
+            failed_count += 1
 
     if any_repaired:
         result["repaired"] = True
         result["moves"] = total_moves
-        log.info("[repair] riparati %d tool-call su %s | moves=%s | level=%s",
-                 len(tool_calls), dep.get("unique", "?"),
-                 total_moves, level)
+        repairlog.note("repair_args", source="nostream", outcome="ok",
+                       dep=dep.get("unique", "?"),
+                       model=dep.get("model", ""),
+                       detail="moves=%s level=%s" % (total_moves, level),
+                       count=repaired_count)
+    if failed_count:
+        repairlog.note("repair_args", source="nostream", outcome="fail",
+                       dep=dep.get("unique", "?"),
+                       model=dep.get("model", ""),
+                       detail="argomenti non riparabili (level=%s)" % level,
+                       count=failed_count)
 
     return result
 
@@ -721,6 +735,10 @@ class ToolRepairSSEFilter:
         di chiusura mancanti (mai una riscrittura dei dati già emessi) così il
         parser del client non esplode e può usare il payload parziale."""
         output: list[bytes] = []
+        _ok_args = 0
+        _ok_close = 0
+        _bad = 0
+        _moves: list[str] = []
         for idx in sorted(self._buffers.keys()):
             tc_obj = self._buffers[idx]
             args = tc_obj.get("arguments") or ""
@@ -755,6 +773,19 @@ class ToolRepairSSEFilter:
                         moves.append("abort_args_emptied")
                     metrics.inc("nx_toolrepair_truncated_total",
                                 (name or "?",))
+                # Classifica la riparazione (per il tracking):
+                #  - moves "reali" -> argomenti riparati;
+                #  - solo chiusura   -> JSON troncato chiuso;
+                #  - niente          -> non riparabile.
+                _real = [m for m in moves if m not in (
+                    "abort_close_json", "abort_args_emptied")]
+                if _real:
+                    _ok_args += 1
+                    _moves.extend(_real)
+                elif force_close:
+                    _ok_close += 1
+                else:
+                    _bad += 1
 
             chunk = {
                 "id": "chatcmpl-toolrepair",
@@ -777,6 +808,26 @@ class ToolRepairSSEFilter:
             self._total_moves.extend(moves)
 
         self._buffers.clear()
+
+        # ---- TRACKING (log a schermo + ledger persistente) ----
+        _dep = self.dep.get("unique", "?")
+        _model = self.dep.get("model", "")
+        if _ok_args:
+            repairlog.note("repair_args", source="stream", outcome="ok",
+                           dep=_dep, model=_model,
+                           detail="moves=%s" % sorted(set(_moves)),
+                           count=_ok_args)
+        if _ok_close:
+            repairlog.note("repair_trunc_close", source="stream",
+                           outcome="abort" if force_close else "ok",
+                           dep=_dep, model=_model,
+                           detail="JSON troncato chiuso",
+                           count=_ok_close)
+        if _bad:
+            repairlog.note("repair_args", source="stream", outcome="fail",
+                           dep=_dep, model=_model,
+                           detail="argomenti non riparabili",
+                           count=_bad)
         return output
 
     def abort_finalize(self) -> list[bytes]:

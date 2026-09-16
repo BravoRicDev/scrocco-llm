@@ -448,6 +448,17 @@ async def admin_history(request: Request, limit: int = 50):
     return journal.history(gw.VAR_DIR, limit)
 
 
+@admin_api.get("/repairs")
+async def admin_repairs(request: Request, limit: int = 0):
+    """Conteggi delle riparazioni/salvataggi tool-call (dal ledger persistente).
+    `by_family` = le 2 tipologie (repair / salvage); `by_kind` = sotto-tipi."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    from . import repairlog
+    return repairlog.aggregate(limit=limit)
+
+
 @admin_api.post("/profiles/purge")
 async def purge_profile(request: Request):
     """Rimuove la COLONNA di un profilo dal CSV (solo se zero righe la usano).
