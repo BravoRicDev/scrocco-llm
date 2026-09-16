@@ -65,6 +65,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         media_modality_signature,
                         _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
+                        _QUOTA_RESET_RE,
                         set_retry_after_floors,
                         set_stream_stall_sec,
                         set_adaptive_timeout, set_latency_lookup,
@@ -3038,11 +3039,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])
         _was_dormant = router.is_cooled_down(dep["unique"])
-        def _fail(u, *, seconds=None, reason=None, status=None):
+        def _fail(u, *, seconds=None, reason=None, status=None,
+                  provenance=None):
             if _was_dormant:
                 _r = router.mark_failed_double_residual(u, reason=reason, status=status)
             else:
-                _r = router.mark_failed(u, seconds=seconds, reason=reason, status=status)
+                _r = router.mark_failed(u, seconds=seconds, reason=reason,
+                                        status=status, provenance=provenance)
             # P1-4: 3 KO dello stesso MODELLO (anche su chiavi diverse) entro
             # la finestra -> bench del modello su tutte le sue chiavi.
             with contextlib.suppress(Exception):
@@ -3643,10 +3646,18 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # nel forwarder) — la key Gemini resta sana per il traffico non-tool.
             # model_missing (inesistente/non servito/giu'): 24h fissi.
             if not thought_sig and not media_sig:
+                _prov_q = None
                 if reason == "quota_exhausted":
                     # Abbonamento flat esaurito: cooldown = tempo al reset
                     # (es. "Resets in 9 days" -> ~9gg), non escalation.
                     _cd = parse_quota_reset_seconds(detail)
+                    # Provenienza: 'authoritative' SOLO se il provider ha
+                    # dichiarato il reset ("Resets in ..."); la nostra stima
+                    # (mezzanotte UTC) resta 'heuristic' -> la SVEglia puo'
+                    # comunque tentare il risveglio (regola utente).
+                    _prov_q = ("authoritative"
+                               if _QUOTA_RESET_RE.search(detail or "")
+                               else "heuristic")
                     # Rilascia dep-sticky: questa key NON tornerà prima del
                     # reset; la sessione deve ripartire su un'altra chiave.
                     if ses:
@@ -3688,7 +3699,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # restavano morti key-soft 429, budget-guard learning,
                 # _punish_concurrency e le classi di cooldown (F18).
                 _fail(dep["unique"], seconds=_cd, reason=reason,
-                      status=abs(err.status) if err.status else None)
+                      status=abs(err.status) if err.status else None,
+                      provenance=_prov_q)
             nxt = _next_filtered(profile, dep, need, scope, ctx=ctx,
                                  tried=tried_set,
                                  requested_group=requested_group) \

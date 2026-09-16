@@ -612,7 +612,15 @@ _QUOTA_EXHAUSTED_RE = re.compile(
     # \baierror\b in _PAYLOAD_SCHEMA_RE la classificava come schema e la
     # faceva ruotare SENZA cooldown, bruciando tutte le chiavi sorelle).
     r"|used up your (?:daily|monthly) free allocation"
-    r"|free allocation of [\d.,]+ ?(?:k|m)? ?neurons",
+    r"|free allocation of [\d.,]+ ?(?:k|m)? ?neurons"
+    # OpenRouter / NVIDIA: tetto GIORNALIERO di richieste sui modelli free dell'
+    # ACCOUNT. Body: {"error":{"message":"Rate limit exceeded:
+    # free-models-per-day. Add 10 credits to unlock 1000 free model requests
+    # per day","code":429}}. Senza questa firma era un 429 generico -> cooldown
+    # 90s e rotazione a vuoto su tutte le chiavi sorelle (osservato su
+    # mioaruba: nemotron-3.5-lightning-free__16 -> __17 e cosi' via).
+    r"|free.models?[ -]?per[ -]?day"
+    r"|free model requests per day",
     re.IGNORECASE)
 # Quota a finestra GIORNALIERA (reset a mezzanotte): senza un hint esplicito
 # "Resets in ..." il cooldown ragionevole e' fino alla mezzanotte UTC, non 10
@@ -621,7 +629,10 @@ _DAILY_QUOTA_RE = re.compile(
     r"daily free allocation"
     r"|used up your daily"
     r"|daily (?:quota|limit) (?:reached|exceeded|exhausted)"
-    r"|reached (?:your|the) daily",
+    r"|reached (?:your|the) daily"
+    # qualunque "N richieste/token PER DAY" e' una finestra giornaliera: il
+    # reset e' a mezzanotte, non tra 10 minuti.
+    r"|per[ -]?day",
     re.IGNORECASE)
 # parses: "Resets in 9 days", "Resets in 4 hours", "Resets in 30 minutes"
 _QUOTA_RESET_RE = re.compile(
@@ -2830,14 +2841,16 @@ truncation_hook=None,
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
             log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
-            def _fail_cur(seconds=None, reason=None, status=None, kind=None):
+            def _fail_cur(seconds=None, reason=None, status=None, kind=None,
+                          provenance=None):
                 _k = kind if kind is not None else _kind_default
                 if _was_dormant and _k != ErrorKind.PERMANENT_DEAD:
                     _r = router.mark_failed_double_residual(
                         cur, reason=reason, status=status)
                 else:
                     _r = router.mark_failed(
-                        cur, seconds=seconds, reason=reason, status=status, kind=_k)
+                        cur, seconds=seconds, reason=reason, status=status,
+                        kind=_k, provenance=provenance)
                 # P1-4: KO ripetuti dello stesso MODELLO -> bench cross-chiave.
                 with contextlib.suppress(Exception):
                     router.note_model_failure(dep)
@@ -3399,7 +3412,10 @@ truncation_hook=None,
                                 "cooldown %.0fs al reset, ruoto",
                                 cur, detail, _qcd)
                     _fail_cur(seconds=_qcd, reason="quota_exhausted",
-                              status=abs(err.status) if err.status else None)
+                              status=abs(err.status) if err.status else None,
+                              provenance=("authoritative"
+                                          if _QUOTA_RESET_RE.search(detail or "")
+                                          else "heuristic"))
                     dep = _pick(profile, dep, need, scope,
                                                ctx=ctx, tried=tried,
                                                           requested_group=requested_group)

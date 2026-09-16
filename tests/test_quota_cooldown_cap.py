@@ -141,3 +141,94 @@ def test_metrica_json_sse_quando_l_upstream_ignora_lo_stream():
     after = dict(metrics.snapshot(("nx_json_sse_total",))
                  .get("nx_json_sse_total", {}))
     assert sum(after.values()) == sum(before.values()) + 1
+
+
+# ------------------------------- quota giornaliera "free-models-per-day"
+OR_QUOTA = ('{"error":{"message":"Rate limit exceeded: free-models-per-day. '
+            'Add 10 credits to unlock 1000 free model requests per day",'
+            '"code":429}}')
+
+_CSV_OR = ("commento,modello,provider,endpoint,data,context,max_input,"
+           "priority,scrocco-llm-test,caps\n"
+           "a,qc-or,openrouter,https://api.openrouter.ai/api/v1,free,"
+           "128,128000,5,K1,\n"
+           "b,qc-or2,openrouter,https://api.openrouter.ai/api/v1,free,"
+           "128,128000,5,K2,\n"
+           "c,qc-ok2,groq,https://ok.test/v1,free,128,128000,5,K3,\n")
+
+
+def _mk_or():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(_CSV_OR)
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    router = Router(cfg, Policy.from_dict({}))
+    os.unlink(path)
+    return cfg, router, _dep(cfg, "K1")
+
+
+def test_free_models_per_day_e_quota_giornaliera():
+    """OpenRouter/NVIDIA: 'free-models-per-day' e' una QUOTA giornaliera, non
+    un 429 generico (prima: cooldown 90s e rotazione a vuoto sulle chiavi
+    sorelle)."""
+    from app.forwarder import _QUOTA_EXHAUSTED_RE, classify_error_class
+    assert _QUOTA_EXHAUSTED_RE.search(OR_QUOTA)
+    secs = parse_quota_reset_seconds(OR_QUOTA)      # -> mezzanotte UTC
+    assert 600.0 <= secs <= 86400.0 and secs > 18000.0
+    assert classify_error_class(429, OR_QUOTA) == "quota"
+    assert classify_error_class(-429, OR_QUOTA) == "quota"
+
+
+def test_free_models_per_day_mette_in_pausa_la_chiave_fino_al_reset():
+    """Nel loop reale un 429 'free-models-per-day' mette la chiave in cooldown
+    FINO AL RESET (non 90s) e la richiesta va avanti sull'altra chiave."""
+    cfg, router, broken = _mk_or()
+    good = _dep(cfg, "K3")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.openrouter.ai":
+            return httpx.Response(429, content=OR_QUOTA.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        return await fwd.call_with_fallback(
+            router, "test", broken,
+            {"model": "x", "messages": [{"role": "user", "content": "x"}]})
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == good["unique"]
+    assert router.cooldown_residual(broken["unique"]) > 18000.0
+    assert router.stats_for(broken["unique"]).last_reason.startswith("quota")
+    assert router.cooldown_provenance(broken["unique"]) == "heuristic"
+    # NOTA: openrouter non espone un account nell'URL, quindi la gemella non
+    # viene messa in pausa "preventivamente": viene solo PROVATA e, siccome la
+    # quota e' dell'account, impara lo stesso reset appena la si tocca.
+    sib = _dep(cfg, "K2")["unique"]
+    assert router.cooldown_residual(sib) == 0.0 or \
+        router.cooldown_residual(sib) > 18000.0
+
+
+def test_free_models_per_day_su_path_account_pausa_tutte_le_chiavi():
+    csv = ("commento,modello,provider,endpoint,data,context,max_input,"
+           "priority,scrocco-llm-test,caps\n"
+           "a,qc-acc,openrouter,https://api.x.test/accounts/ACC9/v1,free,"
+           "128,128000,5,K1,\n"
+           "b,qc-acc2,openrouter,https://api.x.test/accounts/ACC9/v1,free,"
+           "128,128000,5,K2,\n"
+           "c,qc-acc3,openrouter,https://api.x.test/accounts/ACC8/v1,free,"
+           "128,128000,5,K3,\n")
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(csv)
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    router = Router(cfg, Policy.from_dict({}))
+    os.unlink(path)
+    dep = _dep(cfg, "K1")
+    n = maybe_account_quota_cooldown(router, dep, 429, OR_QUOTA)
+    assert n == 2                                   # ACC9: K1 + K2
+    assert router.cooldown_residual(_dep(cfg, "K2")["unique"]) > 18000.0
+    assert router.cooldown_residual(_dep(cfg, "K3")["unique"]) == 0.0
