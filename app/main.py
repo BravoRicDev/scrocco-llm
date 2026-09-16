@@ -58,6 +58,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
                         StreamLoopDetected, STREAM_LOOP_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
+                        tool_combo_signature,
                         _PROVIDER_TRANSIENT_RE,
                         _THOUGHT_SIG_RE, is_provider_error_body,
                         is_provider_fault_body,
@@ -3704,7 +3705,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # thought_signature: ruota SENZA cooldown, mai pass-through finche'
             # c'e' un'alternativa (un provider OpenAI-compatibile lo accetta).
             schema_sig = bool(_PAYLOAD_SCHEMA_RE.search(detail))
-            if schema_sig:
+            # Google/Gemini 3 (anche via proxy OpenAI-compat): rifiuto della
+            # COMBINAZIONE built-in tools + function calling (il flag
+            # tool_config non e' passabile). Stesso trattamento dello schema:
+            # ruota SENZA cooldown, mai pass-through; a catena esaurita NON e'
+            # "actionable" -> 503 RETRYABLE (il client non puo' farci nulla).
+            tool_combo_sig = tool_combo_signature(detail)
+            if schema_sig or tool_combo_sig:
                 thought_sig = True         # riusa tutta la logica no-cooldown
             # Rifiuto di MODALITA' (vision/image/audio/…): il modello non e'
             # rotto, semplicemente non accetta quel tipo di input -> ruota
@@ -3748,6 +3755,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # QUOTA prima dello schema: la quota va in cooldown (fino al
                 # reset), non ruotata a vuoto senza cooldown.
                 reason = "quota_exhausted"
+            elif tool_combo_sig:
+                reason = "tool_combo"
             elif schema_sig:
                 reason = "payload_schema"
             elif media_sig:

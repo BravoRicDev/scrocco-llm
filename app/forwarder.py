@@ -858,6 +858,26 @@ _PAYLOAD_SCHEMA_RE = re.compile(
     r"|(?:unsupported|not supported)\s+['\"]?json_schema",
     re.IGNORECASE)
 
+# COMBINAZIONE built-in tools + function calling rifiutata dal provider
+# (Google/Gemini 3, anche via proxy OpenAI-compat: es. requesty mappa il tool
+# `web_search` sul built-in google_search). Il provider pretende
+# toolConfig.includeServerSideToolInvocations=true, che i proxy non espongono
+# nel body OpenAI-compat -> 400 bloccante. Il payload NON e' malformato: un
+# altro deployment accetta la stessa richiesta. Regola utente: RUOTA senza
+# penalita' (nessun cooldown) e, a catena esaurita, NON consegnare il 400
+# grezzo al client (che non puo' farci nulla) -> 503 retryable.
+_TOOL_COMBO_RE = re.compile(
+    r"include_server_side_tool_invocations"
+    r"|enable\s+tool_config"
+    r"|tool_config[^,;.]{0,40}to use built-?in tools",
+    re.IGNORECASE)
+
+
+def tool_combo_signature(detail: str | None) -> bool:
+    """True se il body d'errore e' il rifiuto della COMBINAZIONE
+    built-in tools + function calling (Google/Gemini 3 & proxy)."""
+    return bool(detail) and _TOOL_COMBO_RE.search(detail) is not None
+
 # REPLAY DEL REASONING (thinking mode). opencode zen "Console Go" (deepseek
 # v4.1 thinking & co.) pretende che un assistant CON tool_calls riporti il suo
 # `reasoning_content`: il client agentico lo droppa dalla history, quindi il
@@ -1110,6 +1130,8 @@ def classify_error_class(status, detail: str | None = None) -> str:
     # la quota va in cooldown, non ruotata a vuoto.
     if _QUOTA_EXHAUSTED_RE.search(d):
         return "quota"
+    if tool_combo_signature(d):
+        return "tool_combo"
     if _PAYLOAD_SCHEMA_RE.search(d):
         return "payload_schema"
     if media_reject_signature(d):
@@ -3810,13 +3832,18 @@ truncation_hook=None,
                                     "senza cooldown", cur, nxt["unique"])
                         dep = nxt
                         continue
-                    if _PAYLOAD_SCHEMA_RE.search(detail):
+                    if _PAYLOAD_SCHEMA_RE.search(detail) or \
+                            tool_combo_signature(detail):
                         # CF Workers AI & co.: rifiuto di SCHEMA della richiesta
                         # (content array vs string, messaggio senza content).
+                        # Google/Gemini 3 (anche via proxy): rifiuto della
+                        # COMBINAZIONE built-in tools + function calling
+                        # (tool_config flag non passabile via OpenAI-compat).
                         # Non e' il modello rotto: ruota SENZA cooldown, un
                         # provider OpenAI-compatibile accetta lo stesso payload.
+                        _tc = tool_combo_signature(detail)
                         metrics.inc("nx_upstream_calls_total",
-                                    (cur, "provider_4xx"))
+                                    (cur, "tool_combo" if _tc else "provider_4xx"))
                         last_err = err        # consegna il 400 se catena esaurita
                         nxt = _pick(profile, dep, need, scope,
                                                    ctx=ctx, tried=tried,
@@ -3824,14 +3851,16 @@ truncation_hook=None,
                         if nxt is not None and nxt["unique"] in tried:
                             nxt = None
                         if nxt is None:
-                            log.warning("[fallback] %s 400 schema payload "
-                                        "(content array / messaggio senza "
-                                        "content): nessuna alternativa, "
-                                        "consegno il 400 al client", cur)
+                            log.warning("[fallback] %s 400 %s: nessuna "
+                                        "alternativa, consegno l'errore", cur,
+                                        "tool mix built-in+function"
+                                        if _tc else "schema payload")
                             raise
-                        log.warning("[fallback] %s 400 schema payload "
-                                    "incompatibile col provider: ritento su "
-                                    "%s senza cooldown", cur, nxt["unique"])
+                        log.warning("[fallback] %s 400 %s incompatibile col "
+                                    "provider: ritento su %s senza cooldown",
+                                    cur,
+                                    "tool mix built-in+function" if _tc
+                                    else "schema payload", nxt["unique"])
                         dep = nxt
                         continue
                     if (qc.retry_provider_4xx and (
