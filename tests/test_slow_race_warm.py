@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -182,6 +183,38 @@ def test_slow_race_allowed_gate(wr):
     wr.policy.slow_race_max_warm = 0          # 0 = nessun gate
     assert wr.slow_race_allowed("s1", "test", f"{BASE}-32k",
                                 frozenset(), 100) is True
+
+
+def test_slow_race_allowed_rispetta_il_budget_output(wr):
+    """Il gate conta solo i CAPACI: un caldo che non puo' consegnare
+    l'output richiesto NON e' 'pronto' (prima lo era: out_tokens=None)."""
+    m = _dep(wr, f"{BASE}-200k", "K-M")          # max_input 200000
+    wr.note_warm_owner("s1", m["unique"])
+    wr.policy.slow_race_max_warm = 1
+    # ctx 190k + out 32k -> room = 200000-190000-10000 = 0 -> NON capace
+    assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k", frozenset(),
+                                190000, 32000) is True
+    # ctx basso: ci stanno ctx e output -> capace -> gate chiuso
+    assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k", frozenset(),
+                                100000, 32000) is False
+
+
+def test_slow_race_allowed_non_conta_prestiti_non_selezionabili(wr):
+    """I prestati si contano solo se sono anche SELEZIONABILI (come nel pick)."""
+    a = _dep(wr, f"{BASE}-200k", "K-M")
+    b = _dep(wr, f"{BASE}-1000k", "K-B")
+    wr.note_warm_owner("s2", a["unique"])        # di un'ALTRA sessione
+    wr.note_warm_owner("s2", b["unique"])
+    for u in (a["unique"], b["unique"]):
+        wr.stats_for(u).last_used = time.time() - 100000
+    wr.policy.slow_race_max_warm = 2
+    wr.policy.warm_borrow_enabled = True
+    wr.policy.warm_borrow_selectable = True
+    assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k",
+                                frozenset(), 100, 1000) is False
+    wr.policy.warm_borrow_selectable = False     # solo conteggio, non si usa
+    assert wr.slow_race_allowed("s1", "test", f"{BASE}-200k",
+                                frozenset(), 100, 1000) is True
 
 
 # ----------------------------------------------------- streaming (caller)

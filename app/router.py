@@ -3012,8 +3012,9 @@ class Router:
         try:
             n = len(self.warm_valid_for(
                 session_id, profile, group_name, need, ctx, out_tokens,
-                tried=tried, include_borrowed=True))
-        except Exception:                           # noqa: BLE001
+                tried=tried,
+                include_borrowed=self._borrow_selectable()))
+        except Exception:
             return True
         return n < cap
 

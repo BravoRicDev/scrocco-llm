@@ -294,5 +294,28 @@ def test_stream_canary_in_volo_non_viene_cancellato(monkeypatch, caplog):
     assert r["unique"] in fwd.calls, "il canary classico era stato aperto"
     assert r["unique"] in warmed, \
         "il canary in volo NON va cancellato: se consegna entra in warm"
-    assert _content_of(out) == "ok"
+
+
+def test_stream_gate_riceve_il_budget_output(monkeypatch):
+    """Il gate della gara lenta deve ricevere il VERO budget di output del
+    client (prima era None -> contava come 'capaci' caldi che non potevano
+    consegnare l'output richiesto)."""
+    cfg, router, by_key = _mk(_HDR + _ROW_A + _ROW_R + _ROW_G, slow_ms=50)
+    a = by_key["K-A"]
+    seen: list = []
+
+    def _gate(sid, profile, group, need, ctx, out=None, tried=None):
+        seen.append(out)
+        return False                      # gate chiuso: nessun canario
+
+    monkeypatch.setattr(router, "slow_race_allowed", _gate)
+    monkeypatch.setattr(router, "hedge_canaries", lambda *a_, **k: [])
+    monkeypatch.setattr(router, "warm_fill_canary", lambda *a_, **k: [])
+    monkeypatch.setattr(router, "warm_wake_canary", lambda *a_, **k: None)
+    fwd = _Fwd(a["unique"])               # A: contenuto, pausa, chiusura
+    out = _stream(monkeypatch, cfg, router, fwd, a,
+                  dict(_PAYLOAD, max_tokens=1234))
+    assert seen, "il gate deve essere chiamato"
+    assert seen[0] == 1234, f"budget di output propagato al gate: {seen[0]}"
+    assert _content_of(out) == "sto arrivando"
 

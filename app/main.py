@@ -3573,8 +3573,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _fresh_only = False
             _legacy = False
             _refill = False
-            _need_out = 0
             _pol = router.policy
+            # Budget di output della richiesta: serve SEMPRE (non solo in
+            # refill) — e' il criterio di "capace" per il gruppo warm (gate
+            # della gara lenta e conteggi di prontezza). Senza questo il gate
+            # conteggiava come caldi dep che non possono consegnare l'output.
+            _need_out = refill_out_budget(payload, _pol)
             # DEGRADED (P1-6): in un blackout upstream l'esplorazione
             # (cascata refill, hedge canary, sveglia) si sospende: spreca
             # rate-limit e chiavi. Resta la rotazione della ladder.
@@ -3592,7 +3596,6 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 _ready = router.warm_ready_effective(session, _pol)
                 _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
                                             6) or 0))
-                _need_out = refill_out_budget(payload, _pol)
                 try:
                     _fly = router.probes_in_flight(session)
                 except Exception:
