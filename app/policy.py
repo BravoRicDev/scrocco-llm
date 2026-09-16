@@ -740,12 +740,27 @@ class Policy:
     # (default 1) canario e la gara va fino alla chiusura. Al client va chi
     # consegna PRIMA (nessuna regola nuova), ma l'ELEZIONE per la richiesta
     # successiva va a chi ha IMPIEGATO MENO nel proprio tentativo (tempo
-    # proprio, non "chi e' arrivato prima"): il piu' veloce diventa holder,
+    # proprio, non "chi e' arrivato prima"): il piu' veloce resta in warm,
     # il piu' lento viene marcato "lento per la sessione". Nessuna
     # generazione viene mai buttata: i perdenti restano probe reali.
-    stream_slow_race_after_ms: int = 120000
-    nonstream_slow_race_after_ms: int = 120000
+    # Default 45s: sotto quella soglia il canary non ripaga (la maggior
+    # parte delle risposte e' gia' chiusa); sopra, il dep e' lento e vale
+    # cercare un sostituto senza incastrarsi.
+    stream_slow_race_after_ms: int = 45000
+    nonstream_slow_race_after_ms: int = 45000
     stream_slow_race_canaries: int = 1
+    # GATE del canary lento: si apre SOLO se la sessione ha MENO di questo
+    # numero di warm validi (include i prestati). A warm pieno il canary
+    # finirebbe solo per riempire la lista di altri lenti. 0 = nessun gate.
+    slow_race_max_warm: int = 6
+    # SCELTA DEL WARM da servire alla richiesta successiva: l'holder
+    # ("eletto" = ultimo che ha servito la sessione) resta PRIMO finche' non
+    # e' lento; con True, tra i non-holder vince il piu' VELOCE (EMA di
+    # latenza del bucket di contesto). I dep FLAGGATI "lenti per la
+    # sessione" vanno in FONDO in ogni caso: restano in warm (non vengono
+    # rimossi) e si riabilitano al primo successo rapido. False = tra i
+    # non-holder resta l'ordine storico (MRU, order, max_input).
+    warm_pick_fastest: bool = True
     # UN DEP CHE IGNORA stream:true (risponde JSON) viene ADATTATO a SSE dal
     # forwarder e CONSEGNATO: non e' un guasto, e' una consegna diversa. Con
     # True (default) resta eleggibile come canario / sveglia / sostituto in
@@ -2264,6 +2279,16 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.slow_race_canaries non valido: {_v!r}")
                 p.stream_slow_race_canaries = int(_v)
+            if wp.get("slow_race_max_warm") is not None:
+                _v = wp["slow_race_max_warm"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.slow_race_max_warm non valido: {_v!r}")
+                p.slow_race_max_warm = int(_v)
+            if "warm_pick_fastest" in wp:
+                p.warm_pick_fastest = _coerce_bool(
+                    wp["warm_pick_fastest"], "warm_pool.warm_pick_fastest")
         if raw.get("warm_borrow_enabled") is not None:
             p.warm_borrow_enabled = _coerce_bool(
                 raw["warm_borrow_enabled"], "warm_borrow_enabled")

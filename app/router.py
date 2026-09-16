@@ -2875,6 +2875,52 @@ class Router:
                 if not m:
                     d.pop(sid, None)
 
+    def mark_session_slow(self, session_id: str | None,
+                          unique: str | None) -> None:
+        """Marchia SUBITO `unique` come 'lento per la sessione' (hard, senza
+        le guardie di soglia/relativa di `_note_session_slow`).
+
+        Serve alla GARA LENTA: il dep che ha fatto scattare il timer (45s) e'
+        lento per definizione — anche se poi dovesse vincere la gara — quindi
+        nelle selezioni successive della sessione va messo IN FONDO alla warm
+        (RESTA in warm, non viene rimosso: se torna veloce risale). Il primo
+        successo RAPIDO lo riabilita (via `_note_session_slow`, che ripulisce
+        il marchio). Solo free-dims, come l'ownership warm."""
+        if not session_id or not unique:
+            return
+        if not getattr(self.policy, "warm_pool_enabled", True):
+            return
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None:
+            return
+        g = dep.get("group", "")
+        if self.config.group_caps.get(g) is not None \
+                or self._is_renewal_bucket(g):
+            return
+        self._sess_slow().setdefault(session_id, {})[unique] = (time.time(), True)
+
+    def slow_race_allowed(self, session_id: str | None, profile: str | None,
+                          group_name: str | None,
+                          need: frozenset[str] | None, ctx: int | None,
+                          out_tokens: int | None = None,
+                          tried: set[str] | None = None) -> bool:
+        """True se il canary LENTO puo' essere aperto: la sessione ha MENO di
+        `slow_race_max_warm` warm validi per QUESTA richiesta (need + ctx +
+        output, include i prestati). A warm pieno il canary finirebbe solo per
+        riempire la lista di altri lenti: si salta. Cap <= 0 = nessun gate."""
+        cap = int(getattr(self.policy, "slow_race_max_warm", 6) or 0)
+        if cap <= 0:
+            return True
+        if not session_id or not profile:
+            return True
+        try:
+            n = len(self.warm_valid_for(
+                session_id, profile, group_name, need, ctx, out_tokens,
+                tried=tried, include_borrowed=True))
+        except Exception:                           # noqa: BLE001
+            return True
+        return n < cap
+
     def _is_demoted_dep(self, unique: str,
                         session_id: str | None = None,
                         ctx: int | None = None,
@@ -5859,10 +5905,12 @@ class Router:
         resta propri >> condivisi, e al primo successo su un prestato la
         proprieta' si trasferisce da sola (note_session_success).
 
-        Lista ORDINATA: cache-holder di sessione, poi MRU (`last_used`), poi
-        `order`, poi `max_input` crescente. Vuota se disabilitato, senza
-        sessione, o senza candidati. `allowed` limita al MONDO richiesto
-        (catena del profilo); None = nessun filtro di mondo."""
+        Lista ORDINATA: i NON lenti prima (holder di sessione "eletto" per
+        primo, poi il piu' veloce per EMA di latenza se `warm_pick_fastest`),
+        i FLAGGATI "lenti per la sessione" in FONDO; tie-break MRU (`last_used`),
+        `order`, `max_input` crescente. Vuota se disabilitato, senza sessione,
+        o senza candidati. `allowed` limita al MONDO richiesto (catena del
+        profilo); None = nessun filtro di mondo."""
         if not getattr(self.policy, "warm_pool_enabled", True):
             return []
         sid = session_id or current_session()
@@ -5881,6 +5929,32 @@ class Router:
         now = time.time()
         skip = tried or set()
         holder = self.session_holder(sid)
+        _fast = bool(getattr(self.policy, "warm_pick_fastest", True))
+
+        def _wkey(dep: dict):
+            # Ordine: (1) FLAG "lento per la sessione" -> in FONDO (restano
+            # in warm, ma dopo tutti i sani: e' il flag, non solo la
+            # latenza); (2) holder ("eletto") primo tra i non flaggati;
+            # (3) con `warm_pick_fastest` il piu' VELOCE (EMA di latenza nel
+            # bucket di contesto), ignoti in coda; (4) tie-break MRU,
+            # `order`, `max_input`.
+            u = dep["unique"]
+            if _fast:
+                try:
+                    _l = self.bucket_latency_ms(u, ctx)
+                    _l = float(_l) if _l and float(_l) > 0 else None
+                except Exception:                   # noqa: BLE001
+                    _l = None
+                _lat = (0, _l) if _l is not None else (1, 0.0)
+            else:
+                _lat = (0, 0.0)
+            return (1 if self.is_slow_for_session(u, sid, ctx) else 0,
+                    0 if (holder and u == holder) else 1,
+                    _lat[0], _lat[1],
+                    -(self.stats_for(u).last_used or 0.0),
+                    int(dep.get("order", ORDER_LAST)),
+                    int(dep.get("max_input_tokens") or 0))
+
         out: list[dict] = []
         for u in (owned or ()):
             if u in skip or u == failed_unique:
@@ -5912,12 +5986,7 @@ class Router:
             if not include_borrowed:
                 return []
         else:
-            out.sort(key=lambda dep: (
-                0 if holder and dep["unique"] == holder else 1,
-                -(self.stats_for(dep["unique"]).last_used or 0.0),
-                int(dep.get("order", ORDER_LAST)),
-                int(dep.get("max_input_tokens") or 0),
-            ))
+                out.sort(key=_wkey)
         if include_borrowed:
             _own = {d["unique"] for d in out}
             borr: list[dict] = []
@@ -5945,11 +6014,7 @@ class Router:
                     continue
                 borr.append(dep)
             if borr:
-                borr.sort(key=lambda dep: (
-                    -(self.stats_for(dep["unique"]).last_used or 0.0),
-                    int(dep.get("order", ORDER_LAST)),
-                    int(dep.get("max_input_tokens") or 0),
-                ))
+                borr.sort(key=_wkey)
                 log.info("[warm] prestito: %d dep da altre sessioni (fermi "
                          "da >=%.0fs) accodati al pool di %s",
                          len(borr),

@@ -2932,37 +2932,58 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             log.info("[slow-race] %s in generazione da %.0fs (> %.0fs) -> "
                      "canario in gara", dep.get("unique"),
                      time.monotonic() - t_att, slow_race_ms / 1000.0)
-            metrics.inc("nx_slow_race_total", ("open",))
-            _lc: list[dict] = []
+            # R3: il dep che ha fatto scattare il timer e' lento per la
+            # sessione, indipendentemente dall'esito della gara (anche se poi
+            # vince). Auto-pulito al primo successo rapido.
             with contextlib.suppress(Exception):
-                _lc = router.hedge_canaries(
-                    profile, dep, need, ctx, tried_set, requested_group,
-                    k=1, exclude=None, fresh_only=False)
-            _xu = set((raced or {}).get("uniq") or ())
-            _xk2 = set((raced or {}).get("keys") or ())
-            for _cc in canaries:
-                _xu.add(_cc["dep"]["unique"])
-                _xk2.add(str(_cc["dep"].get("api_key") or ""))
-            _lc = [B for B in _lc
-                   if B["unique"] not in _xu
-                   and str(B.get("api_key") or "") not in _xk2]
-            if not _lc:
-                metrics.inc("nx_slow_race_total", ("no_canary",))
-                log.info("[slow-race] %s: nessun canario libero "
-                         "(chiavi/uniq in gara escluse)", dep.get("unique"))
+                router.mark_session_slow(session, dep.get("unique"))
+            # R2: gate — il canary si apre solo se la sessione ha pochi warm
+            # (need+ctx+output, prestati inclusi); a warm pieno riempirebbe
+            # la lista di altri lenti.
+            _allow = True
+            try:
+                _allow = bool(router.slow_race_allowed(
+                    session, profile, requested_group, need, ctx,
+                    out_tokens, tried_set))
+            except Exception:                   # noqa: BLE001
+                _allow = True
+            if not _allow:
+                metrics.inc("nx_slow_race_total", ("warm_full",))
+                log.info("[slow-race] %s: warm gia' pieno (>=%s), niente "
+                         "canario", dep.get("unique"),
+                         getattr(router.policy, "slow_race_max_warm", 6))
             else:
-                _c2 = await _open_canary(_lc[0])
-                if _c2 is not None:
-                    canaries.append(_c2)
-                    futs[_c2["fut"]] = _c2
-                    running.add(_c2["fut"])
-                    if raced is not None:
-                        raced.setdefault("uniq", set()).add(
-                            _c2["dep"]["unique"])
-                        raced.setdefault("keys", set()).add(
-                            str(_c2["dep"].get("api_key") or ""))
-                    log.info("[hedge] slow-race: %s in gara con A (fuori dal "
-                             "tetto)", _c2["dep"]["unique"])
+                metrics.inc("nx_slow_race_total", ("open",))
+                _lc: list[dict] = []
+                with contextlib.suppress(Exception):
+                    _lc = router.hedge_canaries(
+                        profile, dep, need, ctx, tried_set, requested_group,
+                        k=1, exclude=None, fresh_only=False)
+                _xu = set((raced or {}).get("uniq") or ())
+                _xk2 = set((raced or {}).get("keys") or ())
+                for _cc in canaries:
+                    _xu.add(_cc["dep"]["unique"])
+                    _xk2.add(str(_cc["dep"].get("api_key") or ""))
+                _lc = [B for B in _lc
+                       if B["unique"] not in _xu
+                       and str(B.get("api_key") or "") not in _xk2]
+                if not _lc:
+                    metrics.inc("nx_slow_race_total", ("no_canary",))
+                    log.info("[slow-race] %s: nessun canario libero "
+                             "(chiavi/uniq in gara escluse)", dep.get("unique"))
+                else:
+                    _c2 = await _open_canary(_lc[0])
+                    if _c2 is not None:
+                        canaries.append(_c2)
+                        futs[_c2["fut"]] = _c2
+                        running.add(_c2["fut"])
+                        if raced is not None:
+                            raced.setdefault("uniq", set()).add(
+                                _c2["dep"]["unique"])
+                            raced.setdefault("keys", set()).add(
+                                str(_c2["dep"].get("api_key") or ""))
+                        log.info("[hedge] slow-race: %s in gara con A (fuori "
+                                 "dal tetto)", _c2["dep"]["unique"])
     if winner is None:
         for f in list(running):
             try:

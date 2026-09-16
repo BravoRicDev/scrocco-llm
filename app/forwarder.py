@@ -3310,9 +3310,30 @@ truncation_hook=None,
                                      "%.0fs (> %.0fs) -> canario in gara",
                                      cur, time.monotonic() - _tA,
                                      _ns_slow / 1000.0)
-                            _raced.add(cur)
-                            _raced_keys.add(str(dep.get("api_key") or ""))
-                            _op = _open_canary("slow-race")
+                            # R3: A e' lento per la sessione, a prescindere
+                            # dall'esito della gara.
+                            with contextlib.suppress(Exception):
+                                router.mark_session_slow(ses, cur)
+                            # R2: gate — solo se la sessione ha pochi warm.
+                            _op = None
+                            try:
+                                _allow = bool(router.slow_race_allowed(
+                                    ses, profile, dep.get("group"), need,
+                                    ctx, _outb, tried))
+                            except Exception:       # noqa: BLE001
+                                _allow = True
+                            if _allow:
+                                _raced.add(cur)
+                                _raced_keys.add(
+                                    str(dep.get("api_key") or ""))
+                                _op = _open_canary("slow-race")
+                            else:
+                                metrics.inc("nx_slow_race_total",
+                                            ("warm_full",))
+                                log.info("[slow-race] ns %s: warm gia' pieno "
+                                         "(>=%s), niente canario", cur,
+                                         getattr(_pol, "slow_race_max_warm",
+                                                 6))
                             if _op is None:
                                 data = await futA
                                 futA = None
@@ -3380,9 +3401,30 @@ truncation_hook=None,
                                      "%.0fs (> %.0fs) -> canario in gara",
                                      cur, time.monotonic() - _tA,
                                      _ns_slow / 1000.0)
-                            _raced.add(cur)
-                            _raced_keys.add(str(dep.get("api_key") or ""))
-                            _op = _open_canary("slow-race")
+                            # R3: A e' lento per la sessione, a prescindere
+                            # dall'esito della gara.
+                            with contextlib.suppress(Exception):
+                                router.mark_session_slow(ses, cur)
+                            # R2: gate — solo se la sessione ha pochi warm.
+                            _op = None
+                            try:
+                                _allow = bool(router.slow_race_allowed(
+                                    ses, profile, dep.get("group"), need,
+                                    ctx, _outb, tried))
+                            except Exception:       # noqa: BLE001
+                                _allow = True
+                            if _allow:
+                                _raced.add(cur)
+                                _raced_keys.add(
+                                    str(dep.get("api_key") or ""))
+                                _op = _open_canary("slow-race")
+                            else:
+                                metrics.inc("nx_slow_race_total",
+                                            ("warm_full",))
+                                log.info("[slow-race] ns %s: warm gia' pieno "
+                                         "(>=%s), niente canario", cur,
+                                         getattr(_pol, "slow_race_max_warm",
+                                                 6))
                             if _op is not None:
                                 _C, _fC, _tC, _wake_c = _op
                                 _parts.append({"fut": _fC, "dep": _C,

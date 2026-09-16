@@ -91,6 +91,8 @@ def _fake_router(B=None, holder_u=WINNER):
         _cache_ok=(lambda: ({SESSION: (holder_u, 0.0)} if holder_u else {})),
         note_session_success=lambda sid, u, **kw: notes["success"].append((u, kw)),
         _note_session_slow=lambda sid, u, **kw: notes["slow"].append((u, kw)),
+        mark_session_slow=lambda sid, u: notes["slow"].append((u, {"hard": True})),
+        slow_race_allowed=lambda *a, **k: True,
     )
     return r, notes
 
