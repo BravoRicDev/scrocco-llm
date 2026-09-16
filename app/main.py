@@ -2115,6 +2115,64 @@ def _strip_sse_content(chunk: bytes, stripper) -> bytes:
     return b"\n".join(out_lines) if changed else chunk
 
 
+def _collapse_sse_content(chunks, text):
+    """Riscrive l'intero content di uno stream SSE (choices[0]) con `text`.
+
+    Usato dopo la pulizia/riparazione dell'output STRUTTURATO in HOLD: la
+    risposta e' gia' completa in `chunks`, quindi si sostituisce il contenuto
+    originale (che espone JSON sporco) con quello sanificato, preservando
+    finish_reason, usage e [DONE]. Ritorna una NUOVA lista di chunk.
+    """
+    if not isinstance(text, str) or not chunks:
+        return chunks
+    out = []
+    placed = False
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or b'"content"' not in chunk:
+            out.append(chunk)
+            continue
+        changed = False
+        new_lines = []
+        for line in chunk.split(b"\n"):
+            st = line.strip()
+            if not st.startswith(b"data:"):
+                new_lines.append(line)
+                continue
+            body = st[5:].strip()
+            if not body or body == b"[DONE]":
+                new_lines.append(line)
+                continue
+            try:
+                obj = json.loads(body)
+            except Exception:
+                new_lines.append(line)
+                continue
+            hit = False
+            chs = obj.get("choices") if isinstance(obj, dict) else None
+            ch0 = chs[0] if isinstance(chs, list) and chs else None
+            d = ch0.get("delta") if isinstance(ch0, dict) else None
+            if isinstance(d, dict) and isinstance(d.get("content"), str):
+                d["content"] = text if not placed else ""
+                placed = True
+                hit = True
+            if hit:
+                new_lines.append(b"data: " + json.dumps(
+                    obj, ensure_ascii=False).encode("utf-8"))
+                changed = True
+            else:
+                new_lines.append(line)
+        out.append(b"\n".join(new_lines) if changed else chunk)
+    if not placed:
+        try:
+            synth = {"choices": [{"index": 0, "delta": {"content": text},
+                                  "finish_reason": None}]}
+            out.insert(0, b"data: " + json.dumps(
+                synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
+        except Exception:                # noqa: BLE001
+            pass
+    return out
+
+
 def _delta_has_content(obj) -> bool:
     """True se un oggetto chunk OpenAI-style porta contenuto reale
     (answer, reasoning o tool_call)."""
@@ -3215,7 +3273,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _tct_cfg = truncation_config_from_policy(router.policy)
     from .sampling import sampling_config_from_policy
     _sm = sampling_config_from_policy(router.policy)
+    from .schemaout import (enforce_response,
+                            schemaout_config_from_policy)
+    from .forwarder import _corrective_note
+    _so = schemaout_config_from_policy(router.policy)
     _synth: list[bytes] = []
+    # OUTPUT STRUTTURATO in HOLD: la risposta bufferizzata viene trattata come
+    # non-streaming -> pulizia/riparazione JSON prima di inviare i byte.
+    _so_corrected: set[str] = set()      # retry correttivo gia' provato per dep
+    _so_rewrite = False                  # il content va riscritto in emissione
+    _so_text = ""                        # content sanificato da inviare
     t_req = time.monotonic()
     try:
         _hedge_ms = int(getattr(router.policy.qc_json,
@@ -3266,6 +3333,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     while True:
         tried += 1
         _maxtok.clear()
+        _so_rewrite = False
+        _so_text = ""
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])
         _was_dormant = router.is_cooled_down(dep["unique"])
@@ -3561,6 +3630,66 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                     dep["unique"], _pat)
                         _quality = 0.3
                         verdict = "fake_tool_call"
+            # OUTPUT STRUTTURATO (HOLD): la risposta e' INTERAMENTE bufferizzata
+            # -> la trattiamo come non-streaming. Pulizia (A) / riparazione
+            # schema-driven (D) PRIMA di inviare qualunque byte: il client non
+            # vede mai il JSON sporco, e rotazione/corrective restano
+            # trasparenti. Solo con HOLD attivo (senza buffer completo non e'
+            # possibile) e senza tool-call sintetizzate.
+            if (verdict == "content" and hold and _so.enabled and not _synth):
+                _so_txt = _buffered_answer_text(prebuf)
+                _so_tcs: list | None = None
+                for _o in _sse_data_objs(b"".join(prebuf)):
+                    for _ch in (_o.get("choices") or []) \
+                            if isinstance(_o, dict) else []:
+                        _d = _ch.get("delta") if isinstance(_ch, dict) else None
+                        _tc = _d.get("tool_calls") if isinstance(_d, dict) else None
+                        if _tc:
+                            _so_tcs = (_so_tcs or []) + list(_tc)
+                _so_data = {"choices": [{"message": {
+                    "content": _so_txt, "tool_calls": _so_tcs}}]}
+                _so_rep = enforce_response(_so_data, payload, _so)
+                _so_st = _so_rep.get("status")
+                if _so_st in ("cleaned", "repaired"):
+                    _so_new = _so_data["choices"][0]["message"].get("content")
+                    if isinstance(_so_new, str) and _so_new != _so_txt:
+                        _so_text = _so_new
+                        _so_rewrite = True
+                    metrics.inc("nx_struct_out_total",
+                                (dep["unique"], _so_st))
+                    log.info("[struct-out] stream %s: %s", dep["unique"], _so_st)
+                    repairlog.note(
+                        "struct_cleaned" if _so_st == "cleaned"
+                        else "struct_repaired",
+                        source="stream", outcome="ok", dep=dep["unique"],
+                        model=dep.get("model", ""),
+                        detail=",".join(_so_rep.get("moves") or []) or _so_st)
+                elif _so_st == "invalid":
+                    _r5 = _so_rep.get("reason") or "schema"
+                    if (getattr(router.policy, "corrective_retry_enabled", True)
+                            and dep["unique"] not in _so_corrected):
+                        _so_corrected.add(dep["unique"])
+                        payload.setdefault("messages", []).append(
+                            {"role": "system",
+                             "content": _corrective_note("schema")})
+                        metrics.inc("nx_corrective_retry_total",
+                                    (dep["unique"], "schema"))
+                        log.warning("[retry] stream %s contenuto non conforme "
+                                    "(%s): retry correttivo", dep["unique"], _r5)
+                        repairlog.note("struct_corrective", source="stream",
+                                       outcome="ok", dep=dep["unique"],
+                                       model=dep.get("model", ""),
+                                       detail="schema")
+                        verdict = "struct_corrective"
+                    else:
+                        metrics.inc("nx_struct_out_total",
+                                    (dep["unique"], "invalid"))
+                        log.warning("[struct-out] stream %s non conforme (%s): "
+                                    "ruoto senza cooldown", dep["unique"], _r5)
+                        repairlog.note("struct_invalid", source="stream",
+                                       outcome="fail", dep=dep["unique"],
+                                       model=dep.get("model", ""), detail=_r5)
+                        verdict = "struct_invalid"
             if verdict == "content":
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
@@ -3627,13 +3756,23 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # nessun cooldown/streak, si ruota e basta.
                     log.info("[fake-tool-call] %s: rotazione senza cooldown",
                              dep["unique"])
+                elif verdict in ("struct_corrective", "struct_invalid"):
+                    # OUTPUT STRUTTURATO (HOLD): risposta gia' completa e non
+                    # conforme -> nessuna penale (no cooldown/streak): si
+                    # ritenta lo stesso dep (corrective) o si ruota.
+                    log.info("[struct-out] %s: %s senza cooldown",
+                             dep["unique"], verdict)
                 else:
                     _fail(dep["unique"], seconds=_soft_cd(
                         router.stats_for(dep["unique"]).fail_count_24h))
             over_deadline = ((time.monotonic() - t_req) * 1000 >
                              int(getattr(qcp, "stream_total_deadline_ms",
                                          90000) or 90000))
-            if verdict == "fake_tool_call":
+            if verdict == "struct_corrective":
+                # retry correttivo: STESSO deployment (la nota di sistema e'
+                # gia' stata appesa al payload).
+                nxt = dep
+            elif verdict == "fake_tool_call":
                 nxt = router.force_escalation(dep, need, ctx,
                                               tried=tried_set) \
                     if profile else None
@@ -4210,7 +4349,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _stripper = TemplateTokenStripper()
             # (D2/B) ordine: prima il prebuffer gia' letto da _peek_stream, poi
             # l'eventuale lettura rimasta in volo (`pending`), poi il resto.
-            for chunk in prebuf:
+            # OUTPUT STRUTTURATO (HOLD): se il content e' stato pulito/riparato
+            # prima di inviare i byte, si emette il testo sanificato al posto
+            # dell'originale (finish_reason/usage/[DONE] preservati).
+            _emit_chunks = (_collapse_sse_content(prebuf, _so_text)
+                            if _so_rewrite else prebuf)
+            for chunk in _emit_chunks:
                 yield _strip_sse_content(_ingest(chunk), _stripper)
             if pending is not None:
                 try:
