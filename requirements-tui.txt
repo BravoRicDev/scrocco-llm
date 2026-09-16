@@ -2,6 +2,10 @@
 # Opzionali: servono solo per `./scrocco.sh` (interfaccia a schermo intero).
 # Senza queste, il launcher ripiega su `./scrocco.sh --cli` (tui/cli_lite.py).
 #
-#   pip install -r requirements-tui.txt
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements-tui.txt
 #
+# httpx serve a `tui/gateway_client.py` (il client HTTP verso il gateway):
+# senza, la TUI si avvia e crasha subito con ModuleNotFoundError.
 textual>=8.0,<9.0
+httpx>=0.27
