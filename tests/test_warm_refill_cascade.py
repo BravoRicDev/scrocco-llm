@@ -513,7 +513,9 @@ def ML(tmp_path, monkeypatch):
     pol = _M.router.policy
     snap = (qj.stream_hedge_delay_ms, qj.stream_first_content_ms,
             qj.stream_hold_until_finish, pol.warm_refill_enabled,
-            pol.warm_ready_min)
+            pol.warm_ready_min, pol.warm_ready_rpm_adaptive,
+            pol.warm_ready_rpm_window_sec, pol.warm_ready_rpm_base,
+            pol.warm_ready_rpm_step, pol.warm_ready_min_max)
     cooled = set(_M.router._cooldown)
     owned = dict(_M.router._dep_last_session)
     sdeps = {k: set(v) for k, v in _M.router._session_deps.items()}
@@ -529,7 +531,9 @@ def ML(tmp_path, monkeypatch):
     yield _M
     (qj.stream_hedge_delay_ms, qj.stream_first_content_ms,
      qj.stream_hold_until_finish, pol.warm_refill_enabled,
-     pol.warm_ready_min) = snap
+     pol.warm_ready_min, pol.warm_ready_rpm_adaptive,
+     pol.warm_ready_rpm_window_sec, pol.warm_ready_rpm_base,
+     pol.warm_ready_rpm_step, pol.warm_ready_min_max) = snap
     _M.config.csv_path = orig_csv
     _M.config.reload()
     for k in list(_M.router._cooldown):
@@ -717,11 +721,21 @@ def test_scrub_assistant_vuote_anche_in_testa():
 def test_policy_knob_warm_refill():
     p = Policy.from_dict({"warm_pool": {"refill_enabled": False,
                                         "ready_min": 5,
+                                        "ready_min_adaptive": False,
+                                        "ready_min_rpm_window_sec": 60,
+                                        "ready_min_rpm_base": 8,
+                                        "ready_min_rpm_step": 4,
+                                        "ready_min_max": 9,
                                         "refill_default_out_tokens": 1000,
                                         "max_inflight": 2,
                                         "wake_max_attempts": 5}})
     assert p.warm_refill_enabled is False
     assert p.warm_ready_min == 5
+    assert p.warm_ready_rpm_adaptive is False
+    assert p.warm_ready_rpm_window_sec == 60
+    assert p.warm_ready_rpm_base == 8.0
+    assert p.warm_ready_rpm_step == 4.0
+    assert p.warm_ready_min_max == 9
     assert p.warm_refill_default_out_tokens == 1000
     assert p.warm_refill_max_inflight == 2
     assert p.warm_refill_wake_max_attempts == 5
@@ -729,6 +743,12 @@ def test_policy_knob_warm_refill():
     assert d.warm_refill_enabled is True and d.warm_ready_min == 3
     assert d.warm_refill_max_inflight == 6
     assert d.warm_refill_wake_max_attempts == 10
+    # default adattivo: base 5 rpm, step 5, cap 6, finestra 180s
+    assert d.warm_ready_rpm_adaptive is True
+    assert d.warm_ready_rpm_window_sec == 180
+    assert d.warm_ready_rpm_base == 5.0
+    assert d.warm_ready_rpm_step == 5.0
+    assert d.warm_ready_min_max == 6
 
 
 # ----------------------------------------------- tetto 4 in volo PER SESSIONE
@@ -850,3 +870,93 @@ def test_metrics_wake_sweep_espone_label_result():
     metrics.inc("nx_wake_sweep_total", ("ok",))
     out = metrics.render()
     assert 'nx_wake_sweep_total{result="ok"}' in out
+
+
+# ------------------------------- WARM-READY ADATTIVO AL RATE DI SESSIONE
+def _seed_rate(r, sid, n):
+    """Popola la finestra di rate della sessione con n arrivi 'adesso'."""
+    from collections import deque
+    r._sess_rate()[sid] = deque([time.time()] * n)
+
+
+def test_session_rpm_finestra(router):
+    from collections import deque
+    r = router
+    assert r.session_rpm("s") == 0.0
+    t = time.time()
+    r._sess_rate()["s"] = deque([t - 400, t - 200, t - 10, t - 5])
+    # finestra default 180s: contano solo gli ultimi due -> 2/(180/60)
+    assert abs(r.session_rpm("s") - 2 / 3.0) < 1e-6
+    # finestra esplicita 60s: conta solo t-10 e t-5
+    assert abs(r.session_rpm("s", 60) - 2.0) < 1e-6
+
+
+def test_note_session_request_conta_e_ignora_vuoti(router):
+    r = router
+    r.note_session_request(None)               # no-op: non esplode
+    r.note_session_request("")
+    for _ in range(16):
+        r.note_session_request("s")
+    assert abs(r.session_rpm("s") - 16 / 3.0) < 0.2
+    assert r.session_rpm(None) == 0.0
+
+
+def test_warm_ready_effective_soglie(router):
+    """Default: base 3, >5rpm -> 4, >10 -> 5, >15 -> 6 (cap)."""
+    r = router
+    pol = r.policy
+    assert pol.warm_ready_min == 3 and pol.warm_ready_min_max == 6
+    cases = [(15, 3),     # rpm 5.00  -> base (non > base)
+             (16, 4),     # rpm 5.33  -> +1
+             (30, 4),     # rpm 10.00 -> +1
+             (31, 5),     # rpm 10.33 -> +2
+             (45, 5),     # rpm 15.00 -> +2
+             (46, 6),     # rpm 15.33 -> +3
+             (300, 6)]    # tappato al cap
+    for n, exp in cases:
+        _seed_rate(r, "s", n)
+        assert r.warm_ready_effective("s", pol) == exp, (n, exp)
+
+
+def test_warm_ready_effective_off_e_senza_sessione(router):
+    r = router
+    _seed_rate(r, "s", 300)
+    assert r.warm_ready_effective(None, r.policy) == 3
+    assert r.warm_ready_effective("", r.policy) == 3
+    r.policy.warm_ready_rpm_adaptive = False
+    assert r.warm_ready_effective("s", r.policy) == 3
+
+
+def test_warm_ready_effective_nel_gate_streaming(ML):
+    """Nel punto di decisione del refill il valore arriva dal router (stessa
+    policy): a rpm alto la soglia sale a 5, a feature off torna 3."""
+    from collections import deque
+    r = ML.router
+    pol = r.policy
+    pol.warm_refill_enabled = True
+    pol.warm_ready_min = 3
+    pol.warm_ready_rpm_adaptive = True
+    r._sess_rate()["rf-sess"] = deque([time.time()] * 31)   # rpm ~10.3
+    assert r.warm_ready_effective("rf-sess", pol) == 5
+    pol.warm_ready_rpm_adaptive = False
+    assert r.warm_ready_effective("rf-sess", pol) == 3
+
+
+def test_prestito_conta_nel_valido(router):
+    """(A) I warm PRESTABILI contano nel conteggio del gate: finché la
+    sessione ha prestati utili il refill NON deve partire."""
+    from app.router import set_current_session
+    r = router
+    big = _dep(r, f"{BASE}-1000k", "K-B")
+    r._dep_last_session[big["unique"]] = ("other", time.time())
+    r.stats_for(big["unique"]).last_used = time.time() - 300
+    set_current_session("me")
+    try:
+        own = r.warm_valid_for("me", "test", f"{BASE}-1000k", frozenset(),
+                               100, 4096, include_borrowed=False)
+        borrow = r.warm_valid_for("me", "test", f"{BASE}-1000k", frozenset(),
+                                  100, 4096, include_borrowed=True)
+    finally:
+        set_current_session(None)
+    assert {d["unique"] for d in own} == set()
+    assert {d["unique"] for d in borrow} == {big["unique"]}

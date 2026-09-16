@@ -3039,7 +3039,7 @@ truncation_hook=None,
         _refill_on = (bool(getattr(_pol, "warm_refill_enabled", True))
                       and bool(getattr(_pol, "warm_pool_enabled", True))
                       and bool(ses) and bool(profile))
-        _ready_min = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
+        _ready_min = router.warm_ready_effective(ses, _pol)
         _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
                                      6) or 0))
         _raced: set[str] = set()
@@ -3224,10 +3224,12 @@ truncation_hook=None,
                         _nv = _ready_min
                     if _nv < _ready_min:
                         _refill_rounds += 1
+                        _rpm = router.session_rpm(ses)
                         log.info("[refill] ns %s: warm validi %d/%d, in volo "
-                                 "%d/%d (ctx=%s, out=%s) -> 2 alla volta",
+                                 "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
+                                 "2 alla volta",
                                  cur, _nv, _ready_min, _fly, _maxif, ctx,
-                                 _outb)
+                                 _outb, _rpm)
                         _raced.add(cur)
                         _raced_keys.add(str(dep.get("api_key") or ""))
                         # chiavi gia' rappresentate nel warm: non si rimette

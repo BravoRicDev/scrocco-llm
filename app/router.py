@@ -6194,6 +6194,75 @@ class Router:
                 m.pop(u, None)
         return len(m)
 
+    # ------------------------------- RATE PER SESSIONE (warm-ready adattivo)
+    # Finestra scorrevole degli ARRIVI di richieste per sessione: alimenta la
+    # soglia `warm_ready_min` adattiva. In-memory, mai persistito. Il
+    # conteggio avviene UNA volta per richiesta (all'ingresso, solo chat),
+    # cosi' le rotazioni interne non gonfiano il rate; nel punto di decisione
+    # si legge soltanto.
+    def _sess_rate(self) -> dict:
+        d = getattr(self, "_session_rate", None)
+        if d is None:
+            d = self._session_rate = {}
+        return d
+
+    def note_session_request(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        now = time.time()
+        win = max(1.0, float(getattr(
+            self.policy, "warm_ready_rpm_window_sec", 180) or 180))
+        dq = self._sess_rate().setdefault(session_id, deque())
+        dq.append(now)
+        cutoff = now - win
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(self._sess_rate()) > 4096:     # rete: spazza le sessioni morte
+            for sid, q in list(self._sess_rate().items()):
+                if not q or now - q[-1] > win * 2:
+                    self._sess_rate().pop(sid, None)
+
+    def session_rpm(self, session_id: str | None,
+                    window_sec: float | None = None) -> float:
+        """Media richieste/min della sessione nella finestra (include la
+        richiesta corrente se gia' contata con note_session_request)."""
+        if not session_id:
+            return 0.0
+        win = max(1.0, float(window_sec if window_sec is not None else
+                             getattr(self.policy, "warm_ready_rpm_window_sec",
+                                     180) or 180))
+        dq = self._sess_rate().get(session_id)
+        if not dq:
+            return 0.0
+        cutoff = time.time() - win
+        n = 0
+        for ts in reversed(dq):
+            if ts < cutoff:
+                break
+            n += 1
+        return n / (win / 60.0)
+
+    def warm_ready_effective(self, session_id: str | None,
+                             policy=None) -> int:
+        """Soglia `warm_ready_min` effettiva: sale con la media rpm della
+        sessione, tappata a `warm_ready_min_max`:
+            ready = min(ready_min + ceil((rpm-base)/step), min_max)
+        con ceil solo se rpm > base. `adaptive=False` -> soglia fissa."""
+        pol = policy or self.policy
+        rmin = max(0, int(getattr(pol, "warm_ready_min", 3) or 0))
+        if not session_id or not bool(
+                getattr(pol, "warm_ready_rpm_adaptive", True)):
+            return rmin
+        ready = rmin
+        cap = max(rmin, int(getattr(pol, "warm_ready_min_max", rmin) or rmin))
+        rpm = self.session_rpm(session_id, getattr(
+            pol, "warm_ready_rpm_window_sec", 180))
+        b = float(getattr(pol, "warm_ready_rpm_base", 5.0) or 0.0)
+        st = float(getattr(pol, "warm_ready_rpm_step", 5.0) or 0.0)
+        if st > 0 and rpm > b:
+            ready += int(math.ceil((rpm - b) / st))
+        return max(rmin, min(ready, cap))
+
     # ------------------------------------- QUARANTENA ENDPOINT (ban / ToS IP)
     # Se un provider risponde "Access from this IP ... ip_banned" o
     # "policy_review_required" il problema NON e' la singola chiave: e'

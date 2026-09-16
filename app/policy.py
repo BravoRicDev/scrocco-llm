@@ -688,6 +688,20 @@ class Policy:
     # presunto quando il client non lo chiede.
     warm_refill_enabled: bool = True
     warm_ready_min: int = 3
+    # WARM-READY ADATTIVO AL RATE DELLA SESSIONE: la soglia base
+    # (`warm_ready_min`) sale con la media rpm della sessione su
+    # `warm_ready_rpm_window_sec`. Ogni gradino di `warm_ready_rpm_step` rpm
+    # OLTRE `warm_ready_rpm_base` vale +1, fino a `warm_ready_min_max`.
+    #   ready_eff = min(warm_ready_min + ceil((rpm-base)/step), min_max)
+    # Con i default: rpm<=5 -> 3, >5 -> 4, >10 -> 5, >15 -> 6 (cap).
+    # Il confronto resta sui warm "validi per la richiesta" (need+ctx+output),
+    # prestiti inclusi: se la sessione ha ancora prestabili utilissimi il
+    # canary NON parte. False = soglia fissa (comportamento legacy).
+    warm_ready_rpm_adaptive: bool = True
+    warm_ready_rpm_window_sec: int = 180
+    warm_ready_rpm_base: float = 5.0
+    warm_ready_rpm_step: float = 5.0
+    warm_ready_min_max: int = 6
     warm_refill_default_out_tokens: int = 4096
     # Modelli PREFERITI nei bucket -go/-fallback (lista separata da virgole o
     # YAML list): se nel bucket c'e' ALMENO una chiave viva di uno di questi
@@ -2149,6 +2163,37 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.ready_min non valido: {_v!r}")
                 p.warm_ready_min = int(_v)
+            if "ready_min_adaptive" in wp:
+                p.warm_ready_rpm_adaptive = _coerce_bool(
+                    wp["ready_min_adaptive"], "warm_pool.ready_min_adaptive")
+            if wp.get("ready_min_rpm_window_sec") is not None:
+                _v = wp["ready_min_rpm_window_sec"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v <= 0:
+                    raise ValueError(
+                        f"warm_pool.ready_min_rpm_window_sec non valido: {_v!r}")
+                p.warm_ready_rpm_window_sec = int(_v)
+            if wp.get("ready_min_rpm_base") is not None:
+                _v = wp["ready_min_rpm_base"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.ready_min_rpm_base non valido: {_v!r}")
+                p.warm_ready_rpm_base = float(_v)
+            if wp.get("ready_min_rpm_step") is not None:
+                _v = wp["ready_min_rpm_step"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v <= 0:
+                    raise ValueError(
+                        f"warm_pool.ready_min_rpm_step non valido: {_v!r}")
+                p.warm_ready_rpm_step = float(_v)
+            if wp.get("ready_min_max") is not None:
+                _v = wp["ready_min_max"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.ready_min_max non valido: {_v!r}")
+                p.warm_ready_min_max = int(_v)
             if wp.get("refill_default_out_tokens") is not None:
                 _v = wp["refill_default_out_tokens"]
                 if isinstance(_v, bool) or not isinstance(_v, (int, float)) \

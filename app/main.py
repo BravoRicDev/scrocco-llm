@@ -1579,6 +1579,8 @@ async def chat_completions(request: Request, response: Response):
     # l'ownership di tutti i suoi deployment (restano suoi finché e' viva;
     # 15 min di silenzio e l'intero set torna libero).
     router.note_session_activity(session_id)
+    # RATE per-sessione (SOLO chat): alimenta warm_ready_min adattivo.
+    router.note_session_request(session_id)
     _sniff_headers(request, logger=_api_log,
                    body_size=len(request._body) if hasattr(request, "_body")
                    else 0, session_id=session_id)
@@ -3308,7 +3310,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             if (session and profile and not _degraded
                     and bool(getattr(_pol, "warm_refill_enabled", True))
                     and bool(getattr(_pol, "warm_pool_enabled", True))):
-                _ready = max(0, int(getattr(_pol, "warm_ready_min", 3) or 0))
+                _ready = router.warm_ready_effective(session, _pol)
                 _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
                                             6) or 0))
                 _need_out = refill_out_budget(payload, _pol)
@@ -3327,11 +3329,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         _nv = _ready
                     _refill = _nv < _ready
                     if _refill:
+                        _rpm = router.session_rpm(session)
                         log.info("[refill] %s: warm validi %d/%d, in volo "
-                                 "%d/%d (ctx=%s, out=%s) -> canario extra "
-                                 "in gara",
+                                 "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
+                                 "canario extra in gara",
                                  dep.get("unique"), _nv, _ready, _fly,
-                                 _maxif, ctx, _need_out)
+                                 _maxif, ctx, _need_out, _rpm)
                         if not _wake_spawned:
                             _wake_spawned = True
                             _spawn_wake_sweep(payload, profile, dep, need,
