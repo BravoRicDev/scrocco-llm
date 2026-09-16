@@ -55,7 +55,8 @@ def _walk_all(router, start_dep):
     Guardia anti-oscillazione (il ramo cap può alternare i membri)."""
     seq, cur, tried = [], start_dep, {start_dep["unique"]}
     while True:
-        nxt = router.fallback_next(PROF, cur, None, scope="group")
+        nxt = router.fallback_next(PROF, cur, None, scope="group",
+                                   tried=set(tried))
         if nxt is None or nxt["unique"] in tried:
             return seq
         seq.append((nxt["group"], nxt["unique"]))

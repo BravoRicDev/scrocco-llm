@@ -4960,8 +4960,16 @@ class Router:
             # raccolti in ordine dim-ascendente, quindi uno stable sort per
             # `order` mantiene l'ordine interno del gruppo dentro (order, dim).
             dim_deps.sort(key=lambda dep: int(dep.get("order", ORDER_LAST)))
+            # ANTI-RAFFICA (solo FREE): dentro ogni tier `order` si interleave
+            # per provider (round-robin) con i -dim crescenti: la scala non ha
+            # mai due vicini dello stesso provider se esistono alternative.
+            _tiers: dict[int, list] = {}
             for dep in dim_deps:
-                chain.append(dep["unique"])
+                _tiers.setdefault(int(dep.get("order", ORDER_LAST)),
+                                  []).append(dep)
+            for _t in sorted(_tiers):
+                chain.extend(d["unique"] for d in
+                             self._provider_chain(_tiers[_t], start_dim))
         if start_tier in ("primary", "go"):
             for u in cfg.groups.get(f"{base}{cfg.go_suffix}", []):
                 chain.append(u["unique"])
@@ -5444,8 +5452,16 @@ class Router:
                      unique, lim, newlim)
 
     # ------------------------------------------------- ANTI-RAFFICA PROVIDER
+    def _dim_k(self, group_name: str | None) -> int:
+        """Dim (in k) del gruppo testo; 0 se non e' un bucket -Nk."""
+        m = self.DIM_SUFFIX_RE.search(str(group_name or ""))
+        try:
+            return int(m.group(1)) if m else 0
+        except Exception:                              # noqa: BLE001
+            return 0
+
     def _note_prov_attempt(self, dep: dict) -> None:
-        """Registra provider+model dell'ultimo TENTATIVO (da note_start).
+        """Registra provider+model+dim dell'ultimo TENTATIVO (da note_start).
         Solo mondo testo/dims: le capacita' (gen/stt/...) non contano."""
         g = str(dep.get("group") or "")
         if self.config.group_caps.get(g) is not None:
@@ -5453,7 +5469,7 @@ class Router:
         p = str(dep.get("provider") or "")
         if not p:
             return
-        self._last_attempt = (p, str(dep.get("model") or ""))
+        self._last_attempt = (p, str(dep.get("model") or ""), self._dim_k(g))
         self._prov_last[p] = time.time()
 
     def _text_alternation_ok(self, group_name: str) -> bool:
@@ -5467,26 +5483,33 @@ class Router:
             return False
         return True
 
-    def _prov_avoid_key(self, dep: dict) -> tuple[int, int]:
-        """(0/1, 0/1): preferisci un provider DIVERSO dall'ultimo tentativo e,
-        tra quelli, lo STESSO modello su un altro provider (molto gradito)."""
+    def _prov_avoid_key(self, dep: dict,
+                        req_dim: int | None = None) -> tuple[int, int, int]:
+        """(same_p, dim_rank, same_m): PRIMARIO il provider diverso dall'ultimo
+        tentativo (mai 2 di fila lo stesso), poi il -dim richiesto (0) con le
+        salite crescenti dopo, poi lo STESSO modello su altro provider. Il
+        vincolo "mai sotto il -dim" e' garantito a monte (ladder start_dim)."""
         if not getattr(self.policy, "provider_alternation_enabled", True):
-            return (0, 0)
+            return (0, 0, 0)
         last = getattr(self, "_last_attempt", None)
+        dim = self._dim_k(dep.get("group"))
+        rd = req_dim if req_dim is not None else (last[2] if last else 0)
+        dim_rank = 0 if (not rd or dim <= rd) else (dim - rd)
         if not last:
-            return (0, 0)
-        lp, lm = last
+            return (0, dim_rank, 0)
+        lp, lm, _ld = last
         p = str(dep.get("provider") or "")
         same_p = 1 if (p and p == lp) else 0
         same_m = 0 if (same_p == 0 and str(dep.get("model") or "") == lm) else 1
-        return (same_p, same_m)
+        return (same_p, dim_rank, same_m)
 
-    def _prov_alternate(self, cands: list[dict]) -> list[dict]:
-        """Riordino STABILE dei candidati per evitare un provider consecutivo
-        (stesso gruppo): non cambia l'insieme, solo l'ordine."""
+    def _prov_alternate(self, cands: list[dict],
+                        req_dim: int | None = None) -> list[dict]:
+        """Riordino STABILE: prima i provider diversi dall'ultimo, poi il -dim
+        richiesto (salite crescenti dopo). Non cambia l'insieme."""
         if not cands:
             return cands
-        return sorted(cands, key=self._prov_avoid_key)
+        return sorted(cands, key=lambda d: self._prov_avoid_key(d, req_dim))
 
     def _prov_prefer(self, winner: dict | None, cands: list[dict],
                      group_name: str) -> dict | None:
@@ -5495,19 +5518,74 @@ class Router:
         alternativo (a parita', stesso modello su altro provider)."""
         if winner is None or not self._text_alternation_ok(group_name):
             return winner
-        w = self._prov_avoid_key(winner)
-        if w == (0, 0):
+        rd = self._dim_k(group_name)
+        w = self._prov_avoid_key(winner, rd)
+        if w[0] == 0:
             return winner
-        alt = [d for d in cands if self._prov_avoid_key(d) < w]
+        alt = [d for d in cands if self._prov_avoid_key(d, rd) < w]
         if not alt:
             return winner
         try:
             return min(alt, key=lambda d: (
-                self._prov_avoid_key(d),
+                self._prov_avoid_key(d, rd),
                 self._reputation_score(d["unique"], d, None),
                 self.usage_weight_24h(d["unique"])))
         except Exception:                              # noqa: BLE001
             return alt[0]
+
+    def _provider_chain(self, cands: list[dict],
+                        req_dim: int | None = None) -> list[dict]:
+        """CATENA DI PROVIDER: sequenza il piu' lunga possibile di provider
+        DIVERSI, ognuno col suo miglior candidato (dim richiesto -> `order` ->
+        reputation), poi si scende consecutivamente (2do di ognuno, ecc.).
+        Ribalta l'ordine: NON tante chiavi dello stesso provider di fila, cosi'
+        non ci si incastra in un provider lento/martellato. Rotazione dal
+        provider SUCCESSIVO all'ultimo tentato, quando possibile."""
+        if not cands:
+            return cands
+        rd = req_dim or 0
+        by: dict[str, list[dict]] = {}
+        for d in cands:
+            by.setdefault(str(d.get("provider") or ""), []).append(d)
+
+        def _q(d: dict):
+            try:
+                _dk = self._dim_k(d.get("group"))
+                _dr = 0 if (not rd or _dk <= rd) else (_dk - rd)
+                return (_dr,
+                        int(d.get("order", ORDER_LAST)),
+                        self._reputation_score(d["unique"], d, None),
+                        self.usage_weight_24h(d["unique"]))
+            except Exception:                          # noqa: BLE001
+                return (0, ORDER_LAST, 0.0, 0.0)
+
+        for p in by:
+            by[p].sort(key=_q)
+        # REGOLA: i provider GIA' PRESENTI IN WARM vanno SEMPRE in fondo alla
+        # catena (dopo tutti i provider freschi), qualunque tier/EMA/punteggio.
+        try:
+            _warm = self._warm_providers()
+        except Exception:                              # noqa: BLE001
+            _warm = set()
+        nw = sorted((p for p in by if p not in _warm),
+                    key=lambda p: (_q(by[p][0]), p))
+        wp = sorted((p for p in by if p in _warm),
+                    key=lambda p: (_q(by[p][0]), p))
+        last = getattr(self, "_last_attempt", None)
+        if last and len(nw) > 1 and last[0] in nw:
+            _i = nw.index(last[0])
+            nw = nw[_i + 1:] + nw[:_i + 1]
+        provs = nw + wp
+        out: list[dict] = []
+        while True:
+            progressed = False
+            for p in provs:
+                if by[p]:
+                    out.append(by[p].pop(0))
+                    progressed = True
+            if not progressed:
+                break
+        return out
 
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
@@ -5765,9 +5843,33 @@ class Router:
 
         `tried`: set di deployment già tentati in questa richiesta — vengono
         saltati a prescindere. Se fornito, ha priorità su `failed_unique`."""
+        # La catena puo' essere RIORDINATA dinamicamente (catena provider):
+        # `index(failed)+1` non e' piu' affidabile. Per le scale -dim si
+        # riprende per FLOOR di dim (mai indietro, ma tutte le alternative
+        # della stessa dim restano); per le catene piatte/capacita' resta il
+        # vecchio resume posizionale.
         start = 0
-        if failed_unique and failed_unique in chain:
-            start = chain.index(failed_unique) + 1
+        if failed_unique:
+            tried = set(tried or ()) | {failed_unique}
+            _fd = self.config.deployment_by_unique(failed_unique)
+            _fmin = self._dim_k(str((_fd or {}).get("group") or ""))
+            if _fmin:
+                if failed_unique in chain:
+                    # riprendi DOPO il fallito, poi WRAP sull'inizio (voci
+                    # precedenti = ultima chance, se non gia' tentate).
+                    _i = chain.index(failed_unique)
+                    chain = chain[_i + 1:] + chain[:_i]
+
+                def _dim_ok(u: str) -> bool:
+                    g = str((self.config.deployment_by_unique(u) or {}
+                             ).get("group") or "")
+                    _dk = self._dim_k(g)
+                    return _dk == 0 or _dk >= _fmin
+                chain = [u for u in chain if _dim_ok(u)]
+            elif failed_unique in chain:
+                start = chain.index(failed_unique) + 1
+        elif tried is None:
+            tried = set()
 
         # "skip after N" REALE: quando `ladder_skip_after` membri di uno stesso
         # gruppo sono già stati tentati in QUESTA richiesta, il resto del gruppo
@@ -5861,10 +5963,6 @@ class Router:
         # LEASE (P2-8, opt-in): depriorizza le chiavi con troppe richieste in
         # volo (soft: se tutte sono al cap la lista resta intera).
         preferred = self._lease_filter(preferred)
-        # ANTI-RAFFICA PROVIDER (solo testo/dims): evita un provider
-        # consecutivo riordinando i candidati dello STESSO gruppo.
-        if preferred and self._text_alternation_ok(gname):
-            preferred = self._prov_alternate(preferred)
 
         # failover same-model (gruppi gen/stt): prima le chiavi gemelle
         if prefer_model:
@@ -6803,13 +6901,14 @@ class Router:
 
         def _key(d: dict):
             try:
-                return (self._group_dim_order_key(str(d.get("group") or "")),
+                return (self._prov_avoid_key(d),
+                        self._group_dim_order_key(str(d.get("group") or "")),
                         1 if int(d.get("order", ORDER_LAST)) in _sam else 0,
                         int(d.get("order", ORDER_LAST)),
                         self._reputation_score(d["unique"], d, None),
                         self.usage_weight_24h(d["unique"]))
             except Exception:                          # noqa: BLE001
-                return ((1, 0), 1, ORDER_LAST, 0.0, 0.0)
+                return ((0, 0, 0), (1, 0), 1, ORDER_LAST, 0.0, 0.0)
 
         queues = {p: sorted(by_prov[p], key=_key) for p in provs}
         used_keys: dict[str, set] = {p: set() for p in provs}

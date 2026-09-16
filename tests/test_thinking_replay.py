@@ -380,7 +380,8 @@ def test_e2e_esenzione_esaurita_poi_ko_normale():
     # ritentato sullo STESSO dep; esaurita l'esenzione (1) -> KO normale.
     with pytest.raises(UpstreamError):
         asyncio.run(_run())
-    assert len(seen) <= 3                       # 1 rimedio, mai 2 in un giro
+    assert len(seen) >= 2                        # almeno 1 rimedio (strip)
+    assert len(seen) <= 6                        # con la catena ruota sulle 4 key
     assert _asst(seen[0]).get("reasoning_content")
     assert _asst(seen[1]).get("reasoning_content") is None    # strip avvenuto
     assert dep["unique"] in router._cooldown    # KO normale applicato
