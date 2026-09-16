@@ -233,6 +233,14 @@ RC_UNSUPPORTED = ('{"error":{"message":"property \'reasoning_content\' is '
 THINK_400 = ('{"error":{"message":"thinking blocks are not allowed in the '
              'current history","type":"invalid_request_error","code":'
              '"invalid_request_error"}}')
+# 422 di requesty (validazione STRICT del body): il campo reasoning_content
+# nella history non e' ammesso -> "extra_forbidden / Extra inputs are not
+# permitted", loc .../assistant/reasoning_content.
+RC_422_EXTRA = ('{"error":{"origin":"provider","message":"{\\"detail\\":'
+                '[{\\"type\\":\\"extra_forbidden\\",\\"loc\\":[\\"body\\",'
+                '\\"messages\\",232,\\"assistant\\",\\"reasoning_content\\"],'
+                '\\"msg\\":\\"Extra inputs are not permitted\\",'
+                '\\"input\\":\\"Ho trovato il problema...\\"}]}"}}')
 
 
 def test_repair_reasoning_error_kinds():
@@ -240,6 +248,7 @@ def test_repair_reasoning_error_kinds():
                                strip_reasoning_fields, downgrade_thinking)
     assert reasoning_err_kind(RC_400) == "needs"
     assert reasoning_err_kind(RC_UNSUPPORTED) == "rejects"
+    assert reasoning_err_kind(RC_422_EXTRA) == "rejects"
     assert reasoning_err_kind(THINK_400) == "history"
     assert reasoning_err_kind("Rate limit exceeded") is None
     # strip
@@ -297,6 +306,53 @@ def test_e2e_rejects_strip_e_ritenta_stesso_dep():
     assert _asst(seen[0]).get("reasoning_content")
     assert _asst(seen[1]).get("reasoning_content") is None
     assert dep["unique"] not in router._cooldown
+
+
+def test_e2e_422_extra_forbidden_strip_ritenta_e_impara():
+    """requesty (Pydantic strict) risponde 422 'extra_forbidden' sul campo
+    reasoning_content: stesso rimedio del rifiuto esplicito (strip + retry
+    dello STESSO dep, nessun cooldown) e flag `strip_reasoning` appreso e
+    persistito su tutti i gemelli dello stesso modello."""
+    cfg, router, dep = _mk(flag="")
+    csvlearn._PERSISTED.discard(("strip_reasoning", "m1"))
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(422, content=RC_422_EXTRA.encode())
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    payload = _payload()
+    _asst(payload)["reasoning_content"] = "ragionamento lungo del modello"
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        data, used = await fwd.call_with_fallback(router, "test", dep, payload,
+                                                  need=frozenset({"text"}))
+        await asyncio.gather(*list(csvlearn._TASKS))
+        return data, used
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == dep["unique"]          # ritenta lo STESSO dep
+    assert len(seen) == 2
+    assert _asst(seen[0]).get("reasoning_content")
+    assert _asst(seen[1]).get("reasoning_content") is None
+    assert dep["unique"] not in router._cooldown
+    twins = [d for deps in router.config.groups.values() for d in deps
+             if d["model"] == "m1"]
+    assert len(twins) == 3 and all(d["strip_reasoning"] for d in twins)
+    with open(cfg.csv_path, newline="", encoding="utf-8") as f:
+        txt = f.read()
+    hdr = txt.splitlines()[0].split(",")
+    assert "strip_reasoning" in hdr
+    i, m = hdr.index("strip_reasoning"), hdr.index("modello")
+    rows = [l.split(",") for l in txt.strip().splitlines()[1:] if l.strip()]
+    assert [r[i] for r in rows if r[m] == "m1"] == ["true"] * 3
 
 
 def test_e2e_esenzione_esaurita_poi_ko_normale():

@@ -913,7 +913,18 @@ _REASONING_ERR_RE = re.compile(
     r"invalid|unknown)"
     r"|(?:unsupported|not supported|unknown|unexpected|invalid)\s{1,3}"
     r"['\"]?reasoning[_a-z]*['\"]?"
-    r"|property ['\"]?reasoning[_a-z]*['\"]? is (?:unsupported|unknown))"
+    r"|property ['\"]?reasoning[_a-z]*['\"]? is (?:unsupported|unknown)"
+    # Validazione STRICT del body (Pydantic, es. router.requesty.ai): 422
+    # "extra_forbidden" -> il campo reasoning nella history NON e' ammesso
+    # ("Extra inputs are not permitted", loc .../assistant/reasoning_content).
+    # Il rimedio e' lo STESSO del rifiuto esplicito: si toglie il campo
+    # (content/tool_calls restano) e si ritenta lo stesso deployment; il flag
+    # `strip_reasoning` viene appreso per tutte le righe di quel modello.
+    r"|extra_forbidden[\s\S]{0,500}?reasoning[_a-z]*"
+    r"|reasoning[_a-z]*[\s\S]{0,500}?(?:extra[ _]?forbidden|not permitted)"
+    r"|(?:extra|additional|unexpected|unknown)[ _]"
+    r"(?:inputs?|fields?|properties|parameters?)[\s\S]{0,300}?reasoning[_a-z]*"
+    r"|not permitted[\s\S]{0,500}?reasoning[_a-z]*)"
     r"|(?P<history_mismatch>thinking[^\n]{0,60}(?:block|signature|content)"
     r"|thought[_ ]signature)",
     re.IGNORECASE)
