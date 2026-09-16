@@ -123,4 +123,77 @@ router.patch("/api/v1/policy", ...writeRoute({
   sanitize: (b) => ({ fields: Object.keys(b) }),
 }));
 
+// --- raw policy / CSV / backup restore (sostituzione completa) ---
+router.put("/api/v1/policy/raw", ...writeRoute({
+  resource: "policy", action: "update", gatewayPath: "/admin/policy/raw", verb: "put",
+  schema: z.object({ raw: z.string() }),
+  sanitize: (b) => ({ chars: b.raw.length }),
+}));
+
+router.put("/api/v1/csv", ...writeRoute({
+  resource: "csv", action: "write", gatewayPath: "/admin/csv", verb: "put",
+  schema: z.object({ raw: z.string() }),
+  sanitize: (b) => ({ chars: b.raw.length }),
+}));
+
+router.post("/api/v1/backups/restore", ...writeRoute({
+  resource: "config_snapshots", action: "restore",
+  gatewayPath: "/admin/backups/restore", verb: "post",
+  schema: z.object({ filename: z.string().min(1) }),
+}));
+
+// --- profiles ---
+router.post("/api/v1/profiles/purge", ...writeRoute({
+  resource: "profiles", action: "purge",
+  gatewayPath: "/admin/profiles/purge", verb: "post",
+  schema: z.object({ profile: z.string().min(1) }),
+}));
+
+// --- pressure (cooldown pressure inspection / clearing) ---
+router.post("/api/v1/pressure/inspect", ...writeRoute({
+  resource: "system", action: "cooldowns",
+  gatewayPath: "/admin/pressure/inspect", verb: "post",
+  schema: z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }),
+}));
+
+router.post("/api/v1/pressure/clear", ...writeRoute({
+  resource: "system", action: "cooldowns",
+  gatewayPath: "/admin/pressure/clear", verb: "post",
+  schema: z.object({ unique: z.string().optional(), model: z.string().optional() }),
+}));
+
+// --- playground (routing simulator, read-only) ---
+router.post("/api/v1/playground", ...writeRoute({
+  resource: "playground", action: "use",
+  gatewayPath: "/admin/playground", verb: "post",
+  schema: z.object({
+    model: z.string().min(1),
+    messages: z.array(z.object({ role: z.string(), content: z.any() })).min(1),
+    profile: z.string().optional(),
+    max_tokens: z.coerce.number().int().min(1).optional(),
+  }),
+  sanitize: (b) => ({ model: b.model, messages: b.messages.length }),
+}));
+
+// --- MCP config protocol (esecuzione tool di configurazione) ---
+router.post("/api/v1/mcp/config/execute", ...writeRoute({
+  resource: "mcp_config", action: "execute",
+  gatewayPath: "/admin/mcp/config/execute", verb: "post",
+  schema: z.object({
+    tool: z.string().min(1),
+    arguments: z.record(z.any()).optional(),
+  }),
+  sanitize: (b) => ({ tool: b.tool }),
+}));
+
+router.post("/api/v1/mcp/config/call", ...writeRoute({
+  resource: "mcp_config", action: "execute",
+  gatewayPath: "/admin/mcp/config/call", verb: "post",
+  schema: z.object({
+    jsonrpc: z.string().optional(), id: z.any().optional(),
+    method: z.string().min(1), params: z.record(z.any()).optional(),
+  }),
+  sanitize: (b) => ({ method: b.method }),
+}));
+
 export default router;

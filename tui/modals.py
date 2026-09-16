@@ -119,11 +119,28 @@ class HelpScreen(ModalScreen[None]):
              soglia salita globale e PER PROFILO, alias, timing, hotword,
              routing per capacità (gruppi -vision ecc.), auto-learn,
              escalation cooldown, QC sanity)
-  M          pagina CAPACITÀ: per_capability, gruppi primary/go/fallback,
+  m          pagina CAPACITÀ: per_capability, gruppi primary/go/fallback,
              catene fallback, strike auto-learn, contatori tts/stt, health
   K          chiavi client (sk-<profilo>) e master mascherata
   E          report rotazioni in arrivo entro N giorni
-  O          osservabilità: chiamate live, errori tracciati, classifica deployment
+  O          osservabilità: chiamate live, errori tracciati, classifica,
+             sessioni attive, statistiche complete
+  t          statistiche complete (token generati/consumati, cache,
+             success rate, modello preferito + classifica modelli)
+  l          classifica deployment (leaderboard con success rate/latency)
+  u          sessioni: classifica sessioni + stato attivo; INVIO su una
+             sessione apre il dettaglio (classifica deployment della
+             sessione, modello preferito, token)
+  M          MCP CONFIG: browser ed esecutore dei tool di configurazione
+             (policy, deployment, CSV, backup, capacità, stats...)
+  T          TUNING: parametri effettivi a runtime (router, forwarder,
+             admin, storage) — prima hardcoded, ora configurabili
+  V          POLICY YAML GREZZA: editor completo (copre ogni manopola)
+  G          CSV CONFIGURAZIONI GREZZO: editor completo delle righe/key
+  P          PUNTEGGI PERSISTITI: ok/fail cumulativi + latenza EMA per dep
+  H          SALUTE PROVIDER: contatori, circuit breaker, latenze
+  Z          OPERAZIONI: probe, unretire, purge, capabilities, pressure,
+             backups, insights, history, guide, playground
   ?          questo aiuto      ·   q esci
 
 [b]Tabella deployment[/]
@@ -148,7 +165,7 @@ class HelpScreen(ModalScreen[None]):
   pass-through; i retry ruotano SOLO dentro quel gruppo, senza sconfinare.
   Guardia SOFT sul max_input applicata DENTRO ogni capacità; membership
   decisa dalla colonna caps del CSV (token 'text' = anche nei dims).
-  Lo schermo M mostra gruppi e catene di fallback per ogni capacità.
+  Lo schermo m mostra gruppi e catene di fallback per ogni capacità.
 
 [b]Pagina AVANZATE (Y)[/]
   e          modifica il valore della riga selezionata

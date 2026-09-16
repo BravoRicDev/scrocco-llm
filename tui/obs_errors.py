@@ -5,6 +5,7 @@ from datetime import datetime
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Label
 
+from . import tui_config as cfg
 from .gateway_client import GatewayClient, GatewayError
 
 
@@ -33,7 +34,7 @@ class ErrorsPanel(Vertical):
         t.add_column("messaggio", key="message")
         self._loading = False
         self.run_worker(self.refresh_data(), exclusive=True)
-        self.set_interval(5.0, self._tick)
+        self.set_interval(cfg.REFRESH_ERRORS_SEC, self._tick)
 
     def _tick(self) -> None:
         if not self._loading:
@@ -73,18 +74,18 @@ class ErrorsPanel(Vertical):
                     else "-"
                 )
                 st = ev.get("status")
-                sev = isinstance(st, int) and (st >= 500 or st < 0)
-                st_txt = f"[red]{st}[/]" if sev else str(st)
+                sev = isinstance(st, int) and st >= 500
+                st_txt = f"[red]{st}[/]" if sev else (f"[yellow]{st}[/]" if isinstance(st, int) and 400 <= st < 500 else str(st))
                 tipo = ev.get("error_type") or "-"
                 msg = (ev.get("error_message") or "-").replace("\n", " ")
-                if len(msg) > 120:
-                    msg = msg[:119] + "…"
+                if len(msg) > cfg.ERROR_MSG_MAX_CHARS + 1:
+                    msg = msg[:cfg.ERROR_MSG_MAX_CHARS] + "…"
                 t.add_row(ora, st_txt, tipo, msg)
                 # riepilogo
-                if isinstance(st, int) and st < 0:
-                    c4xx += 1
-                elif st == 429:
+                if isinstance(st, int) and st == 429:
                     c429 += 1
+                elif isinstance(st, int) and 400 <= st < 500:
+                    c4xx += 1
                 elif isinstance(st, int) and st >= 500:
                     c500 += 1
                 else:

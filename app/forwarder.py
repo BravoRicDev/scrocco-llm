@@ -211,7 +211,9 @@ def clamp_max_tokens(body: dict, dep: dict, hook=None) -> None:
 # rivedere a posteriori gli errori usciti che non dovevano.
 errlog = logging.getLogger("nx.erroraudit")
 
-RETRYABLE_STATUS = {408, 409, 429} | set(range(500, 600))
+_DEFAULT_RETRYABLE_STATUS = frozenset({408, 409, 429} | set(range(500, 600)))
+_DEFAULT_EFFORT_INCOMPATIBLE_HOSTS = ("api.groq.com",)
+RETRYABLE_STATUS = set(_DEFAULT_RETRYABLE_STATUS)
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0,
                                  pool=10.0)
 # Pool connessioni generoso: con centinaia di deployment su molti provider
@@ -219,6 +221,70 @@ UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0,
 UPSTREAM_LIMITS = httpx.Limits(max_keepalive_connections=30,
                                max_connections=100,
                                keepalive_expiry=120.0)
+# Generazione HTTP: incrementata quando i parametri di trasporto cambiano a
+# caldo. I client httpx cachati vengono ricreati pigramente alla prossima
+# richiesta (i limiti del pool valgono solo alla creazione del client).
+_HTTP_GEN = 0
+
+
+def set_upstream_http(*, connect=None, read=None, write=None, pool=None,
+                      max_keepalive=None, max_connections=None,
+                      keepalive_expiry=None) -> None:
+    """Aggiorna timeout/pool del client upstream (None = lascia invariato).
+
+    Default identici alle costanti storiche; cambia solo se la policy lo
+    richiede. I client cachati vengono ricreati alla prossima richiesta."""
+    global UPSTREAM_TIMEOUT, UPSTREAM_LIMITS, _HTTP_GEN
+    cur = UPSTREAM_TIMEOUT
+    try:
+        c = float(connect) if connect is not None else cur.connect
+        r = float(read) if read is not None else cur.read
+        w = float(write) if write is not None else cur.write
+        pl = float(pool) if pool is not None else cur.pool
+    except (TypeError, ValueError):
+        return
+    new_timeout = httpx.Timeout(connect=c, read=r, write=w, pool=pl)
+    lim = UPSTREAM_LIMITS
+    try:
+        mk = (int(max_keepalive) if max_keepalive is not None
+              else lim.max_keepalive_connections)
+        mc = (int(max_connections) if max_connections is not None
+              else lim.max_connections)
+        ke = (float(keepalive_expiry) if keepalive_expiry is not None
+              else (lim.keepalive_expiry or 0.0))
+    except (TypeError, ValueError):
+        return
+    new_limits = httpx.Limits(max_keepalive_connections=mk,
+                              max_connections=mc, keepalive_expiry=ke)
+    if new_timeout != UPSTREAM_TIMEOUT or new_limits != UPSTREAM_LIMITS:
+        UPSTREAM_TIMEOUT = new_timeout
+        UPSTREAM_LIMITS = new_limits
+        _HTTP_GEN += 1
+
+
+def set_retryable_status(codes=None) -> None:
+    """Sostituisce l'insieme dei codici ritentabili (None = default storico)."""
+    global RETRYABLE_STATUS
+    if codes is None:
+        RETRYABLE_STATUS = set(_DEFAULT_RETRYABLE_STATUS)
+        return
+    try:
+        RETRYABLE_STATUS = {int(x) for x in codes}
+    except (TypeError, ValueError):
+        return
+
+
+def set_effort_incompatible_hosts(hosts=None) -> None:
+    """Sostituisce gli host incompatibili con i modelli 'effort' (None=default)."""
+    global EFFORT_INCOMPATIBLE_HOSTS
+    if hosts is None:
+        EFFORT_INCOMPATIBLE_HOSTS = tuple(_DEFAULT_EFFORT_INCOMPATIBLE_HOSTS)
+        return
+    try:
+        EFFORT_INCOMPATIBLE_HOSTS = tuple(str(h) for h in hosts if str(h))
+    except TypeError:
+        return
+
 
 # Timeout upstream ADATTIVO per-deployment: la latenza media storica (EMA,
 # fornita dal router) scala il read-timeout. Provider veloci (es. TTFB ~300ms)
@@ -377,6 +443,38 @@ def set_latency_lookup(fn) -> None:
     globale)."""
     global _LATENCY_LOOKUP
     _LATENCY_LOOKUP = fn
+
+
+def apply_cooldown_policy(policy) -> dict:
+    """Propaga nella forwarder le durate di cooldown 'di categoria' dalla
+    policy. Default = valori storici: se non configurate, nulla cambia.
+    Ritorna la mappa dei valori modificati."""
+    names = {
+        "MODEL_MISSING_COOLDOWN_S": ("model_missing_cooldown_sec", int),
+        "QUOTA_MIN_COOLDOWN_S": ("quota_min_cooldown_sec", float),
+        "QUOTA_MAX_COOLDOWN_S": ("quota_max_cooldown_sec", float),
+        "PROVIDER_TRANSIENT_COOLDOWN_S": (
+            "provider_transient_cooldown_sec", float),
+        "PERMISSION_DENIED_COOLDOWN_S": (
+            "permission_denied_cooldown_sec", float),
+        "STREAM_LOOP_COOLDOWN_S": ("stream_loop_cooldown_sec", float),
+        "_RETRY_BODY_CAP_S": ("retry_body_cap_sec", float),
+        "MIN_OUTPUT_FLOOR": ("min_output_floor", int),
+    }
+    changed: dict[str, dict] = {}
+    for gname, (pname, cast) in names.items():
+        try:
+            val = getattr(policy, pname, None)
+            if val is None:
+                continue
+            val = cast(val)
+        except (TypeError, ValueError):
+            continue
+        old = globals().get(gname)
+        if old != val:
+            globals()[gname] = val
+            changed[gname] = {"old": old, "new": val}
+    return changed
 
 
 def _timeout_for(dep: dict, ctx_est=None) -> httpx.Timeout | None:
@@ -2090,6 +2188,24 @@ class Forwarder:
         self._injected = client
         self._keepalive_pool = bool(keepalive_pool)
         self._clients: dict[str, httpx.AsyncClient] = {}
+        self._http_gen = _HTTP_GEN
+
+    def _reset_http_clients(self) -> None:
+        """Chiude e scarta i client cachati (timeout/pool cambiati a caldo)."""
+        self._http_gen = _HTTP_GEN
+        old = list(self._clients.values())
+        if self.client is not None:
+            old.append(self.client)
+        self._clients.clear()
+        self.client = None
+        if not old:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        for cli in old:
+            loop.create_task(cli.aclose())
 
     def _client_for(self, url: str, key: str = "") -> httpx.AsyncClient:
         """Client persistente per API-KEY, creato lazy e riusato.
@@ -2102,6 +2218,8 @@ class Forwarder:
         """
         if self._injected is not None:
             return self._injected
+        if self._http_gen != _HTTP_GEN:
+            self._reset_http_clients()
         if not self._keepalive_pool:
             if self.client is None:
                 self.client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)

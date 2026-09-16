@@ -69,6 +69,16 @@ _EXIT_RE = re.compile(r"(?im)\bexit(?:[ _-]*code)?\s*[:=]\s*(-?\d+)")
 _MIN_PROTECTED_MSGS = 8
 
 
+def set_min_protected_msgs(value=None) -> None:
+    """Applica da policy il floor dei messaggi protetti (default = costante)."""
+    global _MIN_PROTECTED_MSGS
+    if value is not None:
+        try:
+            _MIN_PROTECTED_MSGS = max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+
+
 class CtxCompactConfig:
     def __init__(self, enabled: bool = True, keep_turns: int = 4,
                  max_tool_output_chars: int = 2000,

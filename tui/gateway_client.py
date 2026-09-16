@@ -17,6 +17,8 @@ from typing import Any
 
 import httpx
 
+from . import tui_config as cfg
+
 DEFAULT_BASE = "http://127.0.0.1:{port}".format(
     port=os.environ.get("GATEWAY_PORT", "4001"))
 
@@ -80,7 +82,7 @@ class GatewayClient:
             try:
                 msg = resp.json()["error"]["message"]
             except Exception:
-                msg = resp.text[:300]
+                msg = resp.text[:cfg.HTTP_ERR_SNIPPET_CHARS]
             raise GatewayError(resp.status_code, msg)
         return resp.json()
 
@@ -96,6 +98,17 @@ class GatewayClient:
 
     async def get(self, path: str, params: dict | None = None) -> Any:
         return await self._parse(await self._send("GET", path, params))
+
+    async def raw(self, path: str, params: dict | None = None) -> str:
+        """GET che ritorna il corpo come testo (per endpoint non-JSON)."""
+        resp = await self._send("GET", path, params)
+        if resp.status_code >= 400:
+            try:
+                msg = resp.json()["error"]["message"]
+            except Exception:
+                msg = resp.text[:cfg.HTTP_ERR_SNIPPET_CHARS]
+            raise GatewayError(resp.status_code, msg)
+        return resp.text
 
     async def post(self, path: str, json: dict | None = None) -> Any:
         return await self._parse(await self._send("POST", path, json=json))
@@ -191,3 +204,195 @@ class GatewayClient:
         """Nomi pubblici visibili alla master key."""
         data = await self.get("/v1/models")
         return sorted({m["id"] for m in data["data"]})
+
+    # ------------------------------------------------------------- nuove API
+    async def sessions(self) -> dict:
+        """Sessioni attive: sticky, cache holder, session dep guard, slow demote."""
+        return await self.get("/admin/sessions")
+
+    async def session_detail(self, session_id: str, window: str = "7d") -> dict:
+        """Dettaglio di UNA sessione: classifica deployment, modello preferito."""
+        return await self.get(f"/admin/sessions/{session_id}",
+                              params={"window": window})
+
+    async def stats_sessions(self, window: str = "7d", limit: int = 50) -> dict:
+        """Classifica delle sessioni: token, successi, modello preferito."""
+        return await self.get("/admin/stats/sessions",
+                              params={"window": window, "limit": limit})
+
+    async def tuning(self) -> dict:
+        """Parametri di tuning effettivi a runtime (router/forwarder/admin/storage)."""
+        return await self.get("/admin/tuning")
+
+    async def stats_tokens(self, window: str = "24h") -> dict:
+        """Statistiche token generati/consumati."""
+        return await self.get("/admin/stats/tokens", {"window": window})
+
+    async def stats_cache(self) -> dict:
+        """Statistiche cache: hit rate, coalescing, etc."""
+        return await self.get("/admin/stats/cache")
+
+    async def stats_success(self, window: str = "24h") -> dict:
+        """Success rate aggregato e per modello (dallo stats/summary)."""
+        return await self.get("/admin/stats/summary")
+
+    async def stats_models(self, window: str = "7d") -> dict:
+        """Classifica modelli per successi, token, latenza."""
+        return await self.get("/admin/stats/models", {"window": window})
+
+    async def stats_summary(self) -> dict:
+        """Statistiche aggregate complete (token, cache, success rate, ranking)."""
+        return await self.get("/admin/stats/summary")
+
+    async def stats_deployments(self, profile: str | None = None,
+                                sort: str = "success_rate",
+                                order: str = "desc") -> dict:
+        """Statistiche per deployment con ordinamento."""
+        params: dict = {"sort": sort, "order": order}
+        if profile:
+            params["profile"] = profile
+        return await self.get("/admin/stats/deployments", params)
+
+    async def stats_providers(self) -> dict:
+        """Statistiche aggregate per provider."""
+        return await self.get("/admin/stats/providers")
+
+    async def deployments_stats(self, profile: str | None = None) -> dict:
+        """Punteggi persistiti per deployment."""
+        params = {"profile": profile} if profile else None
+        return await self.get("/admin/deployments/stats", params)
+
+    async def providers_health(self) -> dict:
+        """Salute aggregata per provider."""
+        return await self.get("/admin/providers/health")
+
+    async def guide(self) -> dict:
+        """Documento guida/agenti (docs/AGENT.md) servito dal gateway.
+
+        L'endpoint risponde text/markdown: il client normalizza in dict."""
+        text = await self.raw("/admin/guide")
+        return {"text": text}
+
+    async def insights(self, days: int = 7, group_by: str = "model") -> dict:
+        """Burn usage/costi aggregato dal ledger."""
+        return await self.get("/admin/insights", {"days": days, "group_by": group_by})
+
+    async def insights_summary(self) -> dict:
+        """Riepilogo 24h compatto."""
+        return await self.get("/admin/insights/summary")
+
+    async def backups(self) -> dict:
+        """Lista backup disponibili."""
+        return await self.get("/admin/backups")
+
+    async def restore_backup(self, filename: str) -> dict:
+        """Ripristina un backup."""
+        return await self.post("/admin/backups/restore", {"filename": filename})
+
+    async def csv_raw(self) -> dict:
+        """CSV grezzo delle configurazioni."""
+        return await self.get("/admin/csv")
+
+    async def put_csv_raw(self, raw: str) -> dict:
+        """Sostituisci il CSV di configurazione."""
+        return await self.put("/admin/csv", {"raw": raw})
+
+    async def policy_raw(self) -> dict:
+        """Policy YAML grezza."""
+        return await self.get("/admin/policy/raw")
+
+    async def put_policy_raw(self, raw: str) -> dict:
+        """Sostituisci la policy YAML."""
+        return await self.put("/admin/policy/raw", {"raw": raw})
+
+    async def probe_bulk(self, filter: str = "all", force: bool = False) -> dict:
+        """Valida deployment in blocco."""
+        return await self.post("/admin/deployments/probe/bulk",
+                               {"filter": filter, "force": force})
+
+    async def probe_one(self, unique: str, force: bool = False) -> dict:
+        """Valida un deployment."""
+        return await self.post("/admin/deployments/probe",
+                               {"unique": unique, "force": force})
+
+    async def capabilities_audit(self) -> dict:
+        """Audit server-side delle capacita."""
+        return await self.post("/admin/capabilities/audit", {})
+
+    async def capabilities_seed(self, dry_run: bool = False) -> dict:
+        """Propone/ applica seed delle capacita da mappa."""
+        return await self.post("/admin/capabilities/seed-from-map",
+                               {"dry_run": dry_run})
+
+    async def unretire(self, unique: str) -> dict:
+        """Riattiva un deployment ritirato."""
+        return await self.post("/admin/deployments/unretire", {"unique": unique})
+
+    async def purge_profile(self, profile: str) -> dict:
+        """Elimina la colonna profilo dal CSV (richiede 0 deployment)."""
+        return await self.post("/admin/profiles/purge", {"profile": profile})
+
+    async def playground(self, model: str, messages: list[dict],
+                         profile: str | None = None,
+                         max_tokens: int | None = None) -> dict:
+        """Simula una chat (read-only, trace di routing)."""
+        body: dict = {"model": model, "messages": messages}
+        if profile:
+            body["profile"] = profile
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        return await self.post("/admin/playground", body)
+
+    async def history(self, limit: int = 50) -> dict:
+        """Journal operazioni (total, entries)."""
+        return await self.get("/admin/history", {"limit": int(limit)})
+
+    async def purge_profile(self, profile: str) -> dict:
+        """Elimina la colonna profilo dal CSV (richiede 0 deployment)."""
+        return await self.post("/admin/profiles/purge", {"profile": profile})
+
+    async def history(self, limit: int = 50) -> dict:
+        """Journal delle operazioni (limit <=100)."""
+        return await self.get("/admin/history", {"limit": int(limit)})
+
+    async def playground(self, model: str, messages: list[dict],
+                         profile: str | None = None,
+                         max_tokens: int | None = None) -> dict:
+        """Simula una chat (read-only, trace di routing)."""
+        body: dict = {"model": model, "messages": messages}
+        if profile:
+            body["profile"] = profile
+        if max_tokens is not None:
+            body["max_tokens"] = int(max_tokens)
+        return await self.post("/admin/playground", body)
+
+    async def pressure_clear(self, unique: str | None = None,
+                             model: str | None = None) -> dict:
+        """Azzera cooldown/penalita/finestre (per unique, model o tutto)."""
+        body: dict = {}
+        if unique:
+            body["unique"] = unique
+        if model:
+            body["model"] = model
+        return await self.post("/admin/pressure/clear", body)
+
+    async def pressure_inspect(self, limit: int = 40) -> dict:
+        """Vista dettagliata del perche' i deployment vengono saltati."""
+        return await self.post("/admin/pressure/inspect", {"limit": limit})
+
+    # --------------------------------------------------------------- MCP
+    async def mcp_tools(self) -> dict:
+        """Elenco dei tool MCP di configurazione."""
+        return await self.get("/admin/mcp/config/tools")
+
+    async def mcp_execute(self, tool: str, arguments: dict | None = None) -> dict:
+        """Esegue un tool MCP di configurazione."""
+        return await self.post("/admin/mcp/config/execute",
+                               {"tool": tool, "arguments": arguments or {}})
+
+    async def mcp_call(self, method: str, params: dict | None = None,
+                       rpc_id: int = 1) -> dict:
+        """Chiamata JSON-RPC 2.0 al server MCP (tools/list, tools/call...)."""
+        return await self.post("/admin/mcp/config/call",
+                               {"jsonrpc": "2.0", "id": rpc_id,
+                                "method": method, "params": params or {}})

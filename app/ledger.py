@@ -34,8 +34,11 @@ log = logging.getLogger("nx.ledger")
 
 from .atomic_store import load_json as _load_json, save_json as _save_json
 
-LEDGER_MAX_BYTES = 20 * 1024 * 1024        # 20MB per file prima della rotazione
-LEDGER_KEEP = 2                             # file ruotati conservati (.1, .2)
+LEDGER_MAX_BYTES = int(
+    os.environ.get("LEDGER_MAX_BYTES", str(20 * 1024 * 1024)) or
+    (20 * 1024 * 1024))                     # 20MB per file prima della rotazione
+LEDGER_KEEP = int(
+    os.environ.get("LEDGER_KEEP", "2") or "2")   # file ruotati conservati (.1, .2)
 # Aggregazione giornaliera: se un segmento ruotato supera questa soglia di
 # righe viene compresso in usage_summary.json (aggregato per profilo+modello+
 # deployment+kind+giorno) e rimosso. Overridabile via env per i test.
