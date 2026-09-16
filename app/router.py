@@ -581,6 +581,11 @@ class Router:
         self._esc_win: dict[str, tuple[str, float]] = {}
         # --- Reputation Scoring (Blocco 1) ---
         self._base_scores: dict[str, float] = {}       # unique -> base score
+        # ANTI-RAFFICA PROVIDER (solo testo/dims): ultimo TENTATIVO
+        # (provider, model) e ts per provider. Serve a non fare due richieste
+        # consecutive allo stesso provider (rischio ban). Lazy per Router nudi.
+        self._last_attempt: tuple[str, str] | None = None
+        self._prov_last: dict[str, float] = {}
         self._provider_scores: dict[str, float] = {}   # provider_model -> group score
         self._key_scores: dict[str, float] = {}        # api_key -> group score
         self._avg_latencies: dict[str, float] = {}     # unique -> average latency
@@ -4332,6 +4337,7 @@ class Router:
         s.day_calls += 1
         dep = self.config.deployment_by_unique(unique)
         if dep is not None:
+            self._note_prov_attempt(dep)
             cap = self.config.group_caps.get(dep["group"])
             if cap in self.SAME_MODEL_PRIORITY_CAPS \
                     and self.policy.gen_same_model_failover:
@@ -5437,6 +5443,72 @@ class Router:
             log.info("[concurrency] %s: 429/503 -> limite dimezzato %d -> %d",
                      unique, lim, newlim)
 
+    # ------------------------------------------------- ANTI-RAFFICA PROVIDER
+    def _note_prov_attempt(self, dep: dict) -> None:
+        """Registra provider+model dell'ultimo TENTATIVO (da note_start).
+        Solo mondo testo/dims: le capacita' (gen/stt/...) non contano."""
+        g = str(dep.get("group") or "")
+        if self.config.group_caps.get(g) is not None:
+            return
+        p = str(dep.get("provider") or "")
+        if not p:
+            return
+        self._last_attempt = (p, str(dep.get("model") or ""))
+        self._prov_last[p] = time.time()
+
+    def _text_alternation_ok(self, group_name: str) -> bool:
+        """True se vale l'anti-raffica provider: solo testo (dims), no renewal,
+        no bucket pagati (-go/-fallback), knob `provider_alternation_enabled`."""
+        if not getattr(self.policy, "provider_alternation_enabled", True):
+            return False
+        if self.config.group_caps.get(group_name) is not None:
+            return False
+        if self._is_renewal_bucket(group_name) or self._is_go_bucket(group_name):
+            return False
+        return True
+
+    def _prov_avoid_key(self, dep: dict) -> tuple[int, int]:
+        """(0/1, 0/1): preferisci un provider DIVERSO dall'ultimo tentativo e,
+        tra quelli, lo STESSO modello su un altro provider (molto gradito)."""
+        if not getattr(self.policy, "provider_alternation_enabled", True):
+            return (0, 0)
+        last = getattr(self, "_last_attempt", None)
+        if not last:
+            return (0, 0)
+        lp, lm = last
+        p = str(dep.get("provider") or "")
+        same_p = 1 if (p and p == lp) else 0
+        same_m = 0 if (same_p == 0 and str(dep.get("model") or "") == lm) else 1
+        return (same_p, same_m)
+
+    def _prov_alternate(self, cands: list[dict]) -> list[dict]:
+        """Riordino STABILE dei candidati per evitare un provider consecutivo
+        (stesso gruppo): non cambia l'insieme, solo l'ordine."""
+        if not cands:
+            return cands
+        return sorted(cands, key=self._prov_avoid_key)
+
+    def _prov_prefer(self, winner: dict | None, cands: list[dict],
+                     group_name: str) -> dict | None:
+        """Anti-raffica: se il vincitore ripete l'ultimo provider e tra i
+        candidati ce n'e' uno con provider DIVERSO, prendi il migliore
+        alternativo (a parita', stesso modello su altro provider)."""
+        if winner is None or not self._text_alternation_ok(group_name):
+            return winner
+        w = self._prov_avoid_key(winner)
+        if w == (0, 0):
+            return winner
+        alt = [d for d in cands if self._prov_avoid_key(d) < w]
+        if not alt:
+            return winner
+        try:
+            return min(alt, key=lambda d: (
+                self._prov_avoid_key(d),
+                self._reputation_score(d["unique"], d, None),
+                self.usage_weight_24h(d["unique"])))
+        except Exception:                              # noqa: BLE001
+            return alt[0]
+
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
                         ctx: int | None = None,
@@ -5637,7 +5709,7 @@ class Router:
             # Filtra solo i candidati con punteggio minimo
             candidates = [d for s, d in rep_scores if s == min_rep]
             if len(candidates) == 1:
-                return candidates[0]
+                return self._prov_prefer(candidates[0], deps, group_name)
             # Tie-breaker: model_preference più alto, poi media storica latenza
             if len(candidates) > 1:
                 def _lat(_d):
@@ -5653,18 +5725,19 @@ class Router:
                 if len(tie) == 1:
                     log.debug("[pick] %s rep=%.1f tie-break-pref/lat -> %s",
                               group_name, min_rep, tie[0]["unique"])
-                    return tie[0]
+                    return self._prov_prefer(tie[0], deps, group_name)
                 # Ancora parità: usa legacy score come ultimo tie-breaker
                 weights = [self._score(d, now) for d in tie]
                 chosen = random.choices(tie, weights=weights, k=1)[0]
                 log.debug("[pick] %s rep=%.1f tie-break-legacy -> %s",
                           group_name, min_rep, chosen["unique"])
                 log.info("[pick-final] %s chosen=%s min_rep=%.1f (%d candidates)", group_name, chosen["unique"], min_rep, len(candidates))
-                return chosen
+                return self._prov_prefer(chosen, deps, group_name)
             log.debug("[pick] %s rep=%.1f", group_name, min_rep)
         else:
             weights = [d.get("priority", 0) + 1 for d in deps]
-            return random.choices(deps, weights=weights, k=1)[0]
+            chosen = random.choices(deps, weights=weights, k=1)[0]
+            return self._prov_prefer(chosen, deps, group_name)
 
     def _walk_chain(self, chain: list[str], failed_unique: str | None,
                     need: frozenset[str] | None = None,
@@ -5788,6 +5861,10 @@ class Router:
         # LEASE (P2-8, opt-in): depriorizza le chiavi con troppe richieste in
         # volo (soft: se tutte sono al cap la lista resta intera).
         preferred = self._lease_filter(preferred)
+        # ANTI-RAFFICA PROVIDER (solo testo/dims): evita un provider
+        # consecutivo riordinando i candidati dello STESSO gruppo.
+        if preferred and self._text_alternation_ok(gname):
+            preferred = self._prov_alternate(preferred)
 
         # failover same-model (gruppi gen/stt): prima le chiavi gemelle
         if prefer_model:
@@ -5999,7 +6076,8 @@ class Router:
         if not cands:
             return None
         cands.sort(key=lambda d: (int(d.get("max_input_tokens") or 0)
-                                  or (1 << 62)))
+                                  or (1 << 62),
+                                  self._prov_avoid_key(d)))
         dep = cands[0]
         ent = self._dep_sess().get(dep["unique"]) or (None, 0.0)
         log.info("[prelast] sessione condivisa: %s (max_in=%s, eta=%.0fs) -> "
@@ -7278,8 +7356,13 @@ class Router:
                    and (need is None or self._dep_supports(d, need))
                    and self._cap_fits(d, ctx)]
         if _cooled:
-            _cooled.sort(
-                key=lambda d: self.cooldown_residual(d["unique"]))
+            if self._text_alternation_ok(group_name):
+                _cooled.sort(key=lambda d: (
+                    self.cooldown_residual(d["unique"]),
+                    self._prov_avoid_key(d)))
+            else:
+                _cooled.sort(
+                    key=lambda d: self.cooldown_residual(d["unique"]))
             _wake = _cooled[0]
             _rem = int(self.cooldown_residual(_wake["unique"]))
             log.info("[cooldown-wakeup] %s: provo lo stantio meno raffreddato: "

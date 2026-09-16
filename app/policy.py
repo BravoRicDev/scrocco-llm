@@ -827,6 +827,10 @@ class Policy:
     # provider x slot-chiave, escludendo prima i provider in uso e poi le
     # chiavi in uso (i provider in uso rientrano solo con chiavi diverse).
     canary_provider_sweep_enabled: bool = True
+    # ANTI-RAFFICA PROVIDER (solo testo/dims): evita due richieste consecutive
+    # allo stesso provider, preferendo -- a parita' -- lo stesso modello su un
+    # altro provider. Non tocca cache/holder/warm, -go/-fallback e capacita'.
+    provider_alternation_enabled: bool = True
     # CACHE-AWARE: detentore per-sessione + troncamento contesto selettivo
     cache_aware_enabled: bool = True
     # AUDIT prefisso (F4): impronta del prefisso canonico per sessione, per
@@ -2297,6 +2301,10 @@ class Policy:
                 p.canary_provider_sweep_enabled = _coerce_bool(
                     wp["canary_provider_sweep"],
                     "warm_pool.canary_provider_sweep")
+            if "provider_alternation" in wp:
+                p.provider_alternation_enabled = _coerce_bool(
+                    wp["provider_alternation"],
+                    "warm_pool.provider_alternation")
         if raw.get("warm_borrow_enabled") is not None:
             p.warm_borrow_enabled = _coerce_bool(
                 raw["warm_borrow_enabled"], "warm_borrow_enabled")
