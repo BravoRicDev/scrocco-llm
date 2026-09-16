@@ -6512,9 +6512,11 @@ class Router:
         _order: list[str] = []
         # CODA PROVIDER (regola utente): le chiavi gia' in warm restano
         # ESCLUSE (filtro `keys`, sempre). Un candidato pero' il cui PROVIDER
-        # e' gia' rappresentato nel warm di UNA QUALSIASI sessione non va
-        # scartato: va in CODA, dopo TUTTI i provider non ancora in warm, cosi'
-        # si sfruttano tutti i provider senza martellare gli stessi.
+        # e' gia' IN USO (warm, probe in volo o chiamata in corso, di UNA
+        # QUALSIASI sessione) non va scartato: va in CODA, dopo TUTTI i
+        # provider non ancora in uso, cosi' si sfruttano tutti i provider
+        # senza martellare gli stessi (e senza cache-hit "sospette" su una
+        # chiave nuova di un provider che ha gia' visto lo stesso contenuto).
         _last = bool(getattr(self.policy, "canary_warm_last", True))
         _wprov = self._warm_providers() if _last else set()
         # FISSATO (regola utente "scava il -dim ESPPLICITO"): il ladder parte
@@ -6608,17 +6610,35 @@ class Router:
         return out
 
     def _warm_providers(self) -> set[str]:
-        """Provider (colonna `provider`) gia' rappresentati nel warm di UNA
-        QUALSIASI sessione viva. Regola utente: le chiavi in warm restano
-        ESCLUSE sempre; un candidato pero' il cui PROVIDER e' gia' in warm non
-        va scartato, va messo in CODA dopo tutti i provider non ancora in warm,
-        cosi' si sfruttano tutti i provider senza martellare gli stessi."""
+        """Provider (colonna `provider`) attualmente IN USO da UNA QUALSIASI
+        sessione, cioe':
+          1) provider di un dep con OWNER caldo (warm) vivo;
+          2) provider di un PROBE/canaro in volo (non e' ancora owner: quel
+             titolo si acquista al successo, quindi senza questo un'altra
+             chiave dello stesso provider partirebbe subito);
+          3) provider di un dep con una CHIAMATA REALE in corso (inflight>0).
+        Regola utente: le chiavi in warm restano ESCLUSE sempre; un candidato
+        pero' il cui PROVIDER e' gia' in uso non va scartato, va messo in CODA
+        dopo tutti i provider non ancora in uso, cosi' si sfruttano tutti i
+        provider senza martellare gli stessi. Serve a evitare la "rotazione
+        palese": alcuni provider non distinguono la cache per api-key, quindi
+        due chiavi dello stesso provider vedrebbero lo stesso contenuto."""
         out: set[str] = set()
         now = time.time()
+
+        def _add(u: object) -> None:
+            us = str(u or "")
+            if not us:
+                return
+            d = self.config.deployment_by_unique(us)
+            if d and d.get("provider"):
+                out.add(str(d["provider"]))
+
         try:
             guard = self._guard_sec()
         except Exception:                              # noqa: BLE001
             guard = 900.0
+        # 1) WARM: dep con owner vivo (qualsiasi sessione).
         for u, ent in list(self._dep_sess().items()):
             if not ent:
                 continue
@@ -6627,9 +6647,27 @@ class Router:
                     continue
             except Exception:                          # noqa: BLE001
                 continue
-            d = self.config.deployment_by_unique(u)
-            if d and d.get("provider"):
-                out.add(str(d["provider"]))
+            _add(u)
+        # 2) PROBE IN VOLO (canari/sveglie, qualsiasi sessione).
+        try:
+            for _m in list(self._probes().values()):
+                for u, ts in list(_m.items()):
+                    try:
+                        if (now - float(ts)) > 950.0:
+                            continue
+                    except Exception:                  # noqa: BLE001
+                        continue
+                    _add(u)
+        except Exception:                              # noqa: BLE001
+            pass
+        # 3) CHIAMATE REALI IN CORSO: stanno popolando la cache di quel
+        #    provider con QUESTO stesso contenuto.
+        try:
+            for u, s in list(self._stats.items()):
+                if int(getattr(s, "inflight", 0) or 0) > 0:
+                    _add(u)
+        except Exception:                              # noqa: BLE001
+            pass
         return out
 
     def warm_wake_canary(self, profile: str | None, cur_dep: dict,
@@ -6674,8 +6712,9 @@ class Router:
         _order: list[str] = []
         # CODA PROVIDER (regola utente): le chiavi gia' in warm restano
         # ESCLUSE (filtro `keys`, sempre, incluse quelle di TUTTE le sessioni).
-        # Un dormiente pero' il cui PROVIDER e' gia' rappresentato nel warm di
-        # UNA QUALSIASI sessione va in CODA, dopo TUTTI i provider non in warm.
+        # Un dormiente pero' il cui PROVIDER e' gia' IN USO (warm, probe in
+        # volo o chiamata in corso, di UNA QUALSIASI sessione) va in CODA,
+        # dopo TUTTI i provider non ancora in uso.
         _last = bool(getattr(self.policy, "canary_warm_last", True))
         _wprov = self._warm_providers() if _last else set()
         # FISSATO: anche la Sveglia scava dalla dim RICHIESTA (vedi refill).

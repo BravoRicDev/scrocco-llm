@@ -883,10 +883,10 @@ warm_pool:
   # Una chiave SATURA (soft-429/fault) resta sempre fuori. false = come
   # prima: i lenti escono dal warm.
   allow_slow: true
-  # I canary mettono in CODA i candidati dei provider gia' rappresentati nel
-  # warm di UNA QUALSIASI sessione (le chiavi in warm restano escluse sempre):
-  # true = prima tutti gli altri provider, poi quelli gia' in warm. false =
-  # ordine legacy (nessuna coda per provider).
+  # I canary mettono in CODA i candidati dei provider gia' "in uso" da UNA
+  # QUALSIASI sessione — warm, probe/canaro in volo o chiamata reale in corso
+  # (le chiavi in warm restano escluse sempre): true = prima tutti gli altri
+  # provider, poi quelli gia' in uso. false = ordine legacy (nessuna coda).
   canary_warm_last: true
 
 # ─────────────────────────────────────────────────────────────────────────────

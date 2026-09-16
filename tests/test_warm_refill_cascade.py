@@ -962,7 +962,7 @@ def test_prestito_conta_nel_valido(router):
     assert {d["unique"] for d in borrow} == {big["unique"]}
 
 
-# ------------------------------------------ CODA DEI PROVIDER GIA' IN WARM
+# ------------------------------------------ CODA DEI PROVIDER GIA' IN USO
 CSV_PROV = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps,intelligence_score,model_preference,order
 t@x.com,m/rf-small,groq,https://api.groq.com/openai/v1,free,32,32000,5,K-S,,5,0,0
 t@x.com,m/rf-mg,groq,https://api.groq.com/openai/v1,free,200,200000,5,K-MG,,5,0,0
@@ -1083,3 +1083,80 @@ def test_wake_provider_in_warm_va_in_coda(router_prov):
                             exclude_keys=set(), exclude_uniq=set(),
                             min_age_sec=3600)
     assert w3 and w3["unique"] == mg["unique"]
+
+
+# --------------------------------- CODA PROVIDER "IN USO" (warm + in volo)
+def test_warm_providers_include_probe_in_volo(router_prov):
+    """Un probe/canaro IN VOLO (non e' ancora owner: l'ownership si acquista
+    al successo) marca il provider come 'in uso', anche se di un'ALTRA
+    sessione; scaduto oltre il TTL di sicurezza non conta piu'."""
+    r = router_prov
+    mg = _dep(r, f"{BASE}-200k", "K-MG")       # groq
+    assert r._warm_providers() == set()
+    r.note_probe_started("altra", mg["unique"])
+    assert r._warm_providers() == {"groq"}
+    r.note_probe_done("altra", mg["unique"])
+    assert r._warm_providers() == set()
+    r._probes()["altra"] = {mg["unique"]: time.time() - 1000.0}
+    assert r._warm_providers() == set()
+
+
+def test_warm_providers_include_chiamata_reale_in_corso(router_prov):
+    """Una chiamata REALE in corso (inflight>0) marca il provider come 'in
+    uso': quel provider sta gia' popolando la cache con lo stesso contenuto."""
+    r = router_prov
+    mg = _dep(r, f"{BASE}-200k", "K-MG")       # groq
+    assert r._warm_providers() == set()
+    r.note_start(mg["unique"], ctx_est=100)
+    assert r._warm_providers() == {"groq"}
+    r.note_end(mg["unique"], ctx_est=100)
+    assert r._warm_providers() == set()
+
+
+def test_canary_provider_in_volo_va_in_coda(router_prov):
+    """Un probe in volo su groq (sessione 'altra') mette groq in CODA: il
+    canary della sessione corrente preferisce openrouter anche se groq ha il
+    tier `order` piu' basso."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")      # groq (dep corrente)
+    mg = _dep(r, f"{BASE}-200k", "K-MG")       # groq, tier order=0
+    mo = _dep(r, f"{BASE}-200k", "K-MO")       # openrouter, tier order=9
+    r.note_probe_started("altra", mg["unique"])
+    c = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                           requested_group=None, exclude_keys=set(),
+                           exclude_uniq=set())
+    assert c and c["unique"] == mo["unique"]
+
+
+def test_canary_provider_in_volo_soft_ripiega(router_prov):
+    """La coda e' SOFT: mai esclusione totale. Se resta solo un provider in
+    volo, viene comunque scelto (seconda passata)."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mg = _dep(r, f"{BASE}-200k", "K-MG")
+    mo = _dep(r, f"{BASE}-200k", "K-MO")
+    r.note_probe_started("altra", mg["unique"])
+    c = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                           requested_group=None, exclude_keys=set(),
+                           exclude_uniq={mo["unique"]})
+    assert c and c["unique"] == mg["unique"]
+
+
+def test_wake_provider_in_volo_va_in_coda(router_prov):
+    """Anche la SVEglia mette in coda (soft) i dormienti di un provider con un
+    probe in volo, preferendo un altro provider."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mg = _dep(r, f"{BASE}-200k", "K-MG")
+    mo = _dep(r, f"{BASE}-200k", "K-MO")
+    now = time.time()
+    for d in (mg, mo):
+        r._cooldown[d["unique"]] = now + 600
+        r._cooldown_since[d["unique"]] = now - 7200
+        r.stats_for(d["unique"]).last_reason = "http_429"
+    r.note_probe_started("altra", mg["unique"])
+    w = r.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                           tried={small["unique"]}, requested_group=None,
+                           exclude_keys=set(), exclude_uniq=set(),
+                           min_age_sec=3600)
+    assert w and w["unique"] == mo["unique"]

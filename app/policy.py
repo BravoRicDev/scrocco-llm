@@ -703,11 +703,12 @@ class Policy:
     warm_ready_rpm_step: float = 5.0
     warm_ready_min_max: int = 6
     warm_refill_default_out_tokens: int = 4096
-    # CODA DEI PROVIDER GIA' IN WARM: le chiavi gia' in warm restano escluse
-    # SEMPRE; ma un candidato il cui PROVIDER (colonna `provider`) e' gia'
-    # rappresentato nel warm di UNA QUALSIASI sessione non viene scartato:
-    # finisce in CODA, dopo tutti i provider non ancora in warm, cosi' si
-    # sfruttano tutti i provider riducendo il rischio di ban per-provider.
+    # CODA DEI PROVIDER GIA' IN USO: le chiavi gia' in warm restano escluse
+    # SEMPRE; ma un candidato il cui PROVIDER (colonna `provider`) e' gia' IN
+    # USO (warm, probe in volo o chiamata in corso, di UNA QUALSIASI sessione)
+    # non viene scartato: finisce in CODA, dopo tutti i provider non ancora in
+    # uso, cosi' si sfruttano tutti i provider riducendo il rischio di ban
+    # per-provider e le cache-hit "sospette" su chiavi nuove.
     canary_warm_last: bool = True
     # Modelli PREFERITI nei bucket -go/-fallback (lista separata da virgole o
     # YAML list): se nel bucket c'e' ALMENO una chiave viva di uno di questi
