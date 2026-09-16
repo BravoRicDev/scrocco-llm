@@ -115,6 +115,28 @@ def test_marchio_pulito_da_successo_rapido(wr):
     assert not wr.is_slow_for_session(s["unique"], "s1", 100)
 
 
+def test_slow_flag_loggato(wr, caplog):
+    s = _dep(wr, f"{BASE}-32k", "K-S")
+    with caplog.at_level(logging.INFO, logger="nx.router"):
+        wr.mark_session_slow("s1", s["unique"])
+    assert any("[slow-flag]" in r.getMessage()
+               and "NESSUN cooldown" in r.getMessage()
+               for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="nx.router"):
+        wr.mark_session_slow("s1", s["unique"])      # gia' flaggato
+    assert not any("[slow-flag]" in r.getMessage() for r in caplog.records)
+
+
+def test_slow_flag_clear_loggato(wr, caplog):
+    s = _dep(wr, f"{BASE}-32k", "K-S")
+    wr.mark_session_slow("s1", s["unique"])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="nx.router"):
+        wr.note_session_success("s1", s["unique"], 50, ctx_est=100)
+    assert any("NON piu' lento" in r.getMessage() for r in caplog.records)
+
+
 def test_warm_pool_knob_off_ordine_legacy(wr):
     s, m, b = _warm3(wr)
     wr.policy.warm_pick_fastest = False

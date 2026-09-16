@@ -2857,11 +2857,23 @@ class Router:
             and lat > max(SOFT_SLOW_LATENCY_MS, _thr * 0.6) \
             and heavy and relative_ok
         if hard or soft:
+            _was = unique in (d.get(session_id) or {})
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
+            if not _was:
+                metrics.inc("nx_slow_flag_total", ("set",))
+                log.info("🐢 [slow-flag] %s: marcato %s lento per la sessione "
+                         "%s (%.0fms > soglia %.0fms; NESSUN cooldown: va in "
+                         "fondo al warm fino al prossimo successo rapido)",
+                         unique, "HARD" if hard else "SOFT", session_id,
+                         lat or 0.0, _thr)
         else:
             m = d.get(session_id)
             if m:
-                m.pop(unique, None)
+                if m.pop(unique, None) is not None:
+                    metrics.inc("nx_slow_flag_total", ("clear",))
+                    log.info("✅ [slow-flag] %s: NON piu' lento per la "
+                             "sessione %s (successo rapido)", unique,
+                             session_id)
                 if not m:
                     d.pop(session_id, None)
         if len(d) > 4096:
@@ -2897,7 +2909,14 @@ class Router:
         if self.config.group_caps.get(g) is not None \
                 or self._is_renewal_bucket(g):
             return
-        self._sess_slow().setdefault(session_id, {})[unique] = (time.time(), True)
+        _m = self._sess_slow().setdefault(session_id, {})
+        _was = unique in _m
+        _m[unique] = (time.time(), True)
+        if not _was:
+            metrics.inc("nx_slow_flag_total", ("set",))
+            log.info("🐢 [slow-flag] %s: marcato LENTO per la sessione %s "
+                     "(timer gara lenta; NESSUN cooldown: va in fondo al warm "
+                     "fino al prossimo successo rapido)", unique, session_id)
 
     def slow_race_allowed(self, session_id: str | None, profile: str | None,
                           group_name: str | None,
