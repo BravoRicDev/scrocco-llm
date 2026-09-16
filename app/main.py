@@ -4378,13 +4378,16 @@ async def images_generations(request: Request):
             status = err.status if err.status is not None else 0
             deployment_side = (
                 status > 0                       # retryable (429/5xx/timeout)
-                or -status == 404                # endpoint/modello assente lì
-                or -status == 402                # chiave senza crediti (deployment)
+                # chiave senza crediti / progetto negato / endpoint o schema non
+                # gestiti: condizioni del DEPLOYMENT, non del client -> ruota
+                # (la catena porta al gruppo -image_gen-fallback, es. le chiavi
+                # OpenRouter a pagamento).
+                or -status in (402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
                 or (router.policy.images_chat_fallback
                     and image_chat_fallback_signature(err.status, detail))
                 or (router.policy.images_chat_fallback
-                    and (-status == 400 or -status == 403)
+                    and -status == 400
                     and ("openai_error" in detail
                          or "bad_response_status_code" in detail)))
             if not deployment_side:
@@ -4393,8 +4396,16 @@ async def images_generations(request: Request):
                 return JSONResponse(status_code=st if st >= 400 else 502,
                                     content={"error": {"message": err.detail,
                                                        "type": "upstream_error"}})
-            # images.chat_fallback: prima di cambiare deployment prova via chat
-            if router.policy.images_chat_fallback and f"{cur}::chat" not in tried:
+            # images.chat_fallback: prova via chat SOLO quando l'errore indica
+            # che l'endpoint nativo e' assente o lo schema non e' riconosciuto.
+            # Un 403/402 (permessi/crediti) non migliora via chat: ruota e basta.
+            _chat_useful = (
+                image_chat_fallback_signature(err.status, detail)
+                or (-status in (400, 403)
+                    and ("openai_error" in detail
+                         or "bad_response_status_code" in detail)))
+            if (router.policy.images_chat_fallback and _chat_useful
+                    and f"{cur}::chat" not in tried):
                 tried.add(f"{cur}::chat")
                 log.info("[images] %s: /images/generations non disponibile "
                          "(status=%s): ritenta via chat", cur, -status or "?")

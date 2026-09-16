@@ -12,7 +12,9 @@ Qui si blinda:
   - la conversione image -> chat (image_chat_payload);
   - la firma che decide il fallback (image_chat_fallback_signature);
   - l'estrazione delle immagini dalla risposta chat (extract_chat_images);
-  - il percorso end-to-end: nativo 404/400 -> chat 200 -> 200 al client.
+  - il percorso end-to-end: nativo 404/400 -> chat 200 -> 200 al client;
+  - la ROTAZIONE su errori deployment-side (403 progetto negato/402 crediti):
+    la catena raggiunge il gruppo -image_gen-fallback (chiavi a pagamento).
 """
 import asyncio
 import json
@@ -27,6 +29,8 @@ from app.forwarder import (Forwarder, UpstreamError, extract_chat_images,
 GEMINI_400 = ('{"error":{"code":400,"message":"Invalid JSON payload '
               'received. Unknown name \\"prompt\\": Cannot find field.",'
               '"status":"INVALID_ARGUMENT"}}')
+GOOGLE_403 = ('{"code":403,"message":"Your project has been denied access. '
+              'Please contact support.","status":"PERMISSION_DENIED"}')
 
 _DEP = {
     "unique": "g__models-gemini-2.5-flash-image__0",
@@ -110,6 +114,8 @@ def test_signature_endpoint_assente():
 def test_signature_non_triggera_su_altri_status():
     assert image_chat_fallback_signature(429, "rate limited") is False
     assert image_chat_fallback_signature(500, "boom") is False
+    # 403 permessi/crediti: non e' un problema di endpoint -> niente chat
+    assert image_chat_fallback_signature(-403, GOOGLE_403) is False
 
 
 def test_signature_esclude_rifiuti_di_contenuto():
@@ -145,41 +151,52 @@ def test_extract_chat_images_nessuna():
 
 # ------------------------------------------------------------- end-to-end
 class _FakeForwarder:
-    """Sostituto di Forwarder: registra le chiamate e simula l'upstream."""
+    """Sostituto di Forwarder: registra le chiamate e simula l'upstream.
+
+    `native`/`chat` sono callable (dep, payload) -> (status, body)."""
 
     def __init__(self, native, chat):
-        self.native = native
-        self.chat = chat
-        self.calls: list[str] = []
+        self.native_fn = native
+        self.chat_fn = chat
+        self.images_calls: list[str] = []
+        self.chat_calls: list[str] = []
         self.chat_payloads: list[dict] = []
 
     async def call_images(self, dep, payload, **kw):
-        self.calls.append("images")
-        status, body = self.native
+        tag = dep.get("provider") or dep.get("unique")
+        self.images_calls.append(tag)
+        status, body = self.native_fn(dep, payload)
         if status >= 400:
             raise UpstreamError(-status if status != 429 else status,
                                 str(body)[:500])
         return body
 
     async def call(self, dep, payload, **kw):
-        self.calls.append("chat")
+        tag = dep.get("provider") or dep.get("unique")
+        self.chat_calls.append(tag)
         self.chat_payloads.append(payload)
-        status, body = self.chat
+        status, body = self.chat_fn(dep, payload)
         if status >= 400:
             raise UpstreamError(-status if status != 429 else status,
                                 str(body)[:500])
         return body
 
 
+_CSV_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
+               "priority,scrocco-llm-test,caps\n")
+_GOOGLE = ("https://generativelanguage.googleapis.com/v1beta/openai")
+
+
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
     csv = tmp_path / "k.csv"
     csv.write_text(
-        "commento,modello,provider,endpoint,data,context,max_input,"
-        "priority,scrocco-llm-test,caps\n"
-        "seed,models/gemini-2.5-flash-image,google,"
-        "https://generativelanguage.googleapis.com/v1beta/openai,"
-        "free,8,8000,1,sk-test-key,image_gen\n"
+        _CSV_HEADER
+        + f"seed,models/gemini-2.5-flash-image,google,{_GOOGLE},"
+          "free,8,8000,1,sk-test-key,image_gen\n"
+        # gruppo -image_gen-fallback (categoria 'fallback'): chiave a pagamento
+        + "orfall,google/gemini-2.5-flash-image,openrouter,"
+          "https://openrouter.ai/api/v1,fallback,128,0,0,sk-or-test-key,image_gen\n"
     )
     import app.main as m
     orig_mk = m.authn.master_key
@@ -212,19 +229,24 @@ def _fun(monkeypatch, m, native, chat) -> _FakeForwarder:
     return fwd
 
 
+_IMG_ONLY = lambda dep, p: (200, {"choices": [{"message": {"images": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZZZ"}}]}}]})
+_NATIVE_URL = lambda dep, p: (200, {"created": 1,
+                                    "data": [{"url": "https://img/native.png"}]})
+
+
 def test_e2e_nativo_404_chat_fallback_ok(client, monkeypatch):
     c, m = client
-    fwd = _fun(monkeypatch, m, native=(404, "not found"),
-               chat=(200, {"choices": [{"message": {"images": [
-                   {"type": "image_url",
-                    "image_url": {"url": "data:image/png;base64,ZZZ"}}]}}]}))
+    fwd = _fun(monkeypatch, m, native=lambda d, p: (404, "not found"),
+               chat=_IMG_ONLY)
     r = c.post("/v1/images/generations", headers=MK,
                json={"model": "scrocco-llm-test", "prompt": "un gatto"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["data"] == [{"url": "data:image/png;base64,ZZZ"}]
     assert body["via"] == "chat"
-    assert fwd.calls == ["images", "chat"]
+    assert fwd.images_calls == ["google"]
+    assert fwd.chat_calls == ["google"]
     assert fwd.chat_payloads[0]["messages"] == [
         {"role": "user", "content": "un gatto"}]
     assert fwd.chat_payloads[0]["modalities"] == ["image"]
@@ -232,36 +254,66 @@ def test_e2e_nativo_404_chat_fallback_ok(client, monkeypatch):
 
 def test_e2e_google_400_prompt_trigghera_chat(client, monkeypatch):
     c, m = client
-    fwd = _fun(monkeypatch, m, native=(400, GEMINI_400),
-               chat=(200, {"choices": [{"message": {"images": [
-                   {"image_url": {"url": "https://img/ok.png"}}]}}]}))
+    fwd = _fun(monkeypatch, m, native=lambda d, p: (400, GEMINI_400),
+               chat=_IMG_ONLY)
     r = c.post("/v1/images/generations", headers=MK,
                json={"model": "scrocco-llm-test", "prompt": "un cane"})
     assert r.status_code == 200, r.text
-    assert r.json()["data"] == [{"url": "https://img/ok.png"}]
-    assert fwd.calls == ["images", "chat"]
+    assert fwd.images_calls == ["google"]
+    assert fwd.chat_calls == ["google"]
 
 
 def test_e2e_rifiuto_contenuto_non_ritenta(client, monkeypatch):
     c, m = client
     fwd = _fun(monkeypatch, m,
-               native=(400, "Your request was blocked by our safety filters"),
-               chat=(200, {"choices": [{"message": {"images": [
-                   {"image_url": {"url": "https://img/never.png"}}]}}]}))
+               native=lambda d, p: (400, "Your request was blocked by our safety filters"),
+               chat=_IMG_ONLY)
     r = c.post("/v1/images/generations", headers=MK,
                json={"model": "scrocco-llm-test", "prompt": "x"})
     assert r.status_code == 400
-    assert fwd.calls == ["images"]
+    assert fwd.images_calls == ["google"]
+    assert fwd.chat_calls == []
+
+
+def test_e2e_403_progetto_negato_ruota_senza_chat(client, monkeypatch):
+    """403 'project denied' e' deployment-side: ruota (anche verso il fallback)
+    SENZA sprecare una chiamata chat."""
+    c, m = client
+    fwd = _fun(monkeypatch, m, native=lambda d, p: (403, GOOGLE_403),
+               chat=_IMG_ONLY)
+    r = c.post("/v1/images/generations", headers=MK,
+               json={"model": "scrocco-llm-test", "prompt": "x"})
+    assert r.status_code == 403
+    assert fwd.chat_calls == []
+    # primario google + fallback openrouter (entrambi 403) -> 2 tentativi
+    assert fwd.images_calls == ["google", "openrouter"]
+
+
+def test_e2e_chain_raggiunge_fallback_openrouter(client, monkeypatch):
+    """Google free morto (403) -> la catena arriva al gruppo -image_gen-fallback
+    (OpenRouter a pagamento) che consegna via chat."""
+    c, m = client
+
+    def native(dep, p):
+        if dep.get("provider") == "openrouter":
+            return (404, "no images endpoint")
+        return (403, GOOGLE_403)
+
+    fwd = _fun(monkeypatch, m, native=native, chat=_IMG_ONLY)
+    r = c.post("/v1/images/generations", headers=MK,
+               json={"model": "scrocco-llm-test", "prompt": "una mela"})
+    assert r.status_code == 200, r.text
+    assert fwd.images_calls == ["google", "openrouter"]
+    assert fwd.chat_calls == ["openrouter"]
+    assert r.json()["data"] == [{"url": "data:image/png;base64,ZZZ"}]
 
 
 def test_e2e_nativo_ok_passthrough(client, monkeypatch):
     c, m = client
-    fwd = _fun(monkeypatch, m,
-               native=(200, {"created": 9,
-                             "data": [{"url": "https://img/native.png"}]}),
-               chat=(200, {"choices": []}))
+    fwd = _fun(monkeypatch, m, native=_NATIVE_URL, chat=_IMG_ONLY)
     r = c.post("/v1/images/generations", headers=MK,
                json={"model": "scrocco-llm-test", "prompt": "x"})
     assert r.status_code == 200
     assert r.json()["data"][0]["url"] == "https://img/native.png"
-    assert fwd.calls == ["images"]
+    assert fwd.images_calls == ["google"]
+    assert fwd.chat_calls == []
