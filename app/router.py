@@ -6508,7 +6508,15 @@ class Router:
         # resta ASCENDENTE dal gruppo corrente; i bucket -go/-fallback non
         # sono mai candidati (FREE only).
         _by: dict[str, list[dict]] = {}
+        _by_tail: dict[str, list[dict]] = {}
         _order: list[str] = []
+        # CODA PROVIDER (regola utente): le chiavi gia' in warm restano
+        # ESCLUSE (filtro `keys`, sempre). Un candidato pero' il cui PROVIDER
+        # e' gia' rappresentato nel warm di UNA QUALSIASI sessione non va
+        # scartato: va in CODA, dopo TUTTI i provider non ancora in warm, cosi'
+        # si sfruttano tutti i provider senza martellare gli stessi.
+        _last = bool(getattr(self.policy, "canary_warm_last", True))
+        _wprov = self._warm_providers() if _last else set()
         # FISSATO (regola utente "scava il -dim ESPPLICITO"): il ladder parte
         # dalla dim RICHIESTA, non dal gruppo della holder (che puo' essere
         # piu' alta: una sessione ancorata a -1000k non vedrebbe mai le free
@@ -6544,10 +6552,11 @@ class Router:
             k = str(d.get("api_key") or "")
             if k and k in keys:
                 continue                               # chiave gia' in warm
-            if g not in _by:
-                _by[g] = []
+            _tail = _last and str(d.get("provider") or "") in _wprov
+            _tgt = _by_tail if _tail else _by
+            if g not in _by and g not in _by_tail:
                 _order.append(g)
-            _by[g].append(d)
+            _tgt.setdefault(g, []).append(d)
         _sam0 = {int(t) for t in (sampled_tiers or ())}
         # DIM-MAJOR (regola utente): si SCAVA la -dim richiesta fino
         # all'esaurimento e solo dopo si sale alla successiva; dentro la -dim
@@ -6556,11 +6565,23 @@ class Router:
         # dimensione: senza questo, una -dim piu' profonda con `order` basso
         # veniva sondata prima di finire quella richiesta.
         _order.sort(key=self._group_dim_order_key)
+        # PRIMA passata: candidati di provider NON ancora in warm (tutte le -dim).
         for g in _order:
-            _pick = self._canary_cold_pick(
-                _by[g], ctx, _sam0 | self._tiers_of(ex, g))
-            if _pick is not None:
-                return _pick
+            _c = _by.get(g)
+            if _c:
+                _pick = self._canary_cold_pick(
+                    _c, ctx, _sam0 | self._tiers_of(ex, g))
+                if _pick is not None:
+                    return _pick
+        # SECONDA passata (CODA): solo se nessun provider nuovo ha dato nulla.
+        if _last:
+            for g in _order:
+                _c = _by_tail.get(g)
+                if _c:
+                    _pick = self._canary_cold_pick(
+                        _c, ctx, _sam0 | self._tiers_of(ex, g))
+                    if _pick is not None:
+                        return _pick
         return None
 
     def session_api_keys(self) -> set[str]:
@@ -6584,6 +6605,31 @@ class Router:
             d = self.config.deployment_by_unique(u)
             if d and d.get("api_key"):
                 out.add(str(d["api_key"]))
+        return out
+
+    def _warm_providers(self) -> set[str]:
+        """Provider (colonna `provider`) gia' rappresentati nel warm di UNA
+        QUALSIASI sessione viva. Regola utente: le chiavi in warm restano
+        ESCLUSE sempre; un candidato pero' il cui PROVIDER e' gia' in warm non
+        va scartato, va messo in CODA dopo tutti i provider non ancora in warm,
+        cosi' si sfruttano tutti i provider senza martellare gli stessi."""
+        out: set[str] = set()
+        now = time.time()
+        try:
+            guard = self._guard_sec()
+        except Exception:                              # noqa: BLE001
+            guard = 900.0
+        for u, ent in list(self._dep_sess().items()):
+            if not ent:
+                continue
+            try:
+                if (now - float(ent[1])) >= guard:
+                    continue
+            except Exception:                          # noqa: BLE001
+                continue
+            d = self.config.deployment_by_unique(u)
+            if d and d.get("provider"):
+                out.add(str(d["provider"]))
         return out
 
     def warm_wake_canary(self, profile: str | None, cur_dep: dict,
@@ -6624,7 +6670,14 @@ class Router:
         go_suf = self.config.go_suffix or "-go"
         fb_suf = self.config.fallback_suffix or "-fallback"
         _by: dict[str, list[dict]] = {}
+        _by_tail: dict[str, list[dict]] = {}
         _order: list[str] = []
+        # CODA PROVIDER (regola utente): le chiavi gia' in warm restano
+        # ESCLUSE (filtro `keys`, sempre, incluse quelle di TUTTE le sessioni).
+        # Un dormiente pero' il cui PROVIDER e' gia' rappresentato nel warm di
+        # UNA QUALSIASI sessione va in CODA, dopo TUTTI i provider non in warm.
+        _last = bool(getattr(self.policy, "canary_warm_last", True))
+        _wprov = self._warm_providers() if _last else set()
         # FISSATO: anche la Sveglia scava dalla dim RICHIESTA (vedi refill).
         _lad = self._ladder_for_group(requested_group
                                       or cur_dep.get("group") or "")
@@ -6674,10 +6727,11 @@ class Router:
             k = str(d.get("api_key") or "")
             if k and k in keys:
                 continue
-            if g not in _by:
-                _by[g] = []
+            _tail = _last and str(d.get("provider") or "") in _wprov
+            _tgt = _by_tail if _tail else _by
+            if g not in _by and g not in _by_tail:
                 _order.append(g)
-            _by[g].append(d)
+            _tgt.setdefault(g, []).append(d)
         _sam0 = {int(t) for t in (sampled_tiers or ())}
         # DIM-MAJOR (regola utente): si SCAVA la -dim richiesta fino
         # all'esaurimento e solo dopo si sale alla successiva; dentro la -dim
@@ -6686,11 +6740,23 @@ class Router:
         # dimensione: senza questo, una -dim piu' profonda con `order` basso
         # veniva sondata prima di finire quella richiesta.
         _order.sort(key=self._group_dim_order_key)
+        # PRIMA passata: dormienti di provider NON ancora in warm (tutte le -dim).
         for g in _order:
-            _pick = self._canary_cold_pick(
-                _by[g], ctx, _sam0 | self._tiers_of(ex, g))
-            if _pick is not None:
-                return _pick
+            _c = _by.get(g)
+            if _c:
+                _pick = self._canary_cold_pick(
+                    _c, ctx, _sam0 | self._tiers_of(ex, g))
+                if _pick is not None:
+                    return _pick
+        # SECONDA passata (CODA): solo se nessun provider nuovo ha dato nulla.
+        if _last:
+            for g in _order:
+                _c = _by_tail.get(g)
+                if _c:
+                    _pick = self._canary_cold_pick(
+                        _c, ctx, _sam0 | self._tiers_of(ex, g))
+                    if _pick is not None:
+                        return _pick
         return None
 
     def initial_pick(self, profile: str | None, group_name: str,

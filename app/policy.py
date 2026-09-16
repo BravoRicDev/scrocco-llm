@@ -703,6 +703,12 @@ class Policy:
     warm_ready_rpm_step: float = 5.0
     warm_ready_min_max: int = 6
     warm_refill_default_out_tokens: int = 4096
+    # CODA DEI PROVIDER GIA' IN WARM: le chiavi gia' in warm restano escluse
+    # SEMPRE; ma un candidato il cui PROVIDER (colonna `provider`) e' gia'
+    # rappresentato nel warm di UNA QUALSIASI sessione non viene scartato:
+    # finisce in CODA, dopo tutti i provider non ancora in warm, cosi' si
+    # sfruttano tutti i provider riducendo il rischio di ban per-provider.
+    canary_warm_last: bool = True
     # Modelli PREFERITI nei bucket -go/-fallback (lista separata da virgole o
     # YAML list): se nel bucket c'e' ALMENO una chiave viva di uno di questi
     # modelli, la scelta cade su quella (regola utente: "-go sempre
@@ -2194,6 +2200,9 @@ class Policy:
                     raise ValueError(
                         f"warm_pool.ready_min_max non valido: {_v!r}")
                 p.warm_ready_min_max = int(_v)
+            if "canary_warm_last" in wp:
+                p.canary_warm_last = _coerce_bool(
+                    wp["canary_warm_last"], "warm_pool.canary_warm_last")
             if wp.get("refill_default_out_tokens") is not None:
                 _v = wp["refill_default_out_tokens"]
                 if isinstance(_v, bool) or not isinstance(_v, (int, float)) \

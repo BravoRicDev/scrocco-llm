@@ -960,3 +960,126 @@ def test_prestito_conta_nel_valido(router):
         set_current_session(None)
     assert {d["unique"] for d in own} == set()
     assert {d["unique"] for d in borrow} == {big["unique"]}
+
+
+# ------------------------------------------ CODA DEI PROVIDER GIA' IN WARM
+CSV_PROV = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps,intelligence_score,model_preference,order
+t@x.com,m/rf-small,groq,https://api.groq.com/openai/v1,free,32,32000,5,K-S,,5,0,0
+t@x.com,m/rf-mg,groq,https://api.groq.com/openai/v1,free,200,200000,5,K-MG,,5,0,0
+t@x.com,m/rf-mo,openrouter,https://openrouter.ai/api/v1,free,200,200000,5,K-MO,,5,0,9
+"""
+
+
+@pytest.fixture()
+def router_prov():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_PROV)
+    pol = Policy.from_dict({})
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    yield Router(cfg, pol)
+    os.unlink(path)
+
+
+def test_warm_providers_espone_i_provider_in_warm(router_prov):
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    assert r._warm_providers() == set()
+    r.note_session_success("altra", small["unique"], 100, ctx_est=100)
+    assert r._warm_providers() == {"groq"}
+
+
+def test_canary_provider_in_warm_va_in_coda(router_prov):
+    """Se un provider e' gia' in warm, i suoi candidati vanno in CODA: il
+    canary prende prima un ALTRO provider, anche se nel cold-pick quello in
+    warm sarebbe il tier piu' basso. Con il knob OFF torna l'ordine legacy."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")      # groq (dep corrente)
+    mg = _dep(r, f"{BASE}-200k", "K-MG")       # groq, tier order=0
+    mo = _dep(r, f"{BASE}-200k", "K-MO")       # openrouter, tier order=9
+    # nessun provider in warm: come a freddo vince il tier piu' basso (groq)
+    c = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                           requested_group=None, exclude_keys=set(),
+                           exclude_uniq=set())
+    assert c and c["unique"] == mg["unique"]
+    # groq ora e' in warm (altra sessione): il canary preferisce openrouter
+    r.note_session_success("altra", small["unique"], 100, ctx_est=100)
+    c2 = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                            requested_group=None, exclude_keys=set(),
+                            exclude_uniq=set())
+    assert c2 and c2["unique"] == mo["unique"]
+    # knob OFF: legacy, nessuna coda -> torna il tier piu' basso (groq)
+    r.policy.canary_warm_last = False
+    c3 = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                            requested_group=None, exclude_keys=set(),
+                            exclude_uniq=set())
+    assert c3 and c3["unique"] == mg["unique"]
+
+
+def test_canary_provider_in_warm_non_escluso_se_unico(router_prov):
+    """Il provider in warm NON viene escluso: se resta l'unico candidato
+    (l'altro provider e' gia' tentato in questa richiesta) viene scelto."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mg = _dep(r, f"{BASE}-200k", "K-MG")
+    mo = _dep(r, f"{BASE}-200k", "K-MO")
+    r.note_session_success("altra", small["unique"], 100, ctx_est=100)
+    c = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                           requested_group=None, exclude_keys=set(),
+                           exclude_uniq={mo["unique"]})
+    assert c and c["unique"] == mg["unique"]
+
+
+def test_canary_chiave_in_warm_resta_esclusa(router_prov):
+    """La chiave gia' in warm resta ESCLUSA SEMPRE, anche se il provider e'
+    in coda: passata in `exclude_keys` (come fanno i chiamanti) il candidato
+    sparisce del tutto."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mg = _dep(r, f"{BASE}-200k", "K-MG")
+    mo = _dep(r, f"{BASE}-200k", "K-MO")
+    r.note_session_success("altra", small["unique"], 100, ctx_est=100)
+    # groq in warm (coda) ma la chiave di mg e' esclusa: resta solo openrouter
+    c = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                           requested_group=None, exclude_keys={"K-MG"},
+                           exclude_uniq=set())
+    assert c and c["unique"] == mo["unique"]
+    # escludo ANCHE la chiave di openrouter: niente piu' candidati
+    c2 = r.warm_fill_canary("test", small, frozenset(), 100, 4096, tried=set(),
+                            requested_group=None,
+                            exclude_keys={"K-MG", "K-MO"}, exclude_uniq=set())
+    assert c2 is None
+
+
+def test_wake_provider_in_warm_va_in_coda(router_prov):
+    """Anche la SVEglia mette in coda i dormienti di un provider gia' in
+    warm, preferendo un altro provider; con il knob OFF torna legacy."""
+    r = router_prov
+    small = _dep(r, f"{BASE}-32k", "K-S")
+    mg = _dep(r, f"{BASE}-200k", "K-MG")
+    mo = _dep(r, f"{BASE}-200k", "K-MO")
+    now = time.time()
+    for d in (mg, mo):
+        r._cooldown[d["unique"]] = now + 600
+        r._cooldown_since[d["unique"]] = now - 7200
+        r.stats_for(d["unique"]).last_reason = "http_429"
+    # nessun provider in warm: vince il tier piu' basso (groq)
+    w = r.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                           tried={small["unique"]}, requested_group=None,
+                           exclude_keys=set(), exclude_uniq=set(),
+                           min_age_sec=3600)
+    assert w and w["unique"] == mg["unique"]
+    # groq in warm -> la Sveglia preferisce openrouter
+    r.note_session_success("altra", small["unique"], 100, ctx_est=100)
+    w2 = r.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                            tried={small["unique"]}, requested_group=None,
+                            exclude_keys=set(), exclude_uniq=set(),
+                            min_age_sec=3600)
+    assert w2 and w2["unique"] == mo["unique"]
+    # knob OFF -> legacy
+    r.policy.canary_warm_last = False
+    w3 = r.warm_wake_canary("test", small, frozenset(), 100, 4096,
+                            tried={small["unique"]}, requested_group=None,
+                            exclude_keys=set(), exclude_uniq=set(),
+                            min_age_sec=3600)
+    assert w3 and w3["unique"] == mg["unique"]
