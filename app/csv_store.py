@@ -29,12 +29,12 @@ from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER,
                      MEDIA_DEFER_HEADER, ENABLED_HEADER,
                      THINKING_REPLAY_HEADER, STRIP_REASONING_HEADER,
-                     NO_THINKING_HEADER, GatewayConfig)
+                     NO_THINKING_HEADER, CONTENT_STRING_HEADER, GatewayConfig)
 
 # flag booleani "sì/true/1" che l'API e i writer automatici scrivono come
 # "true"/"false" (vuoto = default della colonna).
 BOOL_FLAG_FIELDS = ("media_defer", "thinking_replay", "strip_reasoning",
-                    "no_thinking")
+                    "no_thinking", "content_string")
 
 # campi gestiti dall'API (il resto delle colonne passa trasparente)
 PAYLOAD_FIELDS = {
@@ -50,6 +50,7 @@ PAYLOAD_FIELDS = {
     "thinking_replay": THINKING_REPLAY_HEADER,
     "strip_reasoning": STRIP_REASONING_HEADER,
     "no_thinking": NO_THINKING_HEADER,
+    "content_string": CONTENT_STRING_HEADER,
     "enabled": ENABLED_HEADER,
 }
 

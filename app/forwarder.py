@@ -41,6 +41,7 @@ import os
 import re
 import time
 import urllib.parse
+import uuid as _uuid
 from collections import deque
 from typing import AsyncIterator
 
@@ -51,7 +52,7 @@ from . import metrics
 from . import repairlog
 from . import protocols as proto
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
-                       learn_no_thinking)
+                       learn_no_thinking, learn_content_string)
 from .policy import refill_out_budget
 from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
@@ -63,7 +64,8 @@ from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          repair_tool_calls)
 from .fakecall import (fake_config_from_policy, is_escalation_group,
                        message_fake_pattern, sanitize_message)
-from .histnorm import hist_config_from_policy, normalize_messages
+from .histnorm import (hist_config_from_policy, normalize_messages,
+                       flatten_text_content)
 from .sampling import (sampling_config_from_policy,
                        apply_sampling_defaults, response_loop_reason,
                        stream_loop_reason)
@@ -846,9 +848,13 @@ _PAYLOAD_SCHEMA_RE = re.compile(
     r"|property 'reasoning[_a-z]*' is unsupported"
     # CATENA TOOL ROTTA (orfano inverso): un assistant con tool_calls senza il
     # corrispondente messaggio `tool`. I provider severi rispondono 400
-    # bloccante; un altro deployment tollerante accetta lo stesso payload ->
-    # ruota senza cooldown, mai raw al client. La history viene comunque
-    # bonificata a monte da histnorm.
+# bloccante; un altro deployment tollerante accetta lo stesso payload ->
+# ruota senza cooldown, mai raw al client. La history viene comunque
+# bonificata a monte da histnorm.
+#
+# NB: il sotto-caso "content array vs string" ha un percorso DEDICATO
+# (_CONTENT_ARRAY_RE, sopra): si impara `content_string` e si ritenta lo
+# STESSO deployment col payload appiattito, invece di ruotare.
     r"|assistant message with ['\"]?tool_calls['\"]? must be followed by"
     r"|must be a response to a preceding message with ['\"]?tool_calls"
     r"|messages? with role ['\"]?tool['\"]? must be a response"
@@ -864,6 +870,19 @@ _PAYLOAD_SCHEMA_RE = re.compile(
     r"|response_format['\"]?[^,;.]{0,40}(?:unsupported|not supported|"
     r"invalid|unknown)"
     r"|(?:unsupported|not supported)\s+['\"]?json_schema",
+    re.IGNORECASE)
+
+# Sotto-firma SPECIFICA del rifiuto "content array vs string": il payload e'
+# RIPARABILE appiattendo `messages[].content` da array di solo testo a stringa
+# (media-safe) e aggiungendo `content:""` agli assistant con tool_calls senza
+# content. A differenza delle altre firme di _PAYLOAD_SCHEMA_RE NON si ruota
+# subito: si IMPARA il flag `content_string` e si ritenta LO STESSO deployment
+# col payload bonificato (il deployment non e' rotto: e' la forma che non gli
+# piace). Se la bonifica non basta (array con media) si ricade sulla rotazione.
+_CONTENT_ARRAY_RE = re.compile(
+    r"'array' not in 'string'"
+    r"|type mismatch of '/messages/\d+/content'"
+    r"|required properties at '/messages/\d+' are",
     re.IGNORECASE)
 
 # COMBINAZIONE built-in tools + function calling rifiutata dal provider
@@ -1022,6 +1041,23 @@ def apply_thinking_replay(body: dict, dep: dict,
         return 0
     n = restore_reasoning(body, orig) if orig else 0
     return n + repair_reasoning_replay(body)
+
+
+def apply_content_string(body: dict, dep: dict) -> int:
+    """Riparazione PROATTIVA per i deployment col flag `content_string`
+    (schema JSON stretto, es. Cloudflare Workers AI): appiattisce
+    `messages[].content` da array di solo testo a STRINGA e aggiunge
+    `content:""` agli assistant con tool_calls che non ce l'hanno, PRIMA
+    dell'invio (niente 400 al primo colpo). Media-safe: se un array contiene
+    blocchi non-testo il messaggio resta intatto. Ritorna i messaggi sistemati.
+    """
+    if not isinstance(dep, dict) or not dep.get("content_string"):
+        return 0
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    new_msgs, n = flatten_text_content(msgs)
+    if n:
+        body["messages"] = new_msgs
+    return n
 
 
 def strip_reasoning_fields(body: dict) -> int:
@@ -1756,6 +1792,18 @@ def is_embedded_provider_error(text: str) -> bool:
 _B62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _B62_LEN = 14
 
+# Session id NATIVO opencode: "ses_" + 12 hex lowercase + 14 base62 (26 char
+# dopo il prefisso). opencode.ai/zen e /zen/go ACCETTANO solo questo formato:
+# il fingerprint interno "fq_..." (cosi' come "abc" o "ses_x") viene rifiutato
+# con 403 FreeTierError. Quando il client non manda una sessione nativa, la si
+# rigenera dai segnali interni per restare verosimile e coerente.
+_NATIVE_SESSION_RE = re.compile(r"^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$")
+
+
+def _is_native_session(value: str) -> bool:
+    """Vero se `value` e' gia' nel formato session id nativo opencode."""
+    return bool(_NATIVE_SESSION_RE.match(value or ""))
+
 
 def _native_session_of(basis: str) -> str:
     """Session ID nel formato nativo opencode, deterministico dal seed.
@@ -1781,35 +1829,50 @@ def _session_headers(dep: dict, *, profile: str = "",
     """Header x-opencode-session per la richiesta upstream.
 
     Priorità:
-      1. `session` (passthrough dal client) se presente -> esattamente quel
-         valore;
+      1. `session` (passthrough dal client) se presente E nel formato nativo
+         opencode (`ses_` + 12 hex + 14 base62) -> esattamente quel valore;
       2. altrimenti session ID nel formato nativo opencode derivato da
-         `api_key + "|" + client_ip + "|" + profilo` (deterministico: stesso
-         input -> stesso valore; i componenti vuoti restano vuoti, cosi' il
-         valore cambia se cambia anche solo il profilo).
+         `api_key + "|" + client_ip + "|" + profilo` (+ la sessione interna se
+         presente, per coerenza). Deterministico: stesso input -> stesso valore.
 
-    `attribution`: header di attribuzione app INVIATI DAL CLIENT
-    (HTTP-Referer / X-Title / X-OpenRouter-Title). Se presenti, vincono sul
+    `attribution`: header di identità INVIATI DAL CLIENT
+    (HTTP-Referer / X-Title / X-OpenRouter-Title per OpenRouter; user-agent /
+    x-opencode-* / x-session-* per opencode.ai). Se presenti, vincono sul
     valore configurato (passthrough fedele: il client si presenta come
-    l'harness che e'); altrimenti si usa l'identita' di policy (default
-    opencode). Rilevante SOLO per upstream OpenRouter.
+    l'harness che e'); altrimenti si usa l'identita' di policy.
+
+    Oltre a x-opencode-session ritorna (solo per upstream opencode.ai)
+    gli header di identità opencode completi: opencode.ai/zen rifiuta con
+    403 FreeTierError le richieste che non provengono da un client opencode
+    reale (gate "can only be used from within OpenCode").
 
     Ritorna SEMPRE l'header: OpenCode Go lo richiede per session affinity e
     prompt caching; gli altri provider lo ignorano senza effetto.
     """
     out: dict[str, str] = {}
-    if session:
+    if session and _is_native_session(session):
+        # Passthrough fedele: il client opencode manda gia' una sessione nel
+        # formato nativo (x-session-affinity / x-opencode-session).
         out = {"x-opencode-session": session}
         if os.environ.get("SNIFF_HEADERS"):
             log.warning("[sniff] upstream session=passthrough value=%s", session)
     else:
+        # Nessuna sessione dal client, oppure sessione "interna" NON nativa
+        # (es. fingerprint anonimo `fq_...` calcolato dal gateway): opencode.ai
+        # rifiuta con 403 i valori fuori formato, quindi si ricalcola un id
+        # nativo VEROSIMILE. Se esiste una sessione interna la si aggancia al
+        # basis (coerenza: stessa conversazione -> stesso session id upstream,
+        # deterministico e distinto per chiave/IP/profilo/sessione).
         key = (dep.get("api_key") or "").strip()
-        basis = "|".join((key, client_ip, profile))
+        parts = [key, client_ip, profile]
+        if session:
+            parts.append(session)
+        basis = "|".join(parts)
         value = _native_session_of(basis)
         if os.environ.get("SNIFF_HEADERS"):
             log.warning("[sniff] upstream session=native value=%s "
-                        "basis=(%s,%s,%s)", value, bool(key),
-                        bool(client_ip), bool(profile))
+                        "basis=(%s,%s,%s,derived=%s)", value, bool(key),
+                        bool(client_ip), bool(profile), bool(session))
         out = {"x-opencode-session": value}
     # Attribuzione app OpenRouter: vale per OGNI upstream openrouter.ai
     # (i modelli :free ora, ma il gate 'agentic harness' può estendersi):
@@ -1818,16 +1881,28 @@ def _session_headers(dep: dict, *, profile: str = "",
     # presente (passthrough), altrimenti la policy (default opencode,
     # l'harness dietro il gateway).
     out.update(_openrouter_attribution(dep, client_headers=attribution))
+    # Identità opencode verso opencode.ai (zen / zen/go): il gate
+    # "can only be used from within OpenCode" richiede gli header nativi
+    # del client opencode. Per client opencode reale è passthrough fedele
+    # (sintesi dei soli campi mancanti); per gli altri è un POC disattivato
+    # di default (env OPENCODE_SPOOF_HEADERS).
+    out.update(_opencode_upstream_headers(dep, client_headers=attribution))
     return out
 
 
 def _client_attribution(request) -> dict[str, str]:
-    """Estrae dall'header del client l'attribuzione app che OpenRouter
-    pretende per i modelli :free (gate 'agentic harness').
+    """Estrae dall'header del client gli header di identità upstream.
 
-    Ritorna un dict con i SOLI header che il client ha inviato davvero:
-    HTTP-Referer, X-Title, X-OpenRouter-Title. Vuoto = il cliente non si
-    attribuisce -> si usa l'identita' di policy (default opencode).
+    Due famiglie, stesso dict:
+    - Attribuzione app OpenRouter (HTTP-Referer, X-Title, X-OpenRouter-Title):
+      i modelli :free sono limitati agli "agentic harness" riconosciuti.
+    - Identità client opencode (user-agent, x-opencode-*, x-session-*):
+      opencode.ai/zen e /zen/go verificano che la richiesta arrivi da un
+      client opencode reale (gate "can only be used from within OpenCode");
+      servono per replicare in upstream gli stessi header del client.
+
+    Ritorna un dict con i SOLI header che il client ha inviato davvero.
+    Vuoto = il cliente non si attribuisce -> si usano i default di policy.
     """
     out: dict[str, str] = {}
     try:
@@ -1839,6 +1914,84 @@ def _client_attribution(request) -> dict[str, str]:
         v = headers.get(name) or ""
         if isinstance(v, str) and v.strip():
             out[name] = v.strip()
+    for name in ("user-agent", "x-opencode-client", "x-opencode-request",
+                 "x-opencode-project", "x-opencode-session",
+                 "x-session-affinity", "x-session-id"):
+        v = headers.get(name) or ""
+        if isinstance(v, str) and v.strip():
+            out[name] = v.strip()
+    return out
+
+
+def _is_opencode_upstream(dep: dict) -> bool:
+    """Vero per i deployment che parlano con opencode.ai (zen / zen/go)."""
+    base = (dep.get("api_base") or "").lower()
+    return "opencode.ai" in base
+
+
+def _client_is_opencode(client_headers: dict) -> bool:
+    """Vero se il client si presenta come opencode reale.
+
+    Il client opencode 1.18.x verso un gateway custom manda SOLO
+    `user-agent: opencode/<ver> ...` + `x-session-affinity`; gli header
+    `x-opencode-*` espliciti sono un segnale altrettanto valido.
+    """
+    ua = (client_headers.get("user-agent") or "").lower()
+    if ua.startswith("opencode/"):
+        return True
+    for k in ("x-opencode-client", "x-opencode-request",
+              "x-opencode-session"):
+        if client_headers.get(k):
+            return True
+    return False
+
+
+def _opencode_upstream_headers(dep: dict, *,
+                               client_headers: dict | None = None
+                               ) -> dict[str, str]:
+    """Header opencode per upstream opencode.ai (zen / zen/go).
+
+    opencode.ai/zen verifica che la richiesta arrivi da un client opencode
+    reale: senza questi header risponde 403 FreeTierError "can only be used
+    from within OpenCode". Il client opencode REALE (TUI/CLI 1.18.x) verso
+    il gateway manda SOLO `user-agent: opencode/...` + `x-session-affinity`:
+    gli header `x-opencode-*` mancanti vanno sintetizzati qui (request uuid,
+    client "cli", project "default"), esattamente come fa il client quando
+    parla diretto con opencode.ai.
+
+    Regole:
+      - SEMPRE per deployment opencode.ai quando il CLIENT è opencode:
+        il gateway replica l'identità del client (passthrough fedele) e
+        completa i campi mancanti.
+      - Per client NON-opencode: POC "trucco" OFF di default; si sintetizza
+        l'identità opencode SOLO se l'env OPENCODE_SPOOF_HEADERS è truthy
+        (esperimento: il client si presenta come opencode all'upstream).
+    """
+    if not _is_opencode_upstream(dep):
+        return {}
+    client = client_headers or {}
+    is_oc = _client_is_opencode(client)
+    spoof = bool(os.environ.get("OPENCODE_SPOOF_HEADERS"))
+    if not is_oc and not spoof:
+        return {}
+    metrics.inc("nx_opencode_headers_total",
+                ("client" if is_oc else "spoof",))
+    ua = (client.get("user-agent") or "").strip()
+    if not ua or "opencode/" not in ua.lower():
+        ua = "opencode/1.18.31"
+    out = {
+        "User-Agent": ua,
+        "x-opencode-client": (client.get("x-opencode-client")
+                              or "cli").strip(),
+        "x-opencode-request": (client.get("x-opencode-request")
+                               or _uuid.uuid4().hex).strip(),
+        "x-opencode-project": (client.get("x-opencode-project")
+                               or "default").strip(),
+    }
+    if os.environ.get("SNIFF_HEADERS"):
+        log.warning("[sniff] opencode upstream headers=%s "
+                    "(client_opencode=%s spoof=%s)",
+                    {k: v[:44] for k, v in out.items()}, is_oc, spoof)
     return out
 
 
@@ -2467,6 +2620,12 @@ truncation_hook=None,
         """
         body = dict(payload)
         body["model"] = dep["model"]
+        _cs = apply_content_string(body, dep)
+        if _cs:
+            metrics.inc("nx_content_string_total", ("applied",))
+            log.info("[content-string] %s: %d messaggi appiattiti "
+                     "PRIMA dell'invio (proattivo, stream)",
+                     dep.get("unique", "?"), _cs)
         _tp = apply_thinking_replay(body, dep)
         if _tp:
             log.info("[thinking-replay] %s: %d turni assistant riparati "
@@ -2706,6 +2865,12 @@ truncation_hook=None,
         # along with stream = true" se arriva su una richiesta non-stream.
         if not body.get("stream"):
             body.pop("stream_options", None)
+        _cs = apply_content_string(body, dep)
+        if _cs:
+            metrics.inc("nx_content_string_total", ("applied",))
+            log.info("[content-string] %s: %d messaggi appiattiti "
+                     "PRIMA dell'invio (proattivo)", dep.get("unique", "?"),
+                     _cs)
         _tp = apply_thinking_replay(body, dep)
         if _tp:
             log.info("[thinking-replay] %s: %d turni assistant riparati "
@@ -3064,6 +3229,7 @@ truncation_hook=None,
         _tt = text_config_from_policy(router.policy)
         _corrected: set[str] = set()
         _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
+        _cstr_steps: dict[str, set] = {}     # rimedi content-string per dep
         trail: list = []                     # ATTEMPT TRAIL (P0) per il 503
         skip_hosts: set[str] = set()         # P1-5: host saltati (provider KO)
         _rsn_restored = False                # history originale gia' riprovata
@@ -3866,6 +4032,33 @@ truncation_hook=None,
                         elif _rr == "downgraded":
                             learn_no_thinking(router, dep.get("model"))
                     continue
+                # CONTENT ARRAY -> STRING (provider schema stretto, es.
+                # Cloudflare Workers AI): 400 "'array' not in 'string'" /
+                # "required properties ... 'role,content'". Il payload e'
+                # RIPARABILE: impariamo `content_string` (gemelli del modello)
+                # e ritentiamo LO STESSO deployment col payload appiattito
+                # (media-safe). Se la bonifica non basta (array con media) o il
+                # flag c'e' gia', si ricade sulla rotazione di _PAYLOAD_SCHEMA_RE.
+                if _CONTENT_ARRAY_RE.search(detail):
+                    _csteps = _cstr_steps.setdefault(cur, set())
+                    # Solo se c'e' DAVVERO qualcosa da appiattire: se il
+                    # payload e' gia' di sole stringhe (o di soli media) il
+                    # retry non aiuterebbe -> si ricade sulla rotazione.
+                    _flat, _fn = flatten_text_content(
+                        (payload or {}).get("messages"))
+                    if (_fn and "flatten" not in _csteps
+                            and not dep.get("content_string")):
+                        _csteps.add("flatten")
+                        metrics.inc("nx_content_string_total", ("learned",))
+                        log.warning("[content-string] %s: 400 schema "
+                                    "content-array -> imparo content_string e "
+                                    "ritento lo stesso deployment (%d messaggi)",
+                                    cur, _fn)
+                        with contextlib.suppress(Exception):
+                            learn_content_string(router, dep.get("model"))
+                        dep = dict(dep)
+                        dep["content_string"] = True     # copia locale (retry)
+                        continue
                 # ERRORE "OSCURO" su richiesta reasoning: il taglio del
                 # reasoning (histnorm) e' un'ottimizzazione di token; senza una
                 # firma chiara si ritenta UNA volta lo STESSO deployment con la

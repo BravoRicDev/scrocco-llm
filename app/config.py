@@ -92,6 +92,14 @@ STRIP_REASONING_HEADER = "strip_reasoning"
 # per questo deployment NON si iniettano `reasoning_effort`/`thinking`.
 # Imparata in automatico quando il downgrade risolve un 400 del provider.
 NO_THINKING_HEADER = "no_thinking"
+# content_string: il provider ha schema JSON stretto e pretende
+# `messages[].content` come STRINGA (rifiuta gli array di blocchi OpenAI:
+# "'array' not in 'string'") e la proprieta' `content` sempre presente (es.
+# assistant con soli tool_calls). true/1/yes/on = attivo: prima di ogni invio
+# il gateway appiattisce gli array di SOLO testo a stringa (media-safe: i
+# blocchi con immagini/audio restano intatti) e aggiunge `content:""` dove
+# manca. Imparata in automatico quando un deployment lo scopre da un 400.
+CONTENT_STRING_HEADER = "content_string"
 # api_style: protocollo nativo dell'upstream per questo deployment. Default
 # "chat" (OpenAI Chat Completions). Altri valori gestiti da app/protocols.py:
 # "responses" (OpenAI Responses /res/v1), "messages" (Anthropic), "google"
@@ -305,6 +313,9 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         in ("1", "true", "yes", "on")
     no_thinking = (row.get(NO_THINKING_HEADER) or "").strip().lower() \
         in ("1", "true", "yes", "on")
+    # content_string: schema stretto (content array -> string), appresa.
+    content_string = (row.get(CONTENT_STRING_HEADER) or "").strip().lower() \
+        in ("1", "true", "yes", "on")
 
     # api_style: protocollo nativo upstream (chat/responses/messages/google).
     api_style = normalize_style(row.get(API_STYLE_HEADER))
@@ -350,6 +361,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "thinking_replay": thinking_replay,
         "strip_reasoning": strip_reasoning,
         "no_thinking": no_thinking,
+        "content_string": content_string,
         "api_style": api_style,
     }
 
@@ -469,7 +481,7 @@ _STANDARD_COLS = frozenset({
     "max_input", "priority", "caps", "effort_capable", "intelligence_score",
     "model_preference", "media_defer", "order", "enabled",
     "hold_until_finish", "api_style", "thinking_replay",
-    "strip_reasoning", "no_thinking",
+    "strip_reasoning", "no_thinking", "content_string",
 })
 
 
@@ -827,6 +839,7 @@ class GatewayConfig:
                     "thinking_replay": bool(meta.get("thinking_replay")),
                     "strip_reasoning": bool(meta.get("strip_reasoning")),
                     "no_thinking": bool(meta.get("no_thinking")),
+                    "content_string": bool(meta.get("content_string")),
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
                     "api_style": normalize_style(meta.get("api_style")),

@@ -59,6 +59,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
                         StreamLoopDetected, STREAM_LOOP_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
+                        _CONTENT_ARRAY_RE,
                         tool_combo_signature,
                         _PROVIDER_TRANSIENT_RE,
                         _THOUGHT_SIG_RE, is_provider_error_body,
@@ -92,9 +93,10 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         maybe_account_quota_cooldown,
 )
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
-                       learn_no_thinking)
+                       learn_no_thinking, learn_content_string)
 from .health import health_loop
 from .policy import Policy, refill_out_budget
+from .histnorm import flatten_text_content
 from .qc import annotate_reasoning
 from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
                           set_avoid_gemini, set_dummy_fill)
@@ -3385,6 +3387,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     tried = 0
     tried_set: set[str] = set()
     _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
+    _cstr_steps: dict[str, set] = {}     # rimedi content-string per dep
     _rsn_restored = False                # history originale gia' riprovata
     _max_tries = int(getattr(router.policy, "max_fallback_tries",
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
@@ -4044,6 +4047,30 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     elif _rr == "downgraded":
                         learn_no_thinking(router, dep.get("model"))
                 continue
+            # CONTENT ARRAY -> STRING (provider schema stretto, es.
+            # Cloudflare Workers AI): 400 "'array' not in 'string'" /
+            # "required properties ... 'role,content'". Payload RIPARABILE:
+            # impariamo `content_string` (gemelli del modello) e ritentiamo LO
+            # STESSO deployment col payload appiattito (media-safe). Se la
+            # bonifica non basta (array con media) o il flag c'e' gia', si
+            # ricade sulla rotazione di _PAYLOAD_SCHEMA_RE piu' sotto.
+            if _CONTENT_ARRAY_RE.search(detail):
+                _csteps = _cstr_steps.setdefault(dep["unique"], set())
+                # Solo se c'e' DAVVERO qualcosa da appiattire (altrimenti il
+                # retry non aiuta: si ricade sulla rotazione piu' sotto).
+                _flat, _fn = flatten_text_content((payload or {}).get("messages"))
+                if (_fn and "flatten" not in _csteps
+                        and not dep.get("content_string")):
+                    _csteps.add("flatten")
+                    metrics.inc("nx_content_string_total", ("learned",))
+                    log.warning("[content-string] %s: 400 schema content-array "
+                                "-> imparo content_string e ritento lo stesso "
+                                "deployment (%d messaggi)", dep["unique"], _fn)
+                    with contextlib.suppress(Exception):
+                        learn_content_string(router, dep.get("model"))
+                    dep = dict(dep)
+                    dep["content_string"] = True       # copia locale (retry)
+                    continue
             # ERRORE "OSCURO" su richiesta reasoning: il taglio del reasoning
             # (histnorm) e' un'ottimizzazione di token; se il provider non ci
             # da' una firma chiara, si ritenta UNA volta lo STESSO deployment

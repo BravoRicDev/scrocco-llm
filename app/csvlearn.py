@@ -119,3 +119,12 @@ def learn_strip_reasoning(router_or_config, model: str | None) -> int:
 def learn_no_thinking(router_or_config, model: str | None) -> int:
     """Impara `no_thinking` (niente reasoning_effort/thinking in invio)."""
     return learn_flag(router_or_config, model, "no_thinking")
+
+
+def learn_content_string(router_or_config, model: str | None) -> int:
+    """Impara `content_string` (schema stretto: content array -> stringa).
+
+    Il provider (es. Cloudflare Workers AI) pretende `messages[].content`
+    come stringa e la proprieta' sempre presente: d'ora in poi il gateway
+    bonifica proattivamente gli array di solo testo (media-safe)."""
+    return learn_flag(router_or_config, model, "content_string")

@@ -65,10 +65,23 @@ def test_fallback_deterministic_and_differentiated():
 
 
 def test_passthrough_session_wins():
-    # se il client invia l'header, quel valore prevale su ogni hash
+    # se il client invia una sessione NEL FORMATO NATIVO, quel valore prevale
+    # su ogni hash (passthrough fedele verso opencode.ai).
+    nat = "ses_f5204e4a7ffeBxQjwqn3m1wM0X"
     got = _session_headers(_dep("sk-Z"), profile="pz", client_ip="1.1.1.1",
-                           session="client-session-123")
-    assert got == {"x-opencode-session": "client-session-123"}
+                           session=nat)
+    assert got == {"x-opencode-session": nat}
+
+
+def test_foreign_session_normalized_to_native():
+    # una sessione NON nativa (es. fingerprint anonimo interno `fq_...`) NON
+    # viene propagata cosi' com'e': opencode.ai rifiuta con 403 i valori fuori
+    # formato, quindi si rigenera un id nativo verosimile e deterministico.
+    got = _session_headers(_dep("sk-Z"), profile="pz", client_ip="1.1.1.1",
+                           session="fq_7c7a170864154b1d")
+    v = got["x-opencode-session"]
+    assert v != "fq_7c7a170864154b1d"
+    assert re.fullmatch(r"ses_[0-9a-f]{12}[A-Za-z0-9]{14}", v) is not None
 
 
 # ---------------------------------------------------------------------------

@@ -104,6 +104,70 @@ def _text_of(content) -> str:
     return ""
 
 
+# Tipi di parte-`content` considerati TESTO PURO per la bonifica
+# content-array -> string. Tutto il resto (image_url/input_image/input_audio/
+# video_url/file/inline_data o tipi ignoti) e' un BLOCCO non-testo: la
+# bonifica NON avviene (media-safe) per non distruggere input multimodale.
+_TEXT_PART_TYPES = frozenset({"text", "input_text"})
+
+
+def _is_plain_text_part(part) -> bool:
+    """True se `part` e' un blocco di solo testo (nessun media/metadato)."""
+    if not isinstance(part, dict):
+        return False
+    ptype = part.get("type")
+    if ptype is not None and ptype not in _TEXT_PART_TYPES:
+        return False
+    return isinstance(part.get("text"), str)
+
+
+def flatten_text_content(messages):
+    """Riscrive `messages[].content` da ARRAY di soli blocchi testo a STRINGA.
+
+    Serve ai provider con schema JSON stretto (Cloudflare Workers AI & co.) che
+    rifiutano `content` come array ("'array' not in 'string'") o che esigono la
+    proprieta' `content` sempre presente ("required properties at '/messages/N'
+    are 'role,content'", tipico degli assistant con soli tool_calls).
+
+    REGOLE (lossless e media-safe):
+      - solo se OGNI parte dell'array e' testo puro -> concatenazione;
+      - se l'array contiene anche un solo blocco non-testo (immagini/audio/
+        video/file) il messaggio resta INTATTO: il provider stretto non e' adatto
+        e si lascia al routing la rotazione su un provider multimodale;
+      - assistant con tool_calls e `content` assente/null -> `content=""`
+        (la proprieta' deve esistere per lo schema severo).
+
+    Ritorna `(nuova_lista, n_modificati)`. La lista/messaggi di input NON vengono
+    mai mutati: si copia solo cio' che cambia. Deterministica e idempotente
+    (stringa in ingresso -> invariata)."""
+    if not isinstance(messages, list):
+        return messages, 0
+    out = list(messages)
+    n = 0
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content", "__missing__")
+        if isinstance(content, list):
+            if all(_is_plain_text_part(p) for p in content):
+                nm = dict(m)
+                nm["content"] = "".join(p.get("text", "") for p in content
+                                        if isinstance(p, dict))
+            else:
+                continue                    # media / parte ignota: intatto
+        elif content == "__missing__" or content is None:
+            # assistant con soli tool_calls: lo schema severo vuole la chiave.
+            if m.get("role") != "assistant" or not m.get("tool_calls"):
+                continue
+            nm = dict(m)
+            nm["content"] = ""
+        else:
+            continue                        # gia' stringa: invariato
+        out[i] = nm
+        n += 1
+    return out, n
+
+
 def _assistant_tool_ids(msgs) -> set[str]:
     ids: set[str] = set()
     for m in msgs:
