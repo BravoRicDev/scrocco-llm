@@ -5,12 +5,11 @@
 # Aggiunge l'API OpenAI-compatible per /v1/audio/transcriptions e
 # /v1/audio/translations. Il gateway lo raggiunge come http://speaches:8000/v1
 # sulla rete compose interna.
+#
+# NB: il gateway NON ha un depends_on verso speaches (l'STT è on-demand e non
+# deve bloccare l'avvio). Con `up -d` senza servizio esplicito partono tutti i
+# servizi del progetto, quindi speaches viene comunque avviato.
 services:
-  scrocco-llm:
-    depends_on:
-      speaches:
-        condition: service_healthy
-
   # Speaches (ex faster-whisper-server).
   # Modello "base" pre-caricato allo startup e mai scaricato (stt_model_ttl=-1).
   # Altri modelli whisper vengono caricati ON-DEMAND se richiesti nel payload.
