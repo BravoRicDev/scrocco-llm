@@ -4297,6 +4297,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
                                    guard),
             "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
+            "last_go": _pairs(getattr(self, "_last_go", None), sticky_ttl),
             "discovered_max_input": {str(u): int(v) for u, v in
                                      (getattr(self, "_discovered_max_input",
                                               None) or {}).items()
@@ -4338,6 +4339,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         _load_pairs("sticky_dep", self._sticky_dep, sticky_ttl, "sticky_dep")
         _load_pairs("session_last_ok", self._cache_ok(), holder_ttl, "holder")
         _load_pairs("esc_win", self._esc(), esc_ttl, "esc_win")
+        _load_pairs("last_go", self._last_go_map(), sticky_ttl, "last_go")
         dls = getattr(self, "_dep_last_session", None)
         if not isinstance(dls, dict):
             dls = {}
@@ -6217,6 +6219,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                           and not self._is_renewal_bucket(group_name)
                           and not opencode_cautious_request()
                           and self.dep_sticky_get(session_id))
+        # -go esplicito (prefer_holder): riusa l'ultimo dep -go della sessione
+        # (cache). In escalation il riuso avviene nella scala (_go_pref).
+        if not sticky_dep and prefer_holder and session_id \
+                and self._is_go_group(group_name):
+            sticky_dep = self.last_go(session_id)
         if sticky_dep:
             sd = self.config.deployment_by_unique(sticky_dep)
             # Validità dello sticky:
@@ -6605,10 +6612,27 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 log.info("[ladder] -dim successiva -> %s", nxt["unique"])
                 return nxt
 
+        def _go_pref(allow_cooled: bool = False):
+            """Ultimo dep -go della sessione se spendibile: da riusare quando
+            la scala ARRIVA a -go (cache potenzialmente integra)."""
+            u = self.last_go(current_session(), allow_cooled=allow_cooled)
+            if not u or u not in go or u in (tried or set()) \
+                    or u == failed_unique:
+                return None
+            d = self.config.deployment_by_unique(u)
+            if d is None or not _dep_usable(d):
+                return None
+            if need and not self._dep_supports(d, need):
+                return None
+            if not self._cap_fits(d, ctx):
+                return None
+            return d
+
         # 2) -go vivi  (sotto cautela opencode questo step gira DOPO i dims
         #    stantii e il blocco zen: vedi 3bis/2bis qui sotto)
         if not _cautious:
-            nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
+            nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx,
+                                                 tried=tried)
             if nxt is not None:
                 log.info("[ladder] escalation a -go -> %s", nxt["unique"])
                 return nxt
@@ -6650,15 +6674,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     return nxt
         # 2bis) -go vivi (solo cautela opencode: qui, dopo dims stantii + zen)
         if _cautious:
-            nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
+            nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx,
+                                                 tried=tried)
             if nxt is not None:
                 log.info("[ladder] escalation a -go -> %s", nxt["unique"])
                 return nxt
 
         # 4) -go stantii — mai i cronici (Leva B)
-        nxt = self._walk_chain(_chronic_filter(go, True), failed_unique,
-                               need, ctx,
-                               min_cooldown_age=age, tried=tried)
+        nxt = _go_pref(allow_cooled=True) or self._walk_chain(
+            _chronic_filter(go, True), failed_unique,
+            need, ctx,
+            min_cooldown_age=age, tried=tried)
         if nxt is not None:
             log.info("[ladder] go stantio (>%ds) -> %s",
                      int(age), nxt["unique"])

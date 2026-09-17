@@ -23,6 +23,7 @@ from app.config import GatewayConfig
 from app.opencode_gate import set_allow_opencode_zen, set_spoofing_request
 from app.policy import Policy
 from app.router import Router
+from app.session_ctx import set_current_session
 
 BASE = "scrocco-llm-test"
 
@@ -72,6 +73,41 @@ def test_dep_attachment_only_go_when_spoofed(router, monkeypatch):
     set_spoofing_request(False)
     router.note_session_success(sid, dim["unique"], 100, ctx_est=100)
     assert router.session_holder(sid) == dim["unique"]
+
+
+def test_last_go_tracks_only_go_deps(router):
+    go = router.config.groups[f"{BASE}-go"][0]
+    dim = router.config.groups[f"{BASE}-100k"][0]
+    sid = "sess-lg"
+    router.note_session_success(sid, dim["unique"], 100, ctx_est=100)
+    assert router.last_go(sid) is None           # un dim non conta
+    router.note_session_success(sid, go["unique"], 100, ctx_est=100)
+    assert router.last_go(sid) == go["unique"]   # -go ricordato
+    router.note_session_success(sid, dim["unique"], 100, ctx_est=100)
+    assert router.last_go(sid) == go["unique"]   # non sovrascritto dai dim
+
+
+def test_last_go_reused_when_ladder_reaches_go(router, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    go = router.config.groups[f"{BASE}-go"][0]
+    sid = "sess-lg2"
+    router.note_session_success(sid, go["unique"], 100, ctx_est=100)
+    chains = router.config.chains["test"]
+    # tutti i dim/zen gia' provati -> la scala arriva a -go e deve riusare
+    # l'ultimo dep -go usato dalla sessione (cache).
+    tried = {u for u in chains
+             if not router._is_renewal_bucket(
+                 (router.config.deployment_by_unique(u) or {}).get("group")
+                 or "")}
+    set_spoofing_request(True)
+    set_current_session(sid)
+    try:
+        nxt = router._walk_ladder_resilient(chains, None, frozenset({"text"}),
+                                            None, tried=tried)
+    finally:
+        set_current_session(None)
+    assert nxt is not None and nxt["group"].endswith("-go")
+    assert nxt["unique"] == go["unique"]
 
 
 @pytest.fixture()

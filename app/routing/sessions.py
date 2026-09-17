@@ -27,6 +27,41 @@ class SessionMixin:
         suf = getattr(self.config, "go_suffix", None) or "-go"
         return bool(g) and str(g).endswith(suf)
 
+    def _last_go_map(self) -> dict:
+        d = getattr(self, "_last_go", None)
+        if d is None:
+            d = {}
+            self._last_go = d
+        return d
+
+    def last_go(self, session_id: str | None = None,
+                allow_cooled: bool = False) -> str | None:
+        """Ultimo dep del bucket -go che ha servito con successo la sessione.
+        Da riusare quando la scala ARRIVA a -go (dopo aver giocato tutte le
+        carte free/zen): il provider ha potenzialmente ancora cache integra.
+        `allow_cooled=True` per lo step dei -go "stantii" (in cooldown)."""
+        sid = session_id or current_session()
+        if not sid:
+            return None
+        d = self._last_go_map()
+        ent = d.get(sid)
+        if not ent:
+            return None
+        unique, ts = ent
+        ttl = float(getattr(self.policy, "sticky_ttl_sec", 3600) or 3600)
+        if time.time() - ts > ttl:
+            d.pop(sid, None)
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if dep is None or not self._is_go_group(dep.get("group")):
+            d.pop(sid, None)
+            return None
+        if self.is_retired(unique):
+            return None
+        if not allow_cooled and self.is_cooled_down(unique):
+            return None
+        return unique
+
     def sticky_get(self, session_id: str) -> str | None:
         entry = self._sticky.get(session_id)
         if not entry:
@@ -392,6 +427,10 @@ class SessionMixin:
             return
         self._note_dep_session(session_id, unique)
         self._note_session_slow(session_id, unique, latency_ms, ctx_est, kind)
+        _lg = self.config.deployment_by_unique(unique)
+        if _lg is not None and self._is_go_group(_lg.get("group")):
+            # Ultimo -go usato: verra' riusato quando la scala torna a -go.
+            self._last_go_map()[session_id] = (unique, time.time())
         if not getattr(self.policy, "cache_aware_enabled", True):
             return
         d = self._cache_ok()
