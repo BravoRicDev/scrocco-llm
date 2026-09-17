@@ -56,6 +56,9 @@ from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
 from .policy import refill_out_budget
 from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
+from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
+                            client_is_opencode as _opencode_client_detect,
+                            spoof_enabled as _spoof_enabled)
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
@@ -1925,8 +1928,7 @@ def _client_attribution(request) -> dict[str, str]:
 
 def _is_opencode_upstream(dep: dict) -> bool:
     """Vero per i deployment che parlano con opencode.ai (zen / zen/go)."""
-    base = (dep.get("api_base") or "").lower()
-    return "opencode.ai" in base
+    return _is_opencode_dep(dep)
 
 
 def _client_is_opencode(client_headers: dict) -> bool:
@@ -1936,14 +1938,7 @@ def _client_is_opencode(client_headers: dict) -> bool:
     `user-agent: opencode/<ver> ...` + `x-session-affinity`; gli header
     `x-opencode-*` espliciti sono un segnale altrettanto valido.
     """
-    ua = (client_headers.get("user-agent") or "").lower()
-    if ua.startswith("opencode/"):
-        return True
-    for k in ("x-opencode-client", "x-opencode-request",
-              "x-opencode-session"):
-        if client_headers.get(k):
-            return True
-    return False
+    return _opencode_client_detect(client_headers)
 
 
 def _opencode_upstream_headers(dep: dict, *,
@@ -1971,7 +1966,7 @@ def _opencode_upstream_headers(dep: dict, *,
         return {}
     client = client_headers or {}
     is_oc = _client_is_opencode(client)
-    spoof = bool(os.environ.get("OPENCODE_SPOOF_HEADERS"))
+    spoof = _spoof_enabled()
     if not is_oc and not spoof:
         return {}
     metrics.inc("nx_opencode_headers_total",

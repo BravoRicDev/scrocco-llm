@@ -41,6 +41,7 @@ from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_LAST
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
+from .opencode_gate import dep_usable as _dep_usable
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
 from . import metrics
 
@@ -1206,6 +1207,8 @@ class Router:
             return None
         if not self._cap_fits(dep, ctx):
             return None
+        if not _dep_usable(dep):
+            return None
         if need and not self._dep_supports(dep, need):
             return None
         return dep
@@ -1300,6 +1303,8 @@ class Router:
             return None
         if not self._cap_fits(dep, ctx):                  # NON regge il ctx
             return None
+        if not _dep_usable(dep):                          # upstream non usabile
+            return None
         if need and not self._dep_supports(dep, need):    # capacita' mancante
             return None
         log.info("[esc-pin] %s -> %s (eta=%.0fs): salto la scala",
@@ -1340,6 +1345,8 @@ class Router:
             if self.is_slow_for_session(u, ctx=ctx):
                 continue
             if not self._cap_fits(d, ctx):
+                continue
+            if not _dep_usable(d):
                 continue
             if need and not self._dep_supports(d, need):
                 continue
@@ -3688,7 +3695,7 @@ class Router:
         for d in dims:
             gname = f"{cfg.proxy_prefix}{pname}-{d}k"
             for dep in cfg.groups.get(gname, []):
-                if self._dep_supports(dep, need):
+                if self._dep_supports(dep, need) and _dep_usable(dep):
                     capable.append(d)
                     break
         return capable
@@ -3698,7 +3705,7 @@ class Router:
         if not need:
             return True
         for dep in self.config.groups.get(group_name, []):
-            if self._dep_supports(dep, need):
+            if self._dep_supports(dep, need) and _dep_usable(dep):
                 return True
         return False
 
@@ -5229,6 +5236,8 @@ class Router:
             for dep in cfg.groups.get(f"{cfg.proxy_prefix}{pname}-{d}k", []):
                 if self.is_cooled_down(dep["unique"]):
                     continue
+                if not _dep_usable(dep):
+                    continue
                 if need and not self._dep_supports(dep, need):
                     continue
                 s = self._stats.get(dep["unique"])
@@ -5638,6 +5647,8 @@ class Router:
                 return False
             if restrict_model and d.get("model") != restrict_model:
                 return False
+            if not _dep_usable(d):
+                return False
             if need and not self._dep_supports(d, need):
                 return False
             # guardia su OGNI gruppo: _cap_fits e' gia' no-op se ctx e' None
@@ -5929,6 +5940,8 @@ class Router:
                 return None
             if self._gemini_blocked(dep):
                 return None
+            if not _dep_usable(dep):
+                return None
             if need and not self._dep_supports(dep, need):
                 return None
             # guardia universale (vedi pick_deployment): _cap_fits e' no-op
@@ -6077,6 +6090,8 @@ class Router:
             d = self.config.deployment_by_unique(u)
             if not d:
                 continue
+            if not _dep_usable(d):
+                continue                       # upstream non usabile dal client
             g = str(d.get("group") or "")
             if not self._free_group(g):
                 continue                       # solo dim gratis
@@ -6159,6 +6174,8 @@ class Router:
             if self._endpoint_quarantined(dep):
                 continue
             if self._gemini_blocked(dep):
+                continue
+            if not _dep_usable(dep):
                 continue
             if need and not self._dep_supports(dep, need):
                 continue
@@ -6335,6 +6352,8 @@ class Router:
                                     allow_slow=self._warm_allow_slow()):
                 log.debug("[warm] skip (chiave satura o demote): %s", u)
                 continue
+            if not _dep_usable(dep):
+                continue
             if need and not self._dep_supports(dep, need):
                 continue
             if not self._cap_fits(dep, ctx):
@@ -6365,6 +6384,8 @@ class Router:
                     continue
                 if self._is_demoted_dep(u, sid, ctx,
                                         allow_slow=self._warm_allow_slow()):
+                    continue
+                if not _dep_usable(dep):
                     continue
                 if need and not self._dep_supports(dep, need):
                     continue
@@ -7077,6 +7098,8 @@ class Router:
                 continue
             if self._owned_by_any_session(u):
                 continue                               # occupato da qualcuno
+            if not _dep_usable(d):
+                continue                               # upstream non usabile
             mxi = int(d.get("max_input_tokens") or 0)
             if floor and mxi and mxi < floor * 1000:
                 continue
@@ -7287,6 +7310,8 @@ class Router:
                 continue
             if self._owned_by_any_session(u):
                 continue
+            if not _dep_usable(d):
+                continue                               # upstream non usabile
             mxi = int(d.get("max_input_tokens") or 0)
             if floor and mxi and mxi < floor * 1000:
                 continue
@@ -7413,6 +7438,7 @@ class Router:
                         sticky_dep, session_id, ctx,
                         allow_slow=self._warm_allow_slow()) \
                     and self._cap_fits(sd, ctx) \
+                    and _dep_usable(sd) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
                           session_id, sticky_dep, ctx or "?")
@@ -7452,6 +7478,7 @@ class Router:
                    and not self.is_slow_for_session(d["unique"], ctx=ctx)
                    and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
                    and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
+                   and _dep_usable(d)
                    and (need is None or self._dep_supports(d, need))
                    and self._cap_fits(d, ctx)]
         if _cooled:
@@ -7606,6 +7633,8 @@ class Router:
                     continue
                 if self._endpoint_quarantined(d):
                     continue
+                if not _dep_usable(d):
+                    continue
                 if cneed and not self._dep_supports(d, cneed):
                     continue
                 if not self._cap_fits(d, cctx):
@@ -7696,6 +7725,8 @@ class Router:
                 if self.other_session_recent(u):
                     continue
                 if self.is_slow_for_session(u, ctx=ctx):
+                    continue
+                if not _dep_usable(_du):
                     continue
                 if need and not self._dep_supports(_du, need):
                     continue
@@ -7835,6 +7866,8 @@ class Router:
                 continue
             if self._endpoint_quarantined(d):
                 continue
+            if not _dep_usable(d):
+                continue
             if need and not self._dep_supports(d, need):
                 continue
             if not self._cap_fits(d, ctx):
@@ -7862,6 +7895,8 @@ class Router:
             if not _d:
                 continue
             if self._endpoint_quarantined(_d):
+                continue
+            if not _dep_usable(_d):
                 continue
             if need and not self._dep_supports(_d, need):
                 continue

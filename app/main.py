@@ -101,6 +101,7 @@ from .qc import annotate_reasoning
 from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
                           set_avoid_gemini, set_dummy_fill)
 from .router import Router, inject_identity, estimate_tokens, configure_estimate
+from .opencode_gate import (set_allow_opencode, client_can_use_opencode)
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
@@ -1294,6 +1295,17 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def _set_opencode_gate(request: Request) -> None:
+    """Imposta il gate per-client degli upstream opencode.ai (zen/go).
+
+    Va chiamato PRIMA di qualunque selezione (initial_pick/pick_deployment/
+    warm): il router esclude gli upstream opencode.ai quando il client non e'
+    opencode e lo spoof (env OPENCODE_SPOOF_HEADERS) e' off. I contesti
+    interni (probe/autoprobe/admin/background) non lo impostano e ricadono
+    sulla sola env (vedi app/opencode_gate.py)."""
+    set_allow_opencode(client_can_use_opencode(_client_attribution(request)))
+
+
 def _opencode_session(request: Request) -> str | None:
     """Header di sessione in arrivo dal client (passthrough upstream).
 
@@ -1579,6 +1591,7 @@ async def chat_completions(request: Request, response: Response):
         need = frozenset()
 
     # --- routing ---
+    _set_opencode_gate(request)
     session_id = _session_id(request, payload)
     # SESSION-DEP GUARD: la sessione corrente dev'essere nota GIA' durante
     # initial_pick/pick_deployment (guardia anti-usurpazione cross-sessione),
@@ -4747,6 +4760,7 @@ async def images_generations(request: Request):
         return _forbidden(model, auth.profile)
 
     need = frozenset({"image_gen"}) if router.policy.routing_active() else frozenset()
+    _set_opencode_gate(request)
     session_id = _session_id(request, payload)
     scope = "group" if router.is_explicit(model) else "chain"
 
@@ -4983,6 +4997,7 @@ async def audio_speech(request: Request):
 
     need = frozenset({"tts"}) if router.policy.routing_active() else frozenset()
     scope = "group" if router.is_explicit(model) else "chain"
+    _set_opencode_gate(request)
     dep, profile, err = _audio_route(auth.profile, model, raw_model,
                                      _session_id(request, payload), need)
     if err:
@@ -5116,6 +5131,7 @@ async def _audio_transcribe(request: Request, path: str):
 
     need = frozenset({"stt"}) if router.policy.routing_active() else frozenset()
     scope = "group" if router.is_explicit(model) else "chain"
+    _set_opencode_gate(request)
     session_id = _session_id(request, {})
     dep, profile, err = _audio_route(auth.profile, model, raw_model,
                                      session_id, need)
@@ -5251,6 +5267,7 @@ async def videos_generations(request: Request):
     if payload.get("frame_images") or payload.get("input_references"):
         need = need | {"vision"}
     scope = "group" if router.is_explicit(model) else "chain"
+    _set_opencode_gate(request)
     session_id = _session_id(request, payload)
 
     group_or_explicit = router.resolve_group_for_request(
