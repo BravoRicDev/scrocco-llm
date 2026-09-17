@@ -754,13 +754,38 @@ via environment variables.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -r requirements-dev.txt      # include requirements.txt (locked, hashes)
 pip install -r requirements-tui.txt      # opzionale: TUI Textual (./scrocco.sh)
 python3 -m pytest tests/ -q          # full suite (1779 passing, 1 skipped)
 ```
 
 CI runs the suite and builds the image on push
 (`.github/workflows/ci.yml`, GHCR).
+
+### Reproducibility (locked dependencies)
+
+`requirements.txt` and `requirements-dev.txt` are **generated locks** (exact
+pins + sha256 hashes) compiled from `requirements.in` / `requirements-dev.in`
+with `pip-compile` on Python 3.12 — the same base as the runtime image.
+Install them as-is; do not edit them by hand.
+
+```bash
+# regenerate the locks (same interpreter as the container: Python 3.12)
+docker run --rm -v "$PWD":/w -w /w python:3.12-slim sh -c \
+  "pip install 'pip-tools>=7.4' && \
+   pip-compile --generate-hashes --strip-extras -o requirements.txt requirements.in && \
+   pip-compile --generate-hashes --strip-extras -o requirements-dev.txt requirements-dev.in"
+```
+
+Container images are pinned by **digest** in `Dockerfile`, `web/Dockerfile`
+and the compose files (`python:3.12-slim@sha256:…`, `node:22-alpine@sha256:…`,
+`postgres:16-alpine@sha256:…`, `speaches:latest-cpu@sha256:…`,
+`curlimages/curl:8.10.1@sha256:…`). To move to a newer image, resolve the new
+digest and update the pin:
+
+```bash
+docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}'
+```
 
 ### Operator scripts (`scripts/`)
 

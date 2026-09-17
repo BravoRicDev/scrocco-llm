@@ -1,0 +1,16 @@
+# scrocco-llm · dipendenze sviluppo/test (input per pip-compile)
+#
+# NON installare questo file direttamente: e' l'input da cui si genera il lock
+# `requirements-dev.txt` (pin esatti + hash). Per aggiornare il lock:
+#
+#   docker run --rm -v "$PWD":/w -w /w python:3.12-slim \
+#     sh -c "pip install 'pip-tools>=7.4' && \
+#            pip-compile --generate-hashes --strip-extras -o requirements-dev.txt requirements-dev.in"
+#
+# (install in CI: `pip install -r requirements-dev.txt`)
+-r requirements.in
+pytest>=8.0
+hypothesis>=6.0
+pytest-cov>=5.0
+ruff>=0.6
+mypy>=1.11
