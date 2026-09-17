@@ -24,7 +24,7 @@ multimodal last resort for pure text; explicit floors escalate upward.
 
 from __future__ import annotations
 
-import contextvars
+
 import hashlib
 import json
 import logging
@@ -46,6 +46,7 @@ from .opencode_gate import (dep_usable as _dep_usable,
                             is_opencode_zen_dep, is_native_session,
                             opencode_cautious_request)
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
+from .session_ctx import current_session, set_current_session
 from . import metrics
 
 log = logging.getLogger("nx.router")
@@ -482,19 +483,6 @@ def inject_identity(data: dict, dep: dict, router=None) -> None:
         prov = prov.split("://", 1)[1].split("/", 1)[0]
     log.info("[identity] %s -> %s (%s via %s%s)", dep["group"], dep["unique"],
              real, prov, extra)
-
-
-_SESSION_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "scrocco_session", default=None)
-
-
-def set_current_session(session_id: str | None) -> None:
-    """Imposta la sessione corrente per il task (async-safe)."""
-    _SESSION_CTX.set(session_id)
-
-
-def current_session() -> str | None:
-    return _SESSION_CTX.get()
 
 
 class Router:
