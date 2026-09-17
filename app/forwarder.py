@@ -3309,10 +3309,12 @@ truncation_hook=None,
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
             log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
-            # Bucket di escalation (-go/-fallback): niente refill/canary/gara
-            # lenta: sono l'ultimo scaglione e le sonde sarebbero sprecate.
+            # Solo se il gruppo RICHIESTO esplicitamente e' un bucket di
+            # escalation (-go/-fallback): niente refill/canary/gara lenta
+            # (i bucket a pagamento non usano il caldo). Se ci si arriva via
+            # FALLBACK dal dim, la speculativa resta attiva.
             _esc_grp = is_escalation_group(
-                str(dep.get("group") or ""),
+                str(requested_group or ""),
                 router.config.go_suffix, router.config.fallback_suffix)
             def _fail_cur(seconds=None, reason=None, status=None, kind=None,
                           provenance=None):

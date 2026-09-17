@@ -1,17 +1,18 @@
-"""Bucket di escalation (-go/-fallback): NIENTE warm/refill/canary/gara lenta.
-
-Bug: quando il deployment corrente e' su un bucket -go/-fallback il router
-continuava a consultare il pool caldo e a far partire canary di refill + gara
-lenta, ma il warm non li usa mai (e' FREE-only) e le sonde erano sprecate.
+"""Bucket di escalation (-go/-fallback): il warm va skippato SOLO quando il
+client richiede esplicitamente quel bucket; se ci si arriva via fallback dal
+dim, la speculativa (refill/canary/slow-race) resta attiva per tornare al
+caldo appena possibile.
 
 Fix (decisione utente):
-  - `initial_pick`: il blocco warm NON viene consultato per -go/-fallback
-    (`not _is_renewal_bucket(group_name)`);
-  - streaming/non-streaming: per un dep su gruppo di escalation si salta
-    refill/canary/slow-race/hedge (`is_escalation_group`);
-  - difese centrali: `warm_fill_canary`/`warm_wake_canary` -> None,
-    `hedge_canaries` -> [], `slow_race_allowed` -> False.
-I bucket free restano invariati (warm/refill/slow ancora attivi).
+  - `initial_pick`: il blocco warm NON viene consultato quando il gruppo
+    RICHIESTO e' -go/-fallback (`not _is_renewal_bucket(group_name)`) —
+    centralizzato, copre anche video/admin che passano warm=True;
+  - streaming/non-streaming: refill/canary/slow-race/hedge saltati quando il
+    gruppo RICHIESTO esplicitamente e' di escalation
+    (`is_escalation_group(requested_group)`), NON in base al gruppo del dep
+    corrente, cosi' l'escalation via fallback continua a funzionare come prima;
+  - canary/slow_race: NON gated sul gruppo del dep corrente (i canary sono
+    gia' FREE-only; servono proprio a tornare al caldo dopo l'escalation).
 """
 import os
 import tempfile
@@ -109,34 +110,27 @@ def test_initial_pick_free_still_uses_warm(router, monkeypatch):
     assert d is not None
 
 
-def test_slow_race_allowed_false_on_go_true_on_free(router):
+def test_slow_race_allowed_not_gated_on_escalation(router):
     go_group = _group_of(router, "-go")
     free_group = _group_of(router, "-100k")
     assert router.slow_race_allowed(
-        "ses-x", "test", go_group, NEED, None, 4096, set()) is False
+        "ses-x", "test", go_group, NEED, None, 4096, set()) is True
     assert router.slow_race_allowed(
         "ses-x", "test", free_group, NEED, None, 4096, set()) is True
 
 
-def test_warm_fill_canary_inhibited_on_escalation(router):
-    for suffix in ("-go", "-fallback"):
-        g = _group_of(router, suffix)
-        gdep = router.config.groups[g][0]
-        assert router.warm_fill_canary(
-            "test", gdep, NEED, None, 100, set(), g) is None
+def test_warm_fill_canary_explicit_go_no_candidate(router):
+    go_group = _group_of(router, "-go")
+    gdep = router.config.groups[go_group][0]
+    assert router.warm_fill_canary(
+        "test", gdep, NEED, None, 100, set(), go_group) is None
 
 
-def test_warm_wake_canary_inhibited_on_escalation(router):
-    for suffix in ("-go", "-fallback"):
-        g = _group_of(router, suffix)
-        gdep = router.config.groups[g][0]
-        assert router.warm_wake_canary(
-            "test", gdep, NEED, None, 100, set(), g) is None
-
-
-def test_hedge_canaries_inhibited_on_escalation(router):
-    for suffix in ("-go", "-fallback"):
-        g = _group_of(router, suffix)
-        gdep = router.config.groups[g][0]
-        assert router.hedge_canaries(
-            "test", gdep, NEED, None, set(), g) == []
+def test_warm_fill_canary_via_fallback_from_dim_active(router):
+    go_group = _group_of(router, "-go")
+    free_group = _group_of(router, "-100k")
+    gdep = router.config.groups[go_group][0]
+    cand = router.warm_fill_canary(
+        "test", gdep, NEED, None, 100, set(), free_group)
+    assert cand is not None
+    assert router.config.deployment_by_unique(cand["unique"])["group"] == free_group

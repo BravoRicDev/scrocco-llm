@@ -3640,10 +3640,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 log.info("[degraded] esplorazione sospesa per questa "
                          "richiesta (%s)", dep.get("unique"))
             # Bucket di escalation (-go/-fallback): niente esplorazione
-            # speculativa (refill, canary, gara lenta, hedge): sono l'ultimo
-            # scaglione, il caldo non li usa mai e le sonde sarebbero sprecate.
+            # Solo se il gruppo RICHIESTO esplicitamente e' un bucket di
+            # escalation (-go/-fallback): niente refill/canary/gara lenta/hedge
+            # (i bucket a pagamento non usano il caldo, sonde sprecate). Se ci
+            # si arriva via FALLBACK dal dim, la speculativa resta attiva per
+            # tornare al caldo appena possibile.
             _esc_grp = is_escalation_group(
-                str(dep.get("group") or ""),
+                str(requested_group or ""),
                 router.config.go_suffix, router.config.fallback_suffix)
             if (session and profile and not _degraded and not _esc_grp
                     and bool(getattr(_pol, "warm_refill_enabled", True))

@@ -2620,8 +2620,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         timer >45s (`_slow_timer_flagged`): un pool fatto di soli lenti non
         blocca il canario (li si lascia esaurire, senza penalita'). Cap <= 0 =
         nessun gate."""
-        if self._is_renewal_bucket(group_name or ""):
-            return False
         cap = int(getattr(self.policy, "slow_race_max_warm", 6) or 0)
         if cap <= 0:
             return True

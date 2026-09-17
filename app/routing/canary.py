@@ -64,8 +64,6 @@ class CanaryMixin:
         nelle 24h. Con `out_tokens` si richiede anche la capacita' REALE di
         consegnare l'output (altrimenti un canary puo' nascere su un dep che
         sta nel contesto ma non ha spazio per rispondere)."""
-        if self._is_renewal_bucket(dep.get("group") or ""):
-            return []
         k = max(1, int(k))
         a_u = dep.get("unique")
         ex = set(tried or ())
@@ -324,8 +322,6 @@ class CanaryMixin:
         -dim (gli tentativi successivi escludono i gia' provati) e solo a
         esaurimento si sale al -dim superiore.
         Ritorna il miglior candidato del primo -dim utile; None = esauriti."""
-        if self._is_renewal_bucket(cur_dep.get("group") or ""):
-            return None
         cur = cur_dep.get("unique")
         ex: set[str] = set(tried or ())
         if cur:
@@ -484,8 +480,6 @@ class CanaryMixin:
         Percorre lo stesso ladder -dim del refill (free only) con le stesse
         esclusioni, scegliendo "come a freddo" nello stesso modo; in piu' NON
         tocca i dep che non hanno un cooldown 429 maturo."""
-        if self._is_renewal_bucket(cur_dep.get("group") or ""):
-            return None
         now = time.time()
         cur = cur_dep.get("unique")
         ex: set[str] = set(tried or ())
