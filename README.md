@@ -734,8 +734,18 @@ via environment variables.
   **never in the image, never in git history**
 - Admin surface (`/admin/*`) requires the master key and is invisible to
   client keys
-- Client keys are deterministic (`sk-<profile>`) or custom overrides; keys
-  are always masked in admin responses
+- Client keys are deterministic (`sk-<profile>`) in **development** or
+  explicit custom overrides (`client_keys` in `var/gateway.yaml`); keys are
+  always masked in admin responses
+- **Production**: set `GATEWAY_ENV=production`. Deterministic `sk-<profile>`
+  keys are then **disabled** and the gateway **fails fast at startup** unless
+  a real `GATEWAY_MASTER_KEY` is set and at least one `client_keys` entry
+  exists. Generate them with:
+
+  ```bash
+  python scripts/gen_client_keys.py --profiles alice,bob   # stampa lo YAML
+  python scripts/gen_client_keys.py --write                # aggiorna la policy
+  ```
 - The service binds to `127.0.0.1` by default: put a reverse proxy in front
   before exposing it, and change `GATEWAY_MASTER_KEY`
 - `/bootstrap*` endpoints are public read-only and contain no secrets

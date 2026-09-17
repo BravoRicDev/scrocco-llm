@@ -47,7 +47,7 @@ from fastapi.responses import (JSONResponse, PlainTextResponse, Response,
 
 from .admin import admin_api
 from .bootstrap import bootstrap_api
-from .auth import AuthManager, AuthResult
+from .auth import AuthManager, AuthResult, gateway_env
 from . import journal, metrics
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from . import sniff
@@ -822,6 +822,10 @@ async def _nightly_scheduler():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _watch_task
+    # Fail-fast in produzione: master key reale + client_keys esplicite.
+    # In development (default) e' un no-op.
+    authn.enforce_startup()
+    log.info("[start] env=%s production=%s", gateway_env(), authn.production)
     _load_adaptive_stats()                  # F4: ripristino EMA/cooldown
     _load_cooldowns()                       # cooldown NON scaduti (since/full)
     _load_routing_state()                   # warm-start: holder/sticky/warm/pin/frontiere

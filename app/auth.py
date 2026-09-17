@@ -6,11 +6,15 @@ sk-<profilo> esistente -> client di quel profilo; se la policy definisce
 client_keys[profilo], la deterministica DEL profilo e DISATTIVATA (legge
 override: una chiave custom SOSTITUISCE, non affianca). WHY i motivi nel
 log NEGATA (vuota/formato/profilo inesistente/disattivata): diagnosticare
-un 401 senza indovinare.
+un 401 senza indovinare. Con GATEWAY_ENV=production le sk-<profilo>
+deterministiche NON valgono e lo startup e' fail-fast se manca una
+configurazione sicura (master key reale + client_keys esplicite).
 
 [EN] WHAT: three-tier bearer auth. WHY: deterministic profile keys give
-zero-config tenants; custom overrides REPLACE deterministic ones (single
-source of truth); denial reasons are logged so agents can self-debug 401s.
+zero-config tenants (DEVELOPMENT only: GATEWAY_ENV=production disables
+them and fails fast without explicit client_keys + a real master key);
+custom overrides REPLACE deterministic ones (single source of truth);
+denial reasons are logged so agents can self-debug 401s.
 """
 
 from __future__ import annotations
@@ -23,6 +27,34 @@ from dataclasses import dataclass
 from .config import GatewayConfig
 
 log = logging.getLogger("nx.auth")
+
+# Ambienti: "production" (o "prod") disattiva le chiavi deterministiche
+# sk-<profilo> e pretende chiavi client esplicite + master key reale.
+_PRODUCTION_ENVS = {"production", "prod"}
+# Placeholder noti: master key mai accettata in produzione.
+_WEAK_MASTER_KEYS = {"sk-master", "sk-master-change-me"}
+
+
+def gateway_env() -> str:
+    """Ambiente dichiarato via GATEWAY_ENV (default: development)."""
+    return (os.environ.get("GATEWAY_ENV") or "development").strip().lower()
+
+
+def is_production() -> bool:
+    return gateway_env() in _PRODUCTION_ENVS
+
+
+def _weak_master_key(key: str | None) -> bool:
+    if not key or not key.strip():
+        return True
+    k = key.strip().lower()
+    return k in _WEAK_MASTER_KEYS or "change-me" in k
+
+
+def generate_client_key(prefix: str = "sk") -> str:
+    """Chiave client casuale e non prevedibile per un profilo."""
+    return f"{prefix}-{secrets.token_urlsafe(24)}"
+
 
 def _mask(key: str) -> str:
     return f"{key[:6]}..." if len(key) > 10 else "***"
@@ -61,6 +93,9 @@ class AuthManager:
         # callable -> dict profilo->chiave custom (policy.client_keys).
         # Callable (e non dict) così l'hot-reload della policy è sempre vivo.
         self._client_keys = client_keys_provider
+        # In produzione le chiavi deterministiche sk-<profilo> non valgono:
+        # servono client_keys esplicite e una master key non di default.
+        self.production = is_production()
 
     def parse_bearer(self, authorization: str | None) -> str | None:
         if not authorization:
@@ -91,8 +126,17 @@ class AuthManager:
             if custom_profile:
                 res = AuthResult(True, custom_profile, "local")
             elif pname and pname in self.config.profile_dims \
-                    and pname not in ck:
+                    and pname not in ck and not self.production:
                 res = AuthResult(True, pname, "local")
+            elif pname and pname in self.config.profile_dims \
+                    and pname not in ck and self.production:
+                res = AuthResult(False, None, None,
+                                 "Authentication Error, Invalid api key.")
+                self._log_auth(key, False, None, None,
+                               reason="chiavi deterministiche disattivate "
+                                      "(GATEWAY_ENV=production): usa una "
+                                      "client_keys esplicita")
+                return res
             elif not key.startswith("sk-"):
                 res = AuthResult(False, None, None,
                                  "Authentication Error, Invalid api key.")
@@ -127,6 +171,32 @@ class AuthManager:
         else:
             log.warning("[auth] NEGATA key=%s motivo=%s",
                         _mask(key or ""), reason or "non riconosciuta")
+
+    # --------------------------------------------------- production fail-fast
+    def startup_issues(self) -> list[str]:
+        """Problemi bloccanti di configurazione in produzione (vuoto in dev)."""
+        if not self.production:
+            return []
+        problems: list[str] = []
+        if _weak_master_key(os.environ.get("GATEWAY_MASTER_KEY")):
+            problems.append(
+                "GATEWAY_MASTER_KEY assente o ancora al placeholder")
+        ck = self._client_keys() if self._client_keys is not None else {}
+        if not ck:
+            problems.append(
+                "nessuna client_keys definita (le sk-<profilo> deterministiche "
+                "sono disattivate in produzione)")
+        return problems
+
+    def enforce_startup(self) -> None:
+        """Fail-fast: in produzione rifiuta di partire con config debole."""
+        problems = self.startup_issues()
+        if problems:
+            raise RuntimeError(
+                "GATEWAY_ENV=production ma configurazione non sicura: "
+                + "; ".join(problems)
+                + ". Genera le chiavi con scripts/gen_client_keys.py e "
+                  "imposta GATEWAY_MASTER_KEY.")
 
     # --------------------------------------------------------- authorization
     def model_allowed(self, profile: str, requested_model: str) -> bool:

@@ -28,6 +28,7 @@ from fastapi import APIRouter
 
 from . import csv_store
 from .admin import probe_results_view
+from .auth import is_production
 
 bootstrap_api = APIRouter()
 
@@ -318,19 +319,29 @@ async def bootstrap_status():
                 "endpoint": "/admin/deployments/probe/bulk"})
 
     if not pol.client_keys:
-        issues.append({"code": "no_client_keys", "severity": "info",
-                       "detail": "No custom client keys; deterministic "
-                                 "sk-<profile> still works."})
+        _prod = is_production()
+        issues.append({"code": "no_client_keys",
+                       "severity": "error" if _prod else "info",
+                       "detail": ("GATEWAY_ENV=production: no client_keys; "
+                                  "deterministic sk-<profile> keys are "
+                                  "DISABLED and startup fails."
+                                  if _prod else
+                                  "No custom client keys; deterministic "
+                                  "sk-<profile> still works.")})
         actions.append({
             "do": 'PATCH /admin/policy {"client_keys":{"<profile>":"sk-..."}}',
             "endpoint": "/admin/policy"})
 
     mk_env = os.environ.get("GATEWAY_MASTER_KEY")
     if not mk_env or mk_env == "sk-master":
-        issues.append({"code": "master_key_is_default", "severity": "warning",
+        _prod = is_production()
+        issues.append({"code": "master_key_is_default",
+                       "severity": "error" if _prod else "warning",
                        "detail": "GATEWAY_MASTER_KEY is unset or the "
-                                 "default 'sk-master'. Fine on localhost; "
-                                 "CHANGE IT before exposing the service."})
+                                 "default 'sk-master'. "
+                                 + ("Startup FAILS in production." if _prod
+                                    else "Fine on localhost; CHANGE IT "
+                                         "before exposing the service.")})
         actions.append({"do": "Set GATEWAY_MASTER_KEY in .env.gateway and "
                               "restart once", "endpoint": "-"})
 
