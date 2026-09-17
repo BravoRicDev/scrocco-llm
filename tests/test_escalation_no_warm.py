@@ -52,6 +52,28 @@ def _clean(monkeypatch):
     set_spoofing_request(False)
 
 
+def test_dep_attachment_only_go_when_spoofed(router, monkeypatch):
+    """Per una richiesta spoofata in cautela l'unico aggancio ammesso e' lo
+    stesso dep -go (cache); nessun'altra casistica. Client reali invariati."""
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    go = router.config.groups[f"{BASE}-go"][0]
+    dim = router.config.groups[f"{BASE}-100k"][0]
+    sid = "sess-go-only"
+    set_spoofing_request(True)
+    router.dep_sticky_set(sid, dim["unique"])
+    assert router.dep_sticky_get(sid) is None           # spoofato: dim no
+    router.dep_sticky_set(sid, go["unique"])
+    assert router.dep_sticky_get(sid) == go["unique"]   # -go si (cache)
+    router.note_session_success(sid, go["unique"], 100, ctx_est=100)
+    assert router.session_holder(sid) == go["unique"]
+    router.note_session_success(sid, dim["unique"], 100, ctx_est=100)
+    assert router.session_holder(sid) is None
+    # client opencode reale: comportamento invariato (dim consentito)
+    set_spoofing_request(False)
+    router.note_session_success(sid, dim["unique"], 100, ctx_est=100)
+    assert router.session_holder(sid) == dim["unique"]
+
+
 @pytest.fixture()
 def router():
     fd, path = tempfile.mkstemp(suffix=".csv")

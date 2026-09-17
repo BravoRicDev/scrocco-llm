@@ -22,6 +22,11 @@ log = logging.getLogger("nx.router")
 
 
 class SessionMixin:
+    def _is_go_group(self, g: str | None) -> bool:
+        """True se `g` e' il bucket -go."""
+        suf = getattr(self.config, "go_suffix", None) or "-go"
+        return bool(g) and str(g).endswith(suf)
+
     def sticky_get(self, session_id: str) -> str | None:
         entry = self._sticky.get(session_id)
         if not entry:
@@ -50,6 +55,12 @@ class SessionMixin:
         if time.time() - ts > self.policy.sticky_ttl_sec:
             log.debug("[sticky] %s dep_sticky TTL scaduto (%.0fs > %ds), rilasciato", session_id, time.time() - ts, self.policy.sticky_ttl_sec)
             self._sticky_dep.pop(session_id, None)
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if opencode_cautious_request() and not self._is_go_group(
+                (dep or {}).get("group")):
+            # Spoofato in cautela: unico aggancio ammesso = stesso dep -go
+            # (cache). Nessun'altra casistica.
             return None
         log.debug("[sticky] %s dep_sticky valido: %s", session_id, unique)
         return unique
@@ -111,6 +122,10 @@ class SessionMixin:
         unique, ts = entry
         if time.time() - ts > self.policy.sticky_ttl_sec:
             self._sticky_dep.pop(key, None)
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if opencode_cautious_request() and not self._is_go_group(
+                (dep or {}).get("group")):
             return None
         log.debug("[cap-sticky] %s key=%s riuso %s", session_id, key, unique)
         return unique
@@ -390,10 +405,6 @@ class SessionMixin:
                     d.pop(k, None)
 
     def session_holder(self, session_id: str | None = None) -> str | None:
-        # Cautela opencode: le richieste spoofate non si appuntano al
-        # detentore cache (altrimenti restano agganciate a zen, come il warm).
-        if opencode_cautious_request():
-            return None
         sid = session_id or current_session()
         if not sid:
             return None
@@ -405,6 +416,11 @@ class SessionMixin:
         ttl = float(getattr(self.policy, "cache_holder_ttl_sec", 3600) or 3600)
         if time.time() - ts > ttl:
             d.pop(sid, None)
+            return None
+        dep = self.config.deployment_by_unique(unique)
+        if opencode_cautious_request() and not self._is_go_group(
+                (dep or {}).get("group")):
+            # Spoofato in cautela: detentore cache solo per -go.
             return None
         return unique
 

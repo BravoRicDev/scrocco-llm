@@ -281,16 +281,16 @@ def test_sticky_not_set_for_spoofed(router, monkeypatch):
     assert router.dep_sticky_get(FAKE1) is None
 
 
-def test_cache_holder_disabled_for_spoofed(router, monkeypatch):
+def test_cache_holder_go_only_for_spoofed(router, monkeypatch):
     monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
-    oc = _dep(router, f"{BASE}-100k", "K-OC")
+    oc = _dep(router, f"{BASE}-100k", "K-OC")          # dim, non -go
     router.note_session_success(FAKE1, oc["unique"], 100, ctx_est=100)
     set_allow_opencode_zen(True)
     set_spoofing_request(True)
-    # spoofato: nessun pin sul detentore cache
+    # spoofato: un dim NON aggancia (unico aggancio ammesso: dep -go)
     assert router.session_holder(FAKE1) is None
     assert router.cache_holder(FAKE1) is None
-    # client opencode reale: il detentore resta valido
+    # client opencode reale: cache-holder invariato
     set_spoofing_request(False)
     assert router.session_holder(FAKE1) == oc["unique"]
     assert router.cache_holder(FAKE1) is not None
