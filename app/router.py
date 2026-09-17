@@ -5170,6 +5170,42 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             return ORDER_LAST
         return int(dep.get("order", ORDER_LAST))
 
+    def _zen_split(self, uniques: list[str]) -> tuple[list[str], list[str]]:
+        """(non-zen, zen): sotto cautela opencode isola gli zen in un blocco
+        separato, cosi' non vengono mai interleavati nella camminata della
+        catena (che RUOTA attorno al fallito e riporterebbe la coda in testa).
+        Fuori cautela ritorna (uniques, []): percorso invariato."""
+        if not opencode_cautious_request():
+            return uniques, []
+        nonzen: list[str] = []
+        zen: list[str] = []
+        for u in uniques:
+            d = self.config.deployment_by_unique(u)
+            (zen if is_opencode_zen_dep(d) else nonzen).append(u)
+        return nonzen, zen
+
+    def _zen_split3(self, uniques: list[str]) -> tuple[list[str], list[str],
+                                                       list[str]]:
+        """(free non-zen, zen, -go/-fallback): partizione completa sotto cautela
+        opencode; fuori cautela ritorna (uniques, [], [])."""
+        if not opencode_cautious_request():
+            return uniques, [], []
+        go_suf = self.config.go_suffix or "-go"
+        fb_suf = self.config.fallback_suffix or "-fallback"
+        free: list[str] = []
+        zen: list[str] = []
+        gofb: list[str] = []
+        for u in uniques:
+            d = self.config.deployment_by_unique(u)
+            g = str((d or {}).get("group") or "")
+            if g.endswith(go_suf) or g.endswith(fb_suf):
+                gofb.append(u)
+            elif is_opencode_zen_dep(d):
+                zen.append(u)
+            else:
+                free.append(u)
+        return free, zen, gofb
+
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
                         ctx: int | None = None,
@@ -5432,7 +5468,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         Cautela opencode (spoof): la catena viene RIORDINATA (stabile) con rank
         (0) provider normali, (1) zen (free, ultima scelta tra i free), (2)
         bucket -go/-fallback. Cosi' gli zen restano eleggibili nei percorsi
-        normali ma vengono tentati dopo tutti gli altri free e PRIMA di -go."""
+        normali ma vengono tentati dopo tutti gli altri free e PRIMA di -go.
+        I chiamanti (initial_pick / _walk_ladder_resilient) passano comunque
+        catene GIA' separate (vedi _zen_split/_zen_split3): qui il sort resta
+        come rete di sicurezza, e la rotazione attorno al fallito avviene solo
+        dentro il singolo blocco (mai oltre il confine zen)."""
         # Cautela opencode (spoof): rank stabile = normali -> zen -> -go/-fb.
         if opencode_cautious_request():
             _go_suf = self.config.go_suffix or "-go"
@@ -6224,13 +6264,20 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                    and (need is None or self._dep_supports(d, need))
                    and self._cap_fits(d, ctx)]
         if _cooled:
+            # Cautela opencode: gli zen del gruppo vanno in coda anche qui
+            # (non devono vincere la wakeup di cooldown prima dei free).
+            def _zkey(d: dict) -> bool:
+                return opencode_cautious_request() and is_opencode_zen_dep(d)
+
             if self._text_alternation_ok(group_name):
                 _cooled.sort(key=lambda d: (
+                    _zkey(d),
                     self.cooldown_residual(d["unique"]),
                     self._prov_avoid_key(d)))
             else:
                 _cooled.sort(
-                    key=lambda d: self.cooldown_residual(d["unique"]))
+                    key=lambda d: (_zkey(d),
+                                   self.cooldown_residual(d["unique"])))
             _wake = _cooled[0]
             _rem = int(self.cooldown_residual(_wake["unique"]))
             log.info("[cooldown-wakeup] %s: provo lo stantio meno raffreddato: "
@@ -6260,7 +6307,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         cap = self.config.group_caps.get(group_name)
         if cap is not None:
             chain = self.config.chains_cap.get(profile or "", {}).get(cap, [])
-            return self._walk_chain(chain, None, need, ctx)
+            _cfree, _czen, _ = self._zen_split3(chain)
+            dep = self._walk_chain(_cfree, None, need, ctx)
+            if dep is None and _czen:
+                dep = self._walk_chain(_czen, None, need, ctx)
+            return dep
         if self.policy.dims_ladder_floor:
             chain = self._ladder_for_group(group_name)
             if chain:
@@ -6273,7 +6324,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     return g.endswith(_go_suf) or g.endswith(_fb_suf)
 
                 _dims = [u for u in chain if not _is_rb(u)]
-                dep = self._walk_chain(_dims, None, need, ctx)
+                _gofb = [u for u in chain if _is_rb(u)]
+                # Cautela opencode: gli zen del blocco vengono provati SOLO
+                # dopo tutti i free non-zen (vivi + prelast), prima di -go.
+                _dfree, _dzen = self._zen_split(_dims)
+                dep = self._walk_chain(_dfree, None, need, ctx)
                 if dep is not None:
                     log.info("[ladder] initial_pick: %s senza candidati "
                              "vivi -> scala (%d univoci) -> %s",
@@ -6281,20 +6336,36 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     return dep
                 # PRE-ULTIMA SPIAGGIA (fra dims e -go): dims vivi occupati da
                 # un'ALTRA sessione negli ultimi session_dep_guard_sec.
-                dep = self.prelast_shared(_dims, None, need, ctx, None)
+                dep = self.prelast_shared(_dfree, None, need, ctx, None)
                 if dep is not None:
                     return dep
+                # Blocco ZEN (solo cautela; fuori cautela _dzen e' vuoto)
+                if _dzen:
+                    dep = self._walk_chain(_dzen, None, need, ctx)
+                    if dep is not None:
+                        log.info("[ladder] initial_pick: zen block -> %s",
+                                 dep["unique"])
+                        return dep
                 # -go/-fallback vivi
-                dep = self._walk_chain([u for u in chain if _is_rb(u)],
-                                       None, need, ctx)
+                dep = self._walk_chain(_gofb, None, need, ctx)
                 if dep is not None:
                     return dep
         chain = self.config.chains.get(profile or "", [])
-        dep = self._walk_chain(chain, None, need, ctx)
+        _cfree, _czen, _cgofb = self._zen_split3(chain)
+        dep = self._walk_chain(_cfree, None, need, ctx)
+        if dep is None and _czen:
+            dep = self._walk_chain(_czen, None, need, ctx)
+        if dep is None and _cgofb:
+            dep = self._walk_chain(_cgofb, None, need, ctx)
         if dep is None:
             # ULTIMO SCAGLIONE: riammetti i free-dims 'lenti per la sessione'
-            # (demoted) solo ora che tutto il resto e' esaurito.
-            dep = self._walk_chain(chain, None, need, ctx, allow_slow=True)
+            # (demoted) solo ora che tutto il resto e' esaurito. Stesso ordine
+            # a blocchi (free non-zen -> zen -> -go/-fallback).
+            dep = self._walk_chain(_cfree, None, need, ctx, allow_slow=True)
+            if dep is None and _czen:
+                dep = self._walk_chain(_czen, None, need, ctx, allow_slow=True)
+            if dep is None and _cgofb:
+                dep = self._walk_chain(_cgofb, None, need, ctx, allow_slow=True)
         return dep
 
     def _walk_ladder_resilient(self, ladder: list[str],
@@ -6305,13 +6376,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                                out_tokens: int | None = None) -> dict | None:
         """Cammina la scala testo con early-escalation e cooldown lineare.
 
-        Sequenza (8 step):
+        Sequenza (8 step; sotto cautela opencode gli zen sono un BLOCCO 3bis
+        dopo i dims stantii e PRIMA di -go, e lo step -go vivi scivola dopo):
           1) dims vivi — max ladder_skip_after candidati
           1bis) dims cooldown-wakeup (stantii, residuo minore)
           1ter) PRE-ULTIMA SPIAGGIA: dims vivi usati di recente da un'ALTRA
                 sessione (session_dep_guard) — condivisi QUI, prima di -go
-          2) -go vivi
+          2) -go vivi  [solo fuori cautela; in cautela gira come 2bis]
           3) dims stantii (cooldown > stale_cooldown_retry_sec) — max ladder_stale_max
+          3bis) [cautela] ZEN vivi + stantii (blocco separato, ultimo dei free)
           4) -go stantii (dormiente, potrebbe essersi svegliato)
           4bis) PARACADUTE CRONICI (fail_24h >= soglia): riprovati qui, dal
                 meno fallimentare al più fallimentare (a parità: cooldown
@@ -6339,6 +6412,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         dims = [u for u in ladder if not _is_fb(u) and not _is_go(u)]
         go   = [u for u in ladder if _is_go(u)]
         fb   = [u for u in ladder if _is_fb(u)]
+        # Cautela opencode: gli zen sono un BLOCCO separato, provato dopo tutti
+        # i free non-zen (vivi, prelast, wakeup, stantii) e prima di -go/-fallback.
+        _cautious = opencode_cautious_request()
+        if _cautious:
+            dims, zen = self._zen_split(dims)
+        else:
+            zen: list[str] = []
         skip = max(1, int(getattr(pol, "ladder_skip_after", 4) or 4))
         stale_max = max(0, int(getattr(pol, "ladder_stale_max", 3) or 0))
         age = float(getattr(pol, "stale_cooldown_retry_sec", 300) or 300)
@@ -6509,11 +6589,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 log.info("[ladder] -dim successiva -> %s", nxt["unique"])
                 return nxt
 
-        # 2) -go vivi
-        nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
-        if nxt is not None:
-            log.info("[ladder] escalation a -go -> %s", nxt["unique"])
-            return nxt
+        # 2) -go vivi  (sotto cautela opencode questo step gira DOPO i dims
+        #    stantii e il blocco zen: vedi 3bis/2bis qui sotto)
+        if not _cautious:
+            nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
+            if nxt is not None:
+                log.info("[ladder] escalation a -go -> %s", nxt["unique"])
+                return nxt
 
         # 3) dims stantii (max stale_max) — mai i cronici (Leva B).
         #    Opzionale: `ladder_stale_max=0` disattiva (l'autoprobe risveglia).
@@ -6528,6 +6610,33 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             if nxt is not None:
                 log.info("[ladder] dims stantio (>%ds) -> %s",
                          int(age), nxt["unique"])
+                return nxt
+
+        # 3bis) ZEN (solo cautela opencode): blocco separato DOPO tutti i free
+        #    non-zen (vivi, prelast, wakeup, stantii) e PRIMA di -go/-fallback.
+        #    Camminata FRESCA (failed_unique=None): il dim-floor del fallito in
+        #    una dim superiore non deve rendere irraggiungibile il blocco zen.
+        if _cautious and zen:
+            nxt = self._walk_chain(zen, None, need, ctx, tried=tried)
+            if nxt is not None:
+                log.info("[ladder] zen (vivo) -> %s", nxt["unique"])
+                return nxt
+            if stale_max > 0:
+                _q_zen = [u for u in zen
+                          if _is_quota_evidence(
+                              getattr(self.stats_for(u), "last_reason", None))]
+                nxt = self._walk_chain(_q_zen, None, need, ctx,
+                                       min_cooldown_age=age, limit=stale_max,
+                                       tried=tried)
+                if nxt is not None:
+                    log.info("[ladder] zen stantio (>%ds) -> %s",
+                             int(age), nxt["unique"])
+                    return nxt
+        # 2bis) -go vivi (solo cautela opencode: qui, dopo dims stantii + zen)
+        if _cautious:
+            nxt = self._walk_chain(go, failed_unique, need, ctx, tried=tried)
+            if nxt is not None:
+                log.info("[ladder] escalation a -go -> %s", nxt["unique"])
                 return nxt
 
         # 4) -go stantii — mai i cronici (Leva B)
@@ -6557,6 +6666,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             chronic_pool = [u for u in ladder
                             if u != failed_unique
                             and not (tried and u in tried)
+                            and not (_cautious and is_opencode_zen_dep(
+                                cfg.deployment_by_unique(u)))
                             and _is_chronic(u)
                             and not self.is_slow_for_session(u, ctx=ctx)
                             and not self.is_retired(u)]
@@ -6866,8 +6977,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             prefer = cur_dep.get("model") \
                 if self._prefer_same_model(cap, cur_dep.get("model", "")) else None
             if chain:
-                return self._walk_chain(chain, cur_dep["unique"], need, ctx,
-                                        prefer_model=prefer, tried=tried)
+                _cfree, _czen, _ = self._zen_split3(chain)
+                nxt = self._walk_chain(_cfree, cur_dep["unique"], need, ctx,
+                                       prefer_model=prefer, tried=tried)
+                if nxt is None and _czen:
+                    nxt = self._walk_chain(_czen, cur_dep["unique"], need, ctx,
+                                           prefer_model=prefer, tried=tried)
+                return nxt
             # cap senza catena registrata: ripiega sulla catena testo filtrata
             return self.fallback_after(profile or "", cur_dep["unique"], need,
                                        ctx, out_tokens=out_tokens)
