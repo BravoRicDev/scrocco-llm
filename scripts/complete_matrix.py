@@ -6,7 +6,7 @@ Rules (from user):
   3. Remove dead models (stealth/ox-alpha, minimax m2.7, minimax m3 = 404).
   4. Fallback rows: already complete, no changes.
 
-Usage:  python3 scripts/complete_matrix.py [--dry-run] [--profile mioaruba]
+Usage:  python3 scripts/complete_matrix.py [--dry-run] [--profile example]
 """
 from __future__ import annotations
 
@@ -294,7 +294,7 @@ def run(dry_run: bool, profile: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--profile", default="mioaruba")
+    ap.add_argument("--profile", default="example")
     ap.add_argument("--funded",
                     help="override funded keys (comma-separated sk-or-… prefixes). "
                          "Default: auto-detected from fallback rows in CSV.")

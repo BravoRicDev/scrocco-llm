@@ -1702,7 +1702,7 @@ async def chat_completions(request: Request, response: Response):
                                          ctxcompact_config_from_policy)
                 # NB: CtxCompactConfig NON e' un dataclass -> niente
                 # `dataclasses.replace` (TypeError a runtime: era il bug di
-                # viemmegi). E' un'istanza fresca per chiamata: si muta il campo.
+                # in produzione). E' un'istanza fresca per chiamata: si muta il campo.
                 _ccf = ctxcompact_config_from_policy(router.policy)
                 _ccf.min_saved_tokens = 0
                 _img = getattr(router.policy, "image_token_estimate", 0) or 0
@@ -2396,7 +2396,7 @@ async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
         if hold:
             fr = meta.get("finish_reason")
             if fr == "length":
-                # TRONCATURE mai 'content' (fix incidente viemmegi 2026-09-15):
+                # TRONCATURE mai 'content' (fix incidente 2026-09-15):
                 # finish_reason=length significa che l'output e' stato TAGLIATO
                 # (budget o nostro clamp), anche con 0 caratteri (reasoning che
                 # si e' mangiato tutto il budget): si ruota, non si consegna il

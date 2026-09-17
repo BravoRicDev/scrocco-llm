@@ -40,7 +40,7 @@ def test_fingerprint_differs_by_first_user():
 
 
 def test_fingerprint_includes_user_agent():
-    a = M._session_id(_Req({"user-agent": "hermes/1.0"}), _payload())
+    a = M._session_id(_Req({"user-agent": "agent/1.0"}), _payload())
     b = M._session_id(_Req({"user-agent": "other/9.9"}), _payload())
     assert a != b
 

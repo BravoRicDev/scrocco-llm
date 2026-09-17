@@ -468,7 +468,7 @@ toolcall_truncation:
 # viene DISATTIVATA per quel profilo (la chiave custom la SOSTITUISCE).
 # Decommenta e personalizza (segreti: NON versionare, restano in var/):
 # client_keys:
-#   collego: sk-mia-chiave-personale-001
+#   example: sk-EXAMPLE-KEY-001
 #   altro-profilo: sk-altra-chiave-002
 
 # ─────────────────────────────────────────────────────────────────────────────

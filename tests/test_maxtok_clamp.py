@@ -66,7 +66,7 @@ def _dep_eff(mi=32768):
 
 
 def test_riserva_cedevole_non_affama_output():
-    """REGRESSION viemmegi 2026-09-15: ctx ~80% della finestra su modello
+    """REGRESSION 2026-09-15: ctx ~80% della finestra su modello
     thinking. La riserva del 30% NON deve piu' clampare a 512 (risposta
     monca: il reasoning si mangiava tutto il budget): se input + richiesta
     entrano nella finestra niente clamp."""

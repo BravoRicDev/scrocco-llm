@@ -12,11 +12,12 @@ La tabella e' keyed sul nome "normalizzato": minuscolo, basename dopo l'ultimo
 """
 
 import csv
+import os
 import re
 from pathlib import Path
 
-CSV_PATH = Path("/home/serverino/Serverino/scrocco-llm/var/keys_rotation.csv")
-OUTPUT_PATH = Path("/home/serverino/Serverino/scrocco-llm/var/keys_rotation.csv.new")
+CSV_PATH = Path(os.environ.get("SCROCCO_CSV", "var/keys_rotation.csv"))
+OUTPUT_PATH = CSV_PATH.parent / (CSV_PATH.name + ".new")
 BASE_COLS = 10
 
 # model name normalizzato -> (intelligence_score, effort_capable, nota)

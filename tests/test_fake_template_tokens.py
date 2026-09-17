@@ -18,7 +18,7 @@ from app.texttoolparse import parse_text_toolcalls, partial_opener_at_end
 # body reale osservato nel reasoning di un modello Nemotron via opencode
 _NEMOTRON_BODY = (
     '<|tool_call>call:tool_fTBVuU0D_read'
-    '{filePath:<|"|>/home/serverino/Serverino/scrocco-llm/scripts/audit_models.py'
+    '{filePath:<|"|>/home/user/project/scripts/audit_models.py'
     '<|"|>}<tool_call|>')
 
 _NATIVE_MARKERS = (
@@ -60,7 +60,7 @@ def test_strip_template_tokens_rimuove_i_marker():
     assert "<|tool_call>" not in out
     assert "<tool_call|>" not in out
     assert '<|"|>' not in out
-    assert '"/home/serverino' in out          # virgoletta sostituita
+    assert '"/home/user' in out          # virgoletta sostituita
 
 
 def test_stripper_gestisce_token_spezzato_tra_chunk():

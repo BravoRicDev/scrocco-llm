@@ -16,7 +16,7 @@ def _router(deps=None, cooled=None, retired=None, capfits=True,
     dep_map = deps or {}
     r.config = SimpleNamespace(
         go_suffix="-go", fallback_suffix="-fallback",
-        proxy_prefix="scrocco-llm-mioaruba-",
+        proxy_prefix="scrocco-llm-host-a-",
         deployment_by_unique=lambda u: dep_map.get(u),
         groups={}, group_caps={}, profile_dims={}, chains_cap={})
     r._session_last_ok = {}

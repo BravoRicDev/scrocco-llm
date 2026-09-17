@@ -1,5 +1,5 @@
 """Mai rispondere troncato: hold-until-finish come GARANZIA (post-incidente
-viemmegi 2026-09-15).
+incidente in produzione 2026-09-15).
 
 In hold mode `finish_reason=length` NON e' mai 'content' (nemmeno con 0
 caratteri: il reasoning si era mangiato tutto il budget clampato) e una
@@ -230,7 +230,7 @@ async def _drain(resp):
 
 
 def test_length_vuoto_ruota_senza_cooldown_e_cerca_il_piu_capace(ML, monkeypatch):
-    """Incidente viemmegi a valle del fix clamp: se IL MODELLO si trunca da
+    """Incidente in produzione a valle del fix clamp: se IL MODELLO si trunca da
     solo (length a 0 answer) il gateway ruota pre-byte sul piu' capace senza
     consegnare il moncone e senza mettere in cooldown il free-troncatore."""
     calls = _fake_stream(ML, monkeypatch, [LENGTH])

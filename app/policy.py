@@ -138,7 +138,7 @@ class QcJson:
     # (si trasmette quel che arriva). False = comportamento legacy (timeout ->
     # rotazione/503), utile solo se le catene hanno molti account validi.
     stream_parachute_no_timeout: bool = True
-    # HOLD-UNTIL-FINISH: attivo di default (decisione post-incidente viemmegi
+    # HOLD-UNTIL-FINISH: attivo di default (decisione post-incidente
     # 2026-09-15): il gateway NON consegna al client finche' lo stream upstream
     # non e' chiuso PULITAMENTE (finish_reason stop/tool_calls o [DONE]):
     # niente risposte a meta'. Chiusure sporche o finish_reason=length (anche
@@ -330,7 +330,7 @@ class Policy:
     # Budget di probe per CHIAVE nelle 24h (provider-aware nel codice:
     # openrouter/llm7/etc. contano le richieste, quindi 1 solo probe/giorno
     # anche con N modelli sulla stessa chiave). NOTTE-SOLO (regola utente
-    # 2026-09-15, dopo il ban IP di llm7.io su scalifai): 1/giorno.
+    # 2026-09-15, dopo il ban IP di llm7.io): 1/giorno.
     cooldown_autoprobe_key_day_max: int = 1
     # QUANDO sondera': "nightly" = SOLO il giro delle 00:00 locali (niente
     # probe scatenati dalle richieste), "request" = vecchio comportamento
@@ -512,7 +512,7 @@ class Policy:
     # cosa scrivere nel campo "model" delle risposte NON-streaming:
     #   upstream (default)   -> nome scritto dal PROVIDER nella sua risposta
     #                           (fallback al nome che noi inviamo se assente)
-    #   deployment           -> unique scelto, es. <prefix>collego-200k__mod__3
+    #   deployment           -> unique scelto, es. <prefix>example-200k__mod__3
     #   requested            -> nome richiesto dal client (compatibilità storica)
     response_model: str = "upstream"
 
@@ -1144,8 +1144,8 @@ class Policy:
     def from_legacy(self, name: str) -> str:
         """Riscrive un nome con prefisso STORICO al prefisso corrente.
 
-        Es. con legacy_prefixes=["vecchio-"]: 'vecchio-collego-32k' ->
-        '<proxy_prefix>collego-32k'. I nomi già col prefisso corrente
+        Es. con legacy_prefixes=["vecchio-"]: 'vecchio-example-32k' ->
+        '<proxy_prefix>example-32k'. I nomi già col prefisso corrente
         passano indenni.
         """
         for lp in self.legacy_prefixes:

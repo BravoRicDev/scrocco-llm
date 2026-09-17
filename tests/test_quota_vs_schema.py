@@ -1,6 +1,6 @@
 """QUOTA (429) vs RIFIUTO DI SCHEMA.
 
-Osservato su mioaruba (2026-09-16 06:17): un 429 di quota GIORNALIERA di
+Osservato in produzione (2026-09-16 06:17): un 429 di quota GIORNALIERA di
 Cloudflare Workers AI
 
     {"errors":[{"message":"AiError: AiError: you have used up your daily free

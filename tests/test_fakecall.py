@@ -69,14 +69,14 @@ class TestMessage:
 
 class TestEscalationGroup:
     def test_go(self):
-        assert is_escalation_group("scrocco-llm-mioaruba-go", "-go", "-fallback")
+        assert is_escalation_group("scrocco-llm-host-a-go", "-go", "-fallback")
 
     def test_fallback(self):
-        assert is_escalation_group("scrocco-llm-mioaruba-fallback",
+        assert is_escalation_group("scrocco-llm-host-a-fallback",
                                    "-go", "-fallback")
 
     def test_normal(self):
-        assert not is_escalation_group("scrocco-llm-mioaruba-200k",
+        assert not is_escalation_group("scrocco-llm-host-a-200k",
                                        "-go", "-fallback")
 
 

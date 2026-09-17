@@ -2,7 +2,7 @@
 """Probe fedele con httpx (il gateway usa httpx, e Cloudflare blocca urllib).
 Riusa _session_headers del forwarder per il flusso x-opencode-session."""
 from __future__ import annotations
-import asyncio, csv, json, sys, time
+import asyncio, csv, json, os, sys, time
 from pathlib import Path
 import httpx
 
@@ -11,7 +11,7 @@ sys.path.insert(0, str(REPO))
 from app.forwarder import _session_headers
 
 CSV = REPO / "var" / "keys_rotation.csv"
-PROFILE_COL = "scrocco-llm-mioaruba"
+PROFILE_COL = os.environ.get("SCROCCO_PROFILE_COL", "scrocco-llm-example")
 ZEN_EP = "https://opencode.ai/zen/v1"
 GO_EP  = "https://opencode.ai/zen/go/v1"
 ZEN_MODEL = "deepseek-v4-flash-free"
@@ -33,7 +33,7 @@ async def probe_key(client, key, api_base, model, tries=2):
     last = None
     for attempt in range(tries):
         dep = {"api_key": key, "api_base": api_base}
-        hdr = _session_headers(dep, profile="mioaruba", client_ip="127.0.0.1")
+        hdr = _session_headers(dep, profile=os.environ.get("SCROCCO_PROFILE", "example"), client_ip="127.0.0.1")
         hdr.update({"Authorization": f"Bearer {key}",
                     "Content-Type": "application/json"})
         body = {"model": model,

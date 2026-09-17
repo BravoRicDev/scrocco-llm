@@ -1,6 +1,6 @@
 """Autoprobe NOTTURNI-only + QUARANTENA ENDPOINT da ban/ToS del provider.
 
-Regola utente (post-ban llm7.io su scalifai): mai probe scatenati dalle
+Regola utente (post-ban llm7.io): mai probe scatenati dalle
 richieste, solo il giro delle 00:00 locali; 1 probe/giorno per CHIAVE; se un
 provider risponde "ip_banned"/"policy_review"/"Terms of Service" l'HOST va in
 quarantena 24h ed e' escluso da TUTTI i gate di eligibilita' (rotazione, warm,

@@ -51,7 +51,7 @@ def test_non_scende_mai_e_non_tocca_pagati(router):
 
 
 def test_coalesce_key_con_profile_none():
-    """Il 500 'NoneType + str' passato trasparente al client su viemmegi."""
+    """Il 500 'NoneType + str' passato trasparente al client (incidente in produzione)."""
     from app.main import _coalesce_key
     k1 = _coalesce_key({"model": "m", "messages": []}, None)
     k2 = _coalesce_key({"model": "m", "messages": []}, "")

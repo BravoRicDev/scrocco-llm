@@ -5,11 +5,11 @@ services:
     env_file: .env
     cap_add:
       - NET_BIND_SERVICE          # node (non-root) puo' bindare la :80
-    # Pubblicato sul bridge wireguard-ui (172.20.0.1) alla porta 9120.
-    # wg-easy fa DNAT: http://10.9.0.111/ (dentro la VPN) -> 172.20.0.1:9120.
-    # Stesso schema di hermes-dashboard (10.9.0.109 -> 172.20.0.1:9119).
+    # Bind configurabile (default: solo loopback). Per esporre il pannello
+    # (es. dietro un reverse-proxy o dentro una VPN) impostare WEB_BIND nel
+    # file .env, es. WEB_BIND=10.0.0.1
     ports:
-      - "172.20.0.1:9120:80"
+      - "${WEB_BIND:-127.0.0.1}:9120:80"
     depends_on:
       db:
         condition: service_healthy
@@ -23,7 +23,7 @@ services:
       retries: 3
 
   db:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     restart: unless-stopped
     volumes:
       - pgdata:/var/lib/postgresql/data

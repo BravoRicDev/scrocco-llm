@@ -31,7 +31,7 @@ class DeploymentFormScreen(ModalScreen[dict | None]):
     def __init__(self, profiles: list[str], dep: dict | None = None,
                  preset_profile: str | None = None):
         super().__init__()
-        self.profiles = profiles or ["collego"]
+        self.profiles = profiles or ["example"]
         self.dep = dep
         self.preset_profile = preset_profile
 

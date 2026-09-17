@@ -89,7 +89,7 @@ tool so agents can drive the whole gateway over JSON-RPC 2.0:
 ```
 POST /admin/mcp/config/call
 {"jsonrpc":"2.0","id":1,"method":"tools/call",
- "params":{"name":"deploy_list","arguments":{"profile":"mioaruba"}}}
+ "params":{"name":"deploy_list","arguments":{"profile":"example"}}}
 ```
 
 Canonical tool names (48): `policy_get`, `policy_patch`, `policy_raw_get`,

@@ -9,7 +9,7 @@ Usato per la prima volta per popolare il primo model_capabilities nella repo
 pronta per l'adozione.
 
 Uso:
-  python3 scripts/discover_capabilities.py [--fix] [--profile collego]
+  python3 scripts/discover_capabilities.py [--fix] [--profile example]
 
 Opzioni:
   --fix     scrive il blocco YAML in var/gateway.yaml, aggiungendo al

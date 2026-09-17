@@ -48,7 +48,7 @@ DATA_HEADER = "data"
 CONTEXT_HEADER = "context"
 MAX_INPUT_HEADER = "max_input"
 # Tetto della dimensione di contesto: un `context` >1000 nel CSV (es. 1049,
-# nato per errore su viemmegi) viene NORMALIZZATO a 1000k in fase di parsing:
+# nato per errore) viene NORMALIZZATO a 1000k in fase di parsing:
 # nessun gruppo -Nk sopra 1000k esiste, e max_input non supera mai 1.000.000.
 MAX_CONTEXT_DIM_K = 1000
 MAX_CONTEXT_INPUT = MAX_CONTEXT_DIM_K * 1000
@@ -874,7 +874,7 @@ class GatewayConfig:
 
     # ------------------------------------------------------------- accessors
     def profile_of_base(self, base_name: str) -> str | None:
-        """'<proxy_prefix>collego' -> 'collego', solo se il profilo esiste."""
+        """'<proxy_prefix>example' -> 'example', solo se il profilo esiste."""
         if not base_name.startswith(self.proxy_prefix):
             return None
         p = base_name[len(self.proxy_prefix):]

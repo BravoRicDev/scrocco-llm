@@ -159,7 +159,7 @@ def clamp_max_tokens(body: dict, dep: dict, hook=None) -> None:
     la classe di 503 piu' stupida ("provider morto" quando in realta' era
     "hai chiesto troppo output").
 
-    RISERVA CEDEVOLE (fix viemmegi 2026-09-15): la riserva NON deve mai
+    RISERVA CEDEVOLE (fix 2026-09-15): la riserva NON deve mai
     affamare l'output. Con ctx all'80% della finestra su un thinking model la
     riserva del 30% portava `room` sotto zero e il clamp a 512: il modello
     spendeva tutto in reasoning e la risposta partiva gia' troncata
@@ -758,7 +758,7 @@ _QUOTA_EXHAUSTED_RE = re.compile(
     # free-models-per-day. Add 10 credits to unlock 1000 free model requests
     # per day","code":429}}. Senza questa firma era un 429 generico -> cooldown
     # 90s e rotazione a vuoto su tutte le chiavi sorelle (osservato su
-    # mioaruba: nemotron-3.5-lightning-free__16 -> __17 e cosi' via).
+    # esempio: nemotron-3.5-lightning-free__16 -> __17 e cosi' via).
     r"|free.models?[ -]?per[ -]?day"
     r"|free model requests per day",
     re.IGNORECASE)
@@ -1252,7 +1252,7 @@ PROVIDER_TRANSIENT_COOLDOWN_S = 60
 # non torna presto -> cooldown lungo, poi si ruota sul successivo.
 PERMISSION_DENIED_COOLDOWN_S = 1800          # 30min
 # BAN/ToS del PROVIDER verso il NOSTRO IP: non e' colpa della singola chiave,
-# e' l'endpoint intero (llm7.io "ip_banned" con 253 hit a raffica su scalifai,
+# e' l'endpoint intero (llm7.io "ip_banned" con 253 hit a raffica su un host,
 # openrouter "policy_review_required"). Se il body contiene una di queste
 # firme, quarantena dell'HOST per 24h (il router la applica a TUTTI i gate di
 # eleggibilita'): nessun deployment su quell'endpoint verra' piu' riprovato,
@@ -1299,7 +1299,7 @@ def maybe_quarantine_ban(router, dep: dict | None, status,
 # 502/503 di un AGGREGATORE che riporta "il provider ha errore a meta'
 # stream": e' l'HOST a essere momentaneamente malato, non la singola chiave.
 # Senza host-cooldown la rotazione brucia una chiave sorella dopo l'altra
-# sullo stesso host (i nemotron tokenrouter di scalifai). Cooldown breve e
+# sullo stesso host (i nemotron tokenrouter di un host). Cooldown breve e
 # configurabile: elastico per un problema transitorio, non una condanna.
 _HOST_TRANSIENT_SIGNATURES = (
     "sent an error mid-stream",
@@ -1363,7 +1363,7 @@ def maybe_account_quota_cooldown(router, dep: dict | None, status,
     up your daily free allocation of ... neurons"): la quota e' dell'ACCOUNT,
     non della singola chiave -> cooldown fino al reset su TUTTE le chiavi
     dell'account. Senza questo la cascata riprova a vuoto ogni ~90s le decine
-    di chiavi sorelle (osservato su mioaruba: 154 chiavi CF bruciate a vuoto).
+    di chiavi sorelle (osservato: 154 chiavi CF bruciate a vuoto).
     Ritorna il numero di deployment messi in cooldown."""
     if not _QUOTA_EXHAUSTED_RE.search(str(detail or "")):
         return 0

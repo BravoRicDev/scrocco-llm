@@ -140,7 +140,7 @@ def _playbook() -> dict:
              "goal": "Feed keys into the gateway (hot-reload, no restart).",
              "how_to": "POST /admin/deployments/bulk with master key auth. "
                        "One object per (model x key): "
-                       '{"profile":"collego","model":"openai/gpt-oss-120b",'
+                       '{"profile":"example","model":"openai/gpt-oss-120b",'
                        '"endpoint":"https://api.groq.com/openai/v1",'
                        '"key":"gsk_...","data":"free","context":128,'
                        '"max_input":8000,"priority":0,"caps":"text"}',

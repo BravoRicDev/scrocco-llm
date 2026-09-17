@@ -23,7 +23,7 @@ import csv, json, os, shutil, sys
 from datetime import datetime
 
 CSV = "var/keys_rotation.csv"
-PROFILE_COL = "scrocco-llm-mioaruba"
+PROFILE_COL = os.environ.get("SCROCCO_PROFILE_COL", "scrocco-llm-example")
 INTAKE = "var/intake.json"
 LLM7_DEAD = ["deepseek-v4-flash", "gpt-oss", "meta-Llama-3.1-8B-Instruct-Turbo"]
 LLM7_PROV = "llm7"

@@ -61,7 +61,7 @@ def test_classify_true(v):
 
 def test_policy_defaults():
     qj = Policy.from_dict({}).qc_json
-    # hold ON by default (post-incidente viemmegi 2026-09-15)
+    # hold ON by default (post-incidente 2026-09-15)
     assert qj.stream_hold_until_finish is True
     assert qj.stream_hold_idle_ms == 120000
     assert qj.stream_hold_max_buffer_bytes == 50 * 1024 * 1024

@@ -5975,7 +5975,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
     # `seconds` (default 24h): nessun deployment su quell'host e' eleggibile
     # (rotazione, warm, canary, risvegli, ultima spiaggia) e la quarantena
     # SCDE da sola, senza ri-provare a martellate (i 253 hit llm7.io di
-    # scalifai nascevano proprio dal bruciare una chiave dopo l'altra).
+    # nascevano proprio dal bruciare una chiave dopo l'altra).
     def _ep_quar(self) -> dict:
         d = getattr(self, "_endpoint_quarantine", None)
         if d is None:

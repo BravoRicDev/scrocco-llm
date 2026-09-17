@@ -20,7 +20,7 @@ import sys
 from datetime import datetime
 
 CSV = "var/keys_rotation.csv"
-PROFILE_COL = "scrocco-llm-mioaruba"
+PROFILE_COL = os.environ.get("SCROCCO_PROFILE_COL", "scrocco-llm-example")
 PROVIDER = "cloudflare"
 
 # (modello, context_k, context_tokens, caps)
