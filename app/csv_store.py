@@ -29,12 +29,17 @@ from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      PRIORITY_HEADER, CAPS_HEADER, TOOL_REPAIR_HEADER,
                      MEDIA_DEFER_HEADER, ENABLED_HEADER,
                      THINKING_REPLAY_HEADER, STRIP_REASONING_HEADER,
-                     NO_THINKING_HEADER, CONTENT_STRING_HEADER, GatewayConfig)
+                     NO_THINKING_HEADER, CONTENT_STRING_HEADER,
+                     EFFORT_CAPABLE_HEADER, INTELLIGENCE_HEADER,
+                     MODEL_PREFERENCE_HEADER, ORDER_HEADER,
+                     HOLD_UNTIL_HEADER, API_STYLE_HEADER, GatewayConfig)
+from .protocols import VALID_STYLES
 
 # flag booleani "sì/true/1" che l'API e i writer automatici scrivono come
 # "true"/"false" (vuoto = default della colonna).
 BOOL_FLAG_FIELDS = ("media_defer", "thinking_replay", "strip_reasoning",
-                    "no_thinking", "content_string")
+                    "no_thinking", "content_string",
+                    "effort_capable", "hold_until_finish")
 
 # campi gestiti dall'API (il resto delle colonne passa trasparente)
 PAYLOAD_FIELDS = {
@@ -52,6 +57,12 @@ PAYLOAD_FIELDS = {
     "no_thinking": NO_THINKING_HEADER,
     "content_string": CONTENT_STRING_HEADER,
     "enabled": ENABLED_HEADER,
+    "effort_capable": EFFORT_CAPABLE_HEADER,
+    "intelligence_score": INTELLIGENCE_HEADER,
+    "model_preference": MODEL_PREFERENCE_HEADER,
+    "order": ORDER_HEADER,
+    "hold_until_finish": HOLD_UNTIL_HEADER,
+    "api_style": API_STYLE_HEADER,
 }
 
 # token ammessi nella colonna caps (speculare a ROUTING_CAPS + text)
@@ -242,13 +253,20 @@ def apply_payload(row: dict, payload: dict, prefix: str,
     if "key" in payload and (not isinstance(payload["key"], str)
                              or len(payload["key"].strip()) < 8):
         raise CsvStoreError("'key' deve essere una stringa di almeno 8 caratteri")
-    for field_name in ("context", "max_input", "priority"):
+    for field_name in ("context", "max_input", "priority", "order",
+                       "model_preference", "intelligence_score"):
         if field_name in payload and payload[field_name] is not None:
             try:
                 int(payload[field_name])
             except (TypeError, ValueError):
                 raise CsvStoreError(
                     f"'{field_name}' deve essere un intero") from None
+    if "api_style" in payload and payload["api_style"] is not None:
+        _st = str(payload["api_style"]).strip().lower()
+        if _st and _st not in VALID_STYLES:
+            raise CsvStoreError(
+                f"'api_style' non valido: {payload['api_style']!r} "
+                f"(ammessi: {', '.join(VALID_STYLES)})")
     if "endpoint" in payload and not str(payload["endpoint"] or "").strip():
         raise CsvStoreError("'endpoint' non valido")
     if "modello" in payload and not str(payload["modello"] or "").strip():
@@ -267,6 +285,9 @@ def apply_payload(row: dict, payload: dict, prefix: str,
         if payload_key in payload:
             if payload_key == "caps":
                 row[header_name] = validate_caps(payload["caps"])
+                continue
+            if payload_key == "api_style":
+                row[header_name] = str(payload["api_style"] or "").strip().lower()
                 continue
             if payload_key in BOOL_FLAG_FIELDS:
                 v = payload[payload_key]
