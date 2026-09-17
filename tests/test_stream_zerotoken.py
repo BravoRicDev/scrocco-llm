@@ -16,32 +16,21 @@ import pytest
 from fastapi.responses import JSONResponse, StreamingResponse
 
 
-# Regressione nota (backend, non test): dalla commit `be1ade2`
-# ("fix(maxtok+watchdog): clamp con riserva cedevole e floor 4096 ...") la
-# troncatura auto-inflitta fa RUOTARE la catena invece di rispondere 503 subito,
-# rompendo la semantica decisa in `9b9d21f`. Marcati xfail(strict=True) finche'
-# non viene ripristinato il comportamento: quando il fix arrivera', un XPASS
-# fara' fallire la CI ricordando di rimuovere il marker.
-_REGRESSION_BE1ADE2 = pytest.mark.xfail(
-    reason="regressione be1ade2 (maxtok/watchdog): la troncatura auto-inflitta "
-           "ruota la catena invece di 503 diretto",
-    strict=True,
-)
-
-
 @pytest.fixture()
 def M():
     import app.main as _M
     qj = _M.router.policy.qc_json
     qs = _M.router.policy.qc_sanity
     snap = (qj.stream_first_content_ms, qj.stream_total_deadline_ms,
-            qj.stream_commit_include_reasoning, qs.rotate_on_length_empty,
+            qj.stream_commit_include_reasoning, qj.stream_hold_until_finish,
+            qs.rotate_on_length_empty,
             qj.stream_parachute_no_timeout)
     cooldown_keys = set(_M.router._cooldown)
     groups_keys = set(_M.config.groups)
     yield _M
     (qj.stream_first_content_ms, qj.stream_total_deadline_ms,
-     qj.stream_commit_include_reasoning, qs.rotate_on_length_empty,
+     qj.stream_commit_include_reasoning, qj.stream_hold_until_finish,
+     qs.rotate_on_length_empty,
      qj.stream_parachute_no_timeout) = snap
     for k in list(_M.router._cooldown):
         if k not in cooldown_keys:
@@ -80,11 +69,12 @@ def _a_dep(M):
 
 
 def _set(M, first_ms=20000, deadline_ms=90000, incl_reason=False,
-         rotate_length=False):
+         rotate_length=False, hold=True):
     qj = M.router.policy.qc_json
     qj.stream_first_content_ms = first_ms
     qj.stream_total_deadline_ms = deadline_ms
     qj.stream_commit_include_reasoning = incl_reason
+    qj.stream_hold_until_finish = hold
     M.router.policy.qc_sanity.rotate_on_length_empty = rotate_length
 
 
@@ -271,10 +261,11 @@ def test_e2e_empty_stream_no_alternative_returns_503(M, monkeypatch):
     assert resp.headers.get("retry-after") == "2"
 
 
-@_REGRESSION_BE1ADE2
-def test_e2e_length_empty_returns_503_no_chain_burn(M, monkeypatch):
-    """finish_reason=length + zero answer + rotate_on_length_empty=False ->
-    503 SUBITO, senza bruciare la catena (nessuna alternativa provata)."""
+def test_e2e_length_empty_rotates_until_exhausted(M, monkeypatch):
+    """finish_reason=length + zero answer (con rotate_on_length_empty=False):
+    la troncatura auto-inflitta NON viene mai consegnata al client; si prova
+    ogni alternativa disponibile e solo a catena esaurita si risponde 503
+    retryable (semantica decisa: 503 al client solo se non c'e' nulla altro)."""
     _set(M, first_ms=2000, rotate_length=False)
     dep = _a_dep(M)
     seen = []
@@ -293,14 +284,14 @@ def test_e2e_length_empty_returns_503_no_chain_burn(M, monkeypatch):
         return await M._stream_with_fallback("test", dep, payload, scope="chain")
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
-    assert len(seen) == 1                       # un solo deployment interpellato
+    assert len(seen) >= 2                        # ha provato piu' alternative
     assert dep["unique"] not in M.router._cooldown   # length-empty non punisce
 
 
-@_REGRESSION_BE1ADE2
-def test_e2e_reasoning_then_finish_no_answer_returns_503(M, monkeypatch):
-    """Modello che RAGIONA poi CHIUDE con finish_reason ma senza risposta:
-    ha completato, non e' rotto -> 503 diretto, un tentativo, no cooldown."""
+def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypatch):
+    """Modello che RAGIONA poi CHIUDE senza risposta: nessuna alternativa puo'
+    produrre una risposta, ma si prova comunque fino a esaurimento -> 503
+    (la mancanza di risposta non e' un troncamento: nessuna penale)."""
     _set(M, first_ms=2000)
     dep = _a_dep(M)
     M.router._cooldown.pop(dep["unique"], None)
@@ -322,7 +313,7 @@ def test_e2e_reasoning_then_finish_no_answer_returns_503(M, monkeypatch):
         return await M._stream_with_fallback("test", dep, payload, scope="chain")
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
-    assert len(seen) == 1
+    assert len(seen) >= 2                        # ha provato piu' alternative
     assert dep["unique"] not in M.router._cooldown
 
 
@@ -354,15 +345,16 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
     assert dep["unique"] in M.router._cooldown            # primo penalizzato
 
 
-@_REGRESSION_BE1ADE2
 def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
     """Contenuto -> commit al client -> troncamento: nessun artefatto verso il
-    client, ma il deployment va in cooldown."""
-    _set(M, first_ms=2000)
+    client, ma il deployment va in cooldown. Con hold disattivato (si consegna
+    il primo contenuto prima della chiusura pulita) per esercitare il percorso
+    post-commit."""
+    _set(M, first_ms=2000, hold=False)
     dep = _a_dep(M)
     M.router._cooldown.pop(dep["unique"], None)
     chunks = [
-        b'data: {"choices":[{"delta":{"content":"meta"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"' + b"m" * 60 + b'"}}]}\n\n',
         # niente [DONE], niente finish_reason -> troncato
     ]
     monkeypatch.setattr(M.forwarder, "stream_response",
@@ -372,9 +364,10 @@ def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
         resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        assert isinstance(resp, StreamingResponse)
         return await _drain(resp)
     out = asyncio.run(_run())
-    assert b"meta" in out and b'"error"' not in out
+    assert b"m" * 60 in out and b'"error"' not in out
     assert dep["unique"] in M.router._cooldown
 
 
@@ -481,12 +474,12 @@ class _FakeRequest:
         return _t.monotonic() - self._start > self._t
 
 
-@_REGRESSION_BE1ADE2
 def test_client_disconnect_aborts_upstream_and_no_cooldown(M, monkeypatch):
     """Se il client si disconnette a meta' stream, il task dello streaming
     viene cancellato subito (niente token sprecati) e il deployment NON finisce
-    in cooldown (non e' colpa sua)."""
-    _set(M, first_ms=100)
+    in cooldown (non e' colpa sua). hold disattivato per far partire subito il
+    contenuto verso il client."""
+    _set(M, first_ms=100, hold=False)
     dep = _a_dep(M)
     M.router._cooldown.pop(dep["unique"], None)
     # primo chunk grande (commit immediato, >= min_chars), poi 50 chunk lenti
