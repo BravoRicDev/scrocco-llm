@@ -1,0 +1,56 @@
+# scrocco-llm · overlay STT locale (Speaches)
+#
+#   docker compose -f docker-compose.yml -f docker-compose.stt.yml up -d
+#
+# Aggiunge l'API OpenAI-compatible per /v1/audio/transcriptions e
+# /v1/audio/translations. Il gateway lo raggiunge come http://speaches:8000/v1
+# sulla rete compose interna.
+services:
+  scrocco-llm:
+    depends_on:
+      speaches:
+        condition: service_healthy
+
+  # Speaches (ex faster-whisper-server).
+  # Modello "base" pre-caricato allo startup e mai scaricato (stt_model_ttl=-1).
+  # Altri modelli whisper vengono caricati ON-DEMAND se richiesti nel payload.
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: speaches
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      LOG_LEVEL: info
+      ENABLE_UI: "false"           # niente gradio: solo API
+      STT_MODEL_TTL: "-1"          # il modello resta caricato (prima risposta veloce)
+      PRELOAD_MODELS: '["Systran/faster-whisper-base"]'
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+    ports:
+      - "127.0.0.1:8009:8000"      # debug diretto dal host (loopback-only)
+    volumes:
+      - speaches_models:/root/.cache/huggingface   # cache modelli persistente
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;r=urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5);raise SystemExit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s            # tempo di download/avvio modello al primo giro
+      retries: 3
+
+  # Scarica i modelli STT/TTS allo startup se non c'è già nel volume (idempotente).
+  # NOTA: l'env PRELOAD_MODELS di questa versione immagine non è affidabile ->
+  # usiamo l'API di gestione modelli del server (POST /v1/models/{model_id}).
+  speaches-init:
+    image: curlimages/curl:8.10.1
+    container_name: speaches-init
+    depends_on:
+      speaches:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - 'curl -sfb 300 -X POST http://speaches:8000/v1/models/Systran/faster-whisper-base && echo " [init] whisper-base ok"; curl -sfb 300 -X POST http://speaches:8000/v1/models/speaches-ai/piper-it_IT-paola-medium && echo " [init] piper-it-paola ok"'
+
+volumes:
+  speaches_models:

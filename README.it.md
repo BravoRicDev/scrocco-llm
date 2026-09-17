@@ -5,7 +5,7 @@
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-brightgreen.svg)](https://unlicense.org/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-compose%20up-blue.svg)](#in-cinque-comandi)
-[![Tests](https://img.shields.io/badge/tests-1081%20passing-brightgreen.svg)](#test)
+[![Tests](https://img.shields.io/badge/tests-1779%20passing-brightgreen.svg)](#test)
 
 **Un gateway LLM che mette in pool decine di chiavi free e a pagamento, sceglie
 il modello più piccolo che regge il contesto, e non spreca chiamate inutili.**
@@ -170,8 +170,9 @@ Mi sembra corretto dirlo prima, non dopo:
 
 ```bash
 git clone https://github.com/BravoRicDev/scrocco-llm && cd scrocco-llm
+cp .env.gateway.example .env.gateway                      # OBBLIGATORIO: poi cambia la master key
 cp var/keys_rotation.csv.example var/keys_rotation.csv
-docker compose up -d
+docker compose up -d                                      # solo gateway (profilo minimale)
 curl -s localhost:4001/bootstrap        # playbook guidato, in inglese
 # ...registri le chiavi sui provider, le inserisci via API...
 curl -s localhost:4001/v1/chat/completions \

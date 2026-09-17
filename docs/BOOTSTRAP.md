@@ -8,13 +8,17 @@ This file is the static reference.
 
 ```bash
 git clone <repo> && cd scrocco-llm
+cp .env.gateway.example .env.gateway                     # required
 cp var/keys_rotation.csv.example var/keys_rotation.csv   # if absent
-docker compose up -d
+docker compose up -d                                     # gateway only (minimal profile)
 curl -s localhost:4001/healthz          # -> {"status":"ok",...}
 ```
 
 Set a real master key first: edit `.env.gateway`
 (`GATEWAY_MASTER_KEY=sk-master-...`) — never ship the default.
+Optional profiles: add local STT with
+`docker compose -f docker-compose.yml -f docker-compose.stt.yml up -d`, or the
+full stack with `docker compose -f docker-compose.full.yml up -d`.
 
 ## Phase 2 · Insert keys
 

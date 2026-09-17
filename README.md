@@ -3,7 +3,7 @@
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-brightgreen.svg)](https://unlicense.org/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-compose%20up-blue.svg)](#quickstart)
-[![Tests](https://img.shields.io/badge/tests-421%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1779%20passing-brightgreen.svg)](#development)
 
 > 🇮🇹 **Leggi in italiano** — [README.it.md](README.it.md)
 
@@ -14,7 +14,8 @@ endpoint with context-aware routing, capability groups and key rotation.
 Zero database. One container. Port `4001`.
 
 > **Give this repo to any AI agent** and it can set the service up alone:
-> `git clone` → `docker compose up -d` → `curl localhost:4001/bootstrap`.
+> `git clone` → `cp .env.gateway.example .env.gateway` →
+> `docker compose up -d` → `curl localhost:4001/bootstrap`.
 > See [Agent setup](#agent-setup-self-bootstrap).
 
 ---
@@ -431,10 +432,15 @@ individual account limits instead of dying on the first 429.
 
 ```bash
 git clone https://github.com/BravoRicDev/scrocco-llm && cd scrocco-llm
-cp var/keys_rotation.csv.example var/keys_rotation.csv   # if missing
-docker compose up -d
-curl -s localhost:4001/healthz | head -c 60              # -> {"status":"ok"...
+cp .env.gateway.example .env.gateway                      # REQUIRED: then set your own master key
+cp var/keys_rotation.csv.example var/keys_rotation.csv    # if missing
+docker compose up -d                                      # gateway only (minimal profile)
+curl -s localhost:4001/healthz | head -c 60               # -> {"status":"ok"...
 ```
+
+> `docker compose up -d` starts **only the gateway** — no UI, no Postgres, no
+> speech-to-text. Replace `GATEWAY_MASTER_KEY` in `.env.gateway` with a random
+> secret before exposing the port. Add STT/Web with the profiles below.
 
 Then follow the built-in playbook:
 
@@ -443,6 +449,25 @@ curl -s localhost:4001/bootstrap     # phased setup guide (public, EN)
 ```
 
 Run without Docker: `./run.sh` (venv + `127.0.0.1:4001`).
+
+### Deployment profiles
+
+Compose is modular: choose the profile by which files you pass.
+
+| Profile | Command | Services |
+|---|---|---|
+| Minimal (default) | `docker compose up -d` | `scrocco-llm` |
+| + local STT | `docker compose -f docker-compose.yml -f docker-compose.stt.yml up -d` | `+ speaches`, `speaches-init` |
+| + Web UI | `docker compose -f docker-compose.yml -f docker-compose.web.yml up -d` | `+ scrocco-web`, `db` |
+| Full | `docker compose -f docker-compose.full.yml up -d` | all of the above |
+
+`docker-compose.full.yml` simply `include`s the three files (equivalent to
+`COMPOSE_FILE=docker-compose.yml:docker-compose.stt.yml:docker-compose.web.yml`).
+The STT profile serves OpenAI-compatible `/v1/audio/*` from a local Speaches
+container; the Web profile adds the admin panel and needs `web/.env`
+(`cp web/.env.example web/.env`) plus `DB_PASSWORD` in the project `.env`
+(`scrocco-web_pgdata` is an **external** volume: create it once with
+`docker volume create scrocco-web_pgdata`).
 
 ### Minimal configuration
 
@@ -721,7 +746,7 @@ via environment variables.
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 pip install -r requirements-tui.txt      # opzionale: TUI Textual (./scrocco.sh)
-python3 -m pytest tests/ -q          # full suite (1532 passing)
+python3 -m pytest tests/ -q          # full suite (1779 passing, 1 skipped)
 ```
 
 CI runs the suite and builds the image on push

@@ -1,0 +1,15 @@
+# scrocco-llm · stack COMPLETO (gateway + STT locale + Web UI + Postgres)
+#
+#   docker compose -f docker-compose.full.yml up -d
+#
+# È la composizione dei tre profili (minimale + STT + Web) tramite `include:`.
+# Equivalente a:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.stt.yml:docker-compose.web.yml docker compose up -d
+#
+# Richiede, oltre a .env.gateway:
+#   - web/.env  (cp web/.env.example web/.env)
+#   - DB_PASSWORD nel file .env del progetto (root)
+include:
+  - docker-compose.yml
+  - docker-compose.stt.yml
+  - docker-compose.web.yml

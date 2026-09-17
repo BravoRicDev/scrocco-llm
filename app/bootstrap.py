@@ -71,8 +71,8 @@ PROVIDERS = [
     {"id": "local-stt", "signup_url": None,
      "api_base": "http://speaches:8000/v1",
      "key_prefix": "-", "data_hint": "free",
-     "notes": "docker-compose ships a speaches sidecar (whisper/piper): "
-              "STT/TTS without any external account."},
+     "notes": "enable the STT compose profile (docker-compose.stt.yml) for "
+              "a local speaches sidecar: STT/TTS without any external account."},
 ]
 
 CAPS = ["text", "vision", "image_gen", "video_gen", "tts", "stt"]

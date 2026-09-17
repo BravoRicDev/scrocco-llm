@@ -74,22 +74,33 @@ jobs:
           # .env.gateway con chiave master di test
           cp .env.gateway.example .env.gateway
           sed -i 's/sk-master-CHANGE-ME-xxxxxxxxxxxxxxxx/sk-test-master-key-ci-only/' .env.gateway
-          
+
           # var/ con file example (già presenti nel repo)
           mkdir -p var
           cp var/gateway.yaml.example var/gateway.yaml
           cp var/keys_rotation.csv.example var/keys_rotation.csv
 
-          # compose valida gli env_file di TUTTI i servizi: senza web/.env
-          # fallisce anche per il solo --no-deps scrocco-llm
+          # web/.env serve solo al profilo Web (validazione/avvio dell'overlay)
           cp web/.env.example web/.env
+
+      - name: Validate all compose profiles
+        env:
+          DB_PASSWORD: ci-test-db-password
+        run: |
+          # Il profilo di default (minimale) deve essere valido da solo...
+          docker compose -f docker-compose.yml config -q
+          # ...e gli overlay devono comporsi correttamente.
+          docker compose -f docker-compose.yml -f docker-compose.stt.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.web.yml config -q
+          docker compose -f docker-compose.full.yml config -q
+          echo "All compose profiles are valid"
 
       - name: Build Docker image with docker compose
         run: docker compose build
 
-      - name: Start gateway (no sidecar STT - i test API non lo richiedono)
+      - name: Start gateway (minimal profile - no STT/Web sidecars)
         run: |
-          docker compose up -d --no-deps scrocco-llm
+          docker compose up -d scrocco-llm
           docker compose ps
 
       - name: Wait for health check
