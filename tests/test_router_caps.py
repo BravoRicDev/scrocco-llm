@@ -68,17 +68,19 @@ def test_route_vision_picks_capable_group(router):
     assert got == "scrocco-llm-test-128k"
 
 
-def test_route_video_falls_back_to_fallback_group(router):
+def test_route_no_capable_dim_goes_to_ladder_not_fallback(router):
+    # Nessun dim capace per "video": NON si salta a -go/-fallback, si prosegue
+    # la scala dal dim (regola: -go solo esplicito o a fine scala).
     got = router.resolve_group_for_request("scrocco-llm-test", MSG_VISION,
                                            None, frozenset({"video"}))
-    assert got == "scrocco-llm-test-fallback"
+    assert got == "scrocco-llm-test-128k"
 
 
-def test_route_impossible_returns_none(router):
+def test_route_impossible_stays_on_ladder(router):
     msgs = [{"role": "user", "content": [{"type": "input_audio"}]}]
     got = router.resolve_group_for_request("scrocco-llm-test", msgs, None,
                                            frozenset({"audio"}))
-    assert got is None
+    assert got == "scrocco-llm-test-128k"       # non None, non -go/-fallback
 
 
 def test_pick_deployment_never_returns_incapable(router):
@@ -117,12 +119,21 @@ def test_explicit_incapable_passthrough_with_warning(router, caplog):
 def test_sticky_bypassed_when_unfit(router):
     sid = "sess-1"
     router.sticky_set(sid, "scrocco-llm-test-128k")
-    # sticky group NON ha audio -> bypass: cerca altrove (fallback group no audio
-    # nemmeno lui) => None; ma se il gruppo sticky fosse capace verrebbe usato.
+    # sticky group NON ha audio -> bypass; si resta sulla scala (dim),
+    # mai salto diretto a -go/-fallback.
     msgs = [{"role": "user", "content": [{"type": "input_audio"}]}]
     got = router.resolve_group_for_request("scrocco-llm-test", msgs, sid,
                                            frozenset({"audio"}))
-    assert got is None
+    assert got == "scrocco-llm-test-128k"
+
+
+def test_renewal_sticky_never_used_directly(router):
+    sid = "sess-go"
+    router.sticky_set(sid, "scrocco-llm-test-go")      # bucket renewal salvato
+    got = router.resolve_group_for_request("scrocco-llm-test", MSG_TEXT, sid,
+                                           frozenset({"text"}))
+    assert got == "scrocco-llm-test-128k"              # ignora lo sticky -go
+    assert not got.endswith("-go") and not got.endswith("-fallback")
 
 
 def test_sticky_used_when_fit(router):
@@ -149,11 +160,12 @@ def test_routing_disabled_legacy_behavior(router):
     assert got == "scrocco-llm-test-128k"
 
 
-def test_route_tts_falls_back_to_capable_group(router):
-    # nessun modello tts nei gruppi dim -> catena -fallback -> None (nessuno dichiara tts)
+def test_route_tts_stays_on_ladder(router):
+    # nessun modello tts nei gruppi dim: NON si salta a -go/-fallback,
+    # si prosegue la scala dal dim (la capacita' manca ovunque qui).
     got = router.resolve_group_for_request("scrocco-llm-test", [], None,
                                            frozenset({"tts"}))
-    assert got is None
+    assert got == "scrocco-llm-test-128k"
 
 
 def test_chat_implicit_text_excludes_stt_only(router):

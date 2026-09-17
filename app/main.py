@@ -1824,8 +1824,11 @@ async def chat_completions(request: Request, response: Response):
     autoprobe.maybe_spawn(router, forwarder, profile)
 
     # sticky session SOLO dal routing automatico (nome base): le richieste
-    # esplicite (-Nk/-go/-fallback/__univoco) non leggono né scrivono sticky
-    if session_id and not router.is_explicit(model):
+    # esplicite (-Nk/-go/-fallback/__univoco) non leggono né scrivono sticky.
+    # I bucket renewal (-go/-fallback) NON vengono mai salvati: -go si
+    # raggiunge solo esplicitamente o a fine scala (free -> zen -> -go).
+    if session_id and not router.is_explicit(model) \
+            and not router._is_renewal_bucket(group_or_explicit):
         router.sticky_set(session_id, group_or_explicit)
 
     # iniezione identità + modello univoco nel payload upstream

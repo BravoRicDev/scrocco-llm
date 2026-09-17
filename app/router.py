@@ -4703,16 +4703,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # ---- filtro dinamico (percorso testo / degrade) -------------------
         if need:
             capable_dims = self._capable_dims(pname, need)
-            if not capable_dims:
-                # prova -go e -fallback del profilo
-                for suf in (cfg.go_suffix, cfg.fallback_suffix):
-                    g = f"{cfg.proxy_prefix}{pname}{suf}"
-                    if g in cfg.groups and self._any_capable_in_group(g, need):
-                        log.info("[caps] nessun gruppo dim capace per %s -> uso %s", need, g)
-                        self._note_session_group(session_id, g)
-                        return g
-                return None  # nessun gruppo capace -> 400 in main
-            dims = capable_dims
+            if capable_dims:
+                dims = capable_dims
+            else:
+                # Nessun dim capace per il need: NON si salta a -go/-fallback
+                # (regola: -go solo se richiesto esplicito o a fine scala).
+                # Si prosegue sulla scala completa: e' piu' probabile trovare
+                # un deployment capace tra i free che tra i -go.
+                log.info("[caps] nessun gruppo dim capace per %s: proseguo la "
+                         "scala (free -> zen -> -go)", sorted(need))
 
         # hot-word SOLO percorso testo (i media seguono il gruppo dedicato)
         if not media_need:
@@ -4740,7 +4739,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             # resterebbe incollata al tier piccolo.
             if session_id:
                 sticky = self.sticky_get(session_id)
-                if sticky and (not need or self._any_capable_in_group(sticky, need)):
+                if (sticky and not self._is_renewal_bucket(sticky)
+                        and (not need
+                             or self._any_capable_in_group(sticky, need))):
                     m_dim = re.search(r"-(\d+)k$", sticky)
                     fits = (ctx is None or m_dim is None
                             or ctx <= int(m_dim.group(1)) * 1000)

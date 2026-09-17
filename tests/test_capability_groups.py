@@ -128,11 +128,11 @@ def test_dispatch_rarest_first_multi_cap(router_on):
 
 def test_dispatch_missing_group_dynamic_degrade(router_on):
     audio_msgs = [{"role": "user", "content": [{"type": "input_audio"}]}]
-    # audio senza gruppo -> on_missing=dynamic -> filtro dinamico legacy:
-    # nessun deployment dichiara audio -> None (400 a monte)
+    # audio senza gruppo -> on_missing=dynamic: NON si salta a -go/-fallback,
+    # si prosegue la scala dal dim (regola: -go solo esplicito o a fine scala).
     got = router_on.resolve_group_for_request(
         "scrocco-llm-cg", audio_msgs, None, frozenset({"audio"}))
-    assert got is None
+    assert got == "scrocco-llm-cg-128k"
 
 
 def test_dispatch_missing_group_error_mode():
