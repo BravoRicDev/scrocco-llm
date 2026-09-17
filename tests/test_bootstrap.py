@@ -13,6 +13,10 @@ def client(monkeypatch, tmp_path):
     csv.write_text("commento,modello,provider,endpoint,data,context,"
                    "max_input,priority,scrocco-llm-test,caps\n")
     import app.main as m
+    # Il master key e' fissato alla costruzione di AuthManager (import-time):
+    # impostare solo os.environ qui e' troppo tardi e rende i test
+    # order-dependent. Forziamo il valore sull'istanza usata da admin._gw().
+    monkeypatch.setattr(m.authn, "master_key", "test-master-not-default")
     orig_csv_path = m.config.csv_path
     orig_var_dir = getattr(m, "VAR_DIR", None)
     monkeypatch.setattr(m, "CSV_PATH", str(csv))
