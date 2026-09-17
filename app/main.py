@@ -81,6 +81,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         _QUOTA_RESET_RE,
                         set_retry_after_floors,
                         set_stream_stall_sec,
+                        set_strip_client_fields,
                         set_adaptive_timeout, set_latency_lookup,
                         set_reasoning_reserve,
                         apply_cooldown_policy,
@@ -212,6 +213,7 @@ forwarder = Forwarder(keepalive_pool=policy.http_keepalive_pool)
 set_retry_after_floors(policy.retry_after_min_sec,
                        policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
+set_strip_client_fields(policy.strip_client_fields)
 set_latency_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx))
 # F21: lo stall guard si calibra sul TTFT per bucket e sul moltiplicatore/
 # tetto di policy; F20: divisore+immagini condivisi per le stime "senza router".
@@ -753,6 +755,7 @@ async def _watcher(interval: float) -> None:
                     set_retry_after_floors(fresh.retry_after_min_sec,
                                            fresh.retry_after_floor_by_provider)
                     set_stream_stall_sec(fresh.stream_stall_sec)
+                    set_strip_client_fields(fresh.strip_client_fields)
                     set_ttft_lookup(
                         lambda u, ctx=None: router.bucket_latency_ms(
                             u, ctx, "ttft"))

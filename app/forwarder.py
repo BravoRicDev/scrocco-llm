@@ -1071,6 +1071,40 @@ def apply_content_string(body: dict, dep: dict) -> int:
     return n
 
 
+# Campi NON-OpenAI che alcuni client aggiungono al body (es. le opzioni degli
+# agenti opencode come `fallback_models`): i provider severi (Google via
+# /v1beta/openai) li rifiutano con 400 "Unknown name ...". Vengono RIMOSSI dal
+# body prima dell'invio a monte. Denylist configurabile via policy.
+_STRIP_CLIENT_FIELDS: tuple[str, ...] = ("fallback_models",)
+
+
+def set_strip_client_fields(fields=None) -> None:
+    """Aggiorna la denylist dei campi client-only da rimuovere (da policy)."""
+    global _STRIP_CLIENT_FIELDS
+    if fields is None:
+        return
+    try:
+        _STRIP_CLIENT_FIELDS = tuple(
+            str(f).strip() for f in fields if str(f).strip())
+    except TypeError:
+        return
+
+
+def strip_client_fields(body: dict, fields=None) -> int:
+    """Rimuove dal body i campi client-only non standard (top-level).
+    Ritorna il numero di campi rimossi; no-op su input non-dict."""
+    if not isinstance(body, dict):
+        return 0
+    names = _STRIP_CLIENT_FIELDS if fields is None else tuple(fields)
+    n = 0
+    for f in names:
+        if f in body:
+            body.pop(f, None)
+            n += 1
+            metrics.inc("nx_client_fields_stripped_total", (f,))
+    return n
+
+
 def strip_reasoning_fields(body: dict) -> int:
     """Rimuove i campi reasoning che il provider RIFIUTA (es. Cloudflare
     "reasoning_content is unsupported"): il contenuto del modello resta
@@ -1207,7 +1241,7 @@ def classify_error_class(status, detail: str | None = None) -> str:
         return "quota"
     if tool_combo_signature(d):
         return "tool_combo"
-    if _PAYLOAD_SCHEMA_RE.search(d):
+    if _PAYLOAD_SCHEMA_RE.search(d) or _UNKNOWN_FIELD_RE.search(d):
         return "payload_schema"
     if media_reject_signature(d):
         return "media"
@@ -2401,6 +2435,15 @@ _IMAGES_PAYLOAD_UNSUPPORTED_RE = re.compile(
     r"|no such endpoint|method not allowed|unsupported media type",
     re.IGNORECASE)
 
+# Firma STRETTA "campo/argomento sconosciuto al provider" (tipico dei campi
+# client-only come `fallback_models`): il 400 e' colpa della RICHIESTA, non del
+# deployment -> ruota SENZA cooldown (vedi il ramo schema-payload).
+_UNKNOWN_FIELD_RE = re.compile(
+    r"unknown name|unknown field|cannot find field|invalid json payload"
+    r"|unrecognized|unexpected (?:field|property|parameter)"
+    r"|additional propert|unknown parameter",
+    re.IGNORECASE)
+
 # Rifiuti di CONTENUTO/policy: la richiesta e' rifiutata per policy, NON perche'
 # lo schema sia inadatto. Ritentarla via chat fallirebbe identicamente e
 # addosserebbe al deployment un errore del client -> vanno ESCLUSI.
@@ -2619,6 +2662,9 @@ truncation_hook=None,
         """
         body = dict(payload)
         body["model"] = dep["model"]
+        if strip_client_fields(body):
+            log.info("[sanitize] %s: rimossi campi client non standard",
+                     dep.get("unique", "?"))
         _cs = apply_content_string(body, dep)
         if _cs:
             metrics.inc("nx_content_string_total", ("applied",))
@@ -2859,6 +2905,9 @@ truncation_hook=None,
         """Richiesta NON streaming: risposta JSON completa."""
         body = dict(payload)
         body["model"] = dep["model"]
+        if strip_client_fields(body):
+            log.info("[sanitize] %s: rimossi campi client non standard",
+                     dep.get("unique", "?"))
         # stream_options vale solo in streaming: alcuni provider (opencode
         # zen / Console Go) rifiutano con 400 "stream_options should be set
         # along with stream = true" se arriva su una richiesta non-stream.
@@ -4206,7 +4255,8 @@ truncation_hook=None,
                         dep = nxt
                         continue
                     if _PAYLOAD_SCHEMA_RE.search(detail) or \
-                            tool_combo_signature(detail):
+                            tool_combo_signature(detail) or \
+                            _UNKNOWN_FIELD_RE.search(detail):
                         # CF Workers AI & co.: rifiuto di SCHEMA della richiesta
                         # (content array vs string, messaggio senza content).
                         # Google/Gemini 3 (anche via proxy): rifiuto della

@@ -186,6 +186,11 @@ class Policy:
     # e i nomi richiesti dai client vengono riscritti al prefisso corrente.
     # Vuoto = si accettano SOLO i nomi col prefisso attuale.
     legacy_prefixes: list[str] = field(default_factory=list)
+    # Campi client-only NON standard (es. le opzioni degli agenti opencode come
+    # `fallback_models`) rimossi dal body prima dell'invio a monte: i provider
+    # severi (Google via /v1beta/openai) li rifiutano con 400 "Unknown name".
+    strip_client_fields: list[str] = field(
+        default_factory=lambda: ["fallback_models"])
 
     estimate_divisor: int = 4
     # Stima token adattiva (densita' per-blocco). shadow=True calcola e logga
@@ -1682,6 +1687,15 @@ class Policy:
                 raise ValueError(
                     "legacy_prefixes deve essere una lista di stringhe non vuote")
             p.legacy_prefixes = lp
+
+        if "strip_client_fields" in raw:
+            scf = raw["strip_client_fields"]
+            if not isinstance(scf, list) or \
+                    not all(isinstance(x, str) and x.strip() for x in scf):
+                raise ValueError(
+                    "strip_client_fields deve essere una lista di stringhe "
+                    "non vuote")
+            p.strip_client_fields = [x.strip() for x in scf]
 
         if "hotwords" in raw:
             hw = raw["hotwords"]

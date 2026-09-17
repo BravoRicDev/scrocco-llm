@@ -72,6 +72,11 @@ conc_token_ratio: 0.5
 # per richieste consecutive della stessa sessione.
 #   3600 = 1 ora ; 0 = sticky disabilitato
 sticky_ttl_sec: 3600
+# Campi client-only NON standard rimossi dal body prima dell'invio a monte
+# (es. le opzioni degli agenti opencode come `fallback_models`, che i provider
+# severi tipo Google via /v1beta/openai rifiutano con 400 "Unknown name").
+# Default: [fallback_models]
+# strip_client_fields: [fallback_models]
 
 # Coalescing delle richieste IDENTICHE (stesso payload+profilo, non-streaming)
 # gia' in volo: una sola chiamata upstream, risposta condivisa (deepcopy).
