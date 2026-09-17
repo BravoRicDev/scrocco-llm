@@ -2620,6 +2620,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         timer >45s (`_slow_timer_flagged`): un pool fatto di soli lenti non
         blocca il canario (li si lascia esaurire, senza penalita'). Cap <= 0 =
         nessun gate."""
+        if self._is_renewal_bucket(group_name or ""):
+            return False
         cap = int(getattr(self.policy, "slow_race_max_warm", 6) or 0)
         if cap <= 0:
             return True
@@ -6149,7 +6151,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         richieste esplicite su un -Nk; NON per -go/-fallback (escalation
         deliberata: warm=False lì)."""
         # --- WARM POOL (caldi propri): PRIMA del -dim e della scala -------
-        if warm and self.config.group_caps.get(group_name) is None:
+        # Su -go/-fallback il caldo non si consulta: il pool warm traccia solo
+        # i free-dims e i canari/refill lì sarebbero sonde sprecate.
+        if warm and self.config.group_caps.get(group_name) is None \
+                and not self._is_renewal_bucket(group_name):
             _pname = self._group_profile(group_name)
             if _pname:
                 _warm = self._warm_pool(

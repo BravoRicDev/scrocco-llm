@@ -3639,7 +3639,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 _wake_spawned = True          # evita ripetizioni nel loop
                 log.info("[degraded] esplorazione sospesa per questa "
                          "richiesta (%s)", dep.get("unique"))
-            if (session and profile and not _degraded
+            # Bucket di escalation (-go/-fallback): niente esplorazione
+            # speculativa (refill, canary, gara lenta, hedge): sono l'ultimo
+            # scaglione, il caldo non li usa mai e le sonde sarebbero sprecate.
+            _esc_grp = is_escalation_group(
+                str(dep.get("group") or ""),
+                router.config.go_suffix, router.config.fallback_suffix)
+            if (session and profile and not _degraded and not _esc_grp
                     and bool(getattr(_pol, "warm_refill_enabled", True))
                     and bool(getattr(_pol, "warm_pool_enabled", True))):
                 _ready = router.warm_ready_effective(session, _pol)
@@ -3681,14 +3687,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # NB: il campo vive su Policy (non su qc_json): leggerlo da qcp
             # lo lasciava sempre a 0 (bug: la gara lenta non partiva mai).
             _slow_ms = 0
-            if not _degraded:
+            if not _degraded and not _esc_grp:
                 try:
                     _slow_ms = int(getattr(
                         router.policy, "stream_slow_race_after_ms", 0) or 0)
                 except Exception:
                     _slow_ms = 0
             _slow_only = bool(_slow_ms > 0 and not _refill)
-            if not _degraded and (_hedge_ms > 0 or _refill or _slow_only):
+            if not _degraded and not _esc_grp and (_hedge_ms > 0 or _refill or _slow_only):
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
                     _h_u = _h_dep["unique"] if _h_dep else None
@@ -3718,7 +3724,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         # _hedge_peek deve essere chiamato comunque.
                         _h_ms = 1
                     _fresh_only = bool(_h_u and _h_u == dep["unique"])
-            if _h_ms > 0:
+            if not _esc_grp and _h_ms > 0:
                 _races_done += 1
                 if _refill:
                     _refill_rounds += 1

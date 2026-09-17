@@ -3309,6 +3309,11 @@ truncation_hook=None,
             cur = dep["unique"]             # il deployment DEL TENTATIVO:
             log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
             _was_dormant = router.is_cooled_down(cur)
+            # Bucket di escalation (-go/-fallback): niente refill/canary/gara
+            # lenta: sono l'ultimo scaglione e le sonde sarebbero sprecate.
+            _esc_grp = is_escalation_group(
+                str(dep.get("group") or ""),
+                router.config.go_suffix, router.config.fallback_suffix)
             def _fail_cur(seconds=None, reason=None, status=None, kind=None,
                           provenance=None):
                 _k = kind if kind is not None else _kind_default
@@ -3418,6 +3423,7 @@ truncation_hook=None,
                     return _b, _fb, _tb, _wake
 
                 if (_refill_on and _ready_min and not _degraded
+                        and not _esc_grp
                         and _refill_rounds < _maxif
                         and _fly < _maxif
                         and (not _deadline_ms
@@ -3462,7 +3468,7 @@ truncation_hook=None,
                 # refill e' gia' in volo (il timer lento e' indipendente dal
                 # tetto per-sessione e non applica penali al lento).
                 _ns_slow = 0
-                if not _degraded:
+                if not _degraded and not _esc_grp:
                     try:
                         _ns_slow = int(getattr(
                             _pol, "nonstream_slow_race_after_ms", 0) or 0)
