@@ -188,6 +188,13 @@ gateway la carica a caldo in circa 5 secondi, senza restart.
 
 | Documento | Lingua | A cosa serve |
 |---|---|---|
+| [docs/README.md](docs/README.md) | EN | Indice della documentazione |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | EN | Componenti, ciclo di vita della richiesta, mappa della persistenza |
+| [docs/ROUTING.md](docs/ROUTING.md) | EN | Gruppi/dim/tier, warm pool, canary, scala resiliente, fallback, cooldown, gate opencode zen/go |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | EN | Variabili d'ambiente, policy `var/gateway.yaml`, colonne del CSV, profili compose |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | EN | Deploy, admin API, observability/TUI, runbook, troubleshooting |
+| [docs/SECURITY.md](docs/SECURITY.md) | EN | Modello di auth, `GATEWAY_ENV=production`, generazione/rotazione chiavi, igiene dei segreti |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | EN | Setup locale, test, CI, dipendenze lockate, struttura del codice |
 | [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) | EN | Setup zero-to-running, utile prima del primo avvio |
 | `GET /bootstrap` | EN | Lo stesso playbook, servito live dal gateway |
 | [docs/AGENT.md](docs/AGENT.md) | EN | Protocollo operativo day-2: admin API, ricette, log |

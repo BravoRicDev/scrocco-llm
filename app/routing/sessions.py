@@ -1,6 +1,9 @@
-"""Mixin estratto verbatim da router.py (refactor Phase 4).
+"""Sessions mixin (estratto verbatim da router.py, refactor Phase 4).
 
-[IT] Codice spostato senza modifiche di comportamento.
+[IT] Sessioni sticky, holder di deployment/gruppo, helper cache-aware e note di
+attivita'/richiesta per sessione. Codice spostato senza modifiche.
+[EN] Sticky sessions, deployment/group holders, cache-aware helpers and
+per-session activity/request notes. Verbatim move. See docs/ROUTING.md.
 """
 
 from __future__ import annotations

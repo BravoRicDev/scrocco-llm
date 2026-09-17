@@ -1,5 +1,12 @@
 """scrocco-llm — gateway LLM OpenAI-compatible multi-provider (FastAPI :4001).
 
+[EN] WHAT: exposes /v1/chat/completions (+ images/tts/stt/videos, models,
+metrics) and routes each request to the best deployment across dozens of
+provider accounts. HOW: auth -> alias canonicalization -> context estimate ->
+dims/capability group -> adaptive pick -> forwarder with chain fallback ->
+QC/watchdog -> response (stream or JSON). Every request emits a [summary] log
+line. Full lifecycle: docs/ARCHITECTURE.md.
+
 [IT] COSA: espone /v1/chat/completions (+ images/tts/stt/videos, models,
 metrics) e instrada ogni richiesta al deployment migliore tra decine di
 account/provider. HOW: auth -> canonicalize alias -> stima contesto ->

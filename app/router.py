@@ -1,5 +1,13 @@
 """Rotazione adattiva: pick, fallback, cooldown, sticky session.
 
+[EN] Adaptive routing: picks WHO answers within a group and WHO takes over
+after a failure. Score = EMA latency + freshness (recency_halflife) + inflight
++ success rate; cooldowns escalate exponentially (600s * 2^streak, capped at
+24h). Same-model failover for media jobs, media-defer for pure text, and a dims
+ladder that only climbs (an explicit -200k is a floor). opencode.ai upstreams
+are gated per client and, under caution, zen is a separate block after all free
+non-zen deployments. Full details: docs/ROUTING.md.
+
 [IT] COSA: sceglie CHI risponde dentro un gruppo e CHI subentra dopo un
 errore. HOW: punteggio = EMA latenza + freshness (recency_halflife) +
 inflight + tasso successo; cooldown con ESCALATION esponenziale

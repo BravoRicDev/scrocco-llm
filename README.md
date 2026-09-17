@@ -20,6 +20,21 @@ Zero database. One container. Port `4001`.
 
 ---
 
+## Documentation
+
+The full documentation lives in [`docs/`](docs/README.md):
+
+| Document | What it covers |
+|---|---|
+| [Architecture](docs/ARCHITECTURE.md) | components, request lifecycle (stream & non-stream), persistence map, extension points |
+| [Routing](docs/ROUTING.md) | groups/dims/tiers, warm pool & borrows, canary/hedge, the resilient ladder, fallback, cooldowns, opencode zen/go gating |
+| [Configuration](docs/CONFIGURATION.md) | environment variables, `var/gateway.yaml` policy reference, `var/keys_rotation.csv` columns, compose profiles |
+| [Operations](docs/OPERATIONS.md) | deploy, admin API, observability & TUI, runbooks, troubleshooting |
+| [Security](docs/SECURITY.md) | auth model, `GATEWAY_ENV=production`, key generation/rotation, secret hygiene |
+| [Development](docs/DEVELOPMENT.md) | local setup, tests, CI, locked dependencies, code layout & refactors |
+
+---
+
 ## Why
 
 A single free API key is fragile: tiny context windows, rate limits, models

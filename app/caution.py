@@ -1,5 +1,10 @@
 """Cautela GENERICA: spegne le attivita' di background/probe del gateway.
 
+[EN] Generic caution: disables background/probe activity (autoprobe, health
+checks, nightly pass, hot-reload probes, cooldown re-probes) for ALL providers.
+Distinct from the opencode caution in app/opencode_gate.py. Env switch:
+`BACKGROUND_CAUTIOUS` (default off). See docs/CONFIGURATION.md.
+
 Funzionalita' DISTINTA dalla "cautela opencode" (vedi app/opencode_gate.py):
 
   - cautela opencode (`OPENCODE_CAUTIOUS`, default = spoof): riguarda SOLO gli

@@ -1,5 +1,14 @@
 """Gate per-client degli upstream opencode.ai (zen / go).
 
+[EN] Per-client gating of opencode.ai upstreams (zen / go). zen only accepts
+real opencode clients (native headers + a `ses_...` session); the ROUTER must
+know this BEFORE choosing a deployment, otherwise it counts zen as
+available/"warm" (even borrowed from opencode sessions) and offers it to clients
+that cannot use it, wasting attempts, canaries and cooldowns. go is a paid
+upstream, independent of spoof/client (`OPENCODE_GO`, default on) and never
+demoted by caution. Single source of truth shared by router and forwarder;
+per-request state lives in ContextVars. See docs/ROUTING.md, docs/SECURITY.md.
+
 opencode.ai/zen (free tier) accetta richieste solo da client opencode reali
 (header nativi + sessione `ses_...`); per tutti gli altri risponde 403
 FreeTierError. Il forwarder sa sintetizzare (o fare passthrough de)gli header

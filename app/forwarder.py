@@ -1,5 +1,12 @@
 """HTTP verso gli upstream: chiamata, streaming, fallback di catena.
 
+[EN] WHAT: the single place that talks to upstream providers (pure httpx, no
+litellm). HOW: call/stream_response/call_images/speech/submit_video with a
+precise error taxonomy; call_with_fallback walks the chain. Cooldowns are
+classified (positive-status retryable vs model-missing vs client-side). Also
+clamps max_tokens to the deployment window and builds upstream session /
+opencode headers. See docs/ARCHITECTURE.md.
+
 [IT] COSA: punto unico di dialogo coi provider (httpx puro, NIENTE
 litellm). HOW: call/stream_response/call_images/speech/submit_video con
 tassonomia errori precisa; call_with_fallback cammina la catena. WHY la

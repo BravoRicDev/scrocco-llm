@@ -1,6 +1,10 @@
-"""Mixin estratto verbatim da router.py (refactor Phase 4).
+"""Canary/hedge mixin (estratto verbatim da router.py, refactor Phase 4).
 
-[IT] Codice spostato senza modifiche di comportamento.
+[IT] Warm-fill/warm-wake canary e hedge canaries: probe speculative FREE-only
+usate per riscaldare o risvegliare candidati e coprire upstream lenti. Codice
+spostato senza modifiche di comportamento.
+[EN] Canary/hedge mixin: free-only speculative probes (warm fill/wake, hedges).
+Verbatim move, no behaviour change. See docs/ROUTING.md.
 """
 
 from __future__ import annotations
