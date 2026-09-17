@@ -1,0 +1,22 @@
+# Configurazione strumenti (nessun packaging: solo tabelle [tool.*]).
+# pytest / ruff / mypy la leggono automaticamente dalla root del repo.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+# Stessa minor del container (Dockerfile: python:3.12-slim).
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Set conservativo e non rumoroso: errori di sintassi e nomi non definiti.
+# Da allargare in modo incrementale senza bloccare le PR.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.12"
+# Type-check non bloccante in CI (continue-on-error): la codebase non e' ancora
+# completamente tipizzata. Nessun errore fatale qui, solo report.
+ignore_missing_imports = true

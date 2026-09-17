@@ -4981,7 +4981,7 @@ def _audio_route(profile: str | None, model: str, raw_model: str,
     if dep is None and profile:
         dep = router.fallback_after(profile, None, need,
                                     out_tokens=refill_out_budget(
-                                        payload, router.policy))
+                                        {}, router.policy))
     if dep is None:
         return None, profile, JSONResponse(status_code=503, content={
             "error": {"message": f"nessun deployment disponibile per {sorted(need) or model}",
@@ -5227,7 +5227,7 @@ async def _audio_transcribe(request: Request, path: str):
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
             nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
                                        out_tokens=refill_out_budget(
-                                           payload, router.policy)) \
+                                           {}, router.policy)) \
                 if profile else None
             if nxt is None:
                 break
