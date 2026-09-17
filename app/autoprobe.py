@@ -37,6 +37,7 @@ from collections import deque
 
 from .forwarder import _MODEL_MISSING_RE, maybe_quarantine_ban
 from . import protocols as proto
+from .opencode_gate import cautious_enabled
 
 log = logging.getLogger("nx.autoprobe")
 
@@ -343,6 +344,8 @@ async def _retired_pass(router, forwarder) -> None:
 def maybe_spawn_retired(router, forwarder) -> None:
     """Avvia il giro giornaliero sui ritirati (primo tick dopo mezzanotte)."""
     global _retired_task, _retired_day
+    if cautious_enabled():                   # modalita' cauta: niente probe
+        return
     if not bool(getattr(router.policy,
                         "cooldown_autoprobe_retired_enabled", True)):
         return
@@ -370,6 +373,8 @@ def _schedule(policy) -> str:
 
 def maybe_spawn(router, forwarder, profile: str) -> None:
     global _running
+    if cautious_enabled():                   # modalita' cauta: niente probe
+        return
     if not _cfg(router.policy)[0]:
         return
     if _schedule(router.policy) != "request":
@@ -392,6 +397,8 @@ def spawn_hotreload_probe(router, forwarder, uniques) -> None:
     CSV: scopre lo stato di salute PRIMA che ricevano traffico reale.
     OK -> note_result (entra caldo con un successo registrato); KO -> cooldown
     breve. Non entra mai nel percorso di risposta."""
+    if cautious_enabled():                   # modalita' cauta: niente probe
+        return
     _u = [u for u in (uniques or []) if u]
     if not _u:
         return
@@ -773,6 +780,8 @@ async def nightly_pass(router, forwarder, profiles=None) -> None:
     per_dim, max_total, gap per-chiave e budget 1/giorno per CHIAVE (un
     giro puo' quindi trovare poco o nulla da sondare, ed e' giusto)."""
     global _running
+    if cautious_enabled():                   # modalita' cauta: niente probe
+        return
     if not _cfg(router.policy)[0]:
         return
     if _running:

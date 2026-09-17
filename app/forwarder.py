@@ -58,7 +58,8 @@ from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
 from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
                             client_is_opencode as _opencode_client_detect,
-                            spoof_enabled as _spoof_enabled)
+                            spoof_enabled as _spoof_enabled,
+                            is_native_session as _is_native_session)
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
@@ -1800,12 +1801,8 @@ _B62_LEN = 14
 # il fingerprint interno "fq_..." (cosi' come "abc" o "ses_x") viene rifiutato
 # con 403 FreeTierError. Quando il client non manda una sessione nativa, la si
 # rigenera dai segnali interni per restare verosimile e coerente.
-_NATIVE_SESSION_RE = re.compile(r"^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$")
-
-
-def _is_native_session(value: str) -> bool:
-    """Vero se `value` e' gia' nel formato session id nativo opencode."""
-    return bool(_NATIVE_SESSION_RE.match(value or ""))
+# (regex + `_is_native_session` vivono in opencode_gate, fonte unica condivisa
+#  col router.)
 
 
 def _native_session_of(basis: str) -> str:

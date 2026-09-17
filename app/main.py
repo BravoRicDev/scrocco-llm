@@ -101,7 +101,9 @@ from .qc import annotate_reasoning
 from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
                           set_avoid_gemini, set_dummy_fill)
 from .router import Router, inject_identity, estimate_tokens, configure_estimate
-from .opencode_gate import (set_allow_opencode, client_can_use_opencode)
+from .opencode_gate import (set_allow_opencode, set_spoofing_request,
+                            client_can_use_opencode, client_is_opencode,
+                            cautious_enabled)
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
@@ -656,7 +658,8 @@ async def _watcher(interval: float) -> None:
             _maybe_save_all()           # F26: stats+routing, stesso istante
             # giro giornaliero sui RITIRATI: parte al primo tick dopo
             # mezzanotte e li sonda con calma (un probe riuscito riabilita)
-            autoprobe.maybe_spawn_retired(router, forwarder)
+            if not cautious_enabled():      # cautela: nessun probe automatico
+                autoprobe.maybe_spawn_retired(router, forwarder)
             _maybe_save_cooldowns()     # cooldown attivi su disco
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
@@ -702,7 +705,7 @@ async def _watcher(interval: float) -> None:
                     _added = sorted(_all_uniques() - _prev_uniques)
                     _max_p = max(0, int(getattr(policy, "hotreload_probe_max", 20)
                                         or 0))
-                    if _added and _max_p:
+                    if _added and _max_p and not cautious_enabled():
                         autoprobe.spawn_hotreload_probe(router, forwarder,
                                                         _added[:_max_p])
                         log.info("[hotreload] %d deployment nuovi: probe "
@@ -804,7 +807,8 @@ async def _nightly_scheduler():
                                 + random.uniform(0.0, 120.0))
             if str(getattr(router.policy, "cooldown_autoprobe_schedule",
                            "nightly")).lower() == "nightly" \
-                    and autoprobe._cfg(router.policy)[0]:
+                    and autoprobe._cfg(router.policy)[0] \
+                    and not cautious_enabled():
                 await autoprobe.nightly_pass(router, forwarder)
         except asyncio.CancelledError:
             raise
@@ -824,10 +828,16 @@ async def lifespan(_app: FastAPI):
     _load_thought_sigs()                    # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
-    _health_task = asyncio.create_task(
-        health_loop(router, policy.health_interval_sec))
+    _cautious = cautious_enabled()
+    if _cautious:
+        log.warning("[start] modalita' CAUTA (spoof ON): probe/health/nightly "
+                    "automatici DISATTIVATI")
+    else:
+        _health_task = asyncio.create_task(
+            health_loop(router, policy.health_interval_sec))
     global _nightly_task
-    _nightly_task = asyncio.create_task(_nightly_scheduler())
+    if not _cautious:
+        _nightly_task = asyncio.create_task(_nightly_scheduler())
     log.info("[start] %s su %s:%d · profili=%s · deployment=%d",
              policy.service_name, HOST, PORT, ",".join(config.profiles),
              sum(len(v) for v in config.groups.values()))
@@ -1302,8 +1312,14 @@ def _set_opencode_gate(request: Request) -> None:
     warm): il router esclude gli upstream opencode.ai quando il client non e'
     opencode e lo spoof (env OPENCODE_SPOOF_HEADERS) e' off. I contesti
     interni (probe/autoprobe/admin/background) non lo impostano e ricadono
-    sulla sola env (vedi app/opencode_gate.py)."""
-    set_allow_opencode(client_can_use_opencode(_client_attribution(request)))
+    sulla sola env (vedi app/opencode_gate.py).
+
+    Imposta anche il flag "stiamo spoofando" (client non-opencode con spoo
+    attivo): in modalita' cauta il router tratta gli upstream zen come ultima
+    scelta. Un client opencode reale NON e' mai in cautela."""
+    _attr = _client_attribution(request)
+    set_allow_opencode(client_can_use_opencode(_attr))
+    set_spoofing_request(cautious_enabled() and not client_is_opencode(_attr))
 
 
 def _opencode_session(request: Request) -> str | None:

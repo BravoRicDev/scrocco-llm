@@ -41,7 +41,9 @@ from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_LAST
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
-from .opencode_gate import dep_usable as _dep_usable
+from .opencode_gate import (dep_usable as _dep_usable,
+                            is_opencode_zen_dep, is_native_session,
+                            spoofing_request, cautious_enabled)
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
 from . import metrics
 
@@ -3299,6 +3301,8 @@ class Router:
     def probe_ready(self, unique: str) -> bool:
         """True se un deployment dormiente e' maturo per un probe passivo
         (>= cooldown_probe_after_ratio del cooldown trascorso)."""
+        if cautious_enabled():                 # cautela: niente re-probe
+            return False
         if not getattr(self.policy, "cooldown_probe_enabled", True):
             return False
         ratio = float(getattr(self.policy, "cooldown_probe_after_ratio",
@@ -3695,7 +3699,7 @@ class Router:
         for d in dims:
             gname = f"{cfg.proxy_prefix}{pname}-{d}k"
             for dep in cfg.groups.get(gname, []):
-                if self._dep_supports(dep, need) and _dep_usable(dep):
+                if self._dep_supports(dep, need) and _dep_usable(dep, last=True):
                     capable.append(d)
                     break
         return capable
@@ -3705,7 +3709,7 @@ class Router:
         if not need:
             return True
         for dep in self.config.groups.get(group_name, []):
-            if self._dep_supports(dep, need) and _dep_usable(dep):
+            if self._dep_supports(dep, need) and _dep_usable(dep, last=True):
                 return True
         return False
 
@@ -5837,7 +5841,8 @@ class Router:
                      limit: int = 0,
                      tried: set[str] | None = None,
                      allow_slow: bool = False,
-                     out_tokens: int | None = None) -> dict | None:
+                     out_tokens: int | None = None,
+                     last: bool = False) -> dict | None:
         """Cammina una catena piatta di univoci saltando cooled-down,
         deployment senza le capacità `need`, (se ctx) sopra max_input e —
         per richieste pure-testo su catene dims — i multimodali finché
@@ -5853,7 +5858,19 @@ class Router:
           piu' di N secondi (forse la chiave si e' svegliata).
 
         `tried`: set di deployment già tentati in questa richiesta — vengono
-        saltati a prescindere. Se fornito, ha priorità su `failed_unique`."""
+        saltati a prescindere. Se fornito, ha priorità su `failed_unique`.
+
+        `last`: ammissione degli upstream zen opencode come ULTIMA SCELTA (in
+        modalita' cauta): con `last=True` i dep zen tornano eleggibili e la
+        catena viene partizionata mettendoli in coda; default `last=False`
+        (zen esclusi dai percorsi normali)."""
+        # Cautela (spoof): gli zen, ammessi solo con `last=True`, vanno in coda
+        # alla catena cosi' restano l'ultima scelta anche dentro lo step finale.
+        if last and spoofing_request():
+            _z = lambda u: is_opencode_zen_dep(          # noqa: E731
+                self.config.deployment_by_unique(u))
+            chain = ([u for u in chain if not _z(u)]
+                     + [u for u in chain if _z(u)])
         # La catena puo' essere RIORDINATA dinamicamente (catena provider):
         # `index(failed)+1` non e' piu' affidabile. Per le scale -dim si
         # riprende per FLOOR di dim (mai indietro, ma tutte le alternative
@@ -5940,7 +5957,7 @@ class Router:
                 return None
             if self._gemini_blocked(dep):
                 return None
-            if not _dep_usable(dep):
+            if not _dep_usable(dep, last=last):
                 return None
             if need and not self._dep_supports(dep, need):
                 return None
@@ -6352,8 +6369,11 @@ class Router:
                                     allow_slow=self._warm_allow_slow()):
                 log.debug("[warm] skip (chiave satura o demote): %s", u)
                 continue
-            if not _dep_usable(dep):
+            if not _dep_usable(dep, last=True):
                 continue
+            if (spoofing_request() and is_opencode_zen_dep(dep)
+                    and is_native_session(ent[0])):
+                continue           # zen di sessione NATIVA: non "spoofabile"
             if need and not self._dep_supports(dep, need):
                 continue
             if not self._cap_fits(dep, ctx):
@@ -6385,8 +6405,11 @@ class Router:
                 if self._is_demoted_dep(u, sid, ctx,
                                         allow_slow=self._warm_allow_slow()):
                     continue
-                if not _dep_usable(dep):
+                if not _dep_usable(dep, last=True):
                     continue
+                if (spoofing_request() and is_opencode_zen_dep(dep)
+                        and is_native_session(ent[0] if ent else None)):
+                    continue       # zen di sessione NATIVA: non "spoofabile"
                 if need and not self._dep_supports(dep, need):
                     continue
                 if not self._cap_fits(dep, ctx):
@@ -7472,7 +7495,8 @@ class Router:
         _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec",
                                    300) or 300)
         _cooled = [d for d in self.config.groups.get(group_name, [])
-                   if getattr(self.policy, "initial_pick_cooldown_wakeup", True)
+                   if not cautious_enabled()
+                   and getattr(self.policy, "initial_pick_cooldown_wakeup", True)
                    and self.is_cooled_down(d["unique"])
                    and not self._gemini_blocked(d)
                    and not self.is_slow_for_session(d["unique"], ctx=ctx)
@@ -7551,8 +7575,11 @@ class Router:
         dep = self._walk_chain(chain, None, need, ctx)
         if dep is None:
             # ULTIMO SCAGLIONE: riammetti i free-dims 'lenti per la sessione'
-            # (demoted) solo ora che tutto il resto e' esaurito.
-            dep = self._walk_chain(chain, None, need, ctx, allow_slow=True)
+            # (demoted) solo ora che tutto il resto e' esaurito. Con la cautela
+            # attiva e' anche lo stadio in cui gli zen tornano eleggibili
+            # (ultima scelta, in coda alla catena).
+            dep = self._walk_chain(chain, None, need, ctx, allow_slow=True,
+                                   last=True)
         return dep
 
     def _walk_ladder_resilient(self, ladder: list[str],
@@ -7703,7 +7730,7 @@ class Router:
         _win = max(1.0, float(getattr(
             pol, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
         _max_wake = max(0, int(getattr(pol, "ladder_cooldown_wakeups", 20) or 0))
-        if _max_wake > 0:
+        if _max_wake > 0 and not cautious_enabled():   # cautela: no re-probe
             _tried_w = tried or set()
             _cooled_dims = []
             for u in _chronic_filter(dims, True):
@@ -7866,7 +7893,7 @@ class Router:
                 continue
             if self._endpoint_quarantined(d):
                 continue
-            if not _dep_usable(d):
+            if not _dep_usable(d, last=True):
                 continue
             if need and not self._dep_supports(d, need):
                 continue
@@ -7874,7 +7901,8 @@ class Router:
                 continue
             remaining = self.cooldown_residual(u)
             cooled.append((remaining, u, d))
-        cooled.sort(key=lambda x: x[0])
+        # Cautela: gli zen (ammessi qui come ultima scelta) vanno in coda.
+        cooled.sort(key=lambda x: (is_opencode_zen_dep(x[2]), x[0]))
         if cooled:
             dep = cooled[0][2]
             log.warning("[ladder] ULTIMA SPIAGGIA (cooldown ignorato, "
@@ -7896,14 +7924,15 @@ class Router:
                 continue
             if self._endpoint_quarantined(_d):
                 continue
-            if not _dep_usable(_d):
+            if not _dep_usable(_d, last=True):
                 continue
             if need and not self._dep_supports(_d, need):
                 continue
             if not self._cap_fits(_d, ctx):
                 continue
             _ret.append((self.cooldown_residual(u), u, _d))
-        _ret.sort(key=lambda x: x[0])
+        # Cautela: gli zen (ultima scelta) vanno in coda anche qui.
+        _ret.sort(key=lambda x: (is_opencode_zen_dep(x[2]), x[0]))
         if _ret:
             dep = _ret[0][2]
             log.warning("[ladder] ULTIMA SPIAGGIA ESTREMA (ritirato "
