@@ -41,9 +41,10 @@ from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_LAST
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
+from .caution import background_cautious_enabled
 from .opencode_gate import (dep_usable as _dep_usable,
                             is_opencode_zen_dep, is_native_session,
-                            spoofing_request, cautious_enabled)
+                            opencode_cautious_request)
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
 from . import metrics
 
@@ -3301,7 +3302,7 @@ class Router:
     def probe_ready(self, unique: str) -> bool:
         """True se un deployment dormiente e' maturo per un probe passivo
         (>= cooldown_probe_after_ratio del cooldown trascorso)."""
-        if cautious_enabled():                 # cautela: niente re-probe
+        if background_cautious_enabled():      # cautela generica: niente re-probe
             return False
         if not getattr(self.policy, "cooldown_probe_enabled", True):
             return False
@@ -5866,7 +5867,7 @@ class Router:
         (zen esclusi dai percorsi normali)."""
         # Cautela (spoof): gli zen, ammessi solo con `last=True`, vanno in coda
         # alla catena cosi' restano l'ultima scelta anche dentro lo step finale.
-        if last and spoofing_request():
+        if last and opencode_cautious_request():
             _z = lambda u: is_opencode_zen_dep(          # noqa: E731
                 self.config.deployment_by_unique(u))
             chain = ([u for u in chain if not _z(u)]
@@ -6371,7 +6372,7 @@ class Router:
                 continue
             if not _dep_usable(dep, last=True):
                 continue
-            if (spoofing_request() and is_opencode_zen_dep(dep)
+            if (opencode_cautious_request() and is_opencode_zen_dep(dep)
                     and is_native_session(ent[0])):
                 continue           # zen di sessione NATIVA: non "spoofabile"
             if need and not self._dep_supports(dep, need):
@@ -6407,7 +6408,7 @@ class Router:
                     continue
                 if not _dep_usable(dep, last=True):
                     continue
-                if (spoofing_request() and is_opencode_zen_dep(dep)
+                if (opencode_cautious_request() and is_opencode_zen_dep(dep)
                         and is_native_session(ent[0] if ent else None)):
                     continue       # zen di sessione NATIVA: non "spoofabile"
                 if need and not self._dep_supports(dep, need):
@@ -7495,7 +7496,7 @@ class Router:
         _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec",
                                    300) or 300)
         _cooled = [d for d in self.config.groups.get(group_name, [])
-                   if not cautious_enabled()
+                   if not background_cautious_enabled()
                    and getattr(self.policy, "initial_pick_cooldown_wakeup", True)
                    and self.is_cooled_down(d["unique"])
                    and not self._gemini_blocked(d)
@@ -7730,7 +7731,7 @@ class Router:
         _win = max(1.0, float(getattr(
             pol, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
         _max_wake = max(0, int(getattr(pol, "ladder_cooldown_wakeups", 20) or 0))
-        if _max_wake > 0 and not cautious_enabled():   # cautela: no re-probe
+        if _max_wake > 0 and not background_cautious_enabled():  # cautela: no re-probe
             _tried_w = tried or set()
             _cooled_dims = []
             for u in _chronic_filter(dims, True):

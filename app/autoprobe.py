@@ -37,13 +37,19 @@ from collections import deque
 
 from .forwarder import _MODEL_MISSING_RE, maybe_quarantine_ban
 from . import protocols as proto
-from .opencode_gate import cautious_enabled
+from .caution import background_cautious_enabled
+from .opencode_gate import opencode_cautious_enabled, is_opencode_zen_dep
 
 log = logging.getLogger("nx.autoprobe")
 
 # Solo i gruppi dim testo (es. `...-200k`): escludono -go/-fallback/capability.
 _DIM_RE = re.compile(r"-(\d+)k$")
 _PROBE_PROMPT = "Reply with the single letter A"
+
+
+def _probe_excluded(dep: dict) -> bool:
+    """In cautela opencode non si sondano gli upstream zen (free tier)."""
+    return opencode_cautious_enabled() and is_opencode_zen_dep(dep)
 _running = False
 _last_probe: dict[str, float] = {}
 # F32: ultimo probe per CHIAVE (non per deployment). Lo stesso conto non deve
@@ -306,6 +312,8 @@ async def _retired_pass(router, forwarder) -> None:
                 dep = None
             if not dep or dep.get("enabled") is False:
                 continue
+            if _probe_excluded(dep):          # cautela opencode: mai zen
+                continue
             if _keyhealth() is None:          # gateway in shutdown
                 return
             if not _key_gap_ok(dep, time.time(), key_gap):
@@ -344,7 +352,7 @@ async def _retired_pass(router, forwarder) -> None:
 def maybe_spawn_retired(router, forwarder) -> None:
     """Avvia il giro giornaliero sui ritirati (primo tick dopo mezzanotte)."""
     global _retired_task, _retired_day
-    if cautious_enabled():                   # modalita' cauta: niente probe
+    if background_cautious_enabled():        # cautela generica: niente probe
         return
     if not bool(getattr(router.policy,
                         "cooldown_autoprobe_retired_enabled", True)):
@@ -373,7 +381,7 @@ def _schedule(policy) -> str:
 
 def maybe_spawn(router, forwarder, profile: str) -> None:
     global _running
-    if cautious_enabled():                   # modalita' cauta: niente probe
+    if background_cautious_enabled():        # cautela generica: niente probe
         return
     if not _cfg(router.policy)[0]:
         return
@@ -397,7 +405,7 @@ def spawn_hotreload_probe(router, forwarder, uniques) -> None:
     CSV: scopre lo stato di salute PRIMA che ricevano traffico reale.
     OK -> note_result (entra caldo con un successo registrato); KO -> cooldown
     breve. Non entra mai nel percorso di risposta."""
-    if cautious_enabled():                   # modalita' cauta: niente probe
+    if background_cautious_enabled():        # cautela generica: niente probe
         return
     _u = [u for u in (uniques or []) if u]
     if not _u:
@@ -437,6 +445,8 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
         if profile and not grp.startswith(pfx):
             continue
         for d in deps:
+            if _probe_excluded(d):        # cautela opencode: mai zen
+                continue
             unique = d.get("unique") or ""
             if router.is_cooled_down(unique):
                 continue       # appena fallito: non insistere
@@ -503,6 +513,8 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
             dep = None
         if not dep:
             continue
+        if _probe_excluded(dep):          # cautela opencode: mai zen
+            continue
         grp = dep.get("group") or ""
         if not _DIM_RE.search(grp):
             continue           # solo dim testo (-<N>k), niente -go/-fallback/cap
@@ -555,6 +567,8 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 except Exception:  # noqa: BLE001
                     continue
                 if not dep:
+                    continue
+                if _probe_excluded(dep):      # cautela opencode: mai zen
                     continue
                 _now = time.time()
                 if _key_ok_fresh(_okmap, dep, _now, _ok_fresh):
@@ -610,6 +624,8 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
             except Exception:  # noqa: BLE001
                 continue
             if not dep or not router.is_cooled_down(unique):
+                continue
+            if _probe_excluded(dep):          # cautela opencode: mai zen
                 continue
             _now = time.time()
             if _key_ok_fresh(_okmap, dep, _now, _ok_fresh):
@@ -687,6 +703,8 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
             except Exception:  # noqa: BLE001
                 dep = None
             if not dep:
+                continue
+            if _probe_excluded(dep):          # cautela opencode: mai zen
                 continue
             if not _key_gap_ok(dep, time.time(), _key_gap):
                 continue       # F32: chiave gia' sondata poco fa
@@ -780,7 +798,7 @@ async def nightly_pass(router, forwarder, profiles=None) -> None:
     per_dim, max_total, gap per-chiave e budget 1/giorno per CHIAVE (un
     giro puo' quindi trovare poco o nulla da sondare, ed e' giusto)."""
     global _running
-    if cautious_enabled():                   # modalita' cauta: niente probe
+    if background_cautious_enabled():        # cautela generica: niente probe
         return
     if not _cfg(router.policy)[0]:
         return

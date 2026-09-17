@@ -1,30 +1,46 @@
-"""Gate per-client degli upstream opencode.ai (zen / zen/go).
+"""Gate per-client degli upstream opencode.ai (zen / go).
 
-opencode.ai/zen e /zen/go accettano richieste solo da client opencode reali
-(header nativi + sessione `ses_...`); per tutti gli altri rispondono 403
+opencode.ai/zen (free tier) accetta richieste solo da client opencode reali
+(header nativi + sessione `ses_...`); per tutti gli altri risponde 403
 FreeTierError. Il forwarder sa sintetizzare (o fare passthrough de)gli header
 giusti, ma il ROUTER deve saperlo PRIMA di scegliere un deployment: altrimenti
-conta gli upstream opencode.ai come disponibili e "caldi" (anche in prestito
-da sessioni opencode) e li propone a client che non possono usarli, sprecando
+conta gli upstream zen come disponibili e "caldi" (anche in prestito da
+sessioni opencode) e li propone a client che non possono usarli, sprecando
 tentativi, canary e cooldown.
+
+opencode.ai/zen/go e' invece un upstream A PAGAMENTO: NON dipende dallo spoof
+ne' dal tipo di client. Ha un interruttore dedicato (`OPENCODE_GO`, default ON)
+e non viene mai degradato dalla cautela.
 
 Questo modulo e' la fonte di verita' del gate, condivisa da router e
 forwarder. Lo stato vive in ContextVar per-request:
 
-  - una RICHIESTA CLIENT imposta `set_allow_opencode(client_can_use_opencode(
-    attribution))` (vedi main.py): True se il client e' opencode oppure se lo
-    spoof e' attivo (env `OPENCODE_SPOOF_HEADERS`);
+  - una RICHIESTA CLIENT imposta `set_allow_opencode_zen(
+    client_can_use_opencode_zen(attribution))` (vedi main.py): True se il
+    client e' opencode oppure se lo spoof e' attivo (env
+    `OPENCODE_SPOOF_HEADERS`);
   - i contesti INTERNI (probe / autoprobe / admin / background) NON impostano
     nulla: il default `None` ricade sulla env `OPENCODE_SPOOF_HEADERS`, cosi'
-    le probe non toccano opencode.ai quando lo spoof e' off (evita 403 e
-    ritiri di chiave spuri).
+    le probe non toccano zen quando lo spoof e' off (evita 403 e ritiri di
+    chiave spuri).
 
-MODALITA' CAUTA (spoof ON): quando stiamo "spoofando" (client NON-opencode con
-`OPENCODE_SPOOF_HEADERS` attivo) trattiamo gli upstream **zen** (free tier,
-rischioso) come ULTIMA SCELTA, raggiungibili solo a esaurimento degli altri
-provider; gli upstream **go** (a pagamento, legittimi) restano normali. La
-cautela NON si applica ai client opencode reali. Vedi `cautious_enabled()`,
-`spoofing_request()` e `dep_usable(..., last=...)`.
+MODALITA' CAUTA OPENCODE (default = spoof ON): quando stiamo "spoofando"
+(client NON-opencode con `OPENCODE_SPOOF_HEADERS` attivo) trattiamo gli
+upstream **zen** (free tier, rischioso) come ULTIMA SCELTA, raggiungibili solo
+a esaurimento degli altri provider. Gli upstream **go** (a pagamento) restano
+sempre normali. La cautela NON si applica ai client opencode reali. Vedi
+`opencode_cautious_enabled()`, `opencode_cautious_request()` e
+`dep_usable(..., last=...)`.
+
+NOTA: questa e' la cautela "opencode". La cautela GENERICA (probe/background
+spenti per TUTTI i provider) e' una funzionalita' distinta: vedi
+`app/caution.py` (`background_cautious_enabled`, env `BACKGROUND_CAUTIOUS`).
+
+INTERRUTTORI
+  - OPENCODE_SPOOF_HEADERS: abilita lo spoof (zen usabile da client non-opencode)
+  - OPENCODE_CAUTIOUS: zen come ultima scelta (default = spoof)
+  - OPENCODE_GO: abilita gli upstream go a pagamento (default ON)
+  - BACKGROUND_CAUTIOUS: spegne probe/background (app/caution.py, default OFF)
 """
 
 from __future__ import annotations
@@ -36,12 +52,13 @@ from typing import Any, Mapping
 
 # Default None = "nessuna decisione per-request": i contesti interni (probe,
 # autoprobe, admin, background) ricadono su OPENCODE_SPOOF_HEADERS.
-_ALLOW_OPENCODE: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
-    "scrocco_allow_opencode", default=None)
+# Governa SOLO gli upstream zen (free tier); go ha il suo switch dedicato.
+_ALLOW_OPENCODE_ZEN: contextvars.ContextVar[bool | None] = (
+    contextvars.ContextVar("scrocco_allow_opencode_zen", default=None))
 
-# Default False = "non stiamo spoofando": i contesti interni non sono mai in
+# Default False = "non stiamo spoofando". I contesti interni non sono mai in
 # cautela per-request (le loro probe sono disattivate a monte, vedi
-# `cautious_enabled()`).
+# `background_cautious_enabled()` in app/caution.py).
 _SPOOFING: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "scrocco_spoofing_request", default=False)
 
@@ -66,7 +83,7 @@ def _env_bool(name: str) -> bool | None:
 
 
 def is_opencode_dep(dep: Mapping[str, Any] | None) -> bool:
-    """Vero se il deployment parla con opencode.ai (zen / zen/go)."""
+    """Vero se il deployment parla con opencode.ai (zen / go)."""
     if not dep:
         return False
     base = (dep.get("api_base") or "").lower()
@@ -100,17 +117,30 @@ def spoof_enabled() -> bool:
     return bool(os.environ.get("OPENCODE_SPOOF_HEADERS"))
 
 
-def cautious_enabled() -> bool:
-    """Modalita' cauta globale: zen come ultima scelta + niente probe/background.
+def opencode_cautious_enabled() -> bool:
+    """Cautela OPencode (solo zen): zen come ultima scelta, niente probe zen.
 
     Derivata dallo spoof (`OPENCODE_SPOOF_HEADERS`) salvo override esplicito
     della env `OPENCODE_CAUTIOUS`, cosi' si puo' tenere lo spoof ON e la
-    cautela OFF (o viceversa) senza toccare il codice.
+    cautela OFF (o viceversa) senza toccare il codice. NON riguarda la cautela
+    generica/probe (vedi `app/caution.py`).
     """
     override = _env_bool("OPENCODE_CAUTIOUS")
     if override is not None:
         return override
     return spoof_enabled()
+
+
+def opencode_go_enabled() -> bool:
+    """Vero se gli upstream opencode.ai/zen/go (a pagamento) sono abilitati.
+
+    Indipendente da spoof, tipo di client e cautela: interruttore dedicato
+    `OPENCODE_GO` (default ON; `OPENCODE_GO=0` li disattiva).
+    """
+    override = _env_bool("OPENCODE_GO")
+    if override is None:
+        return True
+    return override
 
 
 def client_is_opencode(client_headers: Mapping[str, Any] | None) -> bool:
@@ -130,22 +160,24 @@ def client_is_opencode(client_headers: Mapping[str, Any] | None) -> bool:
     return False
 
 
-def client_can_use_opencode(client_headers: Mapping[str, Any] | None) -> bool:
-    """Vero se il client puo' usare gli upstream opencode.ai.
+def client_can_use_opencode_zen(
+        client_headers: Mapping[str, Any] | None) -> bool:
+    """Vero se il client puo' usare gli upstream zen (free tier).
 
     Vero per un client opencode reale oppure, in POC, se lo spoof e' attivo.
+    Governa SOLO zen: gli upstream go (a pagamento) sono indipendenti.
     """
     return spoof_enabled() or client_is_opencode(client_headers)
 
 
-def set_allow_opencode(flag: bool | None) -> None:
-    """Imposta il gate per il task corrente (async-safe)."""
-    _ALLOW_OPENCODE.set(flag)
+def set_allow_opencode_zen(flag: bool | None) -> None:
+    """Imposta il gate zen per il task corrente (async-safe)."""
+    _ALLOW_OPENCODE_ZEN.set(flag)
 
 
-def allow_opencode() -> bool:
-    """Gate effettivo: scelta per-request se presente, altrimenti spoof env."""
-    v = _ALLOW_OPENCODE.get()
+def allow_opencode_zen() -> bool:
+    """Gate zen effettivo: scelta per-request se presente, altrimenti spoof env."""
+    v = _ALLOW_OPENCODE_ZEN.get()
     if v is None:
         return spoof_enabled()
     return bool(v)
@@ -161,18 +193,32 @@ def spoofing_request() -> bool:
     return bool(_SPOOFING.get())
 
 
+def opencode_cautious_request() -> bool:
+    """Vero se la richiesta corrente va trattata con cautela opencode (zen).
+
+    Cioe' stiamo spoofando (client non-opencode) E la cautela opencode e'
+    abilitata. Solo allora gli upstream zen sono degradati a ultima scelta.
+    """
+    return spoofing_request() and opencode_cautious_enabled()
+
+
 def dep_usable(dep: Mapping[str, Any] | None, *, last: bool = False) -> bool:
     """Vero se `dep` e' utilizzabile nel contesto di richiesta corrente.
 
-    - gli upstream opencode.ai sono utilizzabili solo se `allow_opencode()`;
-    - in modalita' cauta, gli upstream **zen** sono ammessi solo come ULTIMA
-      SCELTA (`last=True`): nei percorsi normali (pick, warm, canary, ...) un
-      dep zen e' "non usabile". Gli upstream **go** restano sempre normali.
+    - upstream non-opencode: sempre utilizzabili;
+    - upstream **zen** (free): utilizzabili solo se `allow_opencode_zen()`
+      (client opencode reale o spoof) e, in cautela opencode, ammessi solo come
+      ULTIMA SCELTA (`last=True`): nei percorsi normali (pick, warm, canary,
+      ...) un dep zen e' "non usabile";
+    - upstream **go** (a pagamento): indipendenti da spoof/client/cautela,
+      dipendono solo dall'interruttore `opencode_go_enabled()`.
     """
     if not is_opencode_dep(dep):
         return True
-    if not allow_opencode():
-        return False
-    if not last and spoofing_request() and is_opencode_zen_dep(dep):
-        return False
-    return True
+    if is_opencode_zen_dep(dep):
+        if not allow_opencode_zen():
+            return False
+        if not last and opencode_cautious_request():
+            return False
+        return True
+    return opencode_go_enabled()

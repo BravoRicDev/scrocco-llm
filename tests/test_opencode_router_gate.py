@@ -15,7 +15,7 @@ import tempfile
 import pytest
 
 from app.config import GatewayConfig
-from app.opencode_gate import set_allow_opencode
+from app.opencode_gate import set_allow_opencode_zen, set_spoofing_request
 from app.policy import Policy
 from app.router import Router
 
@@ -33,9 +33,13 @@ POLICY = {"capability_routing": {"model_capabilities": {
 @pytest.fixture(autouse=True)
 def _gate_off(monkeypatch):
     monkeypatch.delenv("OPENCODE_SPOOF_HEADERS", raising=False)
-    set_allow_opencode(None)
+    monkeypatch.delenv("OPENCODE_GO", raising=False)
+    monkeypatch.delenv("OPENCODE_CAUTIOUS", raising=False)
+    set_allow_opencode_zen(None)
+    set_spoofing_request(False)
     yield
-    set_allow_opencode(None)
+    set_allow_opencode_zen(None)
+    set_spoofing_request(False)
 
 
 @pytest.fixture()
@@ -55,20 +59,20 @@ def _dep(r, gname, key):
 
 # --------------------------------------------------------- pick a freddo
 def test_pick_excludes_opencode_when_disallowed(router):
-    set_allow_opencode(False)
+    set_allow_opencode_zen(False)
     assert router.pick_deployment(f"{BASE}-100k", frozenset({"text"})) is None
     plain = router.pick_deployment(f"{BASE}-200k", frozenset({"text"}))
     assert plain is not None and plain["model"] == "m/plain"
 
 
 def test_pick_includes_opencode_when_allowed(router):
-    set_allow_opencode(True)
+    set_allow_opencode_zen(True)
     oc = router.pick_deployment(f"{BASE}-100k", frozenset({"text"}))
     assert oc is not None and oc["model"] == "m/oc"
 
 
 def test_pick_includes_opencode_with_spoof(router, monkeypatch):
-    set_allow_opencode(None)                     # nessuna decisione per-request
+    set_allow_opencode_zen(None)                     # nessuna decisione per-request
     monkeypatch.setenv("OPENCODE_SPOOF_HEADERS", "1")
     oc = router.pick_deployment(f"{BASE}-100k", frozenset({"text"}))
     assert oc is not None and oc["model"] == "m/oc"
@@ -81,11 +85,11 @@ def test_warm_pool_excludes_opencode_when_disallowed(router):
     router.note_session_success("s1", oc["unique"], 100, ctx_est=100)
     router.note_session_success("s1", plain["unique"], 100, ctx_est=100)
 
-    set_allow_opencode(False)
+    set_allow_opencode_zen(False)
     pool = router._warm_pool("s1", None, None, 100)
     assert {d["model"] for d in pool} == {"m/plain"}
 
-    set_allow_opencode(True)
+    set_allow_opencode_zen(True)
     pool2 = router._warm_pool("s1", None, None, 100)
     assert {d["model"] for d in pool2} == {"m/oc", "m/plain"}
 
@@ -97,29 +101,29 @@ def test_warm_pool_excludes_borrowed_opencode(router):
     router.note_session_success("owner", plain["unique"], 100, ctx_est=100)
     router.policy.warm_borrow_idle_sec = 0.0     # prestabili subito
 
-    set_allow_opencode(False)
+    set_allow_opencode_zen(False)
     pool = router._warm_pool("newbie", None, None, None, include_borrowed=True)
     assert {d["model"] for d in pool} == {"m/plain"}
 
-    set_allow_opencode(True)
+    set_allow_opencode_zen(True)
     pool2 = router._warm_pool("newbie", None, None, None, include_borrowed=True)
     assert {d["model"] for d in pool2} == {"m/oc", "m/plain"}
 
 
 # ------------------------------------------------- capacita' / dims
 def test_capable_dims_respects_gate(router):
-    set_allow_opencode(False)
+    set_allow_opencode_zen(False)
     assert router._capable_dims("test", frozenset({"text"})) == [200]
     assert not router._any_capable_in_group(f"{BASE}-100k", frozenset({"text"}))
     assert router._any_capable_in_group(f"{BASE}-200k", frozenset({"text"}))
 
-    set_allow_opencode(True)
+    set_allow_opencode_zen(True)
     assert router._capable_dims("test", frozenset({"text"})) == [100, 200]
 
 
 # ------------------------------------------------------------- canary
 def test_canary_never_picks_opencode_when_disallowed(router):
-    set_allow_opencode(False)
+    set_allow_opencode_zen(False)
     cur = _dep(router, f"{BASE}-200k", "K-PL")
     got = router.warm_fill_canary("test", cur, frozenset({"text"}), 100,
                                   out_tokens=1000, tried=None,
