@@ -47,9 +47,13 @@ _DIM_RE = re.compile(r"-(\d+)k$")
 _PROBE_PROMPT = "Reply with the single letter A"
 
 
-def _probe_excluded(dep: dict) -> bool:
-    """In cautela opencode non si sondano gli upstream zen (free tier)."""
-    return opencode_cautious_enabled() and is_opencode_zen_dep(dep)
+def _zen_rank(dep: dict) -> int:
+    """Rank di ordinamento probe: 0 = normale, 1 = zen (in cautela opencode).
+
+    In cautela opencode gli zen NON vengono esclusi dai probe: restano
+    sondabili ma per ULTIMI (priorita' minima, in coda ai target)."""
+    return 1 if (opencode_cautious_enabled()
+                 and is_opencode_zen_dep(dep)) else 0
 _running = False
 _last_probe: dict[str, float] = {}
 # F32: ultimo probe per CHIAVE (non per deployment). Lo stesso conto non deve
@@ -297,8 +301,10 @@ async def _retired_pass(router, forwarder) -> None:
                                 "cooldown_autoprobe_retired_gap_sec",
                                 20.0) or 0.0)
         retired = sorted(
-            u for u, rec in list((kh.data or {}).items())
-            if (rec or {}).get("state") == "retired")
+            (u for u, rec in list((kh.data or {}).items())
+             if (rec or {}).get("state") == "retired"),
+            key=lambda u: (_zen_rank(
+                router.config.deployment_by_unique(u) or {}), u))
         if not retired:
             return
         log.info("[autoprobe] giro giornaliero RITIRATI: %d deployment "
@@ -311,8 +317,6 @@ async def _retired_pass(router, forwarder) -> None:
             except Exception:  # noqa: BLE001
                 dep = None
             if not dep or dep.get("enabled") is False:
-                continue
-            if _probe_excluded(dep):          # cautela opencode: mai zen
                 continue
             if _keyhealth() is None:          # gateway in shutdown
                 return
@@ -445,8 +449,6 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
         if profile and not grp.startswith(pfx):
             continue
         for d in deps:
-            if _probe_excluded(d):        # cautela opencode: mai zen
-                continue
             unique = d.get("unique") or ""
             if router.is_cooled_down(unique):
                 continue       # appena fallito: non insistere
@@ -461,11 +463,12 @@ def _select_fresh_targets(router, profile: str, per_dim: int, fresh_age: float,
             s = router._stats.get(unique)
             last_act = 0.0 if s is None else max(
                 s.last_used, s.last_success_ts, s.last_fail_ts)
-            by_group.setdefault(grp, []).append((last_act, unique))
+            by_group.setdefault(grp, []).append(
+                (_zen_rank(d), last_act, unique))
     targets: list[tuple[str, str]] = []
     for grp, items in by_group.items():
-        items.sort(key=lambda x: (_probe_count_24h(x[1], now), x[0]))
-        for _la, unique in items[:per_dim]:
+        items.sort(key=lambda x: (x[0], _probe_count_24h(x[2], now), x[1]))
+        for _zr, _la, unique in items[:per_dim]:
             targets.append((grp, unique))
     return targets[:max_total]
 
@@ -513,8 +516,6 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
             dep = None
         if not dep:
             continue
-        if _probe_excluded(dep):          # cautela opencode: mai zen
-            continue
         grp = dep.get("group") or ""
         if not _DIM_RE.search(grp):
             continue           # solo dim testo (-<N>k), niente -go/-fallback/cap
@@ -529,11 +530,11 @@ def _select_targets(router, profile: str, per_dim: int, min_age: float,
             continue
         if not _key_gap_ok(dep, now, key_gap):
             continue           # F32: stessa chiave sondata troppo di recente
-        by_group.setdefault(grp, []).append((resid, unique))
+        by_group.setdefault(grp, []).append((_zen_rank(dep), resid, unique))
     targets: list[tuple[str, str]] = []
     for grp, items in by_group.items():
-        items.sort(key=lambda x: (_probe_count_24h(x[1], now), x[0]))
-        for _rem, unique in items[:per_dim]:
+        items.sort(key=lambda x: (x[0], _probe_count_24h(x[2], now), x[1]))
+        for _zr, _rem, unique in items[:per_dim]:
             targets.append((grp, unique))
     return targets[:max_total]
 
@@ -567,8 +568,6 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 except Exception:  # noqa: BLE001
                     continue
                 if not dep:
-                    continue
-                if _probe_excluded(dep):      # cautela opencode: mai zen
                     continue
                 _now = time.time()
                 if _key_ok_fresh(_okmap, dep, _now, _ok_fresh):
@@ -624,8 +623,6 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
             except Exception:  # noqa: BLE001
                 continue
             if not dep or not router.is_cooled_down(unique):
-                continue
-            if _probe_excluded(dep):          # cautela opencode: mai zen
                 continue
             _now = time.time()
             if _key_ok_fresh(_okmap, dep, _now, _ok_fresh):
@@ -697,14 +694,13 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                                  "cooldown_autoprobe_key_gap_sec", 300.0) or 0.0)
         _day_max = max(0, int(getattr(
             router.policy, "cooldown_autoprobe_key_day_max", 1) or 0))
-        for unique in uniques:
+        for unique in sorted(uniques, key=lambda u: (
+                _zen_rank(router.config.deployment_by_unique(u) or {}), u)):
             try:
                 dep = router.config.deployment_by_unique(unique)
             except Exception:  # noqa: BLE001
                 dep = None
             if not dep:
-                continue
-            if _probe_excluded(dep):          # cautela opencode: mai zen
                 continue
             if not _key_gap_ok(dep, time.time(), _key_gap):
                 continue       # F32: chiave gia' sondata poco fa

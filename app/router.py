@@ -1330,13 +1330,13 @@ class Router:
         for u in tried:
             d = self.config.deployment_by_unique(u)
             if d and d.get("group") == group_name:
-                tried_tiers.add(int(d.get("order", ORDER_LAST)))
+                tried_tiers.add(self._eff_order(d))
         tiers: dict[int, list[dict]] = {}
         for d in deps:
             u = d.get("unique")
             if not u or u in tried:
                 continue
-            tier = int(d.get("order", ORDER_LAST))
+            tier = self._eff_order(d)
             if tier in tried_tiers:
                 continue
             if self.is_cooled_down(u) or self.is_retired(u):
@@ -3700,7 +3700,7 @@ class Router:
         for d in dims:
             gname = f"{cfg.proxy_prefix}{pname}-{d}k"
             for dep in cfg.groups.get(gname, []):
-                if self._dep_supports(dep, need) and _dep_usable(dep, last=True):
+                if self._dep_supports(dep, need) and _dep_usable(dep):
                     capable.append(d)
                     break
         return capable
@@ -3710,7 +3710,7 @@ class Router:
         if not need:
             return True
         for dep in self.config.groups.get(group_name, []):
-            if self._dep_supports(dep, need) and _dep_usable(dep, last=True):
+            if self._dep_supports(dep, need) and _dep_usable(dep):
                 return True
         return False
 
@@ -4971,13 +4971,13 @@ class Router:
             # tier (colonna `order`) primario, poi dim crescente: i dims sono
             # raccolti in ordine dim-ascendente, quindi uno stable sort per
             # `order` mantiene l'ordine interno del gruppo dentro (order, dim).
-            dim_deps.sort(key=lambda dep: int(dep.get("order", ORDER_LAST)))
+            dim_deps.sort(key=lambda dep: self._eff_order(dep))
             # ANTI-RAFFICA (solo FREE): dentro ogni tier `order` si interleave
             # per provider (round-robin) con i -dim crescenti: la scala non ha
             # mai due vicini dello stesso provider se esistono alternative.
             _tiers: dict[int, list] = {}
             for dep in dim_deps:
-                _tiers.setdefault(int(dep.get("order", ORDER_LAST)),
+                _tiers.setdefault(self._eff_order(dep),
                                   []).append(dep)
             for _t in sorted(_tiers):
                 chain.extend(d["unique"] for d in
@@ -5567,7 +5567,7 @@ class Router:
                 _dk = self._dim_k(d.get("group"))
                 _dr = 0 if (not rd or _dk <= rd) else (_dk - rd)
                 return (_dr,
-                        int(d.get("order", ORDER_LAST)),
+                        self._eff_order(d),
                         self._reputation_score(d["unique"], d, None),
                         self.usage_weight_24h(d["unique"]))
             except Exception:                          # noqa: BLE001
@@ -5600,6 +5600,19 @@ class Router:
             if not progressed:
                 break
         return out
+
+    def _eff_order(self, dep: dict) -> int:
+        """Order EFFETTIVO per il tiering, sensibile alla cautela opencode.
+
+        In cautela opencode (richiesta spoofata) gli upstream **zen** vengono
+        trattati come ULTIMO tier dei free: order = ORDER_LAST, cioe' dopo
+        openrouter (9999). Restano comunque PRIMA dello stadio -go/-fallback,
+        che e' un gruppo separato a valle. Per un client opencode reale (fuori
+        cautela) l'order e' quello nativo (zen tipicamente 0 = primo tier).
+        """
+        if opencode_cautious_request() and is_opencode_zen_dep(dep):
+            return ORDER_LAST
+        return int(dep.get("order", ORDER_LAST))
 
     def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
                         exclude: str | None = None,
@@ -5773,9 +5786,9 @@ class Router:
         # le catene capacita' (-vision, -audio, ...) non sono toccate.
         if deps and self.config.group_caps.get(group_name) is None \
                 and self.DIM_SUFFIX_RE.search(group_name):
-            min_order = min(int(d.get("order", ORDER_LAST)) for d in deps)
+            min_order = min(self._eff_order(d) for d in deps)
             deps = [d for d in deps
-                    if int(d.get("order", ORDER_LAST)) == min_order]
+                    if self._eff_order(d) == min_order]
         # STICKINESS gen/stt: attacca le richieste consecutive allo stesso
         # modello upstream (voce/stile coerenti); le chiavi gemelle continuano
         # a ruotare per recency/EMA dentro il sottoinsieme. Nessuno vivo ->
@@ -5842,8 +5855,7 @@ class Router:
                      limit: int = 0,
                      tried: set[str] | None = None,
                      allow_slow: bool = False,
-                     out_tokens: int | None = None,
-                     last: bool = False) -> dict | None:
+                     out_tokens: int | None = None) -> dict | None:
         """Cammina una catena piatta di univoci saltando cooled-down,
         deployment senza le capacità `need`, (se ctx) sopra max_input e —
         per richieste pure-testo su catene dims — i multimodali finché
@@ -5861,17 +5873,24 @@ class Router:
         `tried`: set di deployment già tentati in questa richiesta — vengono
         saltati a prescindere. Se fornito, ha priorità su `failed_unique`.
 
-        `last`: ammissione degli upstream zen opencode come ULTIMA SCELTA (in
-        modalita' cauta): con `last=True` i dep zen tornano eleggibili e la
-        catena viene partizionata mettendoli in coda; default `last=False`
-        (zen esclusi dai percorsi normali)."""
-        # Cautela (spoof): gli zen, ammessi solo con `last=True`, vanno in coda
-        # alla catena cosi' restano l'ultima scelta anche dentro lo step finale.
-        if last and opencode_cautious_request():
-            _z = lambda u: is_opencode_zen_dep(          # noqa: E731
-                self.config.deployment_by_unique(u))
-            chain = ([u for u in chain if not _z(u)]
-                     + [u for u in chain if _z(u)])
+        Cautela opencode (spoof): la catena viene RIORDINATA (stabile) con rank
+        (0) provider normali, (1) zen (free, ultima scelta tra i free), (2)
+        bucket -go/-fallback. Cosi' gli zen restano eleggibili nei percorsi
+        normali ma vengono tentati dopo tutti gli altri free e PRIMA di -go."""
+        # Cautela opencode (spoof): rank stabile = normali -> zen -> -go/-fb.
+        if opencode_cautious_request():
+            _go_suf = self.config.go_suffix or "-go"
+            _fb_suf = self.config.fallback_suffix or "-fallback"
+
+            def _rank(u: str) -> int:
+                _d = self.config.deployment_by_unique(u)
+                _g = str((_d or {}).get("group") or "")
+                if _g.endswith(_go_suf) or _g.endswith(_fb_suf):
+                    return 2
+                return 1 if is_opencode_zen_dep(_d) else 0
+
+            if any(_rank(u) for u in chain):
+                chain = sorted(chain, key=_rank)
         # La catena puo' essere RIORDINATA dinamicamente (catena provider):
         # `index(failed)+1` non e' piu' affidabile. Per le scale -dim si
         # riprende per FLOOR di dim (mai indietro, ma tutte le alternative
@@ -5958,7 +5977,7 @@ class Router:
                 return None
             if self._gemini_blocked(dep):
                 return None
-            if not _dep_usable(dep, last=last):
+            if not _dep_usable(dep):
                 return None
             if need and not self._dep_supports(dep, need):
                 return None
@@ -6345,7 +6364,7 @@ class Router:
                     0 if (_blk == 0 and holder and u == holder) else 1,
                     _lat[0], _lat[1],
                     -(self.stats_for(u).last_used or 0.0),
-                    int(dep.get("order", ORDER_LAST)),
+                    self._eff_order(dep),
                     int(dep.get("max_input_tokens") or 0))
 
         out: list[dict] = []
@@ -6370,7 +6389,7 @@ class Router:
                                     allow_slow=self._warm_allow_slow()):
                 log.debug("[warm] skip (chiave satura o demote): %s", u)
                 continue
-            if not _dep_usable(dep, last=True):
+            if not _dep_usable(dep):
                 continue
             if (opencode_cautious_request() and is_opencode_zen_dep(dep)
                     and is_native_session(ent[0])):
@@ -6406,7 +6425,7 @@ class Router:
                 if self._is_demoted_dep(u, sid, ctx,
                                         allow_slow=self._warm_allow_slow()):
                     continue
-                if not _dep_usable(dep, last=True):
+                if not _dep_usable(dep):
                     continue
                 if (opencode_cautious_request() and is_opencode_zen_dep(dep)
                         and is_native_session(ent[0] if ent else None)):
@@ -6855,7 +6874,7 @@ class Router:
             if group is not None and str(d.get("group") or "") != str(group):
                 continue
             try:
-                out.add(int(d.get("order", ORDER_LAST)))
+                out.add(self._eff_order(d))
             except Exception:                          # noqa: BLE001
                 continue
         return out
@@ -6895,7 +6914,7 @@ class Router:
         _by_tier: dict[int, list[dict]] = {}
         for d in cands:
             try:
-                _t = int(d.get("order", ORDER_LAST))
+                _t = self._eff_order(d)
             except Exception:                          # noqa: BLE001
                 _t = ORDER_LAST
             _by_tier.setdefault(_t, []).append(d)
@@ -6948,8 +6967,8 @@ class Router:
             try:
                 return (self._prov_avoid_key(d),
                         self._group_dim_order_key(str(d.get("group") or "")),
-                        1 if int(d.get("order", ORDER_LAST)) in _sam else 0,
-                        int(d.get("order", ORDER_LAST)),
+                        1 if self._eff_order(d) in _sam else 0,
+                        self._eff_order(d),
                         self._reputation_score(d["unique"], d, None),
                         self.usage_weight_24h(d["unique"]))
             except Exception:                          # noqa: BLE001
@@ -7576,11 +7595,8 @@ class Router:
         dep = self._walk_chain(chain, None, need, ctx)
         if dep is None:
             # ULTIMO SCAGLIONE: riammetti i free-dims 'lenti per la sessione'
-            # (demoted) solo ora che tutto il resto e' esaurito. Con la cautela
-            # attiva e' anche lo stadio in cui gli zen tornano eleggibili
-            # (ultima scelta, in coda alla catena).
-            dep = self._walk_chain(chain, None, need, ctx, allow_slow=True,
-                                   last=True)
+            # (demoted) solo ora che tutto il resto e' esaurito.
+            dep = self._walk_chain(chain, None, need, ctx, allow_slow=True)
         return dep
 
     def _walk_ladder_resilient(self, ladder: list[str],
@@ -7894,7 +7910,7 @@ class Router:
                 continue
             if self._endpoint_quarantined(d):
                 continue
-            if not _dep_usable(d, last=True):
+            if not _dep_usable(d):
                 continue
             if need and not self._dep_supports(d, need):
                 continue
@@ -7925,7 +7941,7 @@ class Router:
                 continue
             if self._endpoint_quarantined(_d):
                 continue
-            if not _dep_usable(_d, last=True):
+            if not _dep_usable(_d):
                 continue
             if need and not self._dep_supports(_d, need):
                 continue

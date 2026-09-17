@@ -25,12 +25,14 @@ forwarder. Lo stato vive in ContextVar per-request:
     chiave spuri).
 
 MODALITA' CAUTA OPENCODE (default = spoof ON): quando stiamo "spoofando"
-(client NON-opencode con `OPENCODE_SPOOF_HEADERS` attivo) trattiamo gli
-upstream **zen** (free tier, rischioso) come ULTIMA SCELTA, raggiungibili solo
-a esaurimento degli altri provider. Gli upstream **go** (a pagamento) restano
-sempre normali. La cautela NON si applica ai client opencode reali. Vedi
-`opencode_cautious_enabled()`, `opencode_cautious_request()` e
-`dep_usable(..., last=...)`.
+(client NON-opencode con `OPENCODE_SPOOF_HEADERS` attivo) gli upstream **zen**
+(free tier, rischioso) restano eleggibili ma con priorita' ULTIMA tra i
+provider free (dopo openrouter) e comunque prima dello stadio -go/-fallback:
+il router li ordina in coda (`Router._eff_order` + partizione in `_walk_chain`)
+invece di escluderli. Gli upstream **go** (a pagamento) restano sempre normali
+dopo zen. La cautela NON si applica ai client opencode reali (per loro zen
+resta il primo tier, `order=0`). Vedi `opencode_cautious_enabled()`,
+`opencode_cautious_request()` e `Router._eff_order`.
 
 NOTA: questa e' la cautela "opencode". La cautela GENERICA (probe/background
 spenti per TUTTI i provider) e' una funzionalita' distinta: vedi
@@ -202,23 +204,21 @@ def opencode_cautious_request() -> bool:
     return spoofing_request() and opencode_cautious_enabled()
 
 
-def dep_usable(dep: Mapping[str, Any] | None, *, last: bool = False) -> bool:
+def dep_usable(dep: Mapping[str, Any] | None) -> bool:
     """Vero se `dep` e' utilizzabile nel contesto di richiesta corrente.
 
     - upstream non-opencode: sempre utilizzabili;
     - upstream **zen** (free): utilizzabili solo se `allow_opencode_zen()`
-      (client opencode reale o spoof) e, in cautela opencode, ammessi solo come
-      ULTIMA SCELTA (`last=True`): nei percorsi normali (pick, warm, canary,
-      ...) un dep zen e' "non usabile";
+      (client opencode reale o spoof). In cautela opencode NON vengono esclusi:
+      restano eleggibili nei percorsi normali (pick/cold, warm, canary, ...) ma
+      con priorita' ULTIMA tra i provider free (dopo openrouter) e comunque
+      prima dello stadio -go/-fallback. L'ordinamento e' responsabilita' del
+      router (vedi `Router._eff_order`), non di questo gate;
     - upstream **go** (a pagamento): indipendenti da spoof/client/cautela,
       dipendono solo dall'interruttore `opencode_go_enabled()`.
     """
     if not is_opencode_dep(dep):
         return True
     if is_opencode_zen_dep(dep):
-        if not allow_opencode_zen():
-            return False
-        if not last and opencode_cautious_request():
-            return False
-        return True
+        return allow_opencode_zen()
     return opencode_go_enabled()

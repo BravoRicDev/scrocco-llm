@@ -1,18 +1,22 @@
-"""Modalita' cauta OPENCODE (zen come ULTIMA SCELTA) e cautela GENERICA.
+"""Modalita' cauta OPENCODE (zen in CODA tra i free) e cautela GENERICA.
 
 Decisioni utente:
   - la cautela opencode vale SOLO per il traffico spoofato (client non-opencode
     con `OPENCODE_SPOOF_HEADERS` attivo): un client opencode reale resta
-    normale; demotion SOLO degli zen (free), gli upstream go (a pagamento)
-    restano normali e sono regolati da un interruttore dedicato (`OPENCODE_GO`,
-    default ON);
+    normale;
+  - in cautela gli zen (free) NON vengono esclusi: restano eleggibili nei
+    percorsi normali (cold/warm/canary) ma con priorita' ULTIMA tra i free
+    (dopo openrouter) e comunque PRIMA dello stadio -go/-fallback. L'ordine e'
+    gestito dal router via `_eff_order` + rank in `_walk_chain`;
+  - gli upstream go (a pagamento) restano normali e sono regolati
+    dall'interruttore dedicato `OPENCODE_GO` (default ON);
   - il warm zen resta utilizzabile con eccezione sull'OWNER: se il warm zen
     appartiene a una sessione NATIVA opencode (`ses_...`) non e' "spoofabile";
     se l'owner e' una sessione fake (`fq_...`, propria o di un'altra) resta un
     warm valido;
   - la cautela GENERICA (`BACKGROUND_CAUTIOUS`, default OFF) e' una
     funzionalita' distinta: spegne probe/background per TUTTI i provider. In
-    cautela opencode le probe restano attive ma non toccano gli zen.
+    cautela opencode le probe restano attive ma con gli zen in coda.
 """
 import os
 import tempfile
@@ -36,6 +40,15 @@ t@x.com,m/oc,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,5,K-OC
 t@x.com,m/oc2,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,6,K-OC2
 t@x.com,m/plain,groq,https://api.groq.com/openai/v1,free,200,200000,5,K-PL
 t@x.com,m/goc,opencode-go,https://opencode.ai/zen/go/v1,free,300,300000,5,K-GOC
+"""
+
+# Stessa -dim con zen (order 0) e un free non-zen (order 10): serve a provare
+# che in cautela lo zen viene spostato in CODA (order effettivo ORDER_LAST).
+CSV_ORDERED = """commento,modello,provider,endpoint,data,context,max_input,priority,order,scrocco-llm-test
+t@x.com,m/oc,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,5,0,K-OC
+t@x.com,m/oc2,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,6,0,K-OC2
+t@x.com,m/plain,groq,https://api.groq.com/openai/v1,free,100,100000,5,10,K-PL
+t@x.com,m/goc,opencode-go,https://opencode.ai/zen/go/v1,free,300,300000,5,20,K-GOC
 """
 
 POLICY = {"capability_routing": {"model_capabilities": {
@@ -74,6 +87,17 @@ def router():
     os.unlink(path)
 
 
+@pytest.fixture()
+def router_ord():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_ORDERED)
+    pol = Policy.from_dict(POLICY)
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    yield Router(cfg, pol)
+    os.unlink(path)
+
+
 def _dep(r, gname, key):
     return next(d for d in r.config.groups[gname] if d.get("api_key") == key)
 
@@ -85,14 +109,12 @@ def test_zen_vs_go_detection():
     assert is_opencode_go_dep(GO_DEP) and not is_opencode_go_dep(ZEN_DEP)
 
 
-def test_dep_usable_zen_last_only_under_spoofing(monkeypatch):
+def test_dep_usable_zen_usable_under_caution(monkeypatch):
     monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
     set_allow_opencode_zen(True)
     set_spoofing_request(True)
-    assert not dep_usable(ZEN_DEP)                    # percorso normale: no
-    assert dep_usable(ZEN_DEP, last=True)             # ultima scelta: si
-    assert dep_usable(GO_DEP)                         # go: mai demoto
-    assert dep_usable(GO_DEP, last=True)
+    assert dep_usable(ZEN_DEP)          # eleggibile: l'ordine lo manda in coda
+    assert dep_usable(GO_DEP)           # go resta normale
 
 
 def test_dep_usable_zen_normal_for_real_opencode_client():
@@ -104,7 +126,7 @@ def test_dep_usable_zen_normal_for_real_opencode_client():
 def test_dep_usable_zen_client_gate_still_applies():
     set_allow_opencode_zen(False)                     # spoof off, non-opencode
     set_spoofing_request(False)
-    assert not dep_usable(ZEN_DEP, last=True)
+    assert not dep_usable(ZEN_DEP)
     # go e' indipendente dal gate zen: default ON
     assert dep_usable(GO_DEP)
 
@@ -124,21 +146,60 @@ def test_opencode_cautious_derived_and_overridable(monkeypatch):
     assert not opencode_cautious_enabled()
 
 
-# --------------------------------------------- pick: zen ultima scelta
-def test_pick_excludes_zen_and_chain_admits_only_last(router, monkeypatch):
-    monkeypatch.setenv("OPENCODE_SPOOF_HEADERS", "1")  # cautela attiva
+# --------------------------------------------- pick: zen in coda tra i free
+def test_eff_order_demotes_zen_last(router_ord, monkeypatch):
+    from app.config import ORDER_LAST
+    zen = _dep(router_ord, f"{BASE}-100k", "K-OC")
+    plain = _dep(router_ord, f"{BASE}-100k", "K-PL")
+    # fuori cautela: order nativo (zen 0 = primo tier)
+    assert router_ord._eff_order(zen) == 0
+    assert router_ord._eff_order(plain) == 10
+    # in cautela opencode (spoof): zen -> ORDER_LAST, gli altri invariati
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    set_spoofing_request(True)
+    assert router_ord._eff_order(zen) == ORDER_LAST
+    assert router_ord._eff_order(plain) == 10
+
+
+def test_pick_zen_last_among_free(router_ord, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    set_allow_opencode_zen(True)
+    need = frozenset({"text"})
+    # client opencode reale: nessuna cautela, zen resta primo tier (order 0)
+    set_spoofing_request(False)
+    d = router_ord.pick_deployment(f"{BASE}-100k", need)
+    assert d is not None and d["model"] in {"m/oc", "m/oc2"}
+    # traffico spoofato in cautela: zen demoto -> vince il free non-zen
+    set_spoofing_request(True)
+    d2 = router_ord.pick_deployment(f"{BASE}-100k", need)
+    assert d2 is not None and d2["model"] == "m/plain"
+
+
+def test_walk_chain_zen_in_tail(router_ord, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
     set_allow_opencode_zen(True)
     set_spoofing_request(True)
     need = frozenset({"text"})
-    # pick a freddo: nessun zen eleggibile (nemmeno nell'ultima spiaggia locale)
-    assert router.pick_deployment(f"{BASE}-100k", need) is None
-    # la catena normale non ammette zen...
-    chain = [d["unique"] for d in router.config.groups[f"{BASE}-100k"]]
-    assert router._walk_chain(chain, None, need, None) is None
-    # ...ma lo stadio finale (last=True) si'
-    dep = router._walk_chain(chain, None, need, None, allow_slow=True,
-                             last=True)
-    assert dep is not None and dep["model"] in {"m/oc", "m/oc2"}
+    chain = [d["unique"] for d in router_ord.config.groups[f"{BASE}-100k"]]
+    # il primo eleggibile NON e' zen (zen in coda)
+    d = router_ord._walk_chain(chain, None, need, None)
+    assert d is not None and d["model"] == "m/plain"
+    # esaurito il non-zen, lo zen torna raggiungibile
+    d2 = router_ord._walk_chain(chain, None, need, None,
+                                tried={d["unique"]})
+    assert d2 is not None and d2["model"] in {"m/oc", "m/oc2"}
+
+
+def test_warm_zen_ordered_last(router_ord, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    zen = _dep(router_ord, f"{BASE}-100k", "K-OC")
+    plain = _dep(router_ord, f"{BASE}-100k", "K-PL")
+    router_ord.note_session_success(FAKE1, zen["unique"], 100, ctx_est=100)
+    router_ord.note_session_success(FAKE1, plain["unique"], 100, ctx_est=100)
+    set_allow_opencode_zen(True)
+    set_spoofing_request(True)
+    pool = router_ord._warm_pool(FAKE1, None, None, None)
+    assert [d["model"] for d in pool] == ["m/plain", "m/oc"]
 
 
 def test_pick_zen_normal_for_real_opencode_client(router):
