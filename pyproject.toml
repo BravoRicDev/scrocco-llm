@@ -4,6 +4,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# Rende importabile il package `app` anche invocando lo script `pytest`
+# (in CI la CWD non e' aggiunta automaticamente a sys.path).
+pythonpath = ["."]
 
 [tool.ruff]
 # Stessa minor del container (Dockerfile: python:3.12-slim).

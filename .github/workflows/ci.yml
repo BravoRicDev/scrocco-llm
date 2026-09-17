@@ -80,6 +80,10 @@ jobs:
           cp var/gateway.yaml.example var/gateway.yaml
           cp var/keys_rotation.csv.example var/keys_rotation.csv
 
+          # compose valida gli env_file di TUTTI i servizi: senza web/.env
+          # fallisce anche per il solo --no-deps scrocco-llm
+          cp web/.env.example web/.env
+
       - name: Build Docker image with docker compose
         run: docker compose build
 
