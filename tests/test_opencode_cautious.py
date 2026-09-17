@@ -281,6 +281,21 @@ def test_sticky_not_set_for_spoofed(router, monkeypatch):
     assert router.dep_sticky_get(FAKE1) is None
 
 
+def test_cache_holder_disabled_for_spoofed(router, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    oc = _dep(router, f"{BASE}-100k", "K-OC")
+    router.note_session_success(FAKE1, oc["unique"], 100, ctx_est=100)
+    set_allow_opencode_zen(True)
+    set_spoofing_request(True)
+    # spoofato: nessun pin sul detentore cache
+    assert router.session_holder(FAKE1) is None
+    assert router.cache_holder(FAKE1) is None
+    # client opencode reale: il detentore resta valido
+    set_spoofing_request(False)
+    assert router.session_holder(FAKE1) == oc["unique"]
+    assert router.cache_holder(FAKE1) is not None
+
+
 # ------------------------------------------- cautela GENERICA (probe/background)
 def test_background_and_opencode_caution_are_independent(monkeypatch):
     # spoof ON -> cautela opencode ON, ma la generica resta OFF

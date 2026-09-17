@@ -14,7 +14,8 @@ import logging
 import math
 import time
 
-from ..opencode_gate import dep_usable as _dep_usable
+from ..opencode_gate import (dep_usable as _dep_usable,
+                             opencode_cautious_request)
 from ..session_ctx import current_session
 
 log = logging.getLogger("nx.router")
@@ -389,6 +390,10 @@ class SessionMixin:
                     d.pop(k, None)
 
     def session_holder(self, session_id: str | None = None) -> str | None:
+        # Cautela opencode: le richieste spoofate non si appuntano al
+        # detentore cache (altrimenti restano agganciate a zen, come il warm).
+        if opencode_cautious_request():
+            return None
         sid = session_id or current_session()
         if not sid:
             return None
