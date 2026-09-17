@@ -14,7 +14,8 @@ import math
 import time
 
 from ..config import ORDER_LAST
-from ..opencode_gate import dep_usable as _dep_usable
+from ..opencode_gate import (dep_usable as _dep_usable,
+                             opencode_cautious_request)
 from ..session_ctx import current_session
 
 log = logging.getLogger("nx.router")
@@ -326,6 +327,8 @@ class CanaryMixin:
         -dim (gli tentativi successivi escludono i gia' provati) e solo a
         esaurimento si sale al -dim superiore.
         Ritorna il miglior candidato del primo -dim utile; None = esauriti."""
+        if opencode_cautious_request():
+            return None
         cur = cur_dep.get("unique")
         ex: set[str] = set(tried or ())
         if cur:
@@ -484,6 +487,8 @@ class CanaryMixin:
         Percorre lo stesso ladder -dim del refill (free only) con le stesse
         esclusioni, scegliendo "come a freddo" nello stesso modo; in piu' NON
         tocca i dep che non hanno un cooldown 429 maturo."""
+        if opencode_cautious_request():
+            return None
         now = time.time()
         cur = cur_dep.get("unique")
         ex: set[str] = set(tried or ())

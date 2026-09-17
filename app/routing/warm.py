@@ -88,6 +88,11 @@ class WarmMixin:
         MRU (`last_used`), `order`, `max_input` crescente. Vuota se disabilitato,
         senza sessione, o senza candidati. `allowed` limita al MONDO richiesto
         (catena del profilo); None = nessun filtro di mondo."""
+        # Cautela opencode: le richieste spoofate (client non-opencode) NON
+        # usano il warm, ne' proprio ne' in prestito. L'ownership resta
+        # registrato (note_warm_owner) cosi' una sessione reale lo trova caldo.
+        if opencode_cautious_request():
+            return []
         if not getattr(self.policy, "warm_pool_enabled", True):
             return []
         sid = session_id or current_session()
@@ -160,9 +165,6 @@ class WarmMixin:
                 continue
             if not _dep_usable(dep):
                 continue
-            if (opencode_cautious_request() and is_opencode_zen_dep(dep)
-                    and is_native_session(ent[0])):
-                continue           # zen di sessione NATIVA: non "spoofabile"
             if need and not self._dep_supports(dep, need):
                 continue
             if not self._cap_fits(dep, ctx):
@@ -196,9 +198,6 @@ class WarmMixin:
                     continue
                 if not _dep_usable(dep):
                     continue
-                if (opencode_cautious_request() and is_opencode_zen_dep(dep)
-                        and is_native_session(ent[0] if ent else None)):
-                    continue       # zen di sessione NATIVA: non "spoofabile"
                 if need and not self._dep_supports(dep, need):
                     continue
                 if not self._cap_fits(dep, ctx):

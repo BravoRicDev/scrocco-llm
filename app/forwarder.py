@@ -66,7 +66,8 @@ from .router import inject_identity, ErrorKind, estimate_tokens
 from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
                             client_is_opencode as _opencode_client_detect,
                             spoof_enabled as _spoof_enabled,
-                            is_native_session as _is_native_session)
+                            is_native_session as _is_native_session,
+                            opencode_cautious_request as _opencode_cautious_request)
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
 from .effort import get_effort, get_temperature_config
@@ -3482,6 +3483,7 @@ truncation_hook=None,
 
                 if (_refill_on and _ready_min and not _degraded
                         and not _esc_grp
+                        and not _opencode_cautious_request()
                         and _refill_rounds < _maxif
                         and _fly < _maxif
                         and (not _deadline_ms

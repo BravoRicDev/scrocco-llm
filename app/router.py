@@ -6206,13 +6206,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # --- STICKY per-deployment (SOLO FREE, mai renewal/paid) ---------
         sticky_dep = None
         # Prima prova lo sticky per-capability se abilitato
-        if session_id and not self._is_renewal_bucket(group_name):
+        if session_id and not self._is_renewal_bucket(group_name) \
+                and not opencode_cautious_request():
             sticky_dep = self.dep_cap_sticky_get(session_id, need)
         # Fallback allo sticky classico (per-sessione)
         if not sticky_dep:
             sticky_dep = (session_id
                           and self.policy.deployment_sticky
                           and not self._is_renewal_bucket(group_name)
+                          and not opencode_cautious_request()
                           and self.dep_sticky_get(session_id))
         if sticky_dep:
             sd = self.config.deployment_by_unique(sticky_dep)
@@ -6247,7 +6249,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # modello+key dello sticky, riagganciamo lo sticky al nuovo gruppo.
         if dep is not None:
             # --- SET STICKY: free bucket, sessione non anonima -------------
-            if session_id and not self._is_renewal_bucket(group_name):
+            if session_id and not self._is_renewal_bucket(group_name) \
+                    and not opencode_cautious_request():
                 if getattr(self.policy, "deployment_sticky_per_capability", False):
                     self.dep_cap_sticky_set(session_id, need, dep["unique"])
                 elif self.policy.deployment_sticky:
@@ -6308,7 +6311,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             _p = self._esc_pin_probe(group_name, _ew, need, ctx, tried=None,
                                      allow_retry=False)
             _use = _p if _p is not None else _ew
-            if session_id and not self._is_renewal_bucket(group_name):
+            if session_id and not self._is_renewal_bucket(group_name) \
+                    and not opencode_cautious_request():
                 if getattr(self.policy, "deployment_sticky_per_capability", False):
                     self.dep_cap_sticky_set(session_id, need, _use["unique"])
                 elif self.policy.deployment_sticky:

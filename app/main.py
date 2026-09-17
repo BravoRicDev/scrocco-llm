@@ -112,7 +112,7 @@ from .router import Router, inject_identity, estimate_tokens, configure_estimate
 from .caution import background_cautious_enabled
 from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             client_can_use_opencode_zen, client_is_opencode,
-                            spoof_enabled)
+                            spoof_enabled, opencode_cautious_request)
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
@@ -3659,6 +3659,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 str(requested_group or ""),
                 router.config.go_suffix, router.config.fallback_suffix)
             if (session and profile and not _degraded and not _esc_grp
+                    and not opencode_cautious_request()
                     and bool(getattr(_pol, "warm_refill_enabled", True))
                     and bool(getattr(_pol, "warm_pool_enabled", True))):
                 _ready = router.warm_ready_effective(session, _pol)

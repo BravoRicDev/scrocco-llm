@@ -190,7 +190,7 @@ def test_walk_chain_zen_in_tail(router_ord, monkeypatch):
     assert d2 is not None and d2["model"] in {"m/oc", "m/oc2"}
 
 
-def test_warm_zen_ordered_last(router_ord, monkeypatch):
+def test_warm_pool_empty_for_spoofed_under_caution(router_ord, monkeypatch):
     monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
     zen = _dep(router_ord, f"{BASE}-100k", "K-OC")
     plain = _dep(router_ord, f"{BASE}-100k", "K-PL")
@@ -198,8 +198,16 @@ def test_warm_zen_ordered_last(router_ord, monkeypatch):
     router_ord.note_session_success(FAKE1, plain["unique"], 100, ctx_est=100)
     set_allow_opencode_zen(True)
     set_spoofing_request(True)
+    # spoofato: il warm non e' consultabile (ne' proprio ne' prestato)
+    assert router_ord._warm_pool(FAKE1, None, None, None) == []
+    assert router_ord._warm_pool(FAKE1, None, None, None,
+                                 include_borrowed=True) == []
+    # ... ma l'ownership e' comunque registrata
+    assert zen["unique"] in (router_ord._sess_deps().get(FAKE1) or set())
+    # una sessione opencode REALE la trova calda (nessuna cautela)
+    set_spoofing_request(False)
     pool = router_ord._warm_pool(FAKE1, None, None, None)
-    assert [d["model"] for d in pool] == ["m/plain", "m/oc"]
+    assert {d["model"] for d in pool} == {"m/plain", "m/oc"}
 
 
 def test_pick_zen_normal_for_real_opencode_client(router):
@@ -223,32 +231,54 @@ def test_pick_go_disabled_by_switch(router, monkeypatch):
     assert router.pick_deployment(f"{BASE}-300k", frozenset({"text"})) is None
 
 
-# ------------------------------------------- warm: eccezione sull'owner
-def test_warm_zen_native_owner_excluded_fake_owner_allowed(router, monkeypatch):
-    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")      # cautela opencode attiva
+# -------------------------------------- warm/canary/sticky: spoofati
+def test_warm_disabled_for_spoofed_borrow(router, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
     oc = _dep(router, f"{BASE}-100k", "K-OC")
     oc2 = _dep(router, f"{BASE}-100k", "K-OC2")
     router.note_session_success(NATIVE, oc["unique"], 100, ctx_est=100)
     router.note_session_success(FAKE1, oc2["unique"], 100, ctx_est=100)
     router.policy.warm_borrow_idle_sec = 0.0
-
     set_allow_opencode_zen(True)
-    set_spoofing_request(True)                        # stiamo spoofando
-    pool = router._warm_pool(FAKE2, None, None, None, include_borrowed=True)
-    assert {d["model"] for d in pool} == {"m/oc2"}    # nativo escluso
-
-    set_spoofing_request(False)                       # client opencode reale
+    set_spoofing_request(True)
+    # spoofato: niente warm, neanche in prestito
+    assert router._warm_pool(FAKE2, None, None, None,
+                             include_borrowed=True) == []
+    # client opencode reale: il prestito (nativo e fake) resta disponibile
+    set_spoofing_request(False)
     pool2 = router._warm_pool(FAKE2, None, None, None, include_borrowed=True)
     assert {d["model"] for d in pool2} == {"m/oc", "m/oc2"}
 
 
-def test_warm_zen_own_fake_session_is_usable(router):
+def test_warm_recorded_but_unusable_by_owner_when_spoofed(router, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
     oc = _dep(router, f"{BASE}-100k", "K-OC")
     router.note_session_success(FAKE1, oc["unique"], 100, ctx_est=100)
     set_allow_opencode_zen(True)
     set_spoofing_request(True)
-    pool = router._warm_pool(FAKE1, None, None, None)
-    assert {d["model"] for d in pool} == {"m/oc"}
+    assert router._warm_pool(FAKE1, None, None, None) == []
+    assert oc["unique"] in (router._sess_deps().get(FAKE1) or set())
+
+
+def test_canaries_disabled_for_spoofed(router, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    set_allow_opencode_zen(True)
+    set_spoofing_request(True)
+    cur = _dep(router, f"{BASE}-100k", "K-OC")
+    need = frozenset({"text"})
+    assert router.warm_fill_canary("test", cur, need, 100, 0) is None
+    assert router.warm_wake_canary("test", cur, need, 100, 0) is None
+
+
+def test_sticky_not_set_for_spoofed(router, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CAUTIOUS", "1")
+    set_allow_opencode_zen(True)
+    set_spoofing_request(True)
+    router.policy.deployment_sticky = True
+    d = router.initial_pick("test", f"{BASE}-100k",
+                            need=frozenset({"text"}), session_id=FAKE1)
+    assert d is not None
+    assert router.dep_sticky_get(FAKE1) is None
 
 
 # ------------------------------------------- cautela GENERICA (probe/background)
