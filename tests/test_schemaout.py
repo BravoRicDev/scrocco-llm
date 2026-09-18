@@ -76,6 +76,26 @@ def test_notjson_plain():
     assert enforce_response(data, {}, SchemaOutConfig())["status"] == "notjson"
 
 
+def test_no_response_format_brace_non_estraibile_passthrough():
+    # Regressione: senza response_format un content che "sembra JSON" ma non
+    # e' estraibile NON deve diventare "invalid" (sarebbe il trigger del retry
+    # correttivo "rispondi SOLO con JSON" che produce JSON nudo al client).
+    raw = '{"status": "completed", "summary": "x"'
+    data = _resp(raw)
+    rep = enforce_response(data, {}, SchemaOutConfig())
+    assert rep["status"] == "notjson"
+    assert data["choices"][0]["message"]["content"] == raw
+
+
+def test_no_response_format_json_valido_passthrough():
+    # Regressione: senza response_format nemmeno il JSON valido va riscritto.
+    raw = '  {"a": 1}  '
+    data = _resp(raw)
+    rep = enforce_response(data, {}, SchemaOutConfig())
+    assert rep["status"] == "notjson"
+    assert data["choices"][0]["message"]["content"] == raw
+
+
 def test_inject_response_format():
     body = {}
     cfg = SchemaOutConfig(inject_response_format=True,

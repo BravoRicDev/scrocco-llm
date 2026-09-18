@@ -1,9 +1,10 @@
 """Enforcement dell'output strutturato (#5 del piano L2).
 
 [IT] Mosse:
- A) pulizia del content consegnato: se il client chiede JSON (o il content
-    SEMBRA un documento JSON) si estrae il JSON puro da fence/prosa e si
-    riscrive il content;
+ A) pulizia del content consegnato: SOLO se il client chiede JSON
+    (`response_format`) si estrae il JSON puro da fence/prosa e si riscrive
+    il content; senza richiesta esplicita il content non viene mai toccato
+    (un testo che "sembra JSON" non e' un contratto di output);
  B) validazione JSON Schema con un subset pragmatico (type, required,
     properties, enum, items, additionalProperties, minimum/maximum,
     minLength/maxLength); se fallisce il chiamante ruota/riprova;
@@ -316,7 +317,13 @@ def enforce_response(data, payload, cfg: SchemaOutConfig | None = None) -> dict:
         content = "".join(p.get("text", "") for p in content
                           if isinstance(p, dict))
     kind, schema = _wants_json((payload or {}).get("response_format"))
-    if kind is None and not (cfg.rewrite_content and _looks_json(content)):
+    # L'enforcement JSON scatta SOLO se il client ha chiesto JSON
+    # (`response_format`). Senza richiesta esplicita un content che "sembra
+    # JSON" NON e' un output strutturato da ripulire/validare: riscriverlo (o
+    # peggio far scattare il retry correttivo "rispondi SOLO con JSON") spinge
+    # il modello a emettere JSON nudo, che il client mostra grezzo (es. il
+    # report testuale del goal di opencode). Qui si passa attraverso intatti.
+    if kind is None:
         return {"status": "notjson"}
     cleaned = clean_json_content(content)
     if cleaned is None:

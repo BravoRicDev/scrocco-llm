@@ -238,3 +238,23 @@ def test_stream_senza_hold_non_ripara(rep, monkeypatch):
     out = _stream(monkeypatch, cfg, router, fwd, good, payload)
     assert "```" in _content_of(out)                  # NON riparato
     assert not [r for r in _rows() if r["family"] == "struct"]
+
+
+def test_stream_senza_response_format_json_passthrough(rep, monkeypatch):
+    # Regressione (bug "JSON nudo" del goal di opencode): con tool dichiarati e
+    # NESSUN response_format, un content JSON-like va consegnato intatto: niente
+    # struct_cleaned/struct_invalid ne' retry correttivo.
+    cfg, router, by_key = _mk(_HDR + _GOOD)
+    good = by_key["K-G"]
+    raw = '{"status": "completed", "summary": "fatto"}'
+    fwd = _FakeFwd({good["unique"]: [_sse(raw)]})
+    payload = {"model": "x",
+               "messages": [{"role": "user", "content": "riassumi"}],
+               "tools": [{"type": "function", "function": {
+                   "name": "goal_complete",
+                   "parameters": {"type": "object", "required": ["summary"],
+                                  "properties": {"summary": {"type": "string"}}}}}]}
+    out = _stream(monkeypatch, cfg, router, fwd, good, payload)
+    assert _content_of(out) == raw
+    assert fwd.calls.count(good["unique"]) == 1       # nessun retry correttivo
+    assert not [r for r in _rows() if r["family"] == "struct"]
