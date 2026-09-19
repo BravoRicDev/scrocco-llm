@@ -67,6 +67,7 @@ from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
                             client_is_opencode as _opencode_client_detect,
                             spoof_enabled as _spoof_enabled,
                             is_native_session as _is_native_session,
+                            is_opencode_zen_dep,
                             opencode_cautious_request as _opencode_cautious_request)
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
@@ -3317,6 +3318,7 @@ truncation_hook=None,
         _raced: set[str] = set()
         _raced_keys: set[str] = set()
         _refill_rounds = 0
+        _zen_hunt = False                # caccia canary zen-only (nativo)
         try:
             _outb = refill_out_budget(payload, _pol)
         except Exception:
@@ -3432,7 +3434,7 @@ truncation_hook=None,
                     _degraded = router.degraded_active()
                 except Exception:
                     _degraded = False
-                def _open_canary(label: str):
+                def _open_canary(label: str, zen_only: bool = False):
                     """Apre UN canario (o sveglia un cooldown 429 maturo) e lo
                     mette in volo accanto ad A. Ritorna (dep, fut, t0, wake)
                     oppure None. Usata dal gate refill e dalla GARA LENTA."""
@@ -3450,7 +3452,8 @@ truncation_hook=None,
                             profile, dep, need, ctx, _outb,
                             tried=tried | _raced,
                             requested_group=requested_group,
-                            exclude_keys=_raced_keys, exclude_uniq=_raced)
+                            exclude_keys=_raced_keys, exclude_uniq=_raced,
+                            only_zen=zen_only)
                     except Exception:
                         _b = None
                     if _b is None:
@@ -3460,6 +3463,7 @@ truncation_hook=None,
                                 tried=tried | _raced,
                                 requested_group=requested_group,
                                 exclude_keys=_raced_keys, exclude_uniq=_raced,
+                                only_zen=zen_only,
                                 min_age_sec=_age)
                         except Exception:
                             _b = None
@@ -3497,14 +3501,25 @@ truncation_hook=None,
                              or (time.monotonic() - _t0) * 1000
                              < _deadline_ms)):
                     try:
-                        _nv = len(router.warm_valid_for(
+                        _pool = router.warm_valid_for(
                             ses, profile,
                             requested_group or dep.get("group"),
                             need, ctx, _outb, tried=tried | _raced,
-                            include_borrowed=True))
+                            include_borrowed=True)
+                        _nv = len(_pool)
                     except Exception:
-                        _nv = _ready_min
-                    if _nv < _ready_min:
+                        _pool, _nv = [], _ready_min
+                    # Nativo opencode SENZA zen nel warm: caccia un canary
+                    # zen-only anche se il conteggio MISTO basta (basta 1 zen).
+                    _zen_hunt = (router._zen_first_active()
+                                 and not any(is_opencode_zen_dep(d)
+                                             for d in _pool)
+                                 and router.hunt_allowed(ses, ctx))
+                    if (_nv < _ready_min) or _zen_hunt:
+                        if _zen_hunt:
+                            router.note_hunt(ses, ctx, gained=False)
+                            log.info("[refill] ns %s: 0 zen nel warm per client "
+                                     "nativo -> caccia canary zen-only", cur)
                         _refill_rounds += 1
                         _rpm = router.session_rpm(ses)
                         log.info("[refill] ns %s: warm validi %d/%d, in volo "
@@ -3522,7 +3537,7 @@ truncation_hook=None,
                                 requested_group or dep.get("group"))
                         except Exception:
                             pass
-                        _op = _open_canary("refill")
+                        _op = _open_canary("refill", zen_only=_zen_hunt)
                         if _op is None:
                             log.info("[refill] ns %s: nessun canario free "
                                      "consegnabile (chiavi escluse=%d)",

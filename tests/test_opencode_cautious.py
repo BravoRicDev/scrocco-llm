@@ -276,34 +276,46 @@ def test_nonopencode_never_uses_zen(router_ord2):
         assert d is not None and d["model"] == "m/plain"
 
 
-def test_native_skips_nonzen_warm_to_search_zen_cold(router_ord2):
-    """Nativo: un warm non-zen NON deve battere la ricerca (a freddo) di uno
-    zen vivo. Q1 utente: prima cercano uno zen, poi (solo se non c'e') usano
-    un warm non-opencode."""
+def test_native_uses_nonzen_warm_immediately(router_ord2):
+    """Nativo SENZA zen caldo: usa SUBITO il warm non-zen (si evitano le
+    latenze); la caccia allo zen e' demandata al refill canary (only_zen)."""
     plain = _dep(router_ord2, f"{BASE}-100k", "K-PL")
     router_ord2.note_session_success(NATIVE, plain["unique"], 100, ctx_est=100)
     set_allow_opencode_zen(True)
     set_spoofing_request(False)
     set_zen_first(True)
+    d = router_ord2.initial_pick("test", f"{BASE}-100k",
+                                 need=frozenset({"text"}), session_id=NATIVE)
+    assert d is not None and d["model"] == "m/plain"
+
+
+def test_native_warm_two_blocks_zen_first(router_ord2):
+    """Con zen e non-zen entrambi caldi, il pool mette gli zen nel PRIMO
+    blocco (anche se l'order CSV dello zen e' peggiore) e initial_pick sceglie
+    zen."""
+    oc = _dep(router_ord2, f"{BASE}-100k", "K-OC")
+    plain = _dep(router_ord2, f"{BASE}-100k", "K-PL")
+    router_ord2.note_session_success(NATIVE, oc["unique"], 100, ctx_est=100)
+    router_ord2.note_session_success(NATIVE, plain["unique"], 100, ctx_est=100)
+    set_allow_opencode_zen(True)
+    set_spoofing_request(False)
+    set_zen_first(True)
+    pool = router_ord2._warm_pool(NATIVE, None, frozenset({"text"}), None)
+    assert pool and is_opencode_zen_dep(pool[0])
     d = router_ord2.initial_pick("test", f"{BASE}-100k",
                                  need=frozenset({"text"}), session_id=NATIVE)
     assert d is not None and is_opencode_zen_dep(d)
 
 
-def test_native_uses_nonzen_warm_when_no_zen_available(router_ord2,
-                                                       monkeypatch):
-    """Non esclusione totale: se NON esiste alcuno zen, il warm non-zen resta
-    utilizzabile (i nativi ci arrivano solo dopo aver cercato lo zen)."""
-    plain = _dep(router_ord2, f"{BASE}-100k", "K-PL")
-    router_ord2.note_session_success(NATIVE, plain["unique"], 100, ctx_est=100)
+def test_zen_canary_only_zen_filter(router_ord2):
+    """`warm_fill_canary(only_zen=True)` restituisce solo zen."""
+    cur = _dep(router_ord2, f"{BASE}-100k", "K-PL")
     set_allow_opencode_zen(True)
     set_spoofing_request(False)
     set_zen_first(True)
-    monkeypatch.setattr(router_ord2, "_usable_zen_exists",
-                        lambda *a, **k: False)
-    d = router_ord2.initial_pick("test", f"{BASE}-100k",
-                                 need=frozenset({"text"}), session_id=NATIVE)
-    assert d is not None and d["model"] == "m/plain"
+    b_zen = router_ord2.warm_fill_canary("test", cur, frozenset({"text"}),
+                                         100, 100, only_zen=True)
+    assert b_zen is not None and is_opencode_zen_dep(b_zen)
 
 
 # --------------------------------------------- pick: go indipendente

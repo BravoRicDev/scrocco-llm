@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import Counter
 
 from ..opencode_gate import (dep_usable as _dep_usable,
                              is_native_session, is_opencode_zen_dep,
@@ -115,6 +116,12 @@ class WarmMixin:
 
         _own_set = set(owned or ())
 
+        # Client opencode NATIVO: il pool e' a DUE BLOCCHI, prima gli zen e
+        # poi tutto il resto. Dentro ogni blocco valgono le 3 fasce solite
+        # (propri non-lenti > prestati non-lenti > lenti, EMA).
+        _zen_first = bool(getattr(self, "_zen_first_active",
+                                  lambda: False)())
+
         def _wkey(dep: dict):
             # Ordine a TRE FASCE, con il SOLO flag del TIMER lento (>45s) a
             # decidere la fascia: (1) propri non lenti (holder "eletto" primo,
@@ -134,7 +141,9 @@ class WarmMixin:
                 _lat = (0, _l) if _l is not None else (1, 0.0)
             else:
                 _lat = (0, 0.0)
-            return (_blk,
+            _zr = (0 if is_opencode_zen_dep(dep) else 1) if _zen_first else 0
+            return (_zr,
+                    _blk,
                     0 if (_blk == 0 and holder and u == holder) else 1,
                     _lat[0], _lat[1],
                     -(self.stats_for(u).last_used or 0.0),
@@ -223,7 +232,20 @@ class WarmMixin:
             out = out[:max_n]
         log.debug("[warm] pool=%d sid=%s: %s", len(out), sid,
                   ",".join(d["unique"] for d in out[:6]))
+        _n_own = sum(1 for d in out if d["unique"] in _own_set)
+        log.info("[warm] pool %s: %s (propri %d, prestiti %d)",
+                 sid, self._provider_mix(out), _n_own, len(out) - _n_own)
         return out
+
+    @staticmethod
+    def _provider_mix(deps: list[dict]) -> str:
+        """Composizione per provider di un pool, tipo 'openrouter 12,
+        bynara 3, opencode-zen 1' (ordine decrescente)."""
+        c: Counter = Counter()
+        for d in deps or ():
+            p = str((d or {}).get("provider") or "").strip() or "?"
+            c[p] += 1
+        return ", ".join(f"{p} {n}" for p, n in c.most_common())
 
     def _borrow_selectable(self) -> bool:
         """I prestati sono anche SELEZIONABILI (nel blocco prestati, dopo i

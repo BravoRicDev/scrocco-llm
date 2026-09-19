@@ -114,7 +114,8 @@ from .caution import background_cautious_enabled
 from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             set_zen_first,
                             client_can_use_opencode_zen, client_is_opencode,
-                            spoof_enabled, opencode_cautious_request)
+                            spoof_enabled, opencode_cautious_request,
+                            is_opencode_zen_dep)
 from .capabilities import required_caps, count_image_parts
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
@@ -2711,6 +2712,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                       fresh_only: bool = False,
                       hold: bool = False,
                       refill: bool = False,
+                      zen_only: bool = False,
                       out_tokens: int | None = None,
                       raced: dict | None = None):
     """HEDGE sul primo contenuto (stream, pre-commit).
@@ -2786,7 +2788,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                 profile, dep, need, ctx, out_tokens, tried=tried_set,
                 requested_group=requested_group,
                 exclude_keys=_xk,
-                exclude_uniq=_ex_uniq)
+                exclude_uniq=_ex_uniq,
+                only_zen=zen_only)
             if _B is not None:
                 log.info("[refill] canario %s per %s (order=%s, chiavi warm+"
                          "in-volo escluse=%d, out=%s)", _B["unique"],
@@ -2814,6 +2817,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                     profile, dep, need, ctx, out_tokens, tried=tried_set,
                     requested_group=requested_group,
                     exclude_keys=_xk2, exclude_uniq=_exu2,
+                    only_zen=zen_only,
                     min_age_sec=_age)
                 if _W is not None:
                     log.info("[refill] sveglia %s (429 in cooldown da "
@@ -3642,6 +3646,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _fresh_only = False
             _legacy = False
             _refill = False
+            _zen_hunt = False            # caccia canary zen-only (nativo)
             _pol = router.policy
             # Budget di output della richiesta: serve SEMPRE (non solo in
             # refill) — e' il criterio di "capace" per il gruppo warm (gate
@@ -3681,14 +3686,26 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     _fly = 0
                 if _ready and _refill_rounds < _maxif and _fly < _maxif:
                     try:
-                        _nv = len(router.warm_valid_for(
+                        _pool = router.warm_valid_for(
                             session, profile,
                             requested_group or dep.get("group"),
                             need, ctx, _need_out, tried=tried_set,
-                            include_borrowed=True))
+                            include_borrowed=True)
+                        _nv = len(_pool)
                     except Exception:
-                        _nv = _ready
-                    _refill = _nv < _ready
+                        _pool, _nv = [], _ready
+                    # Nativo opencode SENZA zen nel warm: caccia un canary
+                    # zen-only anche se il conteggio MISTO basta (basta 1 zen).
+                    _zen_hunt = (router._zen_first_active()
+                                 and not any(is_opencode_zen_dep(d)
+                                             for d in _pool)
+                                 and router.hunt_allowed(session, ctx))
+                    _refill = (_nv < _ready) or _zen_hunt
+                    if _zen_hunt:
+                        router.note_hunt(session, ctx, gained=False)
+                        log.info("[refill] %s: 0 zen nel warm per client "
+                                 "nativo -> caccia canary zen-only",
+                                 dep.get("unique"))
                     if _refill:
                         _rpm = router.session_rpm(session)
                         log.info("[refill] %s: warm validi %d/%d, in volo "
@@ -3773,7 +3790,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     client_ip=client_ip, attribution=attribution,
                     hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
                     _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only,
-                    hold=hold, refill=_refill,
+                    hold=hold, refill=_refill, zen_only=_zen_hunt,
                     slow_race_ms=_slow_ms,
                     out_tokens=_need_out or None, raced=_raced)
                 if _legacy:

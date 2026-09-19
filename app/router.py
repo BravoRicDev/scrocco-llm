@@ -5176,44 +5176,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         riordinare la scala) ne' per i non-opencode (zen esclusi)."""
         return zen_first_request() and not opencode_cautious_request()
 
-    def _usable_zen_exists(self, uniques, need=None, ctx=None,
-                           tried=None, failed_unique=None) -> bool:
-        """Vero se nel mondo `uniques` esiste almeno un dep zen VIVO e
-        compatibile non ancora provato. Serve a decidere se, per un nativo,
-        cercare uno zen (anche a freddo) PRIMA di usare un warm non-zen."""
-        for u in uniques or ():
-            if u == failed_unique or (tried and u in tried):
-                continue
-            d = self.config.deployment_by_unique(u)
-            if not d or not is_opencode_zen_dep(d):
-                continue
-            if self.is_cooled_down(u) or self.is_retired(u):
-                continue
-            if self._endpoint_quarantined(d):
-                continue
-            if not _dep_usable(d):
-                continue
-            if need and not self._dep_supports(d, need):
-                continue
-            if not self._cap_fits(d, ctx):
-                continue
-            return True
-        return False
-
-    def _zen_world(self, group_name: str) -> list:
-        """Uniques del mondo del gruppo richiesto (bucket + scala), usati per
-        capire se esiste uno zen da cercare prima dei non-zen."""
-        return ([d["unique"] for d in self.config.groups.get(group_name, [])]
-                + (self._ladder_for_group(group_name) or []))
-
-    def _zen_prefer_skip(self, dep, group_name, need=None, ctx=None) -> bool:
-        """True se per un nativo `dep` (non-zen) va SCARTATO in favore di uno
-        zen vivo da cercare (warm/sticky non opentcode = solo a zen esaurito)."""
-        return (self._zen_first_active()
-                and not is_opencode_zen_dep(dep)
-                and self._usable_zen_exists(
-                    self._zen_world(group_name), need, ctx))
-
     def _eff_order(self, dep: dict) -> int:
         """Order EFFETTIVO per il tiering, sensibile al gate opencode.
 
@@ -6221,17 +6183,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     need=need, ctx=ctx,
                     include_borrowed=self._borrow_selectable(),
                     out_tokens=out_tokens)
-                if _warm and self._zen_first_active():
-                    # Nativi opencode: prima i warm ZEN. Se non ce n'e' ma
-                    # esiste uno zen vivo, NON usare un warm non-zen: cerca lo
-                    # zen a freddo (gli altri solo a zen esaurito). Se nessuno
-                    # zen esiste davvero, il warm non-zen resta valido.
-                    _zwarm = [d for d in _warm if is_opencode_zen_dep(d)]
-                    if _zwarm:
-                        _warm = _zwarm
-                    elif self._zen_prefer_skip(_warm[0], group_name,
-                                               need, ctx):
-                        _warm = []
+                # Nativi opencode: l'ordine zen-first e' dentro `_warm_pool`
+                # (blocco zen prima, poi tutto il resto). Nessuno skip: se non
+                # c'e' uno zen caldo si usa SUBITO il warm non-zen e il refill
+                # canary zen lo cerca in background (niente ricerca a freddo
+                # sincrona: si evitano le latenze).
                 if _warm:
                     _dep = _warm[0]
                     # P3 (non-stream): se l'eletto e' LENTO e c'e' un caldo
@@ -6302,7 +6258,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                         allow_slow=self._warm_allow_slow()) \
                     and self._cap_fits(sd, ctx) \
                     and _dep_usable(sd) \
-                    and not self._zen_prefer_skip(sd, group_name, need, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
                           session_id, sticky_dep, ctx or "?")
@@ -6582,15 +6537,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                                 tried, failed_unique,
                                 include_borrowed=self._borrow_selectable(),
                                 out_tokens=out_tokens)
-        if _warm and self._zen_first_active():
-            # Nativi: prima gli zen. Nessuno zen caldo ma uno zen vivo ->
-            # cerca a freddo invece di usare un warm non-zen.
-            _zwarm = [d for d in _warm if is_opencode_zen_dep(d)]
-            if _zwarm:
-                _warm = _zwarm
-            elif self._usable_zen_exists(ladder, need, ctx,
-                                         tried, failed_unique):
-                _warm = []
+        # Nativi opencode: l'ordine zen-first e' dentro `_warm_pool`. Se non
+        # c'e' zen caldo si usa SUBITO il warm non-zen (refill canary zen in
+        # background): niente ricerca a freddo sincrona.
         if _warm:
             _dep = _warm[0]
             log.info("[warm] ladder -> %s (caldo proprio, max_in=%s)",

@@ -15,6 +15,7 @@ import time
 
 from ..config import ORDER_LAST
 from ..opencode_gate import (dep_usable as _dep_usable,
+                             is_opencode_zen_dep,
                              opencode_cautious_request)
 from ..session_ctx import current_session
 
@@ -314,6 +315,7 @@ class CanaryMixin:
                          requested_group: str | None = None,
                          exclude_keys: set[str] | None = None,
                          exclude_uniq: set[str] | None = None,
+                         only_zen: bool = False,
                          sampled_tiers: set[int] | None = None) -> dict | None:
         """UN candidato probe per il warm-refill: percorre il ladder -dim
         ASCENDENTE partendo dal gruppo corrente (se nel -dim corrente non c'e'
@@ -391,6 +393,8 @@ class CanaryMixin:
                 continue                               # occupato da qualcuno
             if not _dep_usable(d):
                 continue                               # upstream non usabile
+            if only_zen and not is_opencode_zen_dep(d):
+                continue                 # caccia zen-only (nativo opencode)
             mxi = int(d.get("max_input_tokens") or 0)
             if floor and mxi and mxi < floor * 1000:
                 continue
@@ -477,6 +481,7 @@ class CanaryMixin:
                          requested_group: str | None = None,
                          exclude_keys: set[str] | None = None,
                          exclude_uniq: set[str] | None = None,
+                         only_zen: bool = False,
                          min_age_sec: float = 3600.0,
                          sampled_tiers: set[int] | None = None) -> dict | None:
         """TERZO canario del warm-refill: non cerca un dep fresco ma un
@@ -562,6 +567,8 @@ class CanaryMixin:
                 continue
             if not _dep_usable(d):
                 continue                               # upstream non usabile
+            if only_zen and not is_opencode_zen_dep(d):
+                continue                 # caccia zen-only (nativo opencode)
             mxi = int(d.get("max_input_tokens") or 0)
             if floor and mxi and mxi < floor * 1000:
                 continue
