@@ -233,8 +233,22 @@ class WarmMixin:
         log.debug("[warm] pool=%d sid=%s: %s", len(out), sid,
                   ",".join(d["unique"] for d in out[:6]))
         _n_own = sum(1 for d in out if d["unique"] in _own_set)
-        log.info("[warm] pool %s: %s (propri %d, prestiti %d)",
-                 sid, self._provider_mix(out), _n_own, len(out) - _n_own)
+        # "propri" e' ownership (ts rinfrescato finche' la sessione e' viva),
+        # NON l'ultimo uso effettivo: un proprio puo' essere gia' PRESTABILE
+        # ad altre sessioni se il DEPLOYMENT e' fermo da >= borrow_idle_sec.
+        # Lo contiamo a parte per chiarezza (stessa definizione di _lendable_set).
+        try:
+            _lend = self._lendable_set(now)
+        except Exception:                              # noqa: BLE001
+            _lend = set()
+        _n_idle = sum(1 for d in out
+                      if d["unique"] in _own_set and d["unique"] in _lend)
+        log.info("[warm] pool %s: %s (propri %d, di cui prestabili %d "
+                 "[fermi >=%.0fs], prestiti %d)",
+                 sid, self._provider_mix(out), _n_own, _n_idle,
+                 float(getattr(self.policy, "warm_borrow_idle_sec", 240.0)
+                       or 0.0),
+                 len(out) - _n_own)
         return out
 
     @staticmethod

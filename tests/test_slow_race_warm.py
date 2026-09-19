@@ -110,6 +110,21 @@ def test_warm_pool_flaggato_in_fondo_ma_non_rimosso(wr):
     assert wr.is_slow_for_session(s["unique"], "s1", 100) is True
 
 
+def test_warm_pool_log_conta_propri_prestabili(wr, caplog):
+    """Il log distingue i 'propri' (ownership, ts rinfrescato) dai 'propri
+    gia' prestabili' (deployment fermo da >= borrow_idle_sec)."""
+    s, m, b = _warm3(wr)
+    # s e' un PROPRIO ma il deployment e' fermo da molto: prestabile
+    wr.stats_for(s["unique"]).last_used = time.time() - 100000
+    with caplog.at_level(logging.INFO, logger="nx.router"):
+        wr._warm_pool("s1", None, None, 100)
+    lines = [r.getMessage() for r in caplog.records
+             if "[warm] pool" in r.getMessage()]
+    assert lines, "deve loggare la composizione del pool"
+    assert "propri 3" in lines[-1]
+    assert "di cui prestabili 1" in lines[-1]
+
+
 def test_marchio_pulito_da_successo_rapido(wr):
     s, _m, _b = _warm3(wr)
     wr.mark_session_slow("s1", s["unique"])
