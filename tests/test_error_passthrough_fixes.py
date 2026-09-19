@@ -15,7 +15,7 @@ import tempfile
 
 from app.forwarder import (Forwarder, UpstreamError, RETRYABLE_STATUS,
                            _PROVIDER_TRANSIENT_RE, _MODEL_MISSING_RE,
-                           media_reject_signature)
+                           _UNKNOWN_FIELD_RE, media_reject_signature)
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
@@ -319,3 +319,85 @@ def test_nonstream_toglie_stream_options():
     assert data["choices"][0]["message"]["content"] == "ok"
     assert "stream_options" not in seen["body"]
     assert seen["body"].get("stream") in (None, False)
+
+
+# ------------------- 400 "modello non servito" / "campo sconosciuto"
+BYNARA_MODEL_400 = ('{"error":{"type":"bad_request","message":"The requested '
+                    'model is not available.","request_id":"x"}}')
+GOOGLE_STORE_400 = (
+    '[{\n  "error": {\n    "code": 400,\n    "message": "Invalid JSON '
+    'payload received. Unknown name \\"store\\": Cannot find field.",\n    '
+    '"status": "INVALID_ARGUMENT"\n  }\n}]')
+
+
+def test_bynara_model_not_available_is_provider_side():
+    assert _PROVIDER_TRANSIENT_RE.search(BYNARA_MODEL_400)
+
+
+def test_google_unknown_field_is_payload_schema():
+    assert _UNKNOWN_FIELD_RE.search(GOOGLE_STORE_400)
+    assert not media_reject_signature(GOOGLE_STORE_400)
+
+
+def _client_4xx_stream_harness(monkeypatch, error_body):
+    """Harness: il primo dep risponde col 400 dato, il secondo risponde ok."""
+    import app.main as M
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    cfg, router, broken, good = _mk()
+    router.fallback_next = lambda *a, **k: good
+    seen = []
+
+    class _Fwd:
+        async def stream_response(self, d, payload, **kwargs):
+            seen.append(d["unique"])
+            if d["unique"] == broken["unique"]:
+                raise UpstreamError(-400, error_body)
+
+            async def _g():
+                yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                yield (b'data: {"choices":[{"delta":{},'
+                       b'"finish_reason":"stop"}]}\n\n')
+                yield b"data: [DONE]\n\n"
+            return _g()
+
+    monkeypatch.setattr(M, "router", router)
+    monkeypatch.setattr(M, "config", cfg)
+    monkeypatch.setattr(M, "forwarder", _Fwd())
+    return M, router, broken, good, seen, JSONResponse, StreamingResponse
+
+
+def test_streaming_bynara_model_not_available_rotates(monkeypatch):
+    M, router, broken, good, seen, JSONResponse, StreamingResponse = \
+        _client_4xx_stream_harness(monkeypatch, BYNARA_MODEL_400)
+
+    async def _run():
+        payload = {"model": broken["model"],
+                   "messages": [{"role": "user", "content": "x"}]}
+        return await M._stream_with_fallback(
+            "test", broken, payload, need=frozenset({"text"}), scope="chain")
+
+    resp = asyncio.run(_run())
+    assert not isinstance(resp, JSONResponse)      # MAI il 400 al client
+    assert isinstance(resp, StreamingResponse)
+    assert b"ok" in asyncio.run(_drain(resp))
+    assert broken["unique"] in router._cooldown    # modello giu' -> cooldown
+    assert good["unique"] in seen
+
+
+def test_streaming_google_unknown_field_rotates(monkeypatch):
+    M, router, broken, good, seen, JSONResponse, StreamingResponse = \
+        _client_4xx_stream_harness(monkeypatch, GOOGLE_STORE_400)
+
+    async def _run():
+        payload = {"model": broken["model"],
+                   "messages": [{"role": "user", "content": "x"}]}
+        return await M._stream_with_fallback(
+            "test", broken, payload, need=frozenset({"text"}), scope="chain")
+
+    resp = asyncio.run(_run())
+    assert not isinstance(resp, JSONResponse)      # MAI il 400 al client
+    assert isinstance(resp, StreamingResponse)
+    assert b"ok" in asyncio.run(_drain(resp))
+    assert broken["unique"] not in router._cooldown  # incompat. -> no cooldown
+    assert good["unique"] in seen

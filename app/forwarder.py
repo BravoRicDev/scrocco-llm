@@ -1076,7 +1076,9 @@ def apply_content_string(body: dict, dep: dict) -> int:
 # agenti opencode come `fallback_models`): i provider severi (Google via
 # /v1beta/openai) li rifiutano con 400 "Unknown name ...". Vengono RIMOSSI dal
 # body prima dell'invio a monte. Denylist configurabile via policy.
-_STRIP_CLIENT_FIELDS: tuple[str, ...] = ("fallback_models",)
+# `store` (OpenAI opzionale, es. store:false): Google via /v1beta/openai lo
+# rifiuta con 400 "Unknown name \"store\"" -> va rimosso come i campi client.
+_STRIP_CLIENT_FIELDS: tuple[str, ...] = ("fallback_models", "store")
 
 
 def set_strip_client_fields(fields=None) -> None:
@@ -1286,7 +1288,12 @@ _PROVIDER_TRANSIENT_RE = re.compile(
     # auth del NOSTRO deployment verso l'upstream (token service giu' o chiave
     # rifiutata): errore provider-side -> ruota, mai 400 raw al client.
     r"|upstream[_ ]+(?:provider[_ ]+)?auth\w*[_ ]*fail"
-    r"|upstream_authentication_failed|provider authentication failed",
+    r"|upstream_authentication_failed|provider authentication failed"
+    # Modello momentaneamente NON servito dall'aggregatore (es. bynara: "The
+    # requested model is not available."): problema deployment-side -> ruota
+    # (cooldown corto, escalating sui fallimenti ripetuti), MAI 400 al client.
+    r"|requested model is not available|model is not available"
+    r"|model not available",
     re.IGNORECASE)
 PROVIDER_TRANSIENT_COOLDOWN_S = 60
 

@@ -16,6 +16,14 @@ def test_strip_removes_fallback_models():
     assert body["model"] == "m"          # il resto resta intatto
 
 
+def test_strip_removes_store():
+    # `store` (client opencode) rifiutato da Google con 400 "Unknown name".
+    body = {"model": "m", "messages": [], "store": False}
+    assert strip_client_fields(body) == 1
+    assert "store" not in body
+    assert body["model"] == "m"
+
+
 def test_strip_noop_when_absent():
     body = {"model": "m", "messages": []}
     assert strip_client_fields(body) == 0
@@ -40,12 +48,12 @@ def test_set_strip_client_fields_updates_default():
         assert "custom_field" not in body
         assert "fallback_models" in body   # non piu' nella denylist
     finally:
-        set_strip_client_fields(["fallback_models"])
+        set_strip_client_fields(["fallback_models", "store"])
 
 
 def test_policy_default_and_parse():
     from app.policy import Policy
     p = Policy()
-    assert p.strip_client_fields == ["fallback_models"]
+    assert p.strip_client_fields == ["fallback_models", "store"]
     p2 = Policy.from_dict({"strip_client_fields": ["foo", "bar"]})
     assert p2.strip_client_fields == ["foo", "bar"]

@@ -15,6 +15,11 @@ from app.forwarder import (_PROVIDER_TRANSIENT_RE, is_provider_error_body,
     "upstream error: 502 Bad Gateway",
     '{"error":{"message":"temporarily unavailable, try again"}}',
     '{"error":{"message":"Service Unavailable"}}',
+    # bynara: modello non servito dall'aggregatore. E' deployment-side: ruota,
+    # MAI pass-through del 400 al client (osservato su cubotto).
+    '{"error":{"type":"bad_request","message":"The requested model is not '
+    'available.","request_id":"d49e6172-8c4d-4d3d-b2da-a3e2649a54c0"}}',
+    '{"error":{"message":"Model is not available"}}',
 ])
 def test_matches_transient(body):
     assert _PROVIDER_TRANSIENT_RE.search(body)

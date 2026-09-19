@@ -187,10 +187,11 @@ class Policy:
     # Vuoto = si accettano SOLO i nomi col prefisso attuale.
     legacy_prefixes: list[str] = field(default_factory=list)
     # Campi client-only NON standard (es. le opzioni degli agenti opencode come
-    # `fallback_models`) rimossi dal body prima dell'invio a monte: i provider
-    # severi (Google via /v1beta/openai) li rifiutano con 400 "Unknown name".
+    # `fallback_models`, oppure `store`) rimossi dal body prima dell'invio a
+    # monte: i provider severi (Google via /v1beta/openai) li rifiutano con 400
+    # "Unknown name".
     strip_client_fields: list[str] = field(
-        default_factory=lambda: ["fallback_models"])
+        default_factory=lambda: ["fallback_models", "store"])
 
     estimate_divisor: int = 4
     # Stima token adattiva (densita' per-blocco). shadow=True calcola e logga

@@ -66,6 +66,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
                         StreamLoopDetected, STREAM_LOOP_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
+                        _UNKNOWN_FIELD_RE,
                         _CONTENT_ARRAY_RE,
                         tool_combo_signature,
                         _PROVIDER_TRANSIENT_RE,
@@ -4169,7 +4170,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # messaggio senza content) -> stesso trattamento del
             # thought_signature: ruota SENZA cooldown, mai pass-through finche'
             # c'e' un'alternativa (un provider OpenAI-compatibile lo accetta).
-            schema_sig = bool(_PAYLOAD_SCHEMA_RE.search(detail))
+            # Include anche i rifiuti "campo sconosciuto" dei provider severi
+            # (Google: "Unknown name \"store\" ... Invalid JSON payload"):
+            # incompatibilita' col provider, NON colpa della richiesta ->
+            # ruota senza cooldown, mai pass-through del 400 al client (parita'
+            # col path non-stream, forwarder._UNKNOWN_FIELD_RE).
+            schema_sig = bool(_PAYLOAD_SCHEMA_RE.search(detail)
+                              or _UNKNOWN_FIELD_RE.search(detail))
             # Google/Gemini 3 (anche via proxy OpenAI-compat): rifiuto della
             # COMBINAZIONE built-in tools + function calling (il flag
             # tool_config non e' passabile). Stesso trattamento dello schema:
