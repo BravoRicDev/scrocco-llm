@@ -29,7 +29,8 @@ from app.config import GatewayConfig
 from app.opencode_gate import (dep_usable, is_opencode_dep,
                                is_opencode_go_dep, is_opencode_zen_dep,
                                opencode_cautious_enabled,
-                               set_allow_opencode_zen, set_spoofing_request)
+                               set_allow_opencode_zen, set_spoofing_request,
+                               set_zen_first)
 from app.policy import Policy
 from app.router import Router
 
@@ -47,6 +48,16 @@ t@x.com,m/goc,opencode-go,https://opencode.ai/zen/go/v1,free,300,300000,5,K-GOC
 CSV_ORDERED = """commento,modello,provider,endpoint,data,context,max_input,priority,order,scrocco-llm-test
 t@x.com,m/oc,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,5,0,K-OC
 t@x.com,m/oc2,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,6,0,K-OC2
+t@x.com,m/plain,groq,https://api.groq.com/openai/v1,free,100,100000,5,10,K-PL
+t@x.com,m/goc,opencode-go,https://opencode.ai/zen/go/v1,free,300,300000,5,20,K-GOC
+"""
+
+# Zen con order ALTO (50) e non-zen con order basso (10): serve a provare che
+# per un client opencode NATIVO lo zen scavalca comunque l'ordine nativo
+# (ORDER_FIRST), mentre per gli altri resta l'ordine del CSV.
+CSV_ORDERED2 = """commento,modello,provider,endpoint,data,context,max_input,priority,order,scrocco-llm-test
+t@x.com,m/oc,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,5,50,K-OC
+t@x.com,m/oc2,opencode-zen,https://opencode.ai/zen/v1,free,100,100000,6,50,K-OC2
 t@x.com,m/plain,groq,https://api.groq.com/openai/v1,free,100,100000,5,10,K-PL
 t@x.com,m/goc,opencode-go,https://opencode.ai/zen/go/v1,free,300,300000,5,20,K-GOC
 """
@@ -71,9 +82,11 @@ def _clean(monkeypatch):
     monkeypatch.delenv("BACKGROUND_CAUTIOUS", raising=False)
     set_allow_opencode_zen(None)
     set_spoofing_request(False)
+    set_zen_first(False)
     yield
     set_allow_opencode_zen(None)
     set_spoofing_request(False)
+    set_zen_first(False)
 
 
 @pytest.fixture()
@@ -92,6 +105,17 @@ def router_ord():
     fd, path = tempfile.mkstemp(suffix=".csv")
     with os.fdopen(fd, "w") as f:
         f.write(CSV_ORDERED)
+    pol = Policy.from_dict(POLICY)
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
+    yield Router(cfg, pol)
+    os.unlink(path)
+
+
+@pytest.fixture()
+def router_ord2():
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_ORDERED2)
     pol = Policy.from_dict(POLICY)
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     yield Router(cfg, pol)
@@ -215,6 +239,71 @@ def test_pick_zen_normal_for_real_opencode_client(router):
     set_spoofing_request(False)                       # nessuna cautela
     dep = router.pick_deployment(f"{BASE}-100k", frozenset({"text"}))
     assert dep is not None and dep["model"] in {"m/oc", "m/oc2"}
+
+
+# ------------------------------------- zen-FIRST per client opencode NATIVO
+def test_eff_order_zen_first_for_native(router_ord2):
+    from app.config import ORDER_FIRST
+    zen = _dep(router_ord2, f"{BASE}-100k", "K-OC")
+    plain = _dep(router_ord2, f"{BASE}-100k", "K-PL")
+    set_allow_opencode_zen(True)
+    set_spoofing_request(False)
+    set_zen_first(True)                       # client opencode nativo
+    assert router_ord2._eff_order(zen) == ORDER_FIRST
+    assert router_ord2._eff_order(plain) == 10
+
+
+def test_pick_zen_first_for_native(router_ord2):
+    need = frozenset({"text"})
+    set_allow_opencode_zen(True)
+    set_spoofing_request(False)
+    # zen ammessi ma NON nativo: vince l'order nativo (plain, order 10)
+    set_zen_first(False)
+    assert router_ord2.pick_deployment(
+        f"{BASE}-100k", need)["model"] == "m/plain"
+    # nativo: lo zen scavalca l'ordine nativo (order 50) -> primo tier
+    set_zen_first(True)
+    assert router_ord2.pick_deployment(
+        f"{BASE}-100k", need)["model"] in {"m/oc", "m/oc2"}
+
+
+def test_nonopencode_never_uses_zen(router_ord2):
+    set_allow_opencode_zen(False)             # non-opencode: zen esclusi
+    set_spoofing_request(False)
+    set_zen_first(False)
+    for _ in range(20):
+        d = router_ord2.pick_deployment(f"{BASE}-100k", frozenset({"text"}))
+        assert d is not None and d["model"] == "m/plain"
+
+
+def test_native_skips_nonzen_warm_to_search_zen_cold(router_ord2):
+    """Nativo: un warm non-zen NON deve battere la ricerca (a freddo) di uno
+    zen vivo. Q1 utente: prima cercano uno zen, poi (solo se non c'e') usano
+    un warm non-opencode."""
+    plain = _dep(router_ord2, f"{BASE}-100k", "K-PL")
+    router_ord2.note_session_success(NATIVE, plain["unique"], 100, ctx_est=100)
+    set_allow_opencode_zen(True)
+    set_spoofing_request(False)
+    set_zen_first(True)
+    d = router_ord2.initial_pick("test", f"{BASE}-100k",
+                                 need=frozenset({"text"}), session_id=NATIVE)
+    assert d is not None and is_opencode_zen_dep(d)
+
+
+def test_native_uses_nonzen_warm_when_no_zen_available(router_ord2,
+                                                       monkeypatch):
+    """Non esclusione totale: se NON esiste alcuno zen, il warm non-zen resta
+    utilizzabile (i nativi ci arrivano solo dopo aver cercato lo zen)."""
+    plain = _dep(router_ord2, f"{BASE}-100k", "K-PL")
+    router_ord2.note_session_success(NATIVE, plain["unique"], 100, ctx_est=100)
+    set_allow_opencode_zen(True)
+    set_spoofing_request(False)
+    set_zen_first(True)
+    monkeypatch.setattr(router_ord2, "_usable_zen_exists",
+                        lambda *a, **k: False)
+    d = router_ord2.initial_pick("test", f"{BASE}-100k",
+                                 need=frozenset({"text"}), session_id=NATIVE)
+    assert d is not None and d["model"] == "m/plain"
 
 
 # --------------------------------------------- pick: go indipendente

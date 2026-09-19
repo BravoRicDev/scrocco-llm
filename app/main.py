@@ -112,6 +112,7 @@ from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
 from .router import Router, inject_identity, estimate_tokens, configure_estimate
 from .caution import background_cautious_enabled
 from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
+                            set_zen_first,
                             client_can_use_opencode_zen, client_is_opencode,
                             spoof_enabled, opencode_cautious_request)
 from .capabilities import required_caps, count_image_parts
@@ -1335,8 +1336,13 @@ def _set_opencode_gate(request: Request) -> None:
     scelta. Un client opencode reale NON e' mai in cautela. La cautela generica
     (probe/background) e' separata: vedi app/caution.py."""
     _attr = _client_attribution(request)
+    _oc = client_is_opencode(_attr)
     set_allow_opencode_zen(client_can_use_opencode_zen(_attr))
-    set_spoofing_request(spoof_enabled() and not client_is_opencode(_attr))
+    set_spoofing_request(spoof_enabled() and not _oc)
+    # Client opencode NATIVO: gli zen sono il PRIMO tier (pool propria), cosi'
+    # non consuma i deployment condivisi. I non-opencode hanno allow=False
+    # (zen esclusi); gli interni non impostano nulla (possono solo sondare).
+    set_zen_first(_oc)
 
 
 def _opencode_session(request: Request) -> str | None:

@@ -73,6 +73,14 @@ _ALLOW_OPENCODE_ZEN: contextvars.ContextVar[bool | None] = (
 _SPOOFING: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "scrocco_spoofing_request", default=False)
 
+# Default False = "zen non prioritari". Vero SOLO per un client opencode
+# NATIVO (impostato da `_set_opencode_gate`): allora gli zen sono il PRIMO tier
+# (la loro pool) e si passa agli altri deployment solo a zen esaurito. I
+# contesti interni restano False: possono usare/sondare gli zen ma non
+# stravolgono l'ordine.
+_ZEN_FIRST: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "scrocco_zen_first", default=False)
+
 # Host degli upstream opencode: copre zen (/zen/v1) e go (/zen/go/v1).
 _OPENCODE_HOST = "opencode.ai"
 
@@ -142,6 +150,22 @@ def opencode_cautious_enabled() -> bool:
     return spoof_enabled()
 
 
+def opencode_zen_internal_enabled() -> bool:
+    """Probe/warm degli zen nei contesti INTERNI (canary, autoprobe, task di
+    boot), che non passano da `_set_opencode_gate`.
+
+    Con il gate per-request assente (`ContextVar` None) gli zen restano
+    sondabili/riscaldabili di default, cosi' i client opencode NATIVI li
+    trovano pronti pur essendo esclusi per i NON-opencode (che impostano
+    sempre il gate esplicito a False). Interruttore dedicato
+    `OPENCODE_ZEN_INTERNAL` (default ON; `=0`/`false` lo disattiva).
+    """
+    override = _env_bool("OPENCODE_ZEN_INTERNAL")
+    if override is None:
+        return True
+    return override
+
+
 def opencode_go_enabled() -> bool:
     """Vero se gli upstream opencode.ai/zen/go (a pagamento) sono abilitati.
 
@@ -187,10 +211,16 @@ def set_allow_opencode_zen(flag: bool | None) -> None:
 
 
 def allow_opencode_zen() -> bool:
-    """Gate zen effettivo: scelta per-request se presente, altrimenti spoof env."""
+    """Gate zen effettivo: scelta per-request se presente, altrimenti contesto
+    INTERNO (`opencode_zen_internal_enabled`, default ON).
+
+    I contesti client impostano SEMPRE il ContextVar (`_set_opencode_gate`):
+    True per gli opencode nativi, False per i NON-opencode. Il fallback interno
+    serve solo a canary/autoprobe/task di boot per continuare a sondare gli zen.
+    """
     v = _ALLOW_OPENCODE_ZEN.get()
     if v is None:
-        return spoof_enabled()
+        return opencode_zen_internal_enabled()
     return bool(v)
 
 
@@ -202,6 +232,17 @@ def set_spoofing_request(flag: bool) -> None:
 def spoofing_request() -> bool:
     """Vero se la richiesta corrente e' servita spoofando un client non-opencode."""
     return bool(_SPOOFING.get())
+
+
+def set_zen_first(flag: bool) -> None:
+    """Marca il task corrente come client opencode NATIVO (zen = primo tier)."""
+    _ZEN_FIRST.set(bool(flag))
+
+
+def zen_first_request() -> bool:
+    """Vero se la richiesta corrente e' di un client opencode nativo: gli zen
+    hanno priorita' assoluta (gli altri deployment solo a zen esaurito)."""
+    return bool(_ZEN_FIRST.get())
 
 
 def opencode_cautious_request() -> bool:

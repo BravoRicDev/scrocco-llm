@@ -45,14 +45,15 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_LAST
+from .config import (GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST,
+                     ORDER_LAST)
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
 from .caution import background_cautious_enabled
-from .opencode_gate import (dep_usable as _dep_usable,
+from .opencode_gate import (allow_opencode_zen, dep_usable as _dep_usable,
                             is_opencode_zen_dep, is_native_session,
-                            opencode_cautious_request)
+                            opencode_cautious_request, zen_first_request)
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
 from .session_ctx import current_session, set_current_session
 from .routing.warm import WarmMixin
@@ -5168,17 +5169,66 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 break
         return out
 
-    def _eff_order(self, dep: dict) -> int:
-        """Order EFFETTIVO per il tiering, sensibile alla cautela opencode.
+    def _zen_first_active(self) -> bool:
+        """Vero se la richiesta corrente e' di un client opencode NATIVO: gli
+        zen sono il PRIMO tier (specchio della cautela, che li manda in coda).
+        NON vale per i contesti interni (che possono sondare gli zen ma non
+        riordinare la scala) ne' per i non-opencode (zen esclusi)."""
+        return zen_first_request() and not opencode_cautious_request()
 
-        In cautela opencode (richiesta spoofata) gli upstream **zen** vengono
-        trattati come ULTIMO tier dei free: order = ORDER_LAST, cioe' dopo
-        openrouter (9999). Restano comunque PRIMA dello stadio -go/-fallback,
-        che e' un gruppo separato a valle. Per un client opencode reale (fuori
-        cautela) l'order e' quello nativo (zen tipicamente 0 = primo tier).
+    def _usable_zen_exists(self, uniques, need=None, ctx=None,
+                           tried=None, failed_unique=None) -> bool:
+        """Vero se nel mondo `uniques` esiste almeno un dep zen VIVO e
+        compatibile non ancora provato. Serve a decidere se, per un nativo,
+        cercare uno zen (anche a freddo) PRIMA di usare un warm non-zen."""
+        for u in uniques or ():
+            if u == failed_unique or (tried and u in tried):
+                continue
+            d = self.config.deployment_by_unique(u)
+            if not d or not is_opencode_zen_dep(d):
+                continue
+            if self.is_cooled_down(u) or self.is_retired(u):
+                continue
+            if self._endpoint_quarantined(d):
+                continue
+            if not _dep_usable(d):
+                continue
+            if need and not self._dep_supports(d, need):
+                continue
+            if not self._cap_fits(d, ctx):
+                continue
+            return True
+        return False
+
+    def _zen_world(self, group_name: str) -> list:
+        """Uniques del mondo del gruppo richiesto (bucket + scala), usati per
+        capire se esiste uno zen da cercare prima dei non-zen."""
+        return ([d["unique"] for d in self.config.groups.get(group_name, [])]
+                + (self._ladder_for_group(group_name) or []))
+
+    def _zen_prefer_skip(self, dep, group_name, need=None, ctx=None) -> bool:
+        """True se per un nativo `dep` (non-zen) va SCARTATO in favore di uno
+        zen vivo da cercare (warm/sticky non opentcode = solo a zen esaurito)."""
+        return (self._zen_first_active()
+                and not is_opencode_zen_dep(dep)
+                and self._usable_zen_exists(
+                    self._zen_world(group_name), need, ctx))
+
+    def _eff_order(self, dep: dict) -> int:
+        """Order EFFETTIVO per il tiering, sensibile al gate opencode.
+
+        - Cautela opencode (richiesta spoofata): gli upstream **zen** sono
+          l'ULTIMO tier dei free (ORDER_LAST), prima di -go/-fallback.
+        - Client opencode NATIVO (`_zen_first_active`): gli zen sono il PRIMO
+          tier in assoluto (ORDER_FIRST): usano la loro pool e non consumano i
+          deployment condivisi; si passa agli altri solo a zen esaurito.
+        - Altrimenti (zen non usabili): order nativo del CSV.
         """
-        if opencode_cautious_request() and is_opencode_zen_dep(dep):
-            return ORDER_LAST
+        if is_opencode_zen_dep(dep):
+            if opencode_cautious_request():
+                return ORDER_LAST
+            if self._zen_first_active():
+                return ORDER_FIRST
         return int(dep.get("order", ORDER_LAST))
 
     def _zen_split(self, uniques: list[str]) -> tuple[list[str], list[str]]:
@@ -6171,6 +6221,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     need=need, ctx=ctx,
                     include_borrowed=self._borrow_selectable(),
                     out_tokens=out_tokens)
+                if _warm and self._zen_first_active():
+                    # Nativi opencode: prima i warm ZEN. Se non ce n'e' ma
+                    # esiste uno zen vivo, NON usare un warm non-zen: cerca lo
+                    # zen a freddo (gli altri solo a zen esaurito). Se nessuno
+                    # zen esiste davvero, il warm non-zen resta valido.
+                    _zwarm = [d for d in _warm if is_opencode_zen_dep(d)]
+                    if _zwarm:
+                        _warm = _zwarm
+                    elif self._zen_prefer_skip(_warm[0], group_name,
+                                               need, ctx):
+                        _warm = []
                 if _warm:
                     _dep = _warm[0]
                     # P3 (non-stream): se l'eletto e' LENTO e c'e' un caldo
@@ -6241,6 +6302,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                         allow_slow=self._warm_allow_slow()) \
                     and self._cap_fits(sd, ctx) \
                     and _dep_usable(sd) \
+                    and not self._zen_prefer_skip(sd, group_name, need, ctx) \
                     and (need is None or self._dep_supports(sd, need)):
                 log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
                           session_id, sticky_dep, ctx or "?")
@@ -6438,10 +6500,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # Cautela opencode: gli zen sono un BLOCCO separato, provato dopo tutti
         # i free non-zen (vivi, prelast, wakeup, stantii) e prima di -go/-fallback.
         _cautious = opencode_cautious_request()
+        _zen_first = self._zen_first_active()          # nativo opencode
         if _cautious:
             dims, zen = self._zen_split(dims)
         else:
             zen: list[str] = []
+        # Nativi: gli zen restano DENTRO `dims` (ordinati per primi da
+        # `_eff_order`), ma lo step -go viene DIFFERITO dopo i dims stantii,
+        # cosi' si passa ai paid/condivisi solo a zen (vivo o stantio) esaurito.
+        _defer_go = _cautious or _zen_first
         skip = max(1, int(getattr(pol, "ladder_skip_after", 4) or 4))
         stale_max = max(0, int(getattr(pol, "ladder_stale_max", 3) or 0))
         age = float(getattr(pol, "stale_cooldown_retry_sec", 300) or 300)
@@ -6515,6 +6582,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                                 tried, failed_unique,
                                 include_borrowed=self._borrow_selectable(),
                                 out_tokens=out_tokens)
+        if _warm and self._zen_first_active():
+            # Nativi: prima gli zen. Nessuno zen caldo ma uno zen vivo ->
+            # cerca a freddo invece di usare un warm non-zen.
+            _zwarm = [d for d in _warm if is_opencode_zen_dep(d)]
+            if _zwarm:
+                _warm = _zwarm
+            elif self._usable_zen_exists(ladder, need, ctx,
+                                         tried, failed_unique):
+                _warm = []
         if _warm:
             _dep = _warm[0]
             log.info("[warm] ladder -> %s (caldo proprio, max_in=%s)",
@@ -6628,9 +6704,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 return None
             return d
 
-        # 2) -go vivi  (sotto cautela opencode questo step gira DOPO i dims
-        #    stantii e il blocco zen: vedi 3bis/2bis qui sotto)
-        if not _cautious:
+        # 2) -go vivi  (sotto cautela opencode E per i nativi zen-first questo
+        #    step gira DOPO i dims stantii: vedi 3bis/2bis qui sotto)
+        if not _defer_go:
             nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx,
                                                  tried=tried)
             if nxt is not None:
@@ -6672,8 +6748,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     log.info("[ladder] zen stantio (>%ds) -> %s",
                              int(age), nxt["unique"])
                     return nxt
-        # 2bis) -go vivi (solo cautela opencode: qui, dopo dims stantii + zen)
-        if _cautious:
+        # 2bis) -go vivi (cautela opencode o nativi zen-first: qui, dopo dims
+        #       stantii [+ blocco zen in cautela])
+        if _defer_go:
             nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx,
                                                  tried=tried)
             if nxt is not None:
@@ -6770,7 +6847,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             remaining = self.cooldown_residual(u)
             cooled.append((remaining, u, d))
         # Cautela: gli zen (ammessi qui come ultima scelta) vanno in coda.
-        cooled.sort(key=lambda x: (is_opencode_zen_dep(x[2]), x[0]))
+        # Per i nativi zen-first NON vanno penalizzati (restano in testa).
+        cooled.sort(key=lambda x: (
+            opencode_cautious_request() and is_opencode_zen_dep(x[2]), x[0]))
         if cooled:
             dep = cooled[0][2]
             log.warning("[ladder] ULTIMA SPIAGGIA (cooldown ignorato, "
@@ -6799,8 +6878,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             if not self._cap_fits(_d, ctx):
                 continue
             _ret.append((self.cooldown_residual(u), u, _d))
-        # Cautela: gli zen (ultima scelta) vanno in coda anche qui.
-        _ret.sort(key=lambda x: (is_opencode_zen_dep(x[2]), x[0]))
+        # Cautela: gli zen (ultima scelta) vanno in coda anche qui. Per i
+        # nativi zen-first restano in testa.
+        _ret.sort(key=lambda x: (
+            opencode_cautious_request() and is_opencode_zen_dep(x[2]), x[0]))
         if _ret:
             dep = _ret[0][2]
             log.warning("[ladder] ULTIMA SPIAGGIA ESTREMA (ritirato "

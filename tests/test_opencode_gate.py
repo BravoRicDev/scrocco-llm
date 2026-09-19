@@ -82,11 +82,15 @@ def test_client_can_use_opencode_zen_with_spoof(monkeypatch):
 
 
 # ------------------------------------------------------------- ContextVar
-def test_allow_opencode_zen_default_none_falls_back_to_spoof(monkeypatch):
+def test_allow_opencode_zen_default_none_falls_back_to_internal(monkeypatch):
+    """Contesti interni (nessuna decisione per-request): gli zen restano
+    sondabili di default (`OPENCODE_ZEN_INTERNAL` default ON), cosi' i nativi
+    li trovano caldi; interruttore dedicato per disattivarli."""
+    monkeypatch.delenv("OPENCODE_ZEN_INTERNAL", raising=False)
     set_allow_opencode_zen(None)
-    assert allow_opencode_zen() is False
-    monkeypatch.setenv("OPENCODE_SPOOF_HEADERS", "1")
     assert allow_opencode_zen() is True
+    monkeypatch.setenv("OPENCODE_ZEN_INTERNAL", "0")
+    assert allow_opencode_zen() is False
 
 
 def test_set_allow_opencode_zen_wins_over_env(monkeypatch):
@@ -107,11 +111,12 @@ def test_dep_usable_zen_gate():
     assert dep_usable(_ZEN)
 
 
-def test_dep_usable_zen_internal_context_uses_spoof(monkeypatch):
+def test_dep_usable_zen_internal_context_uses_internal_knob(monkeypatch):
+    monkeypatch.delenv("OPENCODE_ZEN_INTERNAL", raising=False)
     set_allow_opencode_zen(None)                 # nessuna decisione per-request
-    assert not dep_usable(_ZEN)                  # spoof off -> probe escluse
-    monkeypatch.setenv("OPENCODE_SPOOF_HEADERS", "1")
-    assert dep_usable(_ZEN)
+    assert dep_usable(_ZEN)                      # interno: probe/warm zen ON
+    monkeypatch.setenv("OPENCODE_ZEN_INTERNAL", "0")
+    assert not dep_usable(_ZEN)                  # interruttore dedicato OFF
 
 
 def test_dep_usable_go_independent_of_spoof_and_zen_gate(monkeypatch):

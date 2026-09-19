@@ -67,6 +67,10 @@ MEDIA_DEFER_HEADER = "media_defer"
 # tra provider diversi). Vuoto/assente = ORDER_LAST (neutro, in coda).
 ORDER_HEADER = "order"
 ORDER_LAST = 1_000_000_000
+# Tier "primo in assoluto": usato per gli upstream zen quando il client e'
+# opencode NATIVO (devono preferire la propria pool zen e non consumare i
+# deployment condivisi). Piu' basso di qualunque `order` reale (>= 0).
+ORDER_FIRST = -1_000_000_000
 # enabled: disabilitazione DICHIARATIVA di un deployment dal CSV. Default true
 # (vuoto/assente = attivo); false/0/no/off -> la riga RESTA nel CSV (chiave e
 # coppia provider/chiave conservate) ma e' esclusa da tutti i bucket di routing.
