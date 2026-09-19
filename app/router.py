@@ -51,7 +51,7 @@ from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
 from .caution import background_cautious_enabled
-from .opencode_gate import (allow_opencode_zen, dep_usable as _dep_usable,
+from .opencode_gate import (dep_usable as _dep_usable,
                             is_opencode_zen_dep, is_native_session,
                             opencode_cautious_request, zen_first_request)
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
