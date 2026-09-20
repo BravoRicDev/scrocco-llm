@@ -6838,6 +6838,113 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             return dep
         return None
 
+    def _free_last_resort(self, cur_dep: dict,
+                          need: frozenset[str] | None = None,
+                          ctx: int | None = None,
+                          tried: set[str] | None = None,
+                          out_tokens: int | None = None,
+                          requested_group: str | None = None) -> dict | None:
+        """ULTIMA RISORSA: da un bucket -go/-fallback esaurito si SCENDE ai
+        free-dims, cosi' il 503 resta l'ultimissima cosa.
+
+        Ordine: (1) warm di CHIUNQUE (proprio+prestato da altre sessioni) tra i
+        free-dims che soddisfano il cap; (2) canary freddo (fill, poi wake);
+        (3) [se `free_last_resort_extreme`] free in cooldown o ritirati
+        non-permanenti, ignorando il cooldown. None = davvero niente di
+        cap-compatibile (il 503 e' inevitabile)."""
+        if not getattr(self.policy, "free_last_resort_enabled", True):
+            return None
+        if not cur_dep:
+            return None
+        grp = str(cur_dep.get("group") or "")
+        pname = self._group_profile(grp)
+        if not pname:
+            return None
+        cfg = self.config
+        cap = cfg.group_caps.get(grp)
+        free: list[str] = []
+        if cap:
+            cand = cfg.chains_cap.get(pname, {}).get(cap, [])
+        else:
+            cand = self._text_ladder(pname, start_tier="primary")
+        for u in cand:
+            d = cfg.deployment_by_unique(u)
+            if d and self._free_group(str(d.get("group") or "")):
+                free.append(u)
+        if not free:
+            return None
+        _tried = set(tried or ())
+        _tried.add(cur_dep.get("unique"))
+        _free_set = set(free)
+        # (1) warm di chiunque (proprio + prestato), cap-ok.
+        try:
+            _warm = self._warm_pool(
+                None, _free_set, need=need, ctx=ctx, tried=_tried,
+                failed_unique=cur_dep.get("unique"),
+                include_borrowed=self._borrow_selectable(),
+                out_tokens=out_tokens)
+        except Exception:                              # noqa: BLE001
+            _warm = []
+        if _warm:
+            log.warning("[last-resort] %s -> %s (warm free, cap-ok)",
+                        cur_dep.get("unique"), _warm[0]["unique"])
+            return _warm[0]
+        # (2) canary freddo (fill, poi wake) sui free-dims. Il ladder del
+        # canary parte dal gruppo RICHIESTO: se e' un bucket rinnovo (-go/
+        # -fallback) o manca, si usa la dim free piu' bassa del profilo cosi'
+        # il canary percorre davvero i free-dims.
+        _req_free = requested_group
+        if not _req_free or self._is_renewal_bucket(_req_free):
+            _dims = sorted(cfg.profile_dims.get(pname, []))
+            _req_free = (f"{cfg.proxy_prefix}{pname}-{_dims[0]}k"
+                         if _dims else None)
+        for _fn, _lbl in ((self.warm_fill_canary, "canary"),
+                          (self.warm_wake_canary, "wake")):
+            try:
+                _c = _fn(pname, cur_dep, need, ctx, out_tokens,
+                         tried=_tried, requested_group=_req_free)
+            except Exception:                          # noqa: BLE001
+                _c = None
+            if _c:
+                log.warning("[last-resort] %s -> %s (%s free, cap-ok)",
+                            cur_dep.get("unique"), _c["unique"], _lbl)
+                return _c
+        # (3) estrema: free in cooldown / ritirati non-permanenti.
+        if not getattr(self.policy, "free_last_resort_extreme", True):
+            return None
+        best: tuple[float, dict] | None = None
+        for u in free:
+            if u in _tried:
+                continue
+            d = cfg.deployment_by_unique(u)
+            if not d:
+                continue
+            if self.is_draining(u) or self._endpoint_quarantined(d):
+                continue
+            if self._gemini_blocked(d):
+                continue
+            if not _dep_usable(d):
+                continue
+            if need and not self._dep_supports(d, need):
+                continue
+            if not self._cap_fits(d, ctx):
+                continue
+            if out_tokens and not self.dep_deliverable(d, need, ctx,
+                                                       out_tokens):
+                continue
+            if not (self.is_cooled_down(u) or self._retired_usable(u)):
+                continue
+            res = self.cooldown_residual(u)
+            if best is None or res < best[0]:
+                best = (res, d)
+        if best is not None:
+            _kind = ("retired" if self.is_retired(best[1]["unique"])
+                     else "cooled")
+            log.warning("[last-resort] %s -> %s (free %s, cooldown ignorato)",
+                        cur_dep.get("unique"), best[1]["unique"], _kind)
+            return best[1]
+        return None
+
     def fallback_after(self, profile: str, failed_unique: str | None,
                        need: frozenset[str] | None = None,
                        ctx: int | None = None,
@@ -7018,6 +7125,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     _lad,
                     cur_dep["unique"], need, ctx, tried=tried,
                     out_tokens=out_tokens)
+                if nxt is None and self._is_renewal_bucket(
+                        str(cur_dep.get("group") or "")):
+                    nxt = self._free_last_resort(
+                        cur_dep, need, ctx, tried, out_tokens, req_grp)
                 if nxt is not None and nxt["group"] != cur_dep["group"]:
                     log.info("[ladder] rotazione %s -> %s",
                              cur_dep["group"], nxt["group"])
@@ -7055,10 +7166,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 if nxt is None and _czen:
                     nxt = self._walk_chain(_czen, cur_dep["unique"], need, ctx,
                                            prefer_model=prefer, tried=tried)
+                if nxt is None and self._is_renewal_bucket(
+                        str(cur_dep.get("group") or "")):
+                    nxt = self._free_last_resort(
+                        cur_dep, need, ctx, tried, out_tokens, req_grp)
                 return nxt
             # cap senza catena registrata: ripiega sulla catena testo filtrata
-            return self.fallback_after(profile or "", cur_dep["unique"], need,
-                                       ctx, out_tokens=out_tokens)
+            nxt = self.fallback_after(profile or "", cur_dep["unique"], need,
+                                      ctx, out_tokens=out_tokens)
+            if nxt is None and self._is_renewal_bucket(
+                    str(cur_dep.get("group") or "")):
+                nxt = self._free_last_resort(
+                    cur_dep, need, ctx, tried, out_tokens, req_grp)
+            return nxt
         if self.policy.dims_ladder_floor:
             # auto: stessa scala unica, partendo dalla dim corrente (mai giù),
             # con escalation graduale del rilassamento cooldown.
@@ -7077,9 +7197,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 out_tokens=out_tokens)
             if nxt is not None:
                 return nxt
+            if self._is_renewal_bucket(str(cur_dep.get("group") or "")):
+                return self._free_last_resort(
+                    cur_dep, need, ctx, tried, out_tokens, req_grp)
             return None                     # scala finita: errore a monte
-        return self.fallback_after(profile or "", cur_dep["unique"], need,
-                                   ctx, out_tokens=out_tokens)
+        nxt = self.fallback_after(profile or "", cur_dep["unique"], need,
+                                  ctx, out_tokens=out_tokens)
+        if nxt is None and self._is_renewal_bucket(
+                str(cur_dep.get("group") or "")):
+            nxt = self._free_last_resort(
+                cur_dep, need, ctx, tried, out_tokens, req_grp)
+        return nxt
 
     def capability_chains(self, profile: str) -> dict[str, list[str]]:
         """Capacità -> catena completa dei univoci (primario → go → fallback).

@@ -4009,6 +4009,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     dep, need, ctx, tried=tried_set,
                     out_tokens=refill_out_budget(payload, router.policy)) \
                     if profile else None
+                if (nxt is None and profile
+                        and router._is_renewal_bucket(
+                            str(dep.get("group") or ""))):
+                    nxt = router._free_last_resort(
+                        dep, need, ctx, tried_set,
+                        refill_out_budget(payload, router.policy),
+                        requested_group)
             else:
                 # Su troncatura/risposta-vuota preferiamo un candidato PIU'
                 # CAPACE (finestra > corrente, poi intelligence), perche' il
@@ -4029,19 +4036,34 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         bool(no_rotate),
                         nxt["unique"] if nxt else "503")
             if nxt is None or tried > _max_tries:
-                # nessun byte inviato al client -> errore RETRYABLE pulito
-                _emit_summary(ses=ses or "-", req=req or "-",
-                              grp=dep.get("group"), dep=dep.get("unique"),
-                              tries=len(attempts),
-                              fb=max(0, len(attempts) - 1),
-                              dur_ms=int((time.monotonic() - t_req) * 1000),
-                              stream=True, qc=True, wd="chain-exhausted",
-                              ttfb_ms=ttfb_ms, usage=None)
-                return _exhausted(len(attempts),
-                                  "%s (%s)" % (verdict, fr) if fr else verdict,
-                                  prefix_reason=prefix_reason,
-                                  trail=trail,
-                                  retry_at_ms=_retry_at_ms(router, trail))
+                # ULTIMA RISORSA: bucket -go/-fallback esaurito -> scendi ai
+                # free-dims (warm di chiunque cap-ok, poi canary, poi cooled)
+                # pur di non consegnare un 503.
+                _flr = None
+                if (nxt is None and profile and not over_deadline
+                        and router._is_renewal_bucket(
+                            str(dep.get("group") or ""))):
+                    _flr = router._free_last_resort(
+                        dep, need, ctx, tried_set,
+                        refill_out_budget(payload, router.policy),
+                        requested_group)
+                if _flr is not None:
+                    nxt = _flr
+                elif nxt is None or tried > _max_tries:
+                    # nessun byte inviato al client -> errore RETRYABLE pulito
+                    _emit_summary(ses=ses or "-", req=req or "-",
+                                  grp=dep.get("group"), dep=dep.get("unique"),
+                                  tries=len(attempts),
+                                  fb=max(0, len(attempts) - 1),
+                                  dur_ms=int((time.monotonic() - t_req) * 1000),
+                                  stream=True, qc=True, wd="chain-exhausted",
+                                  ttfb_ms=ttfb_ms, usage=None)
+                    return _exhausted(len(attempts),
+                                      "%s (%s)" % (verdict, fr) if fr
+                                      else verdict,
+                                      prefix_reason=prefix_reason,
+                                      trail=trail,
+                                      retry_at_ms=_retry_at_ms(router, trail))
             dep = nxt
             inject_identity(payload, dep, router=router)
             continue                    # ri-entra nel while col nuovo dep
@@ -4410,23 +4432,39 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         dep["unique"], err.status or "conn", reason,
                         nxt["unique"] if nxt else "nessun alternativo", detail)
             if nxt is None or tried > _max_tries:
-                # errori AZIONABILI (auth/credito/permessi/modello assente/
-                # thought_signature) -> status vero. Il resto -> 503 RETRYABLE.
-                if _actionable_upstream_error(err) and err.status:
-                    return JSONResponse(status_code=abs(err.status), content={
-                        "error": {"message": err.detail,
-                                  "type": "upstream_error"}})
-                _emit_summary(ses=ses or "-", req=req or "-",
-                              grp=dep.get("group"), dep=dep.get("unique"),
-                              tries=len(attempts),
-                              fb=max(0, len(attempts) - 1),
-                              dur_ms=int((time.monotonic() - t_req) * 1000),
-                              stream=True, qc=True, wd="chain-exhausted",
-                              ttfb_ms=ttfb_ms, usage=None)
-                return _exhausted(len(attempts), err.detail,
-                                  prefix_reason=prefix_reason,
-                                  trail=trail,
-                                  retry_at_ms=_retry_at_ms(router, trail))
+                # ULTIMA RISORSA free (solo se -go/-fallback esaurito).
+                _over_dl = ((time.monotonic() - t_req) * 1000 >
+                            int(getattr(qcp, "stream_total_deadline_ms",
+                                        90000) or 90000))
+                _flr = None
+                if (nxt is None and profile and not _over_dl
+                        and router._is_renewal_bucket(
+                            str(dep.get("group") or ""))):
+                    _flr = router._free_last_resort(
+                        dep, need, ctx, tried_set,
+                        refill_out_budget(payload, router.policy),
+                        requested_group)
+                if _flr is not None:
+                    nxt = _flr
+                else:
+                    # errori AZIONABILI (auth/credito/permessi/modello assente/
+                    # thought_signature) -> status vero. Il resto -> 503.
+                    if _actionable_upstream_error(err) and err.status:
+                        return JSONResponse(status_code=abs(err.status),
+                                            content={
+                            "error": {"message": err.detail,
+                                      "type": "upstream_error"}})
+                    _emit_summary(ses=ses or "-", req=req or "-",
+                                  grp=dep.get("group"), dep=dep.get("unique"),
+                                  tries=len(attempts),
+                                  fb=max(0, len(attempts) - 1),
+                                  dur_ms=int((time.monotonic() - t_req) * 1000),
+                                  stream=True, qc=True, wd="chain-exhausted",
+                                  ttfb_ms=ttfb_ms, usage=None)
+                    return _exhausted(len(attempts), err.detail,
+                                      prefix_reason=prefix_reason,
+                                      trail=trail,
+                                      retry_at_ms=_retry_at_ms(router, trail))
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -4452,16 +4490,31 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         dep["unique"], exc,
                         nxt["unique"] if nxt else "503")
             if nxt is None or tried > _max_tries:
-                _emit_summary(ses=ses or "-", req=req or "-",
-                              grp=dep.get("group"), dep=dep.get("unique"),
-                              tries=len(attempts), fb=max(0, len(attempts) - 1),
-                              dur_ms=int((time.monotonic() - t_req) * 1000),
-                              stream=True, qc=True, wd="chain-exhausted",
-                              ttfb_ms=ttfb_ms, usage=None)
-                return _exhausted(len(attempts), repr(exc)[:160],
-                                  prefix_reason=prefix_reason,
-                                  trail=trail,
-                                  retry_at_ms=_retry_at_ms(router, trail))
+                _over_dl = ((time.monotonic() - t_req) * 1000 >
+                            int(getattr(qcp, "stream_total_deadline_ms",
+                                        90000) or 90000))
+                _flr = None
+                if (nxt is None and profile and not _over_dl
+                        and router._is_renewal_bucket(
+                            str(dep.get("group") or ""))):
+                    _flr = router._free_last_resort(
+                        dep, need, ctx, tried_set,
+                        refill_out_budget(payload, router.policy),
+                        requested_group)
+                if _flr is not None:
+                    nxt = _flr
+                else:
+                    _emit_summary(ses=ses or "-", req=req or "-",
+                                  grp=dep.get("group"), dep=dep.get("unique"),
+                                  tries=len(attempts),
+                                  fb=max(0, len(attempts) - 1),
+                                  dur_ms=int((time.monotonic() - t_req) * 1000),
+                                  stream=True, qc=True, wd="chain-exhausted",
+                                  ttfb_ms=ttfb_ms, usage=None)
+                    return _exhausted(len(attempts), repr(exc)[:160],
+                                      prefix_reason=prefix_reason,
+                                      trail=trail,
+                                      retry_at_ms=_retry_at_ms(router, trail))
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt

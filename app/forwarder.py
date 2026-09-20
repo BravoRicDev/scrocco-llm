@@ -3997,6 +3997,12 @@ truncation_hook=None,
                                     dep, need, ctx, tried=tried,
                                     out_tokens=_outb) \
                                     if profile else None
+                                if (nxt is None and profile
+                                        and router._is_renewal_bucket(
+                                            str(dep.get("group") or ""))):
+                                    nxt = router._free_last_resort(
+                                        dep, need, ctx, tried, _outb,
+                                        requested_group)
                                 if nxt is not None:
                                     dep = nxt
                                     continue

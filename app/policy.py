@@ -963,6 +963,13 @@ class Policy:
     # False = legacy (esplicito puntamento esatto, catena solo primari).
     dims_ladder_floor: bool = True
 
+    # ULTIMA RISORSA FREE: quando un bucket -go/-fallback ha esaurito la sua
+    # scala, si SCENDE ai free-dims (warm di chiunque cap-ok, poi canary)
+    # invece di dare 503. `_extreme` include anche i free in cooldown/ritirati
+    # non-permanenti (ignora il cooldown) pur di non fallire.
+    free_last_resort_enabled: bool = True
+    free_last_resort_extreme: bool = True
+
     # QC del contenuto JSON (non-streaming) + retry 400 provider-side +
     # watchdog streaming passivo (vedi app/qc.py)
     qc_json: "QcJson" = field(default_factory=lambda: QcJson())
@@ -2679,6 +2686,14 @@ class Policy:
             if dlf is not None:
                 p.dims_ladder_floor = _coerce_bool(
                     dlf, "capability_routing.dims_ladder_floor")
+            flr = cr.get("free_last_resort")
+            if flr is not None:
+                p.free_last_resort_enabled = _coerce_bool(
+                    flr, "capability_routing.free_last_resort")
+            flrx = cr.get("free_last_resort_extreme")
+            if flrx is not None:
+                p.free_last_resort_extreme = _coerce_bool(
+                    flrx, "capability_routing.free_last_resort_extreme")
             al = cr.get("auto_learn")
             if al is not None:
                 if str(al) not in ("off", "suggest", "auto"):
