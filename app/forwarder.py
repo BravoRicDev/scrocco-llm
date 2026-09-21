@@ -3762,7 +3762,8 @@ truncation_hook=None,
                         _tc_info = apply_to_message(
                             ((data.get("choices") or [{}])[0].get(
                                 "message") or {}),
-                            payload.get("tools"), _tt)
+                            payload.get("tools"), _tt,
+                            preserve_residual=True)
                     except Exception:
                         _tc_info = None
                     if _tc_info:

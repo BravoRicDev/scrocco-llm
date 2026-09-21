@@ -3466,6 +3466,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _fc = fake_config_from_policy(router.policy)
     from .texttoolparse import (text_config_from_policy,
                                parse_text_toolcalls,
+                               strip_toolid_markup,
                                truncation_config_from_policy)
     _tt = text_config_from_policy(router.policy)
     _tct_cfg = truncation_config_from_policy(router.policy)
@@ -3841,6 +3842,14 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                    model=dep.get("model", ""),
                                    detail="tool-call resi come testo",
                                    count=len(_parsed))
+                    # OPZIONE A: il tool-call va RICOSTRUITO ma il testo
+                    # residuo (es. i marker <goal .../> del plugin) resta al
+                    # client: si rimuove SOLO il markup del tool-call.
+                    _tt_txt = _buffered_answer_text(prebuf)
+                    _tt_res = strip_toolid_markup(_tt_txt)
+                    if _tt_res != _tt_txt:
+                        _so_text = _tt_res
+                        _so_rewrite = True
             if (verdict == "content" and _fc.enabled):
                 _pat = looks_like_fake_tool_call(
                     _buffered_answer_text(prebuf), _fc)

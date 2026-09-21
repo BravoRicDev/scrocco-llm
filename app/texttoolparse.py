@@ -22,7 +22,7 @@ log = logging.getLogger("nx.texttoolparse")
 
 DEFAULT_FORMATS: tuple[str, ...] = ("tool_call_json", "nemotron",
                                     "function_xml", "antml", "argkv",
-                                    "bare_json")
+                                    "toolid", "bare_json")
 
 
 class TextToolcallConfig:
@@ -101,6 +101,13 @@ _ARGKV = re.compile(
     r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
 _NAME_ATTR = re.compile(r"name\s*=\s*[\"']([^\"']+)[\"']")
 _JSON_NAME = re.compile(r"[\"']name[\"']\s*:\s*[\"']([^\"']+)[\"']")
+# Formato Anthropic-like reso come TESTO da alcuni modelli deboli (es.
+# ling-3.0): `<tool_call_id>ID</tool_call_id>` (opzionale) +
+# `<tool_call_type>NAME</tool_call_type>` + `<tool_input>{json}</tool_input>`.
+_TOOLID_BLOCK = re.compile(
+    r"(?:<tool_call_id>\s*(?P<id>.*?)\s*</tool_call_id>\s*)?"
+    r"<tool_call_type>\s*(?P<name>.*?)\s*</tool_call_type>\s*"
+    r"<tool_input>\s*(?P<input>.*?)\s*</tool_input>", re.S)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -272,12 +279,48 @@ def _bare_json_calls(content: str) -> list[dict]:
     return []
 
 
+def _toolid_calls(content: str) -> list[dict]:
+    """Formato Anthropic-like reso come testo (es. ling-3.0):
+    `<tool_call_id>ID</tool_call_id>` + `<tool_call_type>NAME</tool_call_type>`
+    + `<tool_input>{json}</tool_input>`. Il tool e' VALIDO: va riparato in un
+    vero `tool_calls`, non eliminato."""
+    calls: list[dict] = []
+    for m in _TOOLID_BLOCK.finditer(content or ""):
+        name = (m.group("name") or "").strip()
+        raw = (m.group("input") or "").strip()
+        if not name or not raw:
+            continue
+        try:
+            args = json.loads(_strip_code_fence(raw))
+        except Exception:
+            continue
+        if not isinstance(args, dict):
+            continue
+        c = _call(name, args)
+        if not c:
+            continue
+        _id = (m.group("id") or "").strip()
+        if _id:
+            c["id"] = _id
+        calls.append(c)
+    return calls
+
+
+def strip_toolid_markup(content: str) -> str:
+    """Rimuove SOLO i blocchi `<tool_call_id>/<tool_call_type>/<tool_input>`
+    (opzione A: il testo residuo, es. `<goal .../>`, resta al client)."""
+    if not isinstance(content, str) or not content:
+        return content
+    return _TOOLID_BLOCK.sub("", content)
+
+
 _PARSERS = {
     "function_xml": _xml_calls,
     "antml": _antml_calls,
     "tool_call_json": _toolcall_json_calls,
     "nemotron": _nemotron_calls,
     "argkv": _argkv_calls,
+    "toolid": _toolid_calls,
     "bare_json": _bare_json_calls,
 }
 
@@ -329,8 +372,13 @@ def parse_text_toolcalls(content, tools, cfg: TextToolcallConfig | None = None):
     return found
 
 
-def apply_to_message(message: dict, tools, cfg: TextToolcallConfig):
-    """Riscrive un messaggio assistant con tool-call testuali. Ritorna info o None."""
+def apply_to_message(message: dict, tools, cfg: TextToolcallConfig,
+                     preserve_residual: bool = False):
+    """Riscrive un messaggio assistant con tool-call testuali. Ritorna info o None.
+
+    `preserve_residual=True` (opzione A): NON azzera il content, ma rimuove
+    SOLO il markup del tool-call riparato, lasciando il testo residuo (es. i
+    tag `<goal .../>`/`<goal_status .../>` del goal plugin)."""
     if not isinstance(message, dict) or message.get("tool_calls"):
         return None
     content = message.get("content")
@@ -341,7 +389,10 @@ def apply_to_message(message: dict, tools, cfg: TextToolcallConfig):
     if not calls:
         return None
     message["tool_calls"] = calls
-    message["content"] = ""
+    if preserve_residual and isinstance(content, str):
+        message["content"] = strip_toolid_markup(content).strip()
+    else:
+        message["content"] = ""
     info = [{"name": c["function"]["name"],
              "n_args": len(json.loads(c["function"]["arguments"]))} for c in calls]
     return info
