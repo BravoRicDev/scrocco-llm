@@ -3424,6 +3424,10 @@ truncation_hook=None,
                 _B = None
                 _wake_b = False
                 _tB = t0
+                _fZ = None
+                _BZ = None
+                _wake_z = False
+                _tZ = t0
                 try:
                     _fly = router.probes_in_flight(ses)
                 except Exception:
@@ -3537,13 +3541,30 @@ truncation_hook=None,
                                 requested_group or dep.get("group"))
                         except Exception:
                             pass
-                        _op = _open_canary("refill", zen_only=_zen_hunt)
+                        _op = _open_canary("refill", zen_only=False)
                         if _op is None:
                             log.info("[refill] ns %s: nessun canario free "
                                      "consegnabile (chiavi escluse=%d)",
                                      cur, len(_raced_keys))
                         else:
                             _B, _fB, _tB, _wake_b = _op
+                        # CANARY ZEN DEDICATO (nativo senza zen in warm):
+                        # affianca il canary normale e cerca gli zen in TUTTE
+                        # le dim del profilo, non solo in quella richiesta.
+                        if _zen_hunt:
+                            try:
+                                _room = (router.probes_in_flight(ses)
+                                         < _maxif)
+                            except Exception:          # noqa: BLE001
+                                _room = True
+                            if _room:
+                                _opz = _open_canary("zen-wake", zen_only=True)
+                                if _opz is None:
+                                    log.info("[refill] ns %s: nessun canary "
+                                             "zen consegnabile (ctx=%s)",
+                                             cur, ctx)
+                                else:
+                                    _BZ, _fZ, _tZ, _wake_z = _opz
                 futA = None
                 # GARA LENTA (non-stream): soglia misurata dall'inizio del
                 # TENTATIVO di A. Vale SEMPRE, anche quando un canario di
@@ -3558,7 +3579,7 @@ truncation_hook=None,
                         _ns_slow = 0
                 _slow_dl = ((t0 + _ns_slow / 1000.0) if _ns_slow > 0
                             else None)
-                if _fB is None:
+                if _fB is None and _fZ is None:
                     # Se il primo tentativo sta ancora generando oltre la
                     # soglia si apre UN canario e si tiene per buono il PRIMO
                     # che consegna; A resta in volo (e se ha generato in MENO
@@ -3613,7 +3634,7 @@ truncation_hook=None,
                                 futA = None
                             else:
                                 _B, _fB, _tB, _wake_b = _op
-                    if _fB is None and data is None:
+                    if _fB is None and _fZ is None and data is None:
                         data = await self.call(dep, payload,
                                        profile=profile or "",
                                        ctx_est=ctx,
@@ -3621,7 +3642,7 @@ truncation_hook=None,
                                        attribution=attribution,
                                        rate_hook=lambda u, rl: router.note_rate_limit(
                                            u, rl))
-                if _fB is not None:
+                if _fB is not None or _fZ is not None:
                     # GARA (A + canario refill, eventualmente + canario
                     # LENTO): vince chi risponde PER PRIMO con successo; gli
                     # altri restano in volo come probe (mai cancellati) e se
@@ -3641,6 +3662,9 @@ truncation_hook=None,
                     if _fB is not None:
                         _parts.append({"fut": _fB, "dep": _B, "t": _tB,
                                        "wake": _wake_b, "a": False})
+                    if _fZ is not None:
+                        _parts.append({"fut": _fZ, "dep": _BZ, "t": _tZ,
+                                       "wake": _wake_z, "a": False})
                     _pending = {p["fut"] for p in _parts}
                     _slow_opened = _slow_dl is None
                     _errs: list[BaseException] = []

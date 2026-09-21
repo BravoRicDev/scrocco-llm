@@ -2667,6 +2667,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
 
     _DIM_GROUP_RE = __import__("re").compile(r"-(\d+)k$")
 
+    def group_has_zen(self, group_name: str | None) -> bool:
+        """Vero se il gruppo contiene almeno un upstream zen (free tier).
+
+        Usato dallo zen-first: una dim con zen e' preferita a una dim piu'
+        capiente ma priva di zen (che costringerebbe a provider non-free)."""
+        if not group_name:
+            return False
+        return any(is_opencode_zen_dep(d)
+                   for d in (self.config.groups.get(group_name) or ()))
+
     def climb_dim_group(self, group_name: str | None,
                         ctx_est) -> str | None:
         """SALITA DI DIM: se il payload non entra nel gruppo `-Nk` richiesto,
@@ -4633,6 +4643,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                             floor, sorted(need), pname2)
                 return requested
         pct = self.policy.step_up_for(pname2)
+        # ZEN-FIRST (client opencode nativo): nel tier dei dim non si sceglie
+        # una dim PRIVA di zen (costringerebbe a provider non-free) se esiste
+        # una dim zen capiente. La compattazione per rientrare nella dim zen e
+        # la salita non-zen sono decise subito dopo in `main._chat` (F31).
+        if self._zen_first_active():
+            _zbase = f"{cfg.proxy_prefix}{pname2}"
+            _zen_dims = [d for d in cand
+                         if self.group_has_zen(f"{_zbase}-{d}k")]
+            if _zen_dims:
+                _zfit = next((d for d in _zen_dims
+                              if ctx_est <= d * 1000 * pct // 100), None)
+                cand = [_zfit] if _zfit is not None else [_zen_dims[-1]]
         chosen = next((d for d in cand
                        if ctx_est <= d * 1000 * pct // 100), cand[-1])
         target = f"{cfg.proxy_prefix}{pname2}-{chosen}k"

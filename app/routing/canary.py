@@ -161,6 +161,24 @@ class CanaryMixin:
             return (1, 0)
         return (0, int(m.group(1)))
 
+    def _zen_ladder_for(self, profile: str | None) -> list[str]:
+        """Ladder dei soli deployment ZEN (free) di TUTTE le -dim del profilo,
+        in ordine dim-ascendente.
+
+        Indipendente dal gruppo richiesto: serve al canary zen dedicato, che
+        deve trovare gli zen anche quando la richiesta atterra su una -dim
+        senza zen (es. -512k/-1000k)."""
+        cfg = self.config
+        if not profile:
+            return []
+        base = f"{cfg.proxy_prefix}{profile}"
+        out: list[str] = []
+        for dim in sorted(cfg.profile_dims.get(profile, []) or []):
+            for d in cfg.groups.get(f"{base}-{dim}k", []) or []:
+                if is_opencode_zen_dep(d):
+                    out.append(d["unique"])
+        return out
+
     def _canary_cold_pick(self, cands: list[dict], ctx: int | None,
                           sampled_tiers: set[int] | None = None
                           ) -> dict | None:
@@ -340,7 +358,7 @@ class CanaryMixin:
                 ex.add(u)
         keys = {str(k) for k in (exclude_keys or ()) if k}
         floor = 0
-        if requested_group:
+        if requested_group and not only_zen:
             try:
                 floor = int(self._group_min_dim(requested_group) or 0)
             except Exception:                          # noqa: BLE001
@@ -368,10 +386,15 @@ class CanaryMixin:
         # dalla dim RICHIESTA, non dal gruppo della holder (che puo' essere
         # piu' alta: una sessione ancorata a -1000k non vedrebbe mai le free
         # -200k). Se la dim richiesta non da' ladder, ripiega su quello corrente.
-        _lad = self._ladder_for_group(requested_group
-                                      or cur_dep.get("group") or "")
-        if not _lad:
-            _lad = self._ladder_for_group(cur_dep.get("group") or "")
+        if only_zen:
+            # Canary zen DEDICATO: cerca gli zen in TUTTE le dim del profilo,
+            # anche se la richiesta attuale e' su una dim senza zen.
+            _lad = self._zen_ladder_for(profile)
+        else:
+            _lad = self._ladder_for_group(requested_group
+                                          or cur_dep.get("group") or "")
+            if not _lad:
+                _lad = self._ladder_for_group(cur_dep.get("group") or "")
         for u in _lad:
             if u in ex:
                 continue
@@ -507,7 +530,7 @@ class CanaryMixin:
         # tocca mai una api_key gia' impegnata da sessione alcuna.
         keys |= self.session_api_keys()
         floor = 0
-        if requested_group:
+        if requested_group and not only_zen:
             try:
                 floor = int(self._group_min_dim(requested_group) or 0)
             except Exception:                          # noqa: BLE001
@@ -525,10 +548,15 @@ class CanaryMixin:
         _last = bool(getattr(self.policy, "canary_warm_last", True))
         _wprov = self._warm_providers() if _last else set()
         # FISSATO: anche la Sveglia scava dalla dim RICHIESTA (vedi refill).
-        _lad = self._ladder_for_group(requested_group
-                                      or cur_dep.get("group") or "")
-        if not _lad:
-            _lad = self._ladder_for_group(cur_dep.get("group") or "")
+        if only_zen:
+            # Canary zen DEDICATO: cerca gli zen in TUTTE le dim del profilo,
+            # anche se la richiesta attuale e' su una dim senza zen.
+            _lad = self._zen_ladder_for(profile)
+        else:
+            _lad = self._ladder_for_group(requested_group
+                                          or cur_dep.get("group") or "")
+            if not _lad:
+                _lad = self._ladder_for_group(cur_dep.get("group") or "")
         for u in _lad:
             if u in ex:
                 continue

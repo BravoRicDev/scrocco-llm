@@ -42,7 +42,10 @@ profiles:
 # Divisore per stimare i token dai caratteri del payload (chars / divisor).
 #   4 = approssimazione standard (1 token ≈ 4 caratteri)
 #   3 = più conservativo (stima più alta → contesto più ampio)
-estimate_divisor: 3
+# NB: il traffico opencode reale misura ~3.9 char/token: con 3 la stima
+# sovrastimava del ~29% e faceva salire di dim (fuori dal tier zen/free)
+# richieste che ci sarebbero entrate. Default realistico = 4.
+estimate_divisor: 4
 
 # Calibrazione closed-loop dell'estimator: a ogni risposta con usage reale
 # (prompt_tokens) il divisor appreso del deployment si muove verso quello vero
