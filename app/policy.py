@@ -209,6 +209,17 @@ class Policy:
     # Calibrazione closed-loop del divisore dal VERO prompt_tokens upstream
     # (alpha dell'EMA sull'errore relativo; 0 = disattiva).
     estimate_calib_alpha: float = 0.05
+    # STIMA PER-SESSIONE dal rapporto REALE char/token (char del payload inviato
+    # a monte / prompt_tokens restituito). Il 1o turno usa la stima euristica;
+    # dal 2o il rapporto appreso * margine di sicurezza. In-memory, per sessione
+    # (una sessione di solo testo e una di solo codice restano separate).
+    session_estimate_enabled: bool = True
+    session_estimate_margin: float = 1.05
+    session_estimate_min_chars: int = 8000
+    session_estimate_min_tokens: int = 1000
+    session_estimate_ttl_sec: int = 3600
+    session_estimate_min_ratio: float = 1.5
+    session_estimate_max_ratio: float = 8.0
     # TTL (secondi) della cache in-memory delle GET {endpoint}/models: una
     # chiamata per endpoint (prima chiave valida), condivisa tra audit, health
     # e probe. 0 = nessuna cache (una GET per endpoint ad ogni esecuzione).
@@ -1236,6 +1247,30 @@ class Policy:
                     or not (0.0 <= float(v) <= 1.0):
                 raise ValueError("estimate_calib_alpha deve essere 0..1")
             p.estimate_calib_alpha = float(v)
+        if "session_estimate_enabled" in raw:
+            p.session_estimate_enabled = _coerce_bool(
+                raw["session_estimate_enabled"], "session_estimate_enabled")
+        if "session_estimate_margin" in raw:
+            v = raw["session_estimate_margin"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0.5 <= float(v) <= 3.0):
+                raise ValueError("session_estimate_margin deve essere 0.5..3.0")
+            p.session_estimate_margin = float(v)
+        _set_int(p, raw, "session_estimate_min_chars", minimum=0)
+        _set_int(p, raw, "session_estimate_min_tokens", minimum=0)
+        _set_int(p, raw, "session_estimate_ttl_sec", minimum=0)
+        if "session_estimate_min_ratio" in raw:
+            v = raw["session_estimate_min_ratio"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or float(v) <= 0:
+                raise ValueError("session_estimate_min_ratio deve essere > 0")
+            p.session_estimate_min_ratio = float(v)
+        if "session_estimate_max_ratio" in raw:
+            v = raw["session_estimate_max_ratio"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or float(v) <= 0:
+                raise ValueError("session_estimate_max_ratio deve essere > 0")
+            p.session_estimate_max_ratio = float(v)
         _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
         _rmin = raw.get("retry_after_min_sec")
         if _rmin is not None:

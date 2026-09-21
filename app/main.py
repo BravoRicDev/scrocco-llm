@@ -109,7 +109,8 @@ from .histnorm import flatten_text_content
 from .qc import annotate_reasoning
 from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
                           set_avoid_gemini, set_dummy_fill)
-from .router import Router, inject_identity, estimate_tokens, configure_estimate
+from .router import (Router, inject_identity, estimate_tokens,
+                     configure_estimate, _prompt_chars)
 from .caution import background_cautious_enabled
 from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             set_zen_first,
@@ -1647,9 +1648,38 @@ async def chat_completions(request: Request, response: Response):
     _sniff_headers(request, logger=_api_log,
                    body_size=len(request._body) if hasattr(request, "_body")
                    else 0, session_id=session_id)
-    ctx_est = estimate_tokens(messages, router.policy.estimate_divisor,
-                              getattr(router.policy, "image_token_estimate", 0) or 0,
-                              tools=payload.get("tools"))
+    _img_est = getattr(router.policy, "image_token_estimate", 0) or 0
+    _cpt = router.session_chars_per_token(session_id)
+    if _cpt:
+        # Dal 2o turno: stima col rapporto REALE char/token della sessione.
+        # Base = payload con la sola histnorm applicata (parte deterministica),
+        # coerente coi char inviati a monte su cui si e' imparato.
+        _est_msgs = messages
+        try:
+            from .histnorm import (hist_config_from_policy,
+                                   normalize_messages)
+            _est_msgs, _ = normalize_messages(
+                messages, hist_config_from_policy(router.policy),
+                tail_floor=router.ctx_boundary_floor(session_id))
+        except Exception:                          # noqa: BLE001
+            _est_msgs = messages
+        ctx_est, _used_ratio = router.estimate_for_session(
+            session_id, _est_msgs, router.policy.estimate_divisor, _img_est,
+            tools=payload.get("tools"))
+        if _used_ratio:
+            metrics.inc("nx_sess_est_used_total")
+            log.info("[estimate] sess ratio=%.2f -> ctx≈%d (chars=%d, +%.0f%%)",
+                     _cpt, ctx_est,
+                     _prompt_chars(_est_msgs, payload.get("tools")),
+                     (float(getattr(router.policy, "session_estimate_margin",
+                                    1.05)) - 1.0) * 100.0)
+        else:
+            metrics.inc("nx_sess_est_fallback_total")
+    else:
+        # 1o turno della sessione: stima euristica basata sui soli char.
+        ctx_est = estimate_tokens(messages, router.policy.estimate_divisor,
+                                  _img_est, tools=payload.get("tools"))
+        metrics.inc("nx_sess_est_fallback_total")
 
     group_or_explicit = router.resolve_group_for_request(model, messages,
                                                          session_id, need,
@@ -1735,8 +1765,9 @@ async def chat_completions(request: Request, response: Response):
                 _img = getattr(router.policy, "image_token_estimate", 0) or 0
                 _forced, _frep = compact_tool_outputs(
                     payload.get("messages") or [], _ccf, max_in=_budget,
-                    estimator=lambda ms: estimate_tokens(
-                        ms, router.policy.estimate_divisor, _img))
+                    estimator=lambda ms: router.estimate_for_session(
+                        session_id, ms, router.policy.estimate_divisor,
+                        _img)[0])
                 if _frep.get("changed"):
                     payload["messages"] = _forced
                     metrics.inc("nx_ctx_compacted_forced")
@@ -1745,9 +1776,10 @@ async def chat_completions(request: Request, response: Response):
                              {k: _frep.get(k) for k in (
                                  "stubbed", "deduped", "args_trimmed",
                                  "saved_chars")})
-                ctx_est = estimate_tokens(payload.get("messages") or [],
-                                          router.policy.estimate_divisor, _img,
-                                          tools=payload.get("tools"))
+                ctx_est = router.estimate_for_session(
+                    session_id, payload.get("messages") or [],
+                    router.policy.estimate_divisor, _img,
+                    tools=payload.get("tools"))[0]
                 if ctx_est <= _budget:
                     metrics.inc("nx_zen_dim_stay")
                     log.info("[zen-dim] compattato: ctx≈%d entra in %s (zen, "
@@ -1780,8 +1812,9 @@ async def chat_completions(request: Request, response: Response):
                     _img = getattr(router.policy, "image_token_estimate", 0) or 0
                     _forced, _frep = compact_tool_outputs(
                         payload.get("messages") or [], _ccf, max_in=_max_grp,
-                        estimator=lambda ms: estimate_tokens(
-                            ms, router.policy.estimate_divisor, _img))
+                        estimator=lambda ms: router.estimate_for_session(
+                            session_id, ms, router.policy.estimate_divisor,
+                            _img)[0])
                     if _frep.get("changed"):
                         payload["messages"] = _forced
                         metrics.inc("nx_ctx_compacted_forced")
@@ -1790,9 +1823,10 @@ async def chat_completions(request: Request, response: Response):
                                  {k: _frep.get(k) for k in (
                                      "stubbed", "deduped", "args_trimmed",
                                      "saved_chars")})
-                    ctx_est = estimate_tokens(payload.get("messages") or [],
-                                              router.policy.estimate_divisor, _img,
-                                              tools=payload.get("tools"))
+                    ctx_est = router.estimate_for_session(
+                        session_id, payload.get("messages") or [],
+                        router.policy.estimate_divisor, _img,
+                        tools=payload.get("tools"))[0]
                     if ctx_est > int(_max_grp * 1.05):
                         metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
                         return JSONResponse(status_code=400, content={
@@ -1965,9 +1999,9 @@ async def chat_completions(request: Request, response: Response):
     if _do_compact:
         _cmsgs, _crep = compact_tool_outputs(
             payload.get("messages"), _cc, max_in=_max_in,
-            estimator=lambda ms: estimate_tokens(
-                ms, _div_eff,
-                getattr(router.policy, "image_token_estimate", 0) or 0),
+            estimator=lambda ms: router.estimate_for_session(
+                session_id, ms, _div_eff,
+                getattr(router.policy, "image_token_estimate", 0) or 0)[0],
             boundary_floor=router.ctx_boundary_floor(session_id),
             divisor=_div_eff)
         if _crep.get("changed"):
@@ -2128,6 +2162,13 @@ async def chat_completions(request: Request, response: Response):
         if _u_f14 and _u_f14.get("prompt_tokens"):
             router.note_estimate_error(used["unique"], ctx_est,
                                        _u_f14["prompt_tokens"])
+            # Stima per-sessione: char REALI del payload inviato a monte
+            # (post inject_identity/histnorm/ctxcompact) / prompt_tokens.
+            router.note_session_estimate(
+                session_id,
+                _prompt_chars(payload.get("messages"), payload.get("tools")),
+                _u_f14["prompt_tokens"])
+            metrics.inc("nx_sess_est_samples_total")
     except Exception:
         pass
     _emit_summary(ses=session_id or "-", req=raw_model,
@@ -4716,6 +4757,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         and usage_final.get("prompt_tokens"):
                     router.note_estimate_error(
                         dep["unique"], ctx, usage_final["prompt_tokens"])
+                    # Stima per-sessione (stream): char REALI inviati a monte.
+                    router.note_session_estimate(
+                        ses,
+                        _prompt_chars(payload.get("messages"),
+                                      payload.get("tools")),
+                        usage_final["prompt_tokens"])
+                    metrics.inc("nx_sess_est_samples_total")
             except Exception:
                 pass
             for o in _sse_data_objs(chunk):

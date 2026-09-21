@@ -52,6 +52,19 @@ estimate_divisor: 4
 # (base/rapporto) con EMA alpha. 0 = calibrazione spenta.
 estimate_calib_alpha: 0.05
 
+# STIMA PER-SESSIONE (char/token REALE): il 1o turno di una sessione usa la
+# stima euristica (char/estimate_divisor); dal 2o il rapporto appreso dai char
+# del payload EFFETTIVAMENTE inviato al provider diviso per il prompt_tokens
+# restituito, applicato ai char della richiesta * margine di sicurezza. Media
+# cumulativa per sessione (testo e codice restano separati). In-memory.
+session_estimate_enabled: true
+session_estimate_margin: 1.05       # +5% di sicurezza
+session_estimate_min_chars: 8000    # scarta campioni troppo piccoli
+session_estimate_min_tokens: 1000
+session_estimate_ttl_sec: 3600      # 0 = nessuna scadenza
+session_estimate_min_ratio: 1.5     # clamp inferiore char/token
+session_estimate_max_ratio: 8.0     # clamp superiore char/token
+
 # ROLLOUT AUTOMATICO DELLA STIMA ADATTIVA
 #   estimate_adaptive_enabled = master switch manuale (vince sempre).
 #   In shadow i due conteggi (legacy/adattivo) vengono accumulati e ORA

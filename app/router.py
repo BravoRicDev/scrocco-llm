@@ -232,9 +232,16 @@ def _json_size(obj: Any) -> int:
         return 0
 
 
-def _estimate_legacy(messages: Any, divisor: int = CHARS_PER_TOKEN,
-                     image_token_estimate: int = 0, tools: Any = None) -> int:
-    """Stima storica: somma caratteri / divisor (default chars/4)."""
+def _prompt_chars(messages: Any, tools: Any = None) -> int:
+    """Caratteri del payload prompt (stessa base di `_estimate_legacy`).
+
+    Conta content (str o parti testuali), tool_calls (nome + arguments JSON),
+    reasoning_content/reasoning e, se presenti, gli schemi `tools`. E' la base
+    su cui si misura il rapporto REALE char/token del provider (vedi
+    `note_session_estimate`): per essere veritiero va chiamata sui messaggi
+    EFFETTIVAMENTE inviati a monte (dopo histnorm/ctxcompact), non su quelli
+    grezzi del client.
+    """
     total = 0
     if tools:
         total += _json_size(list(tools))
@@ -255,7 +262,13 @@ def _estimate_legacy(messages: Any, divisor: int = CHARS_PER_TOKEN,
         rc = m.get("reasoning_content") or m.get("reasoning")
         if isinstance(rc, str):
             total += len(rc)
-    tokens = total // max(1, divisor)
+    return total
+
+
+def _estimate_legacy(messages: Any, divisor: int = CHARS_PER_TOKEN,
+                     image_token_estimate: int = 0, tools: Any = None) -> int:
+    """Stima storica: somma caratteri / divisor (default chars/4)."""
+    tokens = _prompt_chars(messages, tools) // max(1, divisor)
     if image_token_estimate > 0:
         tokens += count_image_parts(messages) * image_token_estimate
     return tokens
@@ -604,6 +617,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # prompt_tokens riportato dall'upstream (tokenizer diverso da chars/4).
         # estimate_correction() lo converte in moltiplicatore per estimate_tokens.
         self._est_div: dict[str, float] = {}
+        # STIMA PER-SESSIONE (char/token REALE): session_id -> {chars, pt, n, ts}.
+        # Il rapporto nasce dai char del payload EFFETTIVAMENTE inviato a monte
+        # (post histnorm/ctxcompact) divisi per il prompt_tokens riportato dal
+        # provider: media cumulativa per sessione. Il 1o turno usa la stima
+        # euristica, dal 2o il rapporto appreso * margine di policy. In-memory,
+        # mai persistito (la sessione e' effimera).
+        self._sess_ratio: dict[str, dict] = {}
         # Time-decay dei punteggi di reputazione (halflife da policy).
         self._scores_decay_ts: float = time.time()
         self._scores_decay_log_ts: float = time.time()
@@ -1908,6 +1928,113 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             return base
         return cur
 
+    # ------------------------------------------------- stima per-sessione
+    def _sess_est(self) -> dict[str, dict]:
+        """Accessor lazy del registro per-sessione (Router "nudi" nei test)."""
+        d = getattr(self, "_sess_ratio", None)
+        if d is None:
+            d = self._sess_ratio = {}
+        return d
+
+    def note_session_estimate(self, session_id: str | None, chars,
+                              prompt_tokens) -> None:
+        """Accumula il rapporto REALE char/token della sessione.
+
+        `chars` = caratteri del payload prompt EFFETTIVAMENTE inviato al
+        provider (dopo inject_identity/histnorm/ctxcompact); `prompt_tokens` =
+        conteggio reale riportato dal provider nella risposta. Il rapporto e'
+        una MEDIA CUMULATIVA (somma char / somma token), cosi' una sessione di
+        solo testo e una di solo codice restano separate e il dato converge
+        senza alpha da tarare. Campioni troppo piccoli (rumore di chat-template)
+        sono scartati.
+        """
+        if not session_id:
+            return
+        if not getattr(self.policy, "session_estimate_enabled", True):
+            return
+        try:
+            ch = int(chars or 0)
+            pt = int(prompt_tokens or 0)
+        except (TypeError, ValueError):
+            return
+        _minch = int(getattr(self.policy, "session_estimate_min_chars",
+                             8000) or 0)
+        _minpt = int(getattr(self.policy, "session_estimate_min_tokens",
+                             1000) or 0)
+        if ch < _minch or pt < _minpt:
+            return
+        d = self._sess_est()
+        now = time.time()
+        rec = d.get(session_id)
+        if not isinstance(rec, dict):
+            rec = {"chars": 0, "pt": 0, "n": 0, "ts": now}
+        rec["chars"] = int(rec.get("chars") or 0) + ch
+        rec["pt"] = int(rec.get("pt") or 0) + pt
+        rec["n"] = int(rec.get("n") or 0) + 1
+        rec["ts"] = now
+        d[session_id] = rec
+        log.debug("[est-sess] %s chars+=%d pt+=%d cpt=%.2f n=%d",
+                  session_id, ch, pt,
+                  rec["chars"] / max(1, rec["pt"]), rec["n"])
+
+    def session_chars_per_token(self, session_id: str | None):
+        """Rapporto char/token appreso per la sessione (None se assente/stale).
+
+        Clampato a [session_estimate_min_ratio, session_estimate_max_ratio] per
+        non propagare campioni anomali."""
+        if not session_id:
+            return None
+        if not getattr(self.policy, "session_estimate_enabled", True):
+            return None
+        rec = self._sess_est().get(session_id)
+        if not isinstance(rec, dict):
+            return None
+        try:
+            ch = int(rec.get("chars") or 0)
+            pt = int(rec.get("pt") or 0)
+            n = int(rec.get("n") or 0)
+            ts = float(rec.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if n < 1 or ch <= 0 or pt <= 0:
+            return None
+        _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        if _ttl > 0 and time.time() - ts > _ttl:
+            return None
+        try:
+            _lo = float(getattr(self.policy, "session_estimate_min_ratio",
+                                1.5) or 1.5)
+            _hi = float(getattr(self.policy, "session_estimate_max_ratio",
+                                8.0) or 8.0)
+        except (TypeError, ValueError):
+            _lo, _hi = 1.5, 8.0
+        return max(_lo, min(_hi, ch / float(pt)))
+
+    def estimate_for_session(self, session_id: str | None, messages: Any,
+                             divisor: int = CHARS_PER_TOKEN,
+                             image_token_estimate: int = 0,
+                             tools: Any = None) -> tuple[int, bool]:
+        """Stima del contesto con il rapporto per-sessione, se disponibile.
+
+        Ritorna `(tokens, usato_rapporto)`. Senza rapporto appreso (1o turno di
+        una sessione) ricade sulla stima euristica `estimate_tokens`. Con il
+        rapporto: `chars / cpt * margine` (+ token immagine), dove `chars` sono
+        i caratteri della STESSA base su cui si e' imparato.
+        """
+        cpt = self.session_chars_per_token(session_id)
+        if not cpt:
+            return estimate_tokens(messages, divisor, image_token_estimate,
+                                   tools), False
+        try:
+            margin = float(getattr(self.policy, "session_estimate_margin",
+                                   1.05) or 1.0)
+        except (TypeError, ValueError):
+            margin = 1.05
+        tokens = int(_prompt_chars(messages, tools) / cpt * max(1.0, margin))
+        if image_token_estimate > 0:
+            tokens += count_image_parts(messages) * image_token_estimate
+        return tokens, True
+
     def _note_latency_sample(self, unique: str, latency_ms: float,
                              ctx_est, kind: str, alpha: float) -> None:
         """Aggiorna l'EMA del bucket giusto (total o ttft) e, per i totali con
@@ -3058,6 +3185,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_dep:
             self._sticky_dep.pop(s, None)
+        # STIMA per-sessione: TTL di policy + cap 4096 (eviction sul piu' vecchio)
+        _sr = self._sess_est()
+        _sttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        if _sttl > 0:
+            for s in [s for s, r in _sr.items()
+                      if now - float((r or {}).get("ts") or 0.0) > _sttl]:
+                _sr.pop(s, None)
+        if len(_sr) > 4096:
+            for s in sorted(_sr, key=lambda k: float(
+                    (_sr[k] or {}).get("ts") or 0.0))[:len(_sr) - 4096]:
+                _sr.pop(s, None)
         # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
         _gttl = self._guard_sec() * 2
         _ds = self._dep_sess()
