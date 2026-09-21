@@ -1708,11 +1708,20 @@ async def chat_completions(request: Request, response: Response):
             _zen_first = router._zen_first_active()
         except Exception:                              # noqa: BLE001
             _zen_first = False
-        # Zen-first: soglia ESATTA (nessuno slack) cosi' un payload appena
-        # sopra la dim zen viene compattato invece di sforarla -> 413. Per i
-        # non-nativi resta lo storico 5% di margine.
-        _margin = 1.0 if _zen_first else 1.05
-        if _max_grp > 0 and ctx_est and ctx_est > int(_max_grp * _margin):
+        # Zen-first: si tiene conto anche della RISERVA DI OUTPUT (il picker
+        # richiede ctx+out <= max_input) e si compatta per rientrare nel tier
+        # zen. Per i non-nativi resta lo storico 5% di margine sull'input.
+        try:
+            _out_res = int(refill_out_budget(payload, router.policy) or 0)
+        except Exception:                              # noqa: BLE001
+            _out_res = 0
+        if _zen_first:
+            _budget = max(1, _max_grp - _out_res) if _max_grp else 0
+            _trig = bool(ctx_est and ctx_est > _budget)
+        else:
+            _budget = _max_grp
+            _trig = bool(ctx_est and ctx_est > int(_max_grp * 1.05))
+        if _max_grp > 0 and _trig:
             _up = None
             _handled = False
             if _zen_first:
@@ -1725,7 +1734,7 @@ async def chat_completions(request: Request, response: Response):
                 _ccf.min_saved_tokens = 0
                 _img = getattr(router.policy, "image_token_estimate", 0) or 0
                 _forced, _frep = compact_tool_outputs(
-                    payload.get("messages") or [], _ccf, max_in=_max_grp,
+                    payload.get("messages") or [], _ccf, max_in=_budget,
                     estimator=lambda ms: estimate_tokens(
                         ms, router.policy.estimate_divisor, _img))
                 if _frep.get("changed"):
@@ -1739,16 +1748,21 @@ async def chat_completions(request: Request, response: Response):
                 ctx_est = estimate_tokens(payload.get("messages") or [],
                                           router.policy.estimate_divisor, _img,
                                           tools=payload.get("tools"))
-                if ctx_est <= _max_grp:
+                if ctx_est <= _budget:
                     metrics.inc("nx_zen_dim_stay")
-                    log.info("[zen-dim] compattato: ctx≈%d entra in %s (zen): "
-                             "resto nel tier free", ctx_est, group_or_explicit)
+                    log.info("[zen-dim] compattato: ctx≈%d entra in %s (zen, "
+                             "budget=%d out=%d): resto nel tier free",
+                             ctx_est, group_or_explicit, _budget, _out_res)
                     _handled = True
             if not _handled:
-                if ctx_est > _max_grp:
+                _climb = ((ctx_est > _budget) if _zen_first
+                          else (ctx_est > _max_grp))
+                if _climb:
                     # SALITA DI DIM (regola dell'utente): la dim PIU' PICCOLA
-                    # che contiene il payload.
-                    _up = router.climb_dim_group(group_or_explicit, ctx_est)
+                    # che contiene il payload (+ riserva output per lo zen).
+                    _up = router.climb_dim_group(
+                        group_or_explicit,
+                        ctx_est + (_out_res if _zen_first else 0))
                 if _up:
                     log.info("[dim] ctx≈%d non entra in %s (max %d): salgo a %s",
                              ctx_est, group_or_explicit, _max_grp, _up)
