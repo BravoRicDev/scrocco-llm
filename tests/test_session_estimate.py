@@ -1,9 +1,14 @@
-"""Stima per-sessione dal rapporto REALE char/token del provider.
+"""Stima per-sessione dai rapporti REALI char/token della sessione.
 
-Il 1o turno di una sessione usa la stima euristica (solo char/divisor); dal 2o
-il rapporto appreso (char REALI del payload inviato a monte / prompt_tokens
-restituito) applicato ai char della richiesta, con margine di sicurezza.
-Qui: fallback iniziale, media cumulativa, margine, clamp, gate, TTL e purge.
+Il 1o turno usa la stima euristica (solo char/divisor). Dal 2o si apprendono
+DUE rapporti dagli stessi campioni:
+  `cpt_post = char_inviati / prompt_tokens`  -> tokenizer vero del provider;
+  `cpt_pre  = char_pre-compressione / prompt_tokens` -> predittore dei token
+              FATTURATI a partire dalla base di stima (preview pre-ctxcompact).
+Al routing: `ctx_dim` (post-compressione previsto) scegle la dim; `ctx_pre`
+(pre-compressione) resta per i controlli di sicurezza/overflow.
+Qui: fallback iniziale, media cumulativa, pre vs post, margine, clamp, gate,
+TTL e purge.
 """
 import os
 import tempfile
@@ -41,6 +46,11 @@ def test_first_turn_falls_back_to_heuristic():
         assert used is False
         assert tokens == estimate_tokens(_msgs(20000),
                                          r.policy.estimate_divisor)
+        # anche la variante pre-compressione ricade sull'euristica
+        tokens_pre, used_pre = r.estimate_for_session("s1", _msgs(20000),
+                                                      pre=True)
+        assert used_pre is False
+        assert tokens_pre == tokens
     finally:
         os.unlink(path)
 
@@ -48,8 +58,8 @@ def test_first_turn_falls_back_to_heuristic():
 def test_second_turn_uses_learned_ratio_with_margin():
     r, path = _router(estimate_divisor=4, session_estimate_margin=1.05)
     try:
-        # provider reale: 40000 char -> 10000 token (cpt = 4.0)
-        r.note_session_estimate("s1", 40000, 10000)
+        # provider reale: 40000 char inviati -> 10000 token (cpt_post = 4.0)
+        r.note_session_estimate("s1", 40000, 40000, 10000)
         assert r.session_chars_per_token("s1") == 4.0
         tokens, used = r.estimate_for_session("s1", _msgs(20000))
         assert used is True
@@ -60,14 +70,39 @@ def test_second_turn_uses_learned_ratio_with_margin():
         os.unlink(path)
 
 
+def test_pre_ratio_predicts_post_compression_tokens():
+    """Il cuore del fix: la dim si scegle con cpt_pre, la sicurezza con cpt_post.
+
+    Sessione che comprime: 60000 char pre-compressione, 30000 inviati,
+    10000 token fatturati -> cpt_post=3.0 (tokenizer), cpt_pre=6.0.
+    """
+    r, path = _router(estimate_divisor=4, session_estimate_margin=1.05)
+    try:
+        r.note_session_estimate("s1", 60000, 30000, 10000)
+        assert r.session_chars_per_token("s1") == 3.0            # post
+        assert r.session_chars_per_token("s1", pre=True) == 6.0  # pre
+        # 60000 char pre-compressione -> ~10000 token fatturati (+5%)
+        dim, used = r.estimate_for_session("s1", _msgs(60000), pre=True)
+        assert used is True
+        assert dim == int(60000 / 6.0 * 1.05)                    # 10500
+        # stima di sicurezza (pre-compressione) -> ~21000 token
+        pre, _ = r.estimate_for_session("s1", _msgs(60000))
+        assert pre == int(60000 / 3.0 * 1.05)                    # 21000
+        assert dim < pre
+    finally:
+        os.unlink(path)
+
+
 def test_cumulative_volume_weighted_average():
     r, path = _router()
     try:
-        r.note_session_estimate("s1", 40000, 10000)     # cpt 4.0
-        r.note_session_estimate("s1", 20000, 4000)      # cpt 5.0
+        r.note_session_estimate("s1", 40000, 40000, 10000)      # cpt 4.0
+        r.note_session_estimate("s1", 20000, 20000, 4000)       # cpt 5.0
         cpt = r.session_chars_per_token("s1")
-        assert abs(cpt - 60000 / 14000) < 1e-9          # ~4.2857
+        assert abs(cpt - 60000 / 14000) < 1e-9                  # ~4.2857
         assert r._sess_ratio["s1"]["n"] == 2
+        assert r._sess_ratio["s1"]["post"] == 60000
+        assert r._sess_ratio["s1"]["pre"] == 60000
     finally:
         os.unlink(path)
 
@@ -75,7 +110,7 @@ def test_cumulative_volume_weighted_average():
 def test_margin_is_configurable_and_never_below_one():
     r, path = _router(session_estimate_margin=1.10)
     try:
-        r.note_session_estimate("s1", 40000, 10000)
+        r.note_session_estimate("s1", 40000, 40000, 10000)
         tokens, _ = r.estimate_for_session("s1", _msgs(20000))
         assert tokens == int(20000 / 4.0 * 1.10)
     finally:
@@ -86,9 +121,9 @@ def test_gate_rejects_unreliable_samples():
     r, path = _router(session_estimate_min_chars=8000,
                       session_estimate_min_tokens=1000)
     try:
-        r.note_session_estimate("s1", 4000, 8000)       # chars < min
-        r.note_session_estimate("s1", 40000, 500)       # pt < min
-        r.note_session_estimate(None, 40000, 10000)     # nessuna sessione
+        r.note_session_estimate("s1", 4000, 4000, 8000)         # post < min
+        r.note_session_estimate("s1", 40000, 40000, 500)        # pt < min
+        r.note_session_estimate(None, 40000, 40000, 10000)      # senza sessione
         assert r.session_chars_per_token("s1") is None
         assert "s1" not in r._sess_ratio
     finally:
@@ -99,8 +134,8 @@ def test_ratio_clamped_to_bounds():
     r, path = _router(session_estimate_min_ratio=1.5,
                       session_estimate_max_ratio=8.0)
     try:
-        r.note_session_estimate("hi", 1000000, 1000)    # cpt 1000 -> clamp 8
-        r.note_session_estimate("lo", 10000, 10000)     # cpt 1.0 -> clamp 1.5
+        r.note_session_estimate("hi", 1000000, 1000000, 1000)   # cpt 1000 -> 8
+        r.note_session_estimate("lo", 10000, 10000, 10000)      # cpt 1.0 -> 1.5
         assert r.session_chars_per_token("hi") == 8.0
         assert r.session_chars_per_token("lo") == 1.5
     finally:
@@ -110,8 +145,9 @@ def test_ratio_clamped_to_bounds():
 def test_disabled_does_not_learn_nor_use():
     r, path = _router(session_estimate_enabled=False)
     try:
-        r.note_session_estimate("s1", 40000, 10000)
+        r.note_session_estimate("s1", 40000, 40000, 10000)
         assert r.session_chars_per_token("s1") is None
+        assert r.session_chars_per_token("s1", pre=True) is None
         tokens, used = r.estimate_for_session("s1", _msgs(20000))
         assert used is False
         assert tokens == estimate_tokens(_msgs(20000),
@@ -123,11 +159,12 @@ def test_disabled_does_not_learn_nor_use():
 def test_ttl_expiry_falls_back():
     r, path = _router(session_estimate_ttl_sec=60)
     try:
-        r.note_session_estimate("s1", 40000, 10000)
+        r.note_session_estimate("s1", 40000, 40000, 10000)
         assert r.session_chars_per_token("s1") == 4.0
         # invecchia artificialmente il campione oltre la TTL
         r._sess_ratio["s1"]["ts"] = time.time() - 3600
         assert r.session_chars_per_token("s1") is None
+        assert r.session_chars_per_token("s1", pre=True) is None
     finally:
         os.unlink(path)
 
@@ -136,11 +173,11 @@ def test_purge_removes_expired_and_caps_cardinality():
     r, path = _router(session_estimate_ttl_sec=60)
     try:
         now = time.time()
-        r._sess_ratio["old"] = {"chars": 40000, "pt": 10000, "n": 1,
-                                "ts": now - 3600}
+        r._sess_ratio["old"] = {"pre": 40000, "post": 40000, "pt": 10000,
+                                "n": 1, "ts": now - 3600}
         for i in range(4100):
-            r._sess_ratio[f"s{i}"] = {"chars": 40000, "pt": 10000, "n": 1,
-                                      "ts": now}
+            r._sess_ratio[f"s{i}"] = {"pre": 40000, "post": 40000,
+                                      "pt": 10000, "n": 1, "ts": now}
         r.purge_expired()
         assert "old" not in r._sess_ratio
         assert len(r._sess_ratio) <= 4096

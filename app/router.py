@@ -238,9 +238,9 @@ def _prompt_chars(messages: Any, tools: Any = None) -> int:
     Conta content (str o parti testuali), tool_calls (nome + arguments JSON),
     reasoning_content/reasoning e, se presenti, gli schemi `tools`. E' la base
     su cui si misura il rapporto REALE char/token del provider (vedi
-    `note_session_estimate`): per essere veritiero va chiamata sui messaggi
-    EFFETTIVAMENTE inviati a monte (dopo histnorm/ctxcompact), non su quelli
-    grezzi del client.
+    `note_session_estimate`): va chiamata sia sui messaggi EFFETTIVAMENTE
+    inviati a monte (dopo histnorm/ctxcompact) sia sulla preview pre-ctxcompact
+    usata al routing, cosi' i due lati della stima coincidono.
     """
     total = 0
     if tools:
@@ -1936,24 +1936,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             d = self._sess_ratio = {}
         return d
 
-    def note_session_estimate(self, session_id: str | None, chars,
-                              prompt_tokens) -> None:
-        """Accumula il rapporto REALE char/token della sessione.
+    def note_session_estimate(self, session_id: str | None, pre_chars,
+                              post_chars, prompt_tokens) -> None:
+        """Accumula i rapporti char/token della sessione su DUE basi.
 
-        `chars` = caratteri del payload prompt EFFETTIVAMENTE inviato al
-        provider (dopo inject_identity/histnorm/ctxcompact); `prompt_tokens` =
-        conteggio reale riportato dal provider nella risposta. Il rapporto e'
-        una MEDIA CUMULATIVA (somma char / somma token), cosi' una sessione di
-        solo testo e una di solo codice restano separate e il dato converge
-        senza alpha da tarare. Campioni troppo piccoli (rumore di chat-template)
-        sono scartati.
+        `pre_chars`  = caratteri del payload al momento della STIMA (preview
+                       con sola histnorm, PRIMA di ctxcompact);
+        `post_chars` = caratteri del payload EFFETTIVAMENTE inviato al provider
+                       (dopo inject_identity/histnorm/ctxcompact);
+        `prompt_tokens` = conteggio reale riportato dal provider.
+
+        Da qui due medie cumulative (somma char / somma token):
+          `cpt_post = post/pt` -> rapporto vero del tokenizer del provider;
+          `cpt_pre  = pre/pt`  -> predittore dei token FATTURATI a partire dai
+                                  char pre-compressione (la base su cui si
+                                  stima al routing).
+        Cosi' una sessione di solo testo e una di solo codice restano separate e
+        il dato converge senza alpha da tarare. Campioni troppo piccoli (rumore
+        di chat-template) sono scartati.
         """
         if not session_id:
             return
         if not getattr(self.policy, "session_estimate_enabled", True):
             return
         try:
-            ch = int(chars or 0)
+            ch_pre = int(pre_chars or 0)
+            ch_post = int(post_chars or 0)
             pt = int(prompt_tokens or 0)
         except (TypeError, ValueError):
             return
@@ -1961,26 +1969,34 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                              8000) or 0)
         _minpt = int(getattr(self.policy, "session_estimate_min_tokens",
                              1000) or 0)
-        if ch < _minch or pt < _minpt:
+        if ch_post < _minch or pt < _minpt:
             return
+        if ch_pre < ch_post:
+            ch_pre = ch_post
         d = self._sess_est()
         now = time.time()
         rec = d.get(session_id)
         if not isinstance(rec, dict):
-            rec = {"chars": 0, "pt": 0, "n": 0, "ts": now}
-        rec["chars"] = int(rec.get("chars") or 0) + ch
+            rec = {"pre": 0, "post": 0, "pt": 0, "n": 0, "ts": now}
+        rec["pre"] = int(rec.get("pre") or 0) + ch_pre
+        rec["post"] = int(rec.get("post") or 0) + ch_post
         rec["pt"] = int(rec.get("pt") or 0) + pt
         rec["n"] = int(rec.get("n") or 0) + 1
         rec["ts"] = now
         d[session_id] = rec
-        log.info("[est-sess] %s: campione chars=%d pt=%d cpt=%.2f -> "
-                 "media cpt=%.2f (n=%d)",
-                 session_id, ch, pt, ch / max(1, pt),
-                 rec["chars"] / max(1, rec["pt"]), rec["n"])
+        log.info("[est-sess] %s: campione pre=%d post=%d pt=%d "
+                 "cpt_post=%.2f cpt_pre=%.2f -> media cpt_pre=%.2f (n=%d)",
+                 session_id, ch_pre, ch_post, pt,
+                 ch_post / max(1, pt), ch_pre / max(1, pt),
+                 rec["pre"] / max(1, rec["pt"]), rec["n"])
 
-    def session_chars_per_token(self, session_id: str | None):
+    def session_chars_per_token(self, session_id: str | None,
+                                pre: bool = False):
         """Rapporto char/token appreso per la sessione (None se assente/stale).
 
+        `pre=False` (default) -> `cpt_post` = char inviati / token (tokenizer
+        vero del provider). `pre=True` -> `cpt_pre` = char pre-compressione /
+        token (predittore dei token fatturati dalla base di stima).
         Clampato a [session_estimate_min_ratio, session_estimate_max_ratio] per
         non propagare campioni anomali."""
         if not session_id:
@@ -1991,7 +2007,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         if not isinstance(rec, dict):
             return None
         try:
-            ch = int(rec.get("chars") or 0)
+            ch = int(rec.get("pre" if pre else "post")
+                     or rec.get("chars") or 0)
             pt = int(rec.get("pt") or 0)
             n = int(rec.get("n") or 0)
             ts = float(rec.get("ts") or 0.0)
@@ -2014,15 +2031,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
     def estimate_for_session(self, session_id: str | None, messages: Any,
                              divisor: int = CHARS_PER_TOKEN,
                              image_token_estimate: int = 0,
-                             tools: Any = None) -> tuple[int, bool]:
+                             tools: Any = None,
+                             pre: bool = False) -> tuple[int, bool]:
         """Stima del contesto con il rapporto per-sessione, se disponibile.
 
         Ritorna `(tokens, usato_rapporto)`. Senza rapporto appreso (1o turno di
         una sessione) ricade sulla stima euristica `estimate_tokens`. Con il
         rapporto: `chars / cpt * margine` (+ token immagine), dove `chars` sono
         i caratteri della STESSA base su cui si e' imparato.
+
+        `pre=False` (default) usa `cpt_post` (rapporto vero del tokenizer):
+        stima i token del payload passato, quindi e' la stima PRE-compressione
+        quando `messages` non e' ancora compattato (sicurezza/overflow).
+        `pre=True` usa `cpt_pre` (char pre-compressione/token): stima i token
+        POST-compressione previsti, cioe' quelli che il provider fatturera'.
         """
-        cpt = self.session_chars_per_token(session_id)
+        cpt = self.session_chars_per_token(session_id, pre=pre)
         if not cpt:
             return estimate_tokens(messages, divisor, image_token_estimate,
                                    tools), False

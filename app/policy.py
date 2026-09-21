@@ -219,7 +219,9 @@ class Policy:
     session_estimate_min_tokens: int = 1000
     session_estimate_ttl_sec: int = 3600
     session_estimate_min_ratio: float = 1.5
-    session_estimate_max_ratio: float = 8.0
+    # cpt_pre (char pre-compressione/token) puo' essere alto se ctxcompact
+    # comprime molto: il tetto copre anche quello, non solo cpt_post.
+    session_estimate_max_ratio: float = 12.0
     # TTL (secondi) della cache in-memory delle GET {endpoint}/models: una
     # chiamata per endpoint (prima chiave valida), condivisa tra audit, health
     # e probe. 0 = nessuna cache (una GET per endpoint ad ogni esecuzione).

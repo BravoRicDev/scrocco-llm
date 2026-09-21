@@ -1649,41 +1649,47 @@ async def chat_completions(request: Request, response: Response):
                    body_size=len(request._body) if hasattr(request, "_body")
                    else 0, session_id=session_id)
     _img_est = getattr(router.policy, "image_token_estimate", 0) or 0
+    # Base di stima = payload con la sola histnorm (preview deterministica,
+    # PRIMA di ctxcompact): la STESSA base su cui si apprende e si applica il
+    # rapporto per-sessione, cosi' i char contati coincidono tra hook usage e
+    # routing.
+    _est_msgs = messages
+    try:
+        from .histnorm import (hist_config_from_policy, normalize_messages)
+        _est_msgs, _ = normalize_messages(
+            messages, hist_config_from_policy(router.policy),
+            tail_floor=router.ctx_boundary_floor(session_id))
+    except Exception:                              # noqa: BLE001
+        _est_msgs = messages
+    _est_chars_pre = _prompt_chars(_est_msgs, payload.get("tools"))
     _cpt = router.session_chars_per_token(session_id)
     if _cpt:
-        # Dal 2o turno: stima col rapporto REALE char/token della sessione.
-        # Base = payload con la sola histnorm applicata (parte deterministica),
-        # coerente coi char inviati a monte su cui si e' imparato.
-        _est_msgs = messages
-        try:
-            from .histnorm import (hist_config_from_policy,
-                                   normalize_messages)
-            _est_msgs, _ = normalize_messages(
-                messages, hist_config_from_policy(router.policy),
-                tail_floor=router.ctx_boundary_floor(session_id))
-        except Exception:                          # noqa: BLE001
-            _est_msgs = messages
-        ctx_est, _used_ratio = router.estimate_for_session(
+        # Dal 2o turno, DUE stime dalla stessa base pre-compressione:
+        #  ctx_dim = token POST-compressione previsti -> scelta della dim;
+        #  ctx_est = token PRE-compressione -> sicurezza (ctxcompact/overflow).
+        ctx_dim, _ = router.estimate_for_session(
+            session_id, _est_msgs, router.policy.estimate_divisor, _img_est,
+            tools=payload.get("tools"), pre=True)
+        ctx_est, _ = router.estimate_for_session(
             session_id, _est_msgs, router.policy.estimate_divisor, _img_est,
             tools=payload.get("tools"))
-        if _used_ratio:
-            metrics.inc("nx_sess_est_used_total")
-            log.info("[estimate] sess ratio=%.2f -> ctx≈%d (chars=%d, +%.0f%%)",
-                     _cpt, ctx_est,
-                     _prompt_chars(_est_msgs, payload.get("tools")),
-                     (float(getattr(router.policy, "session_estimate_margin",
-                                    1.05)) - 1.0) * 100.0)
-        else:
-            metrics.inc("nx_sess_est_fallback_total")
+        metrics.inc("nx_sess_est_used_total")
+        log.info("[estimate] sess cpt_pre=%.2f cpt_post=%.2f -> ctx_dim≈%d "
+                 "ctx_pre≈%d (chars_pre=%d, +%.0f%%)",
+                 router.session_chars_per_token(session_id, pre=True),
+                 _cpt, ctx_dim, ctx_est, _est_chars_pre,
+                 (float(getattr(router.policy, "session_estimate_margin",
+                                1.05)) - 1.0) * 100.0)
     else:
         # 1o turno della sessione: stima euristica basata sui soli char.
         ctx_est = estimate_tokens(messages, router.policy.estimate_divisor,
                                   _img_est, tools=payload.get("tools"))
+        ctx_dim = ctx_est
         metrics.inc("nx_sess_est_fallback_total")
 
     group_or_explicit = router.resolve_group_for_request(model, messages,
                                                          session_id, need,
-                                                         ctx_est)
+                                                         ctx_dim)
     if group_or_explicit is None:
         if need:
             for c in sorted(need):
@@ -1861,7 +1867,7 @@ async def chat_completions(request: Request, response: Response):
                                          or group_or_explicit.endswith(_fb_suf))
         dep = router.initial_pick(auth.profile, group_or_explicit,
                                   None if explicit_req else need,
-                                  ctx_est,
+                                  ctx_dim,
                                   session_id=session_id,
                                   warm=_warm,
                                   prefer_holder=_paid_holder,
@@ -2077,10 +2083,11 @@ async def chat_completions(request: Request, response: Response):
             profile, dep, payload, need,
             hook=_strike_hook(explicit_req, need),
             scope="group" if explicit_req else "chain",
-            ctx=ctx_est,
+            ctx=ctx_dim,
             cold=bool(_dec.get("cold")),
             prefix_reason=(_aud if _aud in ("identity", "prefix") else None),
             ses=session_id, req=raw_model,
+            est_chars=_est_chars_pre,
             session=_sess, client_ip=_cip, request=request,
             attribution=_attr, requested_group=group_or_explicit,
             orig_messages=_orig_for_retry,
@@ -2100,7 +2107,7 @@ async def chat_completions(request: Request, response: Response):
                 media_strike_hook=_strike_hook(explicit_req, need),
                 need=need,
                 scope="group" if explicit_req else "chain",
-                ctx=ctx_est,
+                ctx=ctx_dim,
                 attempts_box=attempts_box,
                 session=_sess, ses=session_id, client_ip=_cip,
                 attribution=_attr,
@@ -2166,6 +2173,7 @@ async def chat_completions(request: Request, response: Response):
             # (post inject_identity/histnorm/ctxcompact) / prompt_tokens.
             router.note_session_estimate(
                 session_id,
+                _est_chars_pre,
                 _prompt_chars(payload.get("messages"), payload.get("tools")),
                 _u_f14["prompt_tokens"])
             metrics.inc("nx_sess_est_samples_total")
@@ -3565,6 +3573,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 hook=None, scope: str = "chain",
                                 ctx: int | None = None,
                                 ses: str | None = None,
+                                est_chars: int = 0,
                                 req: str | None = None,
                                 session: str | None = None,
                                 client_ip: str = "",
@@ -4760,6 +4769,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # Stima per-sessione (stream): char REALI inviati a monte.
                     router.note_session_estimate(
                         ses,
+                        est_chars,
                         _prompt_chars(payload.get("messages"),
                                       payload.get("tools")),
                         usage_final["prompt_tokens"])
