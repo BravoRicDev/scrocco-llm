@@ -1973,9 +1973,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         rec["n"] = int(rec.get("n") or 0) + 1
         rec["ts"] = now
         d[session_id] = rec
-        log.debug("[est-sess] %s chars+=%d pt+=%d cpt=%.2f n=%d",
-                  session_id, ch, pt,
-                  rec["chars"] / max(1, rec["pt"]), rec["n"])
+        log.info("[est-sess] %s: campione chars=%d pt=%d cpt=%.2f -> "
+                 "media cpt=%.2f (n=%d)",
+                 session_id, ch, pt, ch / max(1, pt),
+                 rec["chars"] / max(1, rec["pt"]), rec["n"])
 
     def session_chars_per_token(self, session_id: str | None):
         """Rapporto char/token appreso per la sessione (None se assente/stale).
