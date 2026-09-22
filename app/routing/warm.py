@@ -53,9 +53,22 @@ class WarmMixin:
         `...-200k` -> il caldo `-64k` della stessa sessione NON va pescato).
 
         I bucket -go/-fallback sono inclusi ma il pool li ignora comunque
-        (l'ownership caldi traccia solo i free-dims)."""
+        (l'ownership caldi traccia solo i free-dims).
+
+        (B) Client opencode NATIVO (zen-first): si impone anche il TETTO di
+        dim = dim del gruppo risolto. Il gruppo risolto e' gia' la dim piu'
+        piccola che contiene il ctx, quindi non si pescano warm in dim
+        SUPERIORI (evita prestiti tipo 200k -> 1000k quando il payload sta in
+        200k). Per i non-nativi resta il solo floor."""
         floor = self._group_min_dim(group_name)
-        return set(self._text_ladder(pname, start_dim=floor))
+        cap = None
+        try:
+            if floor and getattr(self, "_zen_first_active",
+                                 lambda: False)():
+                cap = floor
+        except Exception:                              # noqa: BLE001
+            cap = None
+        return set(self._text_ladder(pname, start_dim=floor, end_dim=cap))
 
     def _warm_pool(self, session_id: str | None, allowed: set[str] | None,
                    need: frozenset[str] | None = None,

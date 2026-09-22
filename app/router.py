@@ -4780,10 +4780,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                      gname)
 
     def _text_ladder(self, pname: str, start_dim: int | None = None,
-                     start_tier: str = "primary") -> list[str]:
+                     start_tier: str = "primary",
+                     end_dim: int | None = None) -> list[str]:
         """SCALA UNICA del mondo-testo (dims_ladder_floor):
 
             [primari dims >= start_dim ascendenti] + [-go] + [-fallback]
+
+        Con `end_dim` il blocco dei primari si ferma a quella dim (TETTO):
+        usato per i nativi zen-first (niente warm in dim superiore alla
+        risolta). -go/-fallback restano in coda.
 
         Stateless (ricostruita dai gruppi esistenti). start_tier 'go'/
         'fallback' taglia la parte sopra: -go esplicito non tocca i primari
@@ -4797,6 +4802,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             dim_deps: list[dict] = []
             for d in sorted(cfg.profile_dims.get(pname, [])):
                 if d < (start_dim or 0):
+                    continue
+                if end_dim is not None and d > end_dim:
                     continue
                 dim_deps.extend(cfg.groups.get(f"{base}-{d}k", []))
             # tier (colonna `order`) primario, poi dim crescente: i dims sono
