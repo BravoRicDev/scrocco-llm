@@ -55,20 +55,11 @@ class WarmMixin:
         I bucket -go/-fallback sono inclusi ma il pool li ignora comunque
         (l'ownership caldi traccia solo i free-dims).
 
-        (B) Client opencode NATIVO (zen-first): si impone anche il TETTO di
-        dim = dim del gruppo risolto. Il gruppo risolto e' gia' la dim piu'
-        piccola che contiene il ctx, quindi non si pescano warm in dim
-        SUPERIORI (evita prestiti tipo 200k -> 1000k quando il payload sta in
-        200k). Per i non-nativi resta il solo floor."""
+        Il TETTO di dim per i nativi zen-first NON e' qui: e' applicato in
+        `_warm_pool` (param `cap_dim`) e SOLO quando tra i warm c'e' almeno
+        uno zen (vedi li')."""
         floor = self._group_min_dim(group_name)
-        cap = None
-        try:
-            if floor and getattr(self, "_zen_first_active",
-                                 lambda: False)():
-                cap = floor
-        except Exception:                              # noqa: BLE001
-            cap = None
-        return set(self._text_ladder(pname, start_dim=floor, end_dim=cap))
+        return set(self._text_ladder(pname, start_dim=floor))
 
     def _warm_pool(self, session_id: str | None, allowed: set[str] | None,
                    need: frozenset[str] | None = None,
@@ -76,7 +67,8 @@ class WarmMixin:
                    tried: set[str] | None = None,
                    failed_unique: str | None = None,
                    include_borrowed: bool = False,
-                   out_tokens: int | None = None) -> list[dict]:
+                   out_tokens: int | None = None,
+                   cap_dim: int | None = None) -> list[dict]:
         """Tier "caldi": free-dims che QUESTA sessione ha gia' servito con
         SUCCESSO entro la finestra warm, ancora vivi (no cooldown/retired/
         draining) e compatibili con `need` + `max_input`/contesto (`_cap_fits`).
@@ -236,6 +228,21 @@ class WarmMixin:
                          float(getattr(self.policy, "warm_borrow_idle_sec",
                                        240.0) or 0.0), sid)
                 out = out + borr
+        # (B) Nativi zen-first: tetto di dim SOLO se tra i warm c'e' uno zen.
+        # Cosi' il designato vince (zen di qualsiasi dim), ma se NON c'e' zen
+        # caldo si usa il miglior warm disponibile (anche dim superiore, per
+        # latenza minima) e i canary scaldano lo zen in background.
+        if _zen_first and cap_dim and out:
+            if any(is_opencode_zen_dep(d) for d in out):
+                _kept = [d for d in out
+                         if is_opencode_zen_dep(d)
+                         or int(d.get("max_input_tokens") or 0)
+                         <= cap_dim * 1000]
+                if len(_kept) != len(out):
+                    log.info("[warm] cap dim -%dk: scarto %d warm non-zen "
+                             "oltre la dim richiesta (zen caldo presente)",
+                             cap_dim, len(out) - len(_kept))
+                out = _kept
         if out:
             out.sort(key=_wkey)     # blocco unico: propri > prestati > lenti
         if not out:
@@ -382,7 +389,8 @@ class WarmMixin:
         allowed = self._warm_allowed(profile, group_name)
         pool = self._warm_pool(session_id, allowed, need, ctx, tried,
                                failed_unique, include_borrowed=include_borrowed,
-                               out_tokens=out_tokens)
+                               out_tokens=out_tokens,
+                               cap_dim=self._group_min_dim(group_name) or None)
         return [d for d in pool
                 if self.dep_deliverable(d, need, ctx, out_tokens)]
 

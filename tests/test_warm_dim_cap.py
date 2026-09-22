@@ -1,12 +1,14 @@
 """(A) Priorita' zen nel warm pool + (B) tetto di dim per i nativi zen-first.
 
 Utente: le sessioni opencode native devono usare i modelli designati (zen,
-order=0) e NON devono pescare warm in dim SUPERIORI a quella risolta (es.
-`200k -> 1000k` con ctx piccolo).
+order=0). Se NON c'e' uno zen caldo la prima chiamata puo' andare su un altro
+provider (latenza minima) e i canary scaldano lo zen in background.
 
   - A: per un nativo, un warm ZEN batte un warm non-zen (blocco zen prima).
-  - B: `_warm_allowed(pname, "-200k")` per un nativo esclude le dim > 200k
-       (nessun prestito da `-1000k`); per i non-nativi resta il solo floor.
+  - B: il tetto di dim vale SOLO se tra i warm c'e' almeno uno zen: si
+       tengono gli zen (qualsiasi dim) + i non-zen entro la dim richiesta,
+       scartando i non-zen in dim superiore. Senza zen caldo: nessun tetto.
+       `_warm_allowed` impone solo il floor; per i non-nativi nessun tetto.
 """
 import os
 import tempfile
@@ -40,6 +42,8 @@ CSV = HEADER + (
            "K-BIG")
     + _row("m-small", "groq", "https://api.groq.com/openai/v1", 64, 64000,
            "K-SMALL")
+    + _row("m-zbig", "opencode-zen", "https://opencode.ai/zen/v1", 1000,
+           1000000, "K-ZBIG")
 )
 DIM200 = f"{BASE}-200k"
 
@@ -77,22 +81,68 @@ def _u(r, key):
     raise AssertionError(key)
 
 
-def test_allowed_cap_for_native(router):
-    """(B) nativo: il warm ammesso per -200k non include la dim -1000k."""
+def test_allowed_floor_only(router):
+    """`_warm_allowed` impone SOLO il floor: la dim alta e' ammessa (il tetto
+    vive in `_warm_pool`, e solo se c'e' uno zen caldo)."""
+    for native in (True, False):
+        set_zen_first(native)
+        allowed = router._warm_allowed("test", DIM200)
+        assert _u(router, "K-N") in allowed
+        assert _u(router, "K-Z") in allowed
+        assert _u(router, "K-BIG") in allowed        # dim superiore: ammessa
+        assert _u(router, "K-SMALL") not in allowed  # dim inferiore: floor
+
+
+def test_pool_cap_when_zen_warm(router):
+    """(B) c'e' uno zen caldo -> si scartano i non-zen in dim superiore."""
+    sid = "S-CAP"
     set_zen_first(True)
-    allowed = router._warm_allowed("test", DIM200)
-    assert _u(router, "K-N") in allowed
-    assert _u(router, "K-Z") in allowed
-    assert _u(router, "K-BIG") not in allowed      # dim superiore: esclusa
-    assert _u(router, "K-SMALL") not in allowed    # dim inferiore: floor
+    router.note_session_success(sid, _u(router, "K-Z"))      # zen 200k
+    router.note_session_success(sid, _u(router, "K-BIG"))    # non-zen 1000k
+    pool = router._warm_pool(sid, router._warm_allowed("test", DIM200),
+                             ctx=1000, cap_dim=200)
+    u = {d["unique"] for d in pool}
+    assert _u(router, "K-Z") in u
+    assert _u(router, "K-BIG") not in u          # scartato: non-zen oltre dim
 
 
-def test_allowed_no_cap_non_native(router):
-    """(B) non-nativo: resta il solo floor, la dim alta e' ammessa."""
+def test_pool_no_cap_when_no_zen_warm(router):
+    """(B) NESSUNO zen caldo -> nessun tetto: si usa il migliore disponibile."""
+    sid = "S-NOCAP"
+    set_zen_first(True)
+    router.note_session_success(sid, _u(router, "K-N"))      # non-zen 200k
+    router.note_session_success(sid, _u(router, "K-BIG"))    # non-zen 1000k
+    pool = router._warm_pool(sid, router._warm_allowed("test", DIM200),
+                             ctx=1000, cap_dim=200)
+    u = {d["unique"] for d in pool}
+    assert _u(router, "K-N") in u
+    assert _u(router, "K-BIG") in u              # mantenuto: niente zen caldo
+
+
+def test_pool_cap_keeps_zen_any_dim(router):
+    """(B) lo zen caldo resta anche in dim superiore; il non-zen oltre dim no."""
+    sid = "S-ZCAP"
+    set_zen_first(True)
+    router.note_session_success(sid, _u(router, "K-ZBIG"))   # zen 1000k
+    router.note_session_success(sid, _u(router, "K-BIG"))    # non-zen 1000k
+    pool = router._warm_pool(sid, router._warm_allowed("test", DIM200),
+                             ctx=1000, cap_dim=200)
+    u = {d["unique"] for d in pool}
+    assert _u(router, "K-ZBIG") in u             # zen: tenuto a qualsiasi dim
+    assert _u(router, "K-BIG") not in u          # non-zen oltre dim: scartato
+    assert pool[0]["unique"] == _u(router, "K-ZBIG")   # e vince (A)
+
+
+def test_pool_no_cap_non_native(router):
+    """(B) non-nativo: il tetto non si applica, la dim alta resta."""
+    sid = "S-PLAIN2"
     set_zen_first(False)
-    allowed = router._warm_allowed("test", DIM200)
-    assert _u(router, "K-BIG") in allowed
-    assert _u(router, "K-SMALL") not in allowed
+    router.note_session_success(sid, _u(router, "K-Z"))
+    router.note_session_success(sid, _u(router, "K-BIG"))
+    pool = router._warm_pool(sid, router._warm_allowed("test", DIM200),
+                             ctx=1000, cap_dim=200)
+    u = {d["unique"] for d in pool}
+    assert _u(router, "K-BIG") in u
 
 
 def test_warm_pool_zen_first_priority(router):

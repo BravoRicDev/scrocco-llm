@@ -6465,11 +6465,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     session_id, self._warm_allowed(_pname, group_name),
                     need=need, ctx=ctx,
                     include_borrowed=self._borrow_selectable(),
-                    out_tokens=out_tokens)
-                # Nativi opencode: l'ordine zen-first e' dentro `_warm_pool`
-                # (blocco zen prima, poi tutto il resto). Nessuno skip: se non
-                # c'e' uno zen caldo si usa SUBITO il warm non-zen e il refill
-                # canary zen lo cerca in background (niente ricerca a freddo
+                    out_tokens=out_tokens,
+                    cap_dim=self._group_min_dim(group_name) or None)
+                # Nativi opencode: dentro `_warm_pool` gli zen vincono sempre
+                # (blocco zen). Se c'e' uno zen caldo si resta entro la dim
+                # richiesta; se NON c'e' zen caldo si usa SUBITO il miglior
+                # warm disponibile (anche dim superiore: latenza minima) e i
+                # canary zen lo cercano in background (niente ricerca a freddo
                 # sincrona: si evitano le latenze).
                 if _warm:
                     _dep = _warm[0]
@@ -7368,7 +7370,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     need=need, ctx=ctx, tried=tried,
                     failed_unique=cur_dep.get("unique"),
                     include_borrowed=self._borrow_selectable(),
-                    out_tokens=out_tokens)
+                    out_tokens=out_tokens,
+                    cap_dim=self._group_min_dim(req_grp) or None)
                 if _warm:
                     _wd = _warm[0]
                     log.info("[warm] fallback -> %s (caldo proprio, max_in=%s)",
