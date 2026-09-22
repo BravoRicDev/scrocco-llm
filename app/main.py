@@ -67,6 +67,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         StreamLoopDetected, STREAM_LOOP_COOLDOWN_S,
                         _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
                         _UNKNOWN_FIELD_RE,
+                        _length_truncated_should_fail,
                         _CONTENT_ARRAY_RE,
                         tool_combo_signature,
                         _PROVIDER_TRANSIENT_RE,
@@ -2405,25 +2406,6 @@ def _chunk_finish_reason(obj):
         if fr:
             return fr
     return None
-
-
-def _length_truncated_should_fail(finish_len, answer_total, req_max, comp,
-                                  enabled):
-    """True se la risposta e' TRONCATA dal modello (finish_reason=length) pur
-    avendo contenuto: va trattata come un fallimento (cooldown + rotazione alle
-    richieste successive, come gli altri errori). False se la feature e'
-    disattivata, se non c'e' contenuto (0 char: gia' gestito dallo zero-answer)
-    o se il modello si e' fermato esattamente sul max_tokens CHIESTO dal client
-    (cap del client: ruotare non cambierebbe l'esito)."""
-    if not enabled or not finish_len or answer_total <= 0:
-        return False
-    if req_max and comp is not None:
-        try:
-            if float(comp) >= float(req_max) - 2:
-                return False                  # cap del client
-        except (TypeError, ValueError):
-            pass
-    return True
 
 
 def _tool_calls_sse(tool_calls, model) -> list[bytes]:

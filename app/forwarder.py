@@ -1748,6 +1748,52 @@ def _looks_empty(data: dict) -> bool:
     except Exception:
         return False
 
+
+def _answer_text(data: dict) -> str:
+    """Testo di risposta (content) di una chat.completion non-streaming."""
+    try:
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+    except (AttributeError, IndexError, TypeError):
+        return ""
+    c = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "".join(p.get("text", "") for p in c
+                       if isinstance(p, dict) and isinstance(p.get("text"), str))
+    return ""
+
+
+def _length_truncated_should_fail(finish_len, answer_total, req_max, comp,
+                                  enabled):
+    """True se la risposta e' TRONCATA dal modello (finish_reason=length) pur
+    avendo contenuto: va trattata come un fallimento (cooldown + rotazione alle
+    richieste successive, come gli altri errori). False se la feature e'
+    disattivata, se non c'e' contenuto (0 char: gia' gestito dallo zero-answer)
+    o se il modello si e' fermato esattamente sul max_tokens CHIESTO dal client
+    (cap del client: ruotare non cambierebbe l'esito)."""
+    if not enabled or not finish_len or answer_total <= 0:
+        return False
+    if req_max and comp is not None:
+        try:
+            if float(comp) >= float(req_max) - 2:
+                return False                  # cap del client
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+def _soft_cooldown_sec(router, unique: str) -> int:
+    """Secondi di cooldown per un fallimento SOFT (troncato/zero-answer), con
+    escalation dolce sui fallimenti recenti (gemella di main._soft_cd)."""
+    base = int(getattr(router.policy.qc_json, "watchdog_cooldown_sec", 90)
+               or 90)
+    try:
+        _f24 = router.stats_for(unique).fail_count_24h
+    except Exception:                        # noqa: BLE001
+        _f24 = 0
+    return int(router.escalate_cooldown(base, _f24))
+
 # Fallback diretto SOLO per il body che INIZIA con l'envelope d'errore
 # provider {"type":"error",...} (opencode-zen / Anthropic: AuthError,
 # ModelError, CreditsError, RegionError, ...). Una risposta valida parte
@@ -3318,6 +3364,12 @@ truncation_hook=None,
         _rsn_restored = False                # history originale gia' riprovata
         dep = first_dep
         requested_group = requested_group or (first_dep or {}).get("group")
+        # HOLD-UNTIL-FINISH (parita' col path streaming): con hold attivo la
+        # risposta non-streaming (gia' interamente bufferizzata) non deve MAI
+        # consegnare un moncone troncato dal modello. Stesso interruttore dello
+        # stream: colonna CSV per-deployment OR policy qc_json.
+        hold = bool((first_dep or {}).get("hold_until_finish")) or bool(
+            getattr(router.policy.qc_json, "stream_hold_until_finish", False))
         last_err: UpstreamError | None = None
         tried: set[str] = set()
         qc_failed: list[tuple[str, str]] = []
@@ -3917,6 +3969,28 @@ truncation_hook=None,
                             _rc = (_ch0.get("message") or {}).get(
                                 "reasoning_content") or (
                                 _ch0.get("message") or {}).get("reasoning")
+                            # HOLD (parita' col path streaming): zero-answer da
+                            # budget esaurito (finish_reason=length) NON e'
+                            # colpa del deployment -> si ruota SENZA penale
+                            # verso il candidato piu' capace; 503 solo a catena
+                            # esaurita. (Nello stream hold: verdict
+                            # 'length_truncated' a 0 char, nessuna penale.)
+                            if hold and fr == "length" and _looks_empty(data):
+                                log.info("[hold] ns %s: finish_reason=length "
+                                         "senza risposta -> ruoto senza penale "
+                                         "(capace)", cur)
+                                last_broken = (data, dep)
+                                nxt = _pick(
+                                    profile, dep, need, scope, ctx=ctx,
+                                    tried=tried,
+                                    requested_group=requested_group,
+                                    prefer_capable=True)
+                                if nxt is not None and len(tried) < _max_tries:
+                                    dep = nxt
+                                    continue
+                                raise UpstreamError(
+                                    503, "catena esaurita, nessun output utile",
+                                    final=True)
                             no_rotate = ((fr == "length"
                                           or (isinstance(_rc, str) and _rc.strip()))
                                          and not getattr(
@@ -4060,6 +4134,42 @@ truncation_hook=None,
                             raise UpstreamError(
                                 503, "fake tool-call: catena di escalation "
                                      "esaurita", final=True)
+                # ---- HOLD (parita' col path streaming): finish_reason=length
+                # con contenuto -> risposta TRONCATA dal modello (non dal cap
+                # del client): si ruota PRE-CONSEGNA su un candidato piu'
+                # capace, mai il moncone. Soft cooldown come nello stream.
+                if hold and not _text_parsed:
+                    _ch0h = (data.get("choices") or [{}])[0] \
+                        if isinstance(data, dict) else {}
+                    _frh = _ch0h.get("finish_reason") \
+                        if isinstance(_ch0h, dict) else None
+                    if _frh == "length":
+                        _req_maxh = (payload.get("max_tokens")
+                                     or payload.get("max_completion_tokens"))
+                        _cth = (data.get("usage") or {}).get(
+                            "completion_tokens") \
+                            if isinstance(data, dict) else None
+                        if _length_truncated_should_fail(
+                                True, len(_answer_text(data)), _req_maxh,
+                                _cth, True):
+                            log.warning("[hold] ns %s: finish_reason=length con "
+                                        "contenuto (answer=%d, req_max=%s, "
+                                        "completion=%s) -> ruoto (capace)",
+                                        cur, len(_answer_text(data)), _req_maxh,
+                                        _cth)
+                            _fail_cur(seconds=_soft_cooldown_sec(router, cur),
+                                      reason="length_truncated")
+                            last_broken = (data, dep)
+                            nxt = _pick(
+                                profile, dep, need, scope, ctx=ctx,
+                                tried=tried, requested_group=requested_group,
+                                prefer_capable=True)
+                            if nxt is not None and len(tried) < _max_tries:
+                                dep = nxt
+                                continue
+                            raise UpstreamError(
+                                503, "catena esaurita, risposta troncata",
+                                final=True)
                 # successo pulito: se siamo atterrati su un gruppo piu' alto
                 # rispetto a quello richiesto, ricorda il winner (scorciatoia
                 # per le prossime richieste su QUEL bucket richiesto).

@@ -251,12 +251,15 @@ def test_thought_signature_400_delivered_when_no_alternative():
 
 
 def test_length_truncated_empty_raises_503_no_rotation():
-    """Contenuto vuoto + finish_reason='length' (rotate_on_length_empty=False):
-    NON ruota, NON raffredda, ma NEMMENO consegna un turno vuoto -> UpstreamError
-    503 RETRYABLE (l'agente ritenta; mai un turno finto o vuoto)."""
+    """Contenuto vuoto + finish_reason='length' (rotate_on_length_empty=False)
+    SENZA hold: NON ruota, NON raffredda, ma NEMMENO consegna un turno vuoto ->
+    UpstreamError 503 RETRYABLE (l'agente ritenta; mai un turno finto o vuoto).
+    Con hold attivo (default) questo caso RUOTA senza penale, vedi
+    tests/test_hold_nostream_truncated.py."""
     import pytest
     from app.forwarder import UpstreamError
     router = _mk_router()
+    router.policy.qc_json.stream_hold_until_finish = False   # scenario no-hold
     grp = "scrocco-llm-test-fallback"
     dep = next(d for d in router.config.groups[grp] if d["api_key"] == "K1")
 
