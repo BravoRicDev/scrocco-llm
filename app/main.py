@@ -422,6 +422,18 @@ def _coalesce_key(payload: dict, extra: str = "") -> str:
     return hashlib.sha256(((extra or "") + "|" + raw).encode()).hexdigest()
 
 
+def _nonstream_hold_redirect(stream: bool, dep: dict | None,
+                             qc_json, policy) -> bool:
+    """True se una richiesta NON-stream va eseguita col MOTORE STREAM sotto
+    hold (parita' stream/non-stream). Hold = flag per-deployment OR policy.
+    Kill-switch: policy.nonstream_hold_redirect."""
+    if stream:
+        return False
+    hold = bool((dep or {}).get("hold_until_finish")) or bool(
+        getattr(qc_json, "stream_hold_until_finish", False))
+    return hold and bool(getattr(policy, "nonstream_hold_redirect", True))
+
+
 async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
                              factory):
     """Coalescing delle richieste identiche in volo (solo non-streaming)."""
@@ -2101,23 +2113,80 @@ async def chat_completions(request: Request, response: Response):
 
     qc_pol = router.policy.qc_json
     attempts_box: list[str] = []
+    # HOLD-UNTIL-FINISH + richiesta non-stream: esegui il MOTORE STREAM (sotto
+    # hold bufferizza l'intera risposta) e restituisci non-stream. Un solo
+    # motore per entrambi -> comportamento identico. Kill-switch:
+    # policy.nonstream_hold_redirect.
+    _redirect = _nonstream_hold_redirect(stream, dep, qc_pol, router.policy)
+
+    async def _redirect_once():
+        from .protocols import sse_to_chat_obj
+        _sp = dict(payload)
+        _sp["stream"] = True
+        try:
+            if _sm.enabled:
+                apply_sampling_defaults(_sp, dep, _sm)
+            maybe_inject_response_format(_sp, dep, _so)
+        except Exception:                    # noqa: BLE001
+            pass
+        _meta: dict = {}
+        _sresp = await _stream_with_fallback(
+            profile, dep, _sp, need,
+            hook=_strike_hook(explicit_req, need),
+            scope="group" if explicit_req else "chain",
+            ctx=ctx_dim,
+            cold=bool(_dec.get("cold")),
+            prefix_reason=(_aud if _aud in ("identity", "prefix") else None),
+            ses=session_id, req=raw_model,
+            est_chars=_est_chars_pre,
+            session=_sess, client_ip=_cip, request=request,
+            attribution=_attr, requested_group=group_or_explicit,
+            orig_messages=_orig_for_retry, sniffer=None,
+            result_box=_meta, client_stream=False)
+        if isinstance(_sresp, StreamingResponse):
+            _chunks = [c async for c in _sresp.body_iterator]
+            attempts_box.extend(_meta.get("attempts") or [])
+            try:
+                _data = sse_to_chat_obj(_chunks)
+            except ValueError as _ex:
+                raise UpstreamError(
+                    503, "stream non assemblable: %s" % _ex,
+                    final=True) from _ex
+            return (_data, _meta.get("dep") or dep)
+        # errore PRE-BYTE: il motore stream ritorna gia' un JSONResponse
+        # (503 retryable o status vero). Ricostruiamo l'errore per riusare
+        # l'handler non-stream (status/trail/epiloghi identici).
+        attempts_box.extend(_meta.get("attempts") or [])
+        _st = int(getattr(_sresp, "status_code", 503) or 503)
+        try:
+            _detail = json.loads(
+                bytes(getattr(_sresp, "body", b"") or b"")
+            ).get("error", {}).get("message")
+        except Exception:                    # noqa: BLE001
+            _detail = None
+        raise UpstreamError(_st, _detail or "upstream error (redirect stream)")
+
     try:
-        async def _fwd_once():
-            return await forwarder.call_with_fallback(
-                router, profile, dep, payload,
-                collect_qc_failures=bool(qc_pol.enabled
-                                         or router.policy.qc_sanity.enabled),
-                media_strike_hook=_strike_hook(explicit_req, need),
-                need=need,
-                scope="group" if explicit_req else "chain",
-                ctx=ctx_dim,
-                attempts_box=attempts_box,
-                session=_sess, ses=session_id, client_ip=_cip,
-                attribution=_attr,
-                orig_messages=_orig_for_retry,
-                requested_group=group_or_explicit)
-        res = await _forward_coalesced(router.policy, payload, profile,
-                                       _fwd_once)
+        if _redirect:
+            res = await _forward_coalesced(router.policy, payload, profile,
+                                           _redirect_once)
+        else:
+            async def _fwd_once():
+                return await forwarder.call_with_fallback(
+                    router, profile, dep, payload,
+                    collect_qc_failures=bool(qc_pol.enabled
+                                             or router.policy.qc_sanity.enabled),
+                    media_strike_hook=_strike_hook(explicit_req, need),
+                    need=need,
+                    scope="group" if explicit_req else "chain",
+                    ctx=ctx_dim,
+                    attempts_box=attempts_box,
+                    session=_sess, ses=session_id, client_ip=_cip,
+                    attribution=_attr,
+                    orig_messages=_orig_for_retry,
+                    requested_group=group_or_explicit)
+            res = await _forward_coalesced(router.policy, payload, profile,
+                                           _fwd_once)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
@@ -3567,8 +3636,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 cold: bool = False,
                                 prefix_reason: str | None = None,
                                 orig_messages: list | None = None,
-                                sniffer=None):
-    """Streaming SSE con fallback PRIMA del primo byte inviato al client."""
+                                sniffer=None,
+                                result_box: dict | None = None,
+                                client_stream: bool = True):
+    """Streaming SSE con fallback PRIMA del primo byte inviato al client.
+
+    `result_box`, se fornito, riceve ('dep'/'attempts') il deployment finale e
+    i tentativi: serve al redirect non-stream->stream sotto hold per la
+    post-elaborazione non-stream. `client_stream=False` etichetta summary/sniff
+    come non-stream (il client reale ha chiesto non-stream)."""
     dep = first_dep
     # Gruppo ORIGINARIO della richiesta (es. -200k): serve al pin
     # escalation-winner per valere anche dopo la salita su altre dim.
@@ -3606,6 +3682,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             schemaout_config_from_policy)
     from .forwarder import _corrective_note
     _so = schemaout_config_from_policy(router.policy)
+    # QC di contenuto (parita' col non-stream): attivi anche in hold.
+    qc = router.policy.qc_json
+    san = router.policy.qc_sanity
     _synth: list[bytes] = []
     # OUTPUT STRUTTURATO in HOLD: la risposta bufferizzata viene trattata come
     # non-streaming -> pulizia/riparazione JSON prima di inviare i byte.
@@ -3624,6 +3703,17 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     trail: list = []
     skip_hosts: set[str] = set()         # P1-5: host saltati (errore provider)
     _lease = None                        # P2-8: lease per chiave (opt-in)
+
+    def _ret(resp):
+        """Registra dep/attempts finali per il chiamante (redirect non-stream)
+        e ritorna la risposta invariata."""
+        if result_box is not None:
+            try:
+                result_box["dep"] = dep
+                result_box["attempts"] = list(attempts)
+            except Exception:                # noqa: BLE001
+                pass
+        return resp
 
     def _next_filtered(*a, **k):
         """fallback_next + P1-5: salta gli host che hanno gia' fallito a
@@ -4061,6 +4151,64 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                        outcome="fail", dep=dep["unique"],
                                        model=dep.get("model", ""), detail=_r5)
                         verdict = "struct_invalid"
+            # QC DI CONTENUTO (HOLD): parita' col percorso non-streaming. La
+            # risposta e' INTERAMENTE bufferizzata -> si applicano check_response
+            # (JSON quando richiesto) e check_sanity (anti-vuoto) come nel
+            # non-stream, con corrective JSON sullo stesso dep e rotazione senza
+            # penale se non conforme. (D3 'meno peggio' non si applica: in hold
+            # non si consegna mai un body rotto, si ruota fino al 503.)
+            if (verdict == "content" and hold and not _synth
+                    and (qc.enabled or san.enabled)):
+                from .qc import check_response, check_sanity
+                _qc_txt = _buffered_answer_text(prebuf)
+                _qc_tcs: list | None = None
+                for _o in _sse_data_objs(b"".join(prebuf)):
+                    for _ch in (_o.get("choices") or []) \
+                            if isinstance(_o, dict) else []:
+                        _d = _ch.get("delta") if isinstance(_ch, dict) else None
+                        _tc = _d.get("tool_calls") if isinstance(_d, dict) else None
+                        if _tc:
+                            _qc_tcs = (_qc_tcs or []) + list(_tc)
+                _qc_obj = {"choices": [{"message": {
+                    "content": _qc_txt, "tool_calls": _qc_tcs}}]}
+                # QC solo su contenuto REALE: i casi vuoti/zero-answer (e il
+                # paracadute -go che trasmette senza contenuto) restano gestiti
+                # dalla macchina a verdict, non dalla sanity.
+                _qc_reason = None
+                if _qc_txt.strip() or _qc_tcs:
+                    _qc_reason = (check_response(_qc_obj, payload, qc)
+                                  if qc.enabled else None)
+                    if not _qc_reason and san.enabled:
+                        _qc_reason = check_sanity(_qc_obj, payload, san)
+                if _qc_reason:
+                    if (getattr(router.policy, "corrective_retry_enabled", True)
+                            and dep["unique"] not in _so_corrected):
+                        _so_corrected.add(dep["unique"])
+                        payload.setdefault("messages", []).append(
+                            {"role": "system",
+                             "content": _corrective_note("json")})
+                        metrics.inc("nx_corrective_retry_total",
+                                    (dep["unique"], "json"))
+                        log.warning("[retry] stream %s contenuto non conforme "
+                                    "(%s): retry correttivo JSON",
+                                    dep["unique"], _qc_reason)
+                        repairlog.note("struct_corrective", source="stream",
+                                       outcome="ok", dep=dep["unique"],
+                                       model=dep.get("model", ""),
+                                       detail="json")
+                        verdict = "struct_corrective"
+                    else:
+                        metrics.inc("nx_qc_discarded_total",
+                                    (dep["unique"],
+                                     str(_qc_reason).split(" ")[0]))
+                        log.warning("[qc] stream %s contenuto non conforme "
+                                    "(%s): ruoto senza cooldown",
+                                    dep["unique"], _qc_reason)
+                        repairlog.note("struct_invalid", source="stream",
+                                       outcome="fail", dep=dep["unique"],
+                                       model=dep.get("model", ""),
+                                       detail=str(_qc_reason)[:60])
+                        verdict = "struct_invalid"
             if verdict == "content":
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
@@ -4195,14 +4343,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                   tries=len(attempts),
                                   fb=max(0, len(attempts) - 1),
                                   dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=True, qc=True, wd="chain-exhausted",
+                                  stream=client_stream, qc=True, wd="chain-exhausted",
                                   ttfb_ms=ttfb_ms, usage=None)
-                    return _exhausted(len(attempts),
-                                      "%s (%s)" % (verdict, fr) if fr
-                                      else verdict,
-                                      prefix_reason=prefix_reason,
-                                      trail=trail,
-                                      retry_at_ms=_retry_at_ms(router, trail))
+                    return _ret(_exhausted(
+                        len(attempts),
+                        "%s (%s)" % (verdict, fr) if fr
+                        else verdict,
+                        prefix_reason=prefix_reason,
+                        trail=trail,
+                        retry_at_ms=_retry_at_ms(router, trail)))
             dep = nxt
             inject_identity(payload, dep, router=router)
             continue                    # ri-entra nel while col nuovo dep
@@ -4602,21 +4751,21 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # errori AZIONABILI (auth/credito/permessi/modello assente/
                     # thought_signature) -> status vero. Il resto -> 503.
                     if _actionable_upstream_error(err) and err.status:
-                        return JSONResponse(status_code=abs(err.status),
-                                            content={
+                        return _ret(JSONResponse(status_code=abs(err.status),
+                                                 content={
                             "error": {"message": err.detail,
-                                      "type": "upstream_error"}})
+                                      "type": "upstream_error"}}))
                     _emit_summary(ses=ses or "-", req=req or "-",
                                   grp=dep.get("group"), dep=dep.get("unique"),
                                   tries=len(attempts),
                                   fb=max(0, len(attempts) - 1),
                                   dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=True, qc=True, wd="chain-exhausted",
+                                  stream=client_stream, qc=True, wd="chain-exhausted",
                                   ttfb_ms=ttfb_ms, usage=None)
-                    return _exhausted(len(attempts), err.detail,
-                                      prefix_reason=prefix_reason,
-                                      trail=trail,
-                                      retry_at_ms=_retry_at_ms(router, trail))
+                    return _ret(_exhausted(len(attempts), err.detail,
+                                           prefix_reason=prefix_reason,
+                                           trail=trail,
+                                           retry_at_ms=_retry_at_ms(router, trail)))
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -4661,12 +4810,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                   tries=len(attempts),
                                   fb=max(0, len(attempts) - 1),
                                   dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=True, qc=True, wd="chain-exhausted",
+                                  stream=client_stream, qc=True, wd="chain-exhausted",
                                   ttfb_ms=ttfb_ms, usage=None)
-                    return _exhausted(len(attempts), repr(exc)[:160],
-                                      prefix_reason=prefix_reason,
-                                      trail=trail,
-                                      retry_at_ms=_retry_at_ms(router, trail))
+                    return _ret(_exhausted(len(attempts), repr(exc)[:160],
+                                           prefix_reason=prefix_reason,
+                                           trail=trail,
+                                           retry_at_ms=_retry_at_ms(router, trail)))
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -4686,7 +4835,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                           tries=len(attempts),
                           fb=max(0, len(attempts) - 1),
                           dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=True, qc=False, wd="text-toolcall",
+                          stream=client_stream, qc=False, wd="text-toolcall",
                           ttfb_ms=ttfb_ms, usage=None)
             return
         sent_first = False
@@ -4714,7 +4863,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _emit_summary(ses=ses or "-", req=req or "-", grp=dep["group"],
                           dep=dep["unique"], tries=len(attempts),
                           fb=max(0, len(attempts) - 1), dur_ms=dur_ms,
-                          stream=True, qc=False, wd=wd, ttfb_ms=ttfb_ms,
+                          stream=client_stream, qc=False, wd=wd, ttfb_ms=ttfb_ms,
                           fr=last_finish_reason, usage=usage_final)
 
         # corpo del loop fattorizzato: aggiorna lo stato watchdog ed emette
@@ -5014,7 +5163,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     "dep_final": dep.get("unique"), "tries": len(attempts),
                 })
 
-    return StreamingResponse(sse(), media_type="text/event-stream")
+    return _ret(StreamingResponse(sse(), media_type="text/event-stream"))
 
 
 # ---------------------------------------------------------- image generations

@@ -656,6 +656,131 @@ def chat_obj_to_sse(obj: dict) -> list[bytes]:
     return out
 
 
+def _sse_objs_from_chunk(chunk) -> list[dict]:
+    """Estrae gli oggetti JSON da un chunk SSE (anche multi-riga). Accetta
+    bytes/str (righe `data:`) oppure direttamente un dict."""
+    if isinstance(chunk, dict):
+        return [chunk]
+    if isinstance(chunk, str):
+        chunk = chunk.encode()
+    if not isinstance(chunk, (bytes, bytearray)):
+        return []
+    objs: list[dict] = []
+    for line in bytes(chunk).split(b"\n"):
+        s = line.strip()
+        if not s.startswith(b"data:"):
+            continue
+        payload = s[5:].strip()
+        if not payload or payload == b"[DONE]":
+            continue
+        try:
+            o = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(o, dict):
+            objs.append(o)
+    return objs
+
+
+def _merge_tool_call(acc: dict, tc: dict) -> None:
+    """Accorpa un delta tool_call nello slot per indice (nome una volta,
+    arguments concatenati, come fa OpenAI in streaming)."""
+    if not isinstance(tc, dict):
+        return
+    idx = tc.get("index")
+    if not isinstance(idx, int):
+        idx = len(acc)
+    slot = acc.get(idx)
+    if slot is None:
+        slot = {"id": tc.get("id") or "",
+                "type": tc.get("type") or "function",
+                "function": {"name": "", "arguments": ""}}
+        acc[idx] = slot
+    if tc.get("id"):
+        slot["id"] = tc["id"]
+    if tc.get("type"):
+        slot["type"] = tc["type"]
+    fn = tc.get("function") or {}
+    if isinstance(fn, dict):
+        nm = fn.get("name")
+        if isinstance(nm, str) and nm:
+            cur = slot["function"]["name"]
+            if not cur:
+                slot["function"]["name"] = nm
+            elif not cur.endswith(nm) and nm != cur:
+                slot["function"]["name"] += nm
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            slot["function"]["arguments"] += args
+
+
+def sse_to_chat_obj(chunks) -> dict:
+    """Inverso di `chat_obj_to_sse`: assembla chunk SSE OpenAI Chat in una
+    singola `chat.completion` JSON.
+
+    `chunks` e' un iterabile/lista di bytes (o dict) SSE. Solleva ValueError se
+    lo stream porta un evento d'errore o non produce alcuna scelta utile: cosi'
+    il chiamante (redirect non-stream->stream sotto hold) puo' ruotare invece
+    di consegnare un body vuoto.
+    """
+    out: dict | None = None
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    finish_reason = None
+    usage = None
+    err = None
+    if isinstance(chunks, (bytes, bytearray, str, dict)):
+        chunks = [chunks]
+    for chunk in chunks or []:
+        if not chunk:
+            continue
+        for obj in _sse_objs_from_chunk(chunk):
+            if obj.get("error"):
+                err = obj["error"]
+                continue
+            if out is None:
+                out = {"id": obj.get("id") or _new_id("chatcmpl"),
+                       "object": "chat.completion",
+                       "created": obj.get("created") or _now(),
+                       "model": obj.get("model") or ""}
+            if isinstance(obj.get("usage"), dict):
+                usage = obj["usage"]
+            for ch in obj.get("choices") or []:
+                if not isinstance(ch, dict):
+                    continue
+                d = ch.get("delta")
+                if isinstance(d, dict):
+                    c = d.get("content")
+                    if isinstance(c, str):
+                        content_parts.append(c)
+                    rc = d.get("reasoning_content")
+                    if rc is None:
+                        rc = d.get("reasoning")
+                    if isinstance(rc, str):
+                        reasoning_parts.append(rc)
+                    for tc in d.get("tool_calls") or []:
+                        _merge_tool_call(tool_calls, tc)
+                fr = ch.get("finish_reason")
+                if fr:
+                    finish_reason = fr
+    if err is not None:
+        raise ValueError("stream errore: %s" % str(err)[:200])
+    if out is None:
+        raise ValueError("stream senza contenuto")
+    msg: dict[str, Any] = {"role": "assistant",
+                           "content": "".join(content_parts)}
+    if reasoning_parts:
+        msg["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
+    out["choices"] = [{"index": 0, "message": msg,
+                       "finish_reason": finish_reason or "stop"}]
+    out["usage"] = usage if isinstance(usage, dict) else {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return out
+
+
 # ================================================================ streaming
 async def _iter_data_json(source: AsyncIterator[bytes]) -> AsyncIterator[dict]:
     """Estrae gli oggetti JSON da uno stream SSE (righe `data:`), ignorando

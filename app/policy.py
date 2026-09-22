@@ -787,6 +787,12 @@ class Policy:
     # utente: "sia stream che non stream indistintamente"). False = pool
     # sostituti limitato ai soli dep che parlano SSE nativo.
     nonstream_canary_allowed: bool = True
+    # HOLD-UNTIL-FINISH + richiesta NON-stream del client: il gateway esegue il
+    # MOTORE STREAM (che sotto hold bufferizza l'intera risposta) e la
+    # restituisce in formato non-stream. Cosi' stream e non-stream condividono
+    # un unico motore (stessa selezione/canary, stesse regole). True=default;
+    # False=kill-switch (si torna al percorso non-stream dedicato).
+    nonstream_hold_redirect: bool = True
     # SVEglia: il terzo canario del refill cerca un dep in cooldown da 429 da
     # ALMENO questo tempo (default 1h) e, se risponde, lo riporta caldo.
     warm_refill_wake_min_cooldown_age_sec: float = 3600.0
@@ -2378,6 +2384,9 @@ class Policy:
         if raw.get("nonstream_canary_allowed") is not None:
             p.nonstream_canary_allowed = _coerce_bool(
                 raw["nonstream_canary_allowed"], "nonstream_canary_allowed")
+        if raw.get("nonstream_hold_redirect") is not None:
+            p.nonstream_hold_redirect = _coerce_bool(
+                raw["nonstream_hold_redirect"], "nonstream_hold_redirect")
         for _k, _attr in (("stream_slow_race_after_ms",
                            "stream_slow_race_after_ms"),
                           ("nonstream_slow_race_after_ms",
