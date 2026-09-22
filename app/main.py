@@ -1879,13 +1879,20 @@ async def chat_completions(request: Request, response: Response):
         _fb_suf = router.config.fallback_suffix or "-fallback"
         _paid_holder = explicit_req and (group_or_explicit.endswith(_go_suf)
                                          or group_or_explicit.endswith(_fb_suf))
+        # PARITA' stream/non-stream sotto HOLD: se questa richiesta non-stream
+        # sara' servita dal MOTORE STREAM (redirect hold, vedi _redirect sotto),
+        # anche il pick iniziale deve ordinare il warm come lo stream
+        # (prefer_fast=False). Qui `dep` non esiste ancora: l'intento si ricava
+        # dalla policy (il flag per-deployment resta gestito dal ramo a valle).
+        _pre_redirect = _nonstream_hold_redirect(
+            stream, None, router.policy.qc_json, router.policy)
         dep = router.initial_pick(auth.profile, group_or_explicit,
                                   None if explicit_req else need,
                                   ctx_dim,
                                   session_id=session_id,
                                   warm=_warm,
                                   prefer_holder=_paid_holder,
-                                  prefer_fast=not stream,
+                                  prefer_fast=(not stream) and not _pre_redirect,
                                   out_tokens=refill_out_budget(payload,
                                                                router.policy))
     if dep is None:

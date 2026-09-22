@@ -186,7 +186,12 @@ def test_endpoint_nonstream_hold_redirect_e2e(M, monkeypatch):
     monkeypatch.setattr(M.authn, "authorize_model", lambda a, m: True)
     monkeypatch.setattr(M.router, "resolve_group_for_request",
                         lambda *a, **k: dep["group"])
-    monkeypatch.setattr(M.router, "initial_pick", lambda *a, **k: dep)
+    seen: dict = {}
+
+    def _pick(*a, **k):
+        seen.update(k)
+        return dep
+    monkeypatch.setattr(M.router, "initial_pick", _pick)
     monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
 
     payload = {"model": dep["model"], "stream": False,
@@ -212,3 +217,5 @@ def test_endpoint_nonstream_hold_redirect_e2e(M, monkeypatch):
     assert out["object"] == "chat.completion"
     assert out["choices"][0]["message"]["content"] == "ciao"
     assert out["nx_deployment"] == dep["unique"]
+    # parita' stream/non-stream: sotto hold il non-stream ordina come lo stream
+    assert seen.get("prefer_fast") is False
