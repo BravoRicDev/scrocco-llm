@@ -4518,13 +4518,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 dep["unique"], detail,
                                 (">=%d tok" % _actual)
                                 if _actual else "ctx-sconosciuto")
-                elif -err.status != 404 and not provider_side:
-                    log.warning("[fallback] stream %s %d PASS-THROUGH al "
-                                "client (non deployment-side) :: %.120s",
-                                dep["unique"], -err.status, detail)
-                    return JSONResponse(status_code=abs(err.status),
-                                        content={"error": {
-                                            "message": err.detail}})
+                # QUALSIASI altro non-200: ruota, mai pass-through al client.
+                # (La rotazione termina solo a catena esaurita: a quel punto
+                # _actionable_upstream_error consegna lo status vero oppure 503.)
             # Gemini 3 tool replay: ruota SENZA cooldown (vedi _THOUGHT_SIG_RE
             # nel forwarder) — la key Gemini resta sana per il traffico non-tool.
             # model_missing (inesistente/non servito/giu'): 24h fissi.

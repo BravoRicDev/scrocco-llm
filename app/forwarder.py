@@ -4263,11 +4263,10 @@ truncation_hook=None,
                                                ctx=ctx, tried=tried,
                                                           requested_group=requested_group)
                     continue
-                # 4xx pass-through SOLO se non deployment-side. Due casi
-                # RITRIABILI: (a) firma provider-side (openai_error /
-                # bad_response_status_code = errore del LORO upstream);
-                # (b) 404 = modello/path inesistente su QUESTO provider
-                # (deployment rotto, colpa sua non della richiesta).
+                # QUALSIASI non-200 ruota (regola utente): mai pass-through al
+                # client. I rami sotto sono solo classi di cooldown/ragione
+                # diverse; se nessuno matcha, si ruota comunque (last_err) e
+                # l'ultimo errore viene consegnato solo a catena esaurita.
                 if err.status is not None and err.status < 0:
                     # errore TRANSITORIO del provider/router a monte (upstream
                     # giu', nessun endpoint valido ora, 5xx del provider): NON
@@ -4558,7 +4557,11 @@ truncation_hook=None,
                                     tried=tried,
                                     requested_group=requested_group)
                         continue
-                    raise
+                    # QUALSIASI altro non-200 (4xx/5xx non riconosciuto): ruota
+                    # comunque, mai pass-through. L'ultimo errore viene
+                    # consegnato al client solo a catena esaurita (raise
+                    # last_err in fondo al loop).
+                    last_err = err
                 metrics.inc("nx_upstream_calls_total", (cur, "error"))
                 last_err = err
                 log.warning("[fallback] %s fallito (status=%s): provo il successivo",

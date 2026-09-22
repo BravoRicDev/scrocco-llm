@@ -401,3 +401,73 @@ def test_streaming_google_unknown_field_rotates(monkeypatch):
     assert b"ok" in asyncio.run(_drain(resp))
     assert broken["unique"] not in router._cooldown  # incompat. -> no cooldown
     assert good["unique"] in seen
+
+
+# ----------------------- REGOLA UTENTE: QUALSIASI non-200 ruota
+def test_streaming_generic_4xx_rotates_never_passthrough(monkeypatch):
+    """Regola utente: un 400 generico (nessun classificatore provider-side)
+    NON deve piu' passare al client: si ruota sul successivo e solo a catena
+    esaurita si risponde l'errore."""
+    import app.main as M
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    cfg, router, broken, good = _mk()
+    router.fallback_next = lambda *a, **k: good
+    seen = []
+
+    class _Fwd:
+        async def stream_response(self, d, payload, **kwargs):
+            seen.append(d["unique"])
+            if d["unique"] == broken["unique"]:
+                raise UpstreamError(-400, "generic upstream error")
+
+            async def _g():
+                yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                yield (b'data: {"choices":[{"delta":{},'
+                       b'"finish_reason":"stop"}]}\n\n')
+                yield b"data: [DONE]\n\n"
+            return _g()
+
+    monkeypatch.setattr(M, "router", router)
+    monkeypatch.setattr(M, "config", cfg)
+    monkeypatch.setattr(M, "forwarder", _Fwd())
+
+    async def _run():
+        payload = {"model": broken["model"],
+                   "messages": [{"role": "user", "content": "x"}]}
+        return await M._stream_with_fallback(
+            "test", broken, payload, need=frozenset({"text"}), scope="chain")
+
+    resp = asyncio.run(_run())
+    assert not isinstance(resp, JSONResponse)      # MAI il 400 al client
+    assert isinstance(resp, StreamingResponse)
+    assert b"ok" in asyncio.run(_drain(resp))
+    assert broken["unique"] in seen
+    assert good["unique"] in seen
+
+
+def test_nonstream_generic_4xx_rotates_never_passthrough():
+    """Stessa regola nel path non-stream: 400 generico -> rotazione sul
+    successivo, mai l'errore nudo al client."""
+    import httpx
+
+    cfg, router, broken, good = _mk()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "openrouter.ai":
+            return httpx.Response(400, content=b"generic upstream error")
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "ok"}}]})
+
+    async def _run():
+        fwd = Forwarder(client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)))
+        router.fallback_next = lambda *a, **k: good
+        return await fwd.call_with_fallback(
+            router, "test", broken,
+            {"model": "x", "messages": [{"role": "user", "content": "x"}]},
+            need=frozenset({"text"}))
+
+    data, used = asyncio.run(_run())
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert used["unique"] == good["unique"]
