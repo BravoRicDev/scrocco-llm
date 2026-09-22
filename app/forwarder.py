@@ -63,6 +63,7 @@ from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
 from .policy import refill_out_budget
 from .qc import check_response
 from .router import inject_identity, ErrorKind, estimate_tokens
+from .session_ctx import current_session
 from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
                             client_is_opencode as _opencode_client_detect,
                             spoof_enabled as _spoof_enabled,
@@ -1481,6 +1482,12 @@ _MAXCTX_PATTERNS = (
     re.compile(r"max(?:imum)?\s+(?:of\s+)?(\d{3,9})\s*tokens", re.I),
     re.compile(r"too\s+long[^0-9]{0,40}(\d{3,9})\s*tokens", re.I),
 )
+# Token RICHIESTI (per alzare la soglia di sessione): primo il numero dei
+# soli input ("... tokens from the input messages"), poi il totale richiesto.
+_REQ_INPUT_TOKENS = re.compile(
+    r"(\d{3,9})\s*tokens?\s+from\s+the\s+input\s+messages", re.I)
+_REQ_TOTAL_TOKENS = re.compile(
+    r"a?\s*total\s+of\s+(\d{3,9})\s*tokens?", re.I)
 
 
 def extract_provider_max_input(detail: str | None) -> int | None:
@@ -1496,6 +1503,25 @@ def extract_provider_max_input(detail: str | None) -> int | None:
         except (TypeError, ValueError):
             continue
         if 256 <= n <= 32_000_000:
+            return n
+    return None
+
+
+def extract_requested_tokens(detail: str | None) -> int | None:
+    """Estrae il numero di token RICHIESTI dal body di un errore
+    context-length (es. '175556 tokens from the input messages' oppure
+    'a total of 275614 tokens'). Serve per alzare la soglia di sessione
+    (quanto ci serve davvero, non quanto il modello consente)."""
+    d = detail or ""
+    for rx in (_REQ_INPUT_TOKENS, _REQ_TOTAL_TOKENS):
+        m = rx.search(d)
+        if not m:
+            continue
+        try:
+            n = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 256 <= n <= 64_000_000:
             return n
     return None
 
@@ -4502,6 +4528,31 @@ truncation_hook=None,
                                     cur, -err.status)
                         _fail_cur(seconds=err.retry_after,
                                   reason="model_feature",
+                                  status=abs(err.status) if err.status else None)
+                        dep = _pick(profile, dep, need, scope, ctx=ctx,
+                                    tried=tried,
+                                    requested_group=requested_group)
+                        continue
+                    # CONTEXT LENGTH (400/413): il payload non entra nel modello.
+                    # NON e' un errore del deployment: ruota su un dep con
+                    # max_input maggiore (la ladder sale di dim) e alza la
+                    # soglia di sessione. Mai pass-through.
+                    if _looks_context_limit(-err.status, detail):
+                        metrics.inc("nx_upstream_calls_total", (cur, "ctx_limit"))
+                        _actual = extract_requested_tokens(detail)
+                        if _actual:
+                            try:
+                                router.note_session_overflow(
+                                    current_session(), _actual)
+                            except Exception:           # noqa: BLE001
+                                pass
+                        last_err = err
+                        log.warning("[fallback] %s context_length_exceeded "
+                                    "(%.90s): alzo la soglia sessione (%s) e "
+                                    "ruoto sul successivo", cur, detail,
+                                    (">=%d tok" % _actual) if _actual
+                                    else "ctx-sconosciuto")
+                        _fail_cur(reason="ctx_limit",
                                   status=abs(err.status) if err.status else None)
                         dep = _pick(profile, dep, need, scope, ctx=ctx,
                                     tried=tried,

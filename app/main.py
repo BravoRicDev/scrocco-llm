@@ -77,6 +77,7 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         media_modality_signature,
                         image_chat_fallback_signature, image_chat_payload,
                         extract_chat_images,
+                        _looks_context_limit, extract_requested_tokens,
                         _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
                         _QUOTA_RESET_RE,
@@ -2007,7 +2008,8 @@ async def chat_completions(request: Request, response: Response):
             payload.get("messages"), _cc, max_in=_max_in,
             estimator=lambda ms: router.estimate_for_session(
                 session_id, ms, _div_eff,
-                getattr(router.policy, "image_token_estimate", 0) or 0)[0],
+                getattr(router.policy, "image_token_estimate", 0) or 0,
+                unique=dep.get("unique"))[0],
             boundary_floor=router.ctx_boundary_floor(session_id),
             divisor=_div_eff)
         if _crep.get("changed"):
@@ -4499,7 +4501,24 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         hook(dep["model"], detail)
                     except Exception:
                         pass
-                if -err.status != 404 and not provider_side:
+                if _looks_context_limit(-err.status, detail):
+                    # CONTEXT LENGTH: NON passiamo il 400 al client. Alziamo la
+                    # soglia minima della sessione (le richieste successive
+                    # partiranno da una dim che contiene il payload) e lasciamo
+                    # cadere nel flusso di fallback: `_fail` + `_next_filtered`
+                    # ruotano (e per i dim espliciti la ladder sale di dim).
+                    _actual = extract_requested_tokens(detail)
+                    try:
+                        router.note_session_overflow(
+                            ses, _actual or 0)
+                    except Exception:            # noqa: BLE001
+                        pass
+                    log.warning("[fallback] stream %s context_length_exceeded "
+                                "(%.90s): alzo la soglia sessione (%s) e ruoto",
+                                dep["unique"], detail,
+                                (">=%d tok" % _actual)
+                                if _actual else "ctx-sconosciuto")
+                elif -err.status != 404 and not provider_side:
                     log.warning("[fallback] stream %s %d PASS-THROUGH al "
                                 "client (non deployment-side) :: %.120s",
                                 dep["unique"], -err.status, detail)

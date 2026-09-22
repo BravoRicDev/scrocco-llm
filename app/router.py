@@ -624,6 +624,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # euristica, dal 2o il rapporto appreso * margine di policy. In-memory,
         # mai persistito (la sessione e' effimera).
         self._sess_ratio: dict[str, dict] = {}
+        # SOGLIA MINIMA per-sessione ("floor"): quando un provider risponde
+        # context_length_exceeded, alziamo la stima di quella sessione cosi' le
+        # richieste successive partono gia' da una dim che contiene il payload.
+        # Monotona (solo max), TTL come session_estimate_ttl_sec, cap 4096.
+        self._sess_floor: dict[str, tuple[int, float]] = {}
         # Time-decay dei punteggi di reputazione (halflife da policy).
         self._scores_decay_ts: float = time.time()
         self._scores_decay_log_ts: float = time.time()
@@ -2028,11 +2033,68 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             _lo, _hi = 1.5, 8.0
         return max(_lo, min(_hi, ch / float(pt)))
 
+    def _sess_floor_map(self) -> dict[str, tuple[int, float]]:
+        """Accessor lazy del registro floor per-sessione."""
+        d = getattr(self, "_sess_floor", None)
+        if d is None:
+            d = self._sess_floor = {}
+        return d
+
+    def note_session_overflow(self, session_id: str | None,
+                              tokens: int | float | None) -> None:
+        """Alza la soglia minima della sessione dopo un context_length_exceeded.
+
+        Monotona (solo max): la richiesta successiva stima almeno questo valore
+        (x margine di policy), cosi' la dim sale subito e non si ripete
+        l'overflow. TTL `session_estimate_ttl_sec`, cap 4096 (eviction sul piu'
+        vecchio), mai persistita (sessione effimera).
+        """
+        if not session_id:
+            return
+        if not getattr(self.policy, "session_estimate_enabled", True):
+            return
+        try:
+            val = int(float(tokens or 0))
+        except (TypeError, ValueError):
+            return
+        if val <= 0:
+            return
+        d = self._sess_floor_map()
+        now = time.time()
+        cur, _ts = d.get(session_id, (0, 0.0))
+        if val <= cur:
+            return
+        d[session_id] = (val, now)
+        _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        if _ttl > 0:
+            for s in [s for s, (_v, t) in d.items() if now - t > _ttl]:
+                d.pop(s, None)
+        if len(d) > 4096:
+            for s in sorted(d, key=lambda k: d[k][1])[:len(d) - 4096]:
+                d.pop(s, None)
+        log.info("[session-overflow] %s: soglia sessione alzata a >=%d token",
+                 session_id, val)
+
+    def session_floor_tokens(self, session_id: str | None) -> int | None:
+        """Floor monotono della sessione (None se assente/scaduto)."""
+        if not session_id:
+            return None
+        d = self._sess_floor_map()
+        rec = d.get(session_id)
+        if not rec:
+            return None
+        val, ts = rec
+        _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        if _ttl > 0 and time.time() - ts > _ttl:
+            return None
+        return int(val)
+
     def estimate_for_session(self, session_id: str | None, messages: Any,
                              divisor: int = CHARS_PER_TOKEN,
                              image_token_estimate: int = 0,
                              tools: Any = None,
-                             pre: bool = False) -> tuple[int, bool]:
+                             pre: bool = False,
+                             unique: str | None = None) -> tuple[int, bool]:
         """Stima del contesto con il rapporto per-sessione, se disponibile.
 
         Ritorna `(tokens, usato_rapporto)`. Senza rapporto appreso (1o turno di
@@ -2045,20 +2107,41 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         quando `messages` non e' ancora compattato (sicurezza/overflow).
         `pre=True` usa `cpt_pre` (char pre-compressione/token): stima i token
         POST-compressione previsti, cioe' quelli che il provider fatturera'.
+
+        Inoltre, al risultato si applicano due livelli di protezione (max):
+        1. il FLOOR di sessione (`note_session_overflow`) * margine: dopo un
+           context_length_exceeded la sessione non torna piu' giu' di dim;
+        2. le metriche per-DEPLOYMENT (F14, `unique`): se si conosce il
+           deployment, la sua stima `chars / effective_divisor` e' piu'
+           aderente a quello specifico upstream -> max (anti-overflow).
         """
-        cpt = self.session_chars_per_token(session_id, pre=pre)
-        if not cpt:
-            return estimate_tokens(messages, divisor, image_token_estimate,
-                                   tools), False
         try:
             margin = float(getattr(self.policy, "session_estimate_margin",
                                    1.05) or 1.0)
         except (TypeError, ValueError):
             margin = 1.05
-        tokens = int(_prompt_chars(messages, tools) / cpt * max(1.0, margin))
-        if image_token_estimate > 0:
-            tokens += count_image_parts(messages) * image_token_estimate
-        return tokens, True
+        cpt = self.session_chars_per_token(session_id, pre=pre)
+        if not cpt:
+            est = estimate_tokens(messages, divisor, image_token_estimate,
+                                  tools)
+            used = False
+        else:
+            est = int(_prompt_chars(messages, tools) / cpt * max(1.0, margin))
+            if image_token_estimate > 0:
+                est += count_image_parts(messages) * image_token_estimate
+            used = True
+        _flr = self.session_floor_tokens(session_id)
+        if _flr:
+            est = max(est, int(_flr * max(1.0, margin)))
+        if unique:
+            try:
+                _div = self.effective_divisor(unique)
+                if _div and _div > 0:
+                    est = max(est, int(_prompt_chars(messages, tools)
+                                       / _div * max(1.0, margin)))
+            except Exception:                          # noqa: BLE001
+                pass
+        return est, used
 
     def _note_latency_sample(self, unique: str, latency_ms: float,
                              ctx_est, kind: str, alpha: float) -> None:
@@ -3221,6 +3304,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             for s in sorted(_sr, key=lambda k: float(
                     (_sr[k] or {}).get("ts") or 0.0))[:len(_sr) - 4096]:
                 _sr.pop(s, None)
+        # FLOOR per-sessione (overflow context): stessa TTL + cap 4096.
+        _sf = self._sess_floor_map()
+        if _sttl > 0:
+            for s in [s for s, (_v, t) in _sf.items() if now - t > _sttl]:
+                _sf.pop(s, None)
+        if len(_sf) > 4096:
+            for s in sorted(_sf, key=lambda k: _sf[k][1])[:len(_sf) - 4096]:
+                _sf.pop(s, None)
         # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
         _gttl = self._guard_sec() * 2
         _ds = self._dep_sess()
