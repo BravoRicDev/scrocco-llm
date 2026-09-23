@@ -116,7 +116,7 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   pubblico `GET /v1/images/files/{id}` serve i byte.
 - **Rimborso latenza**: blocco `go_refund.*` — `enabled` (kill-switch),
   `pct` (% dei turni totali della sessione, default 20), `min_turns` (default
-  5), `max_turns` (default 20). Quando un deployment è marcato **lento** per
+  3), `max_turns` (default 15). Quando un deployment è marcato **lento** per
   una sessione (marchio HARD di `_note_session_slow`, o gara lenta) la sessione
   riceve `clamp(pct%·turni_totali, min_turns, max_turns)` turni serviti sul
   bucket `-go` del profilo, come se il client avesse chiamato

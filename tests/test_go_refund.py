@@ -58,8 +58,8 @@ def test_policy_defaults():
     p = Policy()
     assert p.go_refund_enabled is True
     assert p.go_refund_pct == 20
-    assert p.go_refund_min_turns == 5
-    assert p.go_refund_max_turns == 20
+    assert p.go_refund_min_turns == 3
+    assert p.go_refund_max_turns == 15
 
 
 def test_policy_parse_block():
@@ -92,41 +92,41 @@ def test_no_refund_means_no_go(router):
 
 
 def test_grant_min_clamp_example_turn3(router):
-    # lento al turno 3 -> refund = clamp(0.6, min 5, max 20) = 5 -> go_until 8
+    # lento al turno 3 -> refund = clamp(0.6, min 3, max 15) = 3 -> go_until 6
     sid = "s1"
     for _ in range(3):
         router.note_session_turn(sid)
-    assert router.grant_go_refund(sid) == 5
+    assert router.grant_go_refund(sid) == 3
     st = router.go_refund_status(sid)
-    assert st["go_until"] == 8
-    # turni in -go: n = 3,4,5,6,7 -> 5 turni, poi stop a n=8
-    got = [router.note_session_turn(sid) for _ in range(6)]
-    assert got == [True, True, True, True, True, False]
+    assert st["go_until"] == 6
+    # turni in -go: n = 3,4,5 -> 3 turni, poi stop a n=6
+    got = [router.note_session_turn(sid) for _ in range(4)]
+    assert got == [True, True, True, False]
 
 
 def test_grant_pct_example_turn100(router):
     sid = "s1"
     _set_turns(router, sid, 100)
-    assert router.grant_go_refund(sid) == 20
-    assert router.go_refund_status(sid)["go_until"] == 120
-    got = [router.note_session_turn(sid) for _ in range(21)]
-    assert got.count(True) == 20 and got[-1] is False
+    assert router.grant_go_refund(sid) == 15
+    assert router.go_refund_status(sid)["go_until"] == 115
+    got = [router.note_session_turn(sid) for _ in range(16)]
+    assert got.count(True) == 15 and got[-1] is False
 
 
 def test_grant_max_clamp_example_turn200(router):
     sid = "s1"
     _set_turns(router, sid, 200)
-    assert router.grant_go_refund(sid) == 20          # 40 -> max 20
-    assert router.go_refund_status(sid)["go_until"] == 220
+    assert router.grant_go_refund(sid) == 15          # 40 -> max 15
+    assert router.go_refund_status(sid)["go_until"] == 215
 
 
 def test_grant_takes_max_never_shrinks(router):
     sid = "s1"
     _set_turns(router, sid, 100)
-    router.grant_go_refund(sid)                       # go_until 120
-    _set_turns(router, sid, 105, go_until=120)
-    router.grant_go_refund(sid)                       # target 125 > 120
-    assert router.go_refund_status(sid)["go_until"] == 125
+    router.grant_go_refund(sid)                       # go_until 115
+    _set_turns(router, sid, 105, go_until=115)
+    router.grant_go_refund(sid)                       # target 120 > 115
+    assert router.go_refund_status(sid)["go_until"] == 120
 
 
 def test_disabled_knob_blocks_grant(router):
@@ -142,7 +142,7 @@ def test_mark_session_slow_grants(router):
     _set_turns(router, sid, 100)
     dep = router.config.groups["scrocco-llm-gr-200k"][0]
     router.mark_session_slow(sid, dep["unique"])
-    assert router.go_refund_status(sid)["go_until"] == 120
+    assert router.go_refund_status(sid)["go_until"] == 115
     assert router.note_session_turn(sid) is True
 
 

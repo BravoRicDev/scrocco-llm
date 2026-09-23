@@ -43,8 +43,8 @@ t@x.com,m/rf-big,groq,https://api.groq.com/openai/v1,free,1000,1000000,5,K-B,,10
 # ------------------------------------------------------------------ policy
 def test_policy_defaults_slow_race():
     p = Policy.from_dict({})
-    assert p.stream_slow_race_after_ms == 45000
-    assert p.nonstream_slow_race_after_ms == 45000
+    assert p.stream_slow_race_after_ms == 30000
+    assert p.nonstream_slow_race_after_ms == 30000
     assert p.slow_race_max_warm == 6
     assert p.warm_pick_fastest is True
 
@@ -156,13 +156,13 @@ def test_slow_flag_clear_loggato(wr, caplog):
 
 
 def test_slow_race_ms(wr):
-    assert wr._slow_race_ms() == 45000
-    wr.policy.stream_slow_race_after_ms = 30000
+    assert wr._slow_race_ms() == 30000
+    wr.policy.stream_slow_race_after_ms = 20000
     wr.policy.nonstream_slow_race_after_ms = 50000
-    assert wr._slow_race_ms() == 30000          # min dei valori positivi
+    assert wr._slow_race_ms() == 20000          # min dei valori positivi
     wr.policy.stream_slow_race_after_ms = 0
     wr.policy.nonstream_slow_race_after_ms = 0
-    assert wr._slow_race_ms() == 45000          # fallback
+    assert wr._slow_race_ms() == 30000          # fallback
 
 
 def test_marchio_non_pulito_da_successo_lento(wr, caplog):

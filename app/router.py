@@ -110,7 +110,7 @@ SLOW_REL_BASELINE_MULT = 2.0
 # 100s e' normale, non lento). Baseline: mediana di FLOTTA del bucket ->
 # stima dal rate di prefill/generazione -> 90s legacy. Floor assoluto per non
 # marchiare quando la flotta e' tutta veloce.
-SLOW_LATENCY_ABS_FLOOR_MS = 45000.0
+SLOW_LATENCY_ABS_FLOOR_MS = 30000.0
 SLOW_LATENCY_REL_MULT = 2.0
 SLOW_LATENCY_MIN_PEERS = 5
 SLOW_GEN_MULT = 6.0                 # total atteso ~ ttft * mult (fallback)
@@ -2595,7 +2595,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 v = 0
             if v > 0:
                 vals.append(v)
-        return min(vals) if vals else 45000
+        return min(vals) if vals else 30000
 
     # ---- caccia al sostituto: budget/backoff (anti-spreco) ---------------
     def hunt_allowed(self, session_id: str | None, ctx_est=None) -> bool:

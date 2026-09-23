@@ -584,7 +584,7 @@ ladder_cooldown_wakeup_window_sec: 3600
 # e, a fine stream, generazione token/s) -> 90s legacy. Un 128k che risponde
 # in 100s e' NORMALE, non lento: cosi' non si demota/caccia in continuazione
 # bruciando quota free-tier.
-slow_latency_abs_floor_ms: 45000
+slow_latency_abs_floor_ms: 30000
 slow_latency_rel_mult: 2.0
 slow_latency_min_peers: 5
 
@@ -813,8 +813,8 @@ images:
 go_refund:
   enabled: true                # kill-switch del rimborso
   pct: 20                      # % dei turni totali della sessione
-  min_turns: 5                 # minimo turni -go regalati
-  max_turns: 20                # massimo turni -go regalati
+  min_turns: 3                 # minimo turni -go regalati
+  max_turns: 15                # massimo turni -go regalati
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…
