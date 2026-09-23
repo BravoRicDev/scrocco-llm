@@ -1595,7 +1595,8 @@ def _strike_hook(explicit: bool, need=frozenset()):
 
 
 def _apply_go_refund(router, group: str | None, profile: str | None,
-                     turn_go: bool) -> tuple[str | None, bool]:
+                     turn_go: bool,
+                     session_id: str | None = None) -> tuple[str | None, bool]:
     """Rimborso latenza all'atterraggio: se il turno corrente e' coperto dal
     regalo (`turn_go`) e la richiesta atterra su un dim testo (-Nk), sposta il
     gruppo sul bucket -go del profilo. Ritorna (gruppo, rediretto?).
@@ -1613,8 +1614,12 @@ def _apply_go_refund(router, group: str | None, profile: str | None,
         metrics.inc("nx_go_refund_total", ("redirect",))
     except Exception:                                  # noqa: BLE001
         pass
-    _st = router.go_refund_status() if hasattr(router, "go_refund_status") \
-        else {}
+    _st = {}
+    if hasattr(router, "go_refund_status"):
+        try:
+            _st = router.go_refund_status(session_id) or {}
+        except Exception:                              # noqa: BLE001
+            _st = {}
     logging.getLogger("nx.api").info(
         "🎁 [go-refund] atterraggio %s -> %s (turno %d, restano %d)",
         group, go_group, _st.get("turns", 0), _st.get("refund_left", 0))
@@ -1772,7 +1777,7 @@ async def chat_completions(request: Request, response: Response):
         except Exception:                              # noqa: BLE001
             _turn_go = False
     group_or_explicit, _refund_go = _apply_go_refund(
-        router, group_or_explicit, auth.profile, _turn_go)
+        router, group_or_explicit, auth.profile, _turn_go, session_id)
 
     explicit_req = router.is_explicit(model)
     # Se il client chiama esplicitamente un gruppo diverso (es. -200k -> -1000k

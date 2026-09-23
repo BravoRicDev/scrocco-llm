@@ -202,3 +202,30 @@ def test_session_turns_persist_roundtrip():
             os.unlink(r2._tmp_path)
     finally:
         os.unlink(r._tmp_path)
+
+
+# --------------------------------------------------------------- log INFO
+def test_log_info_on_grant_and_consumption(router, caplog):
+    import logging
+    sid = "s1"
+    _set_turns(router, sid, 100)
+    with caplog.at_level(logging.INFO, logger="nx.router"):
+        router.grant_go_refund(sid)          # concessione
+        router.note_session_turn(sid)        # consumo
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("turni -go" in m for m in msgs), msgs        # concesso
+    assert any("servito in -go" in m for m in msgs), msgs   # consumato
+
+
+def test_log_info_on_landing(router, caplog):
+    import logging
+    M = _main()
+    sid = "s1"
+    _set_turns(router, sid, 100, go_until=120)
+    router.note_session_turn(sid)
+    with caplog.at_level(logging.INFO, logger="nx.api"):
+        grp, red = M._apply_go_refund(
+            router, "scrocco-llm-gr-200k", "gr", True, sid)
+    assert red is True
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("atterraggio" in m and "restano" in m for m in msgs), msgs
