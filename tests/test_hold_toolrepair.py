@@ -246,14 +246,15 @@ def test_corrective_kind_toolcall_vs_json():
 
 
 def test_hold_unrepairable_toolcall_uses_toolcall_note(rep, monkeypatch):
-    """Argomenti tool-call NON riparabili -> il retry correttivo deve chiedere
-    di riemettere la tool-call col MECCANISMO previsto (non 'solo JSON'), e il
-    client deve continuare a ricevere una tool-call."""
-    cfg, router, by_key = _mk(_HDR + _GOOD)
+    """Con tool-repair DISATTIVATO per il dep, il QC torna competente: il retry
+    correttivo deve usare la nota `toolcall` (non 'solo JSON'), cosi' il modello
+    riemette la chiamata col meccanismo previsto."""
+    _hdr = ("commento,modello,provider,endpoint,data,context,max_input,"
+            "priority,scrocco-llm-test,caps,tool_repair\n")
+    _good = "a,good,groq,https://ok.test/v1,free,128,8000,5,K-G,,off\n"
+    cfg, router, by_key = _mk(_hdr + _good)
     good = by_key["K-G"]
-    # 1o tentativo: argomenti con doppia virgola (non riparabili)
     bad = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
-    # 2o tentativo (dopo la nota correttiva): tool-call VALIDA
     fixed = _sse_toolcall("search", '{"alias":"x","command":"y"}')
     fwd = _FakeFwd({good["unique"]: [bad, fixed]})
     out = _stream(monkeypatch, cfg, router, fwd, good, _payload())
@@ -262,28 +263,28 @@ def test_hold_unrepairable_toolcall_uses_toolcall_note(rep, monkeypatch):
             if m.get("role") == "system"][-1]
     assert "meccanismo di tool-call" in note
     assert "SOLO con un oggetto JSON" not in note
-    assert json.loads(_toolcall_args_of(out)) == {"alias": "x", "command": "y"}
-    assert _finish_of(out) == "tool_calls"
     row = next((r for r in _rows()
                 if r["kind"] == "struct_corrective"
                 and r["source"] == "stream"), None)
     assert row and row["detail"] == "toolcall"
 
 
-def test_hold_unrepairable_toolcall_softlands_no_storm(rep, monkeypatch):
-    """Argomenti tool-call non validi ANCHE al 2o tentativo (dopo la nota
-    correttiva): NON si deve ruotare (tempesta di rotazione) -> soft landing,
-    il turno viene consegnato senza la tool-call rotta."""
+def test_hold_unrepairable_toolcall_leaves_to_repair(rep, monkeypatch):
+    """Args tool-call non riparabili: gli argomenti sono di competenza del
+    tool-repair -> il QC NON deve far scattare retry/rotazioni (tempeste) ne'
+    azzerare la risposta: si consegna il turno cosi' com'e' (tool-call inclusa),
+    senza penali."""
     cfg, router, by_key = _mk(_HDR + _GOOD)
     good = by_key["K-G"]
-    bad1 = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
-    bad2 = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
-    fwd = _FakeFwd({good["unique"]: [bad1, bad2]})
-    out = _stream(monkeypatch, cfg, router, fwd, good, _payload())
-    # un solo deployment, NESSuna rotazione
-    assert fwd.calls == [good["unique"], good["unique"]]
-    # la tool-call rotta non arriva al client
-    assert _toolcall_args_of(out) == ""
+    bad = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
+    fwd = _FakeFwd({good["unique"]: [bad]})
+    out = _stream(monkeypatch, cfg, router, fwd, good, _payload(tools=True))
+    # una sola chiamata (nessun retry correttivo, nessuna rotazione)
+    assert fwd.calls == [good["unique"]]
+    # la tool-call resta (il turno NON e' azzerato)
+    assert _toolcall_args_of(out) != ""
+    assert _finish_of(out) == "tool_calls"
     kinds = {r["kind"] for r in _rows()}
     assert "struct_softland" in kinds
     assert "struct_invalid" not in kinds
+    assert "struct_corrective" not in kinds

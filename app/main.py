@@ -2555,53 +2555,6 @@ def _rewrite_sse_tool_calls(chunks, tool_calls):
     return out
 
 
-def _strip_sse_tool_calls(chunks):
-    """Rimuove TUTTI i delta `tool_calls` da uno stream SSE bufferizzato.
-
-    Usato per il "soft landing" quando una tool-call ha argomenti NON validi e
-    non riparabili: ruotare su un altro modello e' inutile (spesso anche peggio)
-    e provoca tempeste di rotazione. Si consegna invece il turno SENZA la
-    tool-call rotta (resta l'eventuale testo). Ritorna una NUOVA lista.
-    """
-    if not chunks:
-        return chunks
-    out = []
-    for chunk in chunks:
-        if not isinstance(chunk, bytes) or b'"tool_calls"' not in chunk:
-            out.append(chunk)
-            continue
-        changed = False
-        new_lines = []
-        for line in chunk.split(b"\n"):
-            st = line.strip()
-            if not st.startswith(b"data:"):
-                new_lines.append(line)
-                continue
-            body = st[5:].strip()
-            if not body or body == b"[DONE]":
-                new_lines.append(line)
-                continue
-            try:
-                obj = json.loads(body)
-            except Exception:                    # noqa: BLE001
-                new_lines.append(line)
-                continue
-            chs = obj.get("choices") if isinstance(obj, dict) else None
-            ch0 = chs[0] if isinstance(chs, list) and chs else None
-            d = ch0.get("delta") if isinstance(ch0, dict) else None
-            if isinstance(d, dict) and "tool_calls" in d:
-                d.pop("tool_calls", None)
-                changed = True
-                if d or (isinstance(ch0, dict) and ch0.get("finish_reason")):
-                    new_lines.append(b"data: " + json.dumps(
-                        obj, ensure_ascii=False).encode("utf-8"))
-                continue
-            new_lines.append(line)
-        out.append(b"\n".join(new_lines) if changed else chunk)
-    return out
-
-
-
 def _delta_has_content(obj) -> bool:
     """True se un oggetto chunk OpenAI-style porta contenuto reale
     (answer, reasoning o tool_call)."""
@@ -3852,7 +3805,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
                      or 128)
     # Tool repair config per streaming
-    from .toolrepair import create_tool_repair_config
+    from .toolrepair import create_tool_repair_config, resolve_level
     from .fakecall import (fake_config_from_policy, is_escalation_group,
                            looks_like_fake_tool_call, TemplateTokenStripper)
     _tr_cfg = create_tool_repair_config({
@@ -4424,6 +4377,28 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                   if qc.enabled else None)
                     if not _qc_reason and san.enabled:
                         _qc_reason = check_sanity(_qc_obj, payload, san)
+                # Gli ARGOMENTI di una tool-call sono di competenza del
+                # tool-repair (livello effective per questo dep), NON del QC:
+                # se il repair e' attivo ha gia' tentato tutte le mosse. Far
+                # scattare il QC qui genera retry correttivi inutili e (peggio)
+                # rotazioni a catena, oppure soft-landing che azzera la
+                # risposta. Si consegna il turno cosi' com'e'.
+                if _qc_reason and _corrective_kind(_qc_reason) == "toolcall":
+                    try:
+                        _trl = resolve_level(dep, _tr_cfg)
+                    except Exception:                    # noqa: BLE001
+                        _trl = "aggressive"
+                    if _trl != "off":
+                        log.info("[qc] stream %s tool-call args non validi "
+                                 "(%s): lasciati al tool-repair, consegno",
+                                 dep["unique"], _qc_reason)
+                        metrics.inc("nx_toolcall_qc_skipped_total",
+                                    (dep["unique"],))
+                        repairlog.note("struct_softland", source="stream",
+                                       outcome="ok", dep=dep["unique"],
+                                       model=dep.get("model", ""),
+                                       detail="toolcall args non validi")
+                        _qc_reason = None
                 if _qc_reason:
                     _ck = _corrective_kind(_qc_reason)
                     if (getattr(router.policy, "corrective_retry_enabled", True)
@@ -4442,23 +4417,6 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                        model=dep.get("model", ""),
                                        detail=_ck)
                         verdict = "struct_corrective"
-                    elif _ck == "toolcall":
-                        # Argomenti tool-call non validi e retry correttivo gia'
-                        # fatto (o disabilitato): ruotare e' INUTILE e provoca
-                        # tempeste di rotazione (nessun modello del pool formatta
-                        # meglio questi args). SOFT LANDING: si consegna il turno
-                        # SENZA la tool-call rotta (resta l'eventuale testo).
-                        prebuf = _strip_sse_tool_calls(prebuf)
-                        metrics.inc("nx_toolcall_softland_total",
-                                    (dep["unique"],))
-                        log.warning("[qc] stream %s tool-call non valida (%s): "
-                                    "soft-landing senza tool_calls",
-                                    dep["unique"], _qc_reason)
-                        repairlog.note("struct_softland", source="stream",
-                                       outcome="ok", dep=dep["unique"],
-                                       model=dep.get("model", ""),
-                                       detail="toolcall args non validi")
-                        verdict = "content"
                     else:
                         metrics.inc("nx_qc_discarded_total",
                                     (dep["unique"],

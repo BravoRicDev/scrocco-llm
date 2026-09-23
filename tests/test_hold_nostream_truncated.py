@@ -147,10 +147,9 @@ def test_hold_zero_answer_length_ruota_senza_penale():
     assert not router.is_cooled_down(trunc["unique"])   # nessuna penale
 
 
-def test_hold_toolcall_args_non_validi_softland():
-    """Tool-call con args JSON non riparabili, anche al 2o tentativo: NON si
-    ruota (tempeste di rotazione) -> soft-landing: si consegna il turno senza
-    la tool-call rotta."""
+def test_hold_toolcall_args_non_validi_lasciati_al_repair():
+    """Args tool-call non riparabili: competenza del tool-repair -> il QC non
+    ruota e non azzera: si consegna il turno con la tool-call cosi' com'e'."""
     router = _mk_router(hold=True)
     trunc, _good = _deps(router)
     calls = []
@@ -171,9 +170,9 @@ def test_hold_toolcall_args_non_validi_softland():
                    "function": {"name": "run", "parameters": {}}}]
     data, used = _run(router, _fwd(handler), trunc, p)[:2]
     assert used["api_key"] == "K1"               # nessuna rotazione
-    assert calls == ["trunc.test", "trunc.test"]
+    assert calls == ["trunc.test"]              # nessun retry correttivo
     msg = data["choices"][0]["message"]
-    assert not msg.get("tool_calls")            # tool-call rotta rimossa
+    assert msg.get("tool_calls")                # tool-call mantenuta
 
 
 def test_hold_catena_esaurita_503():
