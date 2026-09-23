@@ -39,6 +39,64 @@ from .texttoolparse import (TruncationConfig, has_unclosed_toolcall,
 log = logging.getLogger("nx.toolrepair")
 
 # ------------------------------------------------------------------- costanti
+# NB: `Done\.?` (punto OPZIONALE) — il modello puo' chiudere la ripetizione
+# senza punto finale (osservato: 233× con punto + 1 senza). Con `Done\.`
+# l'ultima occorrenza restava come residuo nel testo inviato al client.
+_DEGENERATE_REASONING_RE = re.compile(
+    r'(?:\s*<previous_reasoning_empty/>\s*Done\.?)+', re.IGNORECASE)
+
+
+def sanitize_reasoning_content(text: str) -> tuple[str, bool]:
+    """Rimuove l'artefatto interno ripetuto ``<previous_reasoning_empty/>Done.``.
+
+    Il pattern e' volutamente specifico: non altera altri tag o testo normale.
+    Ritorna (testo_sanificato, e' stato_modificato).
+    """
+    if not text:
+        return text, False
+    cleaned = _DEGENERATE_REASONING_RE.sub("", text)
+    changed = cleaned != text
+    if not changed:
+        return text, False
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+    return cleaned, True
+
+
+def sanitize_response(data: dict) -> bool:
+    """Pulisce content/reasoning_content del messaggio assistant (in-place).
+
+    Rimuove gli artefatti di ragionamento interni (es.
+    ``<previous_reasoning_empty/>Done.``) dal TESTO di risposta. Non tocca le
+    tool_calls. Vale anche senza tools: e' una pulizia del contenuto, non della
+    forma degli argomenti. Ritorna True se qualcosa e' cambiato.
+    """
+    if not isinstance(data, dict):
+        return False
+    try:
+        msg = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not isinstance(msg, dict):
+        return False
+    changed = False
+    for key in ("content", "reasoning_content"):
+        val = msg.get(key)
+        if isinstance(val, str) and val:
+            cleaned, did = sanitize_reasoning_content(val)
+            if did:
+                msg[key] = cleaned
+                changed = True
+        elif isinstance(val, list):
+            for part in val:
+                if (isinstance(part, dict)
+                        and isinstance(part.get("text"), str)):
+                    cleaned, did = sanitize_reasoning_content(part["text"])
+                    if did:
+                        part["text"] = cleaned
+                        changed = True
+    return changed
+
+# ------------------------------------------------------------------- costanti
 TOOL_REPAIR_HEADER = "tool_repair"
 """Nome della colonna CSV per il flag tool_repair."""
 

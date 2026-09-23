@@ -219,3 +219,59 @@ def test_endpoint_nonstream_hold_redirect_e2e(M, monkeypatch):
     assert out["nx_deployment"] == dep["unique"]
     # parita' stream/non-stream: sotto hold il non-stream ordina come lo stream
     assert seen.get("prefer_fast") is False
+
+
+def test_endpoint_nonstream_hold_repairs_toolcall(M, monkeypatch):
+    """E2E: non-stream sotto hold con tool-call malformata (virgola finale)
+    -> il body assemblato e' riparato (stessa riparazione del non-stream)."""
+    import json as _json
+    from starlette.requests import Request
+    from starlette.responses import Response
+    dep = _dep(M, "scrocco-llm-test-ep-tr")
+    chunks = [
+        b'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+        b'"id":"c1","type":"function","function":{"name":"search",'
+        b'"arguments":""}}]}}]}\n\n',
+        b'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+        b'"function":{"arguments":"{\\"q\\": \\"hi\\",}"}}]}}]}\n\n',
+        b'data: {"choices":[{"index":0,"delta":{},'
+        b'"finish_reason":"tool_calls"}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(M.forwarder, "stream_response", _stream(chunks))
+
+    class _A:
+        ok = True
+        profile = "test"
+        error = None
+    monkeypatch.setattr(M.authn, "authenticate", lambda h: _A())
+    monkeypatch.setattr(M.authn, "authorize_model", lambda a, m: True)
+    monkeypatch.setattr(M.router, "resolve_group_for_request",
+                        lambda *a, **k: dep["group"])
+    monkeypatch.setattr(M.router, "initial_pick", lambda *a, **k: dep)
+    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+
+    payload = {"model": dep["model"], "stream": False,
+               "messages": [{"role": "user", "content": "cerca"}],
+               "tools": [{"type": "function", "function": {
+                   "name": "search", "parameters": {"type": "object"}}}]}
+    body = _json.dumps(payload).encode()
+    sent = {"done": False}
+
+    async def receive():
+        if not sent["done"]:
+            sent["done"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    scope = {"type": "http", "method": "POST",
+             "path": "/v1/chat/completions",
+             "headers": [(b"authorization", b"Bearer x")],
+             "query_string": b""}
+
+    async def _run():
+        return await M.chat_completions(Request(scope, receive), Response())
+    out = asyncio.run(_run())
+    tcs = out["choices"][0]["message"]["tool_calls"]
+    assert _json.loads(tcs[0]["function"]["arguments"]) == {"q": "hi"}
+    assert out["choices"][0]["finish_reason"] == "tool_calls"

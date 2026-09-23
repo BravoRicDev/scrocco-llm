@@ -75,7 +75,7 @@ from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
 from .effort import get_effort, get_temperature_config
 from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          TruncatedToolcallSSEFilter, create_tool_repair_config,
-                         repair_tool_calls)
+                         repair_tool_calls, sanitize_response)
 from .fakecall import (fake_config_from_policy, is_escalation_group,
                        message_fake_pattern, sanitize_message)
 from .histnorm import (hist_config_from_policy, normalize_messages,
@@ -2826,6 +2826,7 @@ truncation_hook=None,
                                maxtok_hook=None,
                                loop_config=None,
                                loop_stream_words=0,
+                               defer_tool_repair: bool = False,
                                ) -> AsyncIterator[bytes]:
         """Fa la richiesta con stream=True e yielda i chunk SSE grezzi.
 
@@ -3013,9 +3014,14 @@ truncation_hook=None,
                 dep.get("unique", "?"), dep.get("model", ""))
 
         # ---- TOOL REPAIR streaming ----
+        # Con `defer_tool_repair` (HOLD attivo) NON si ripara qui: la risposta
+        # e' interamente bufferizzata a valle, quindi si applica la STESSA
+        # riparazione del percorso non-streaming sull'output GREZZO totale
+        # (l'intenzione del modello resta intatta). Vedi main._stream_with_fallback.
         _tr_cfg = tool_repair_config or ToolRepairConfig()
         _tr_filter = ToolRepairSSEFilter(_tr_cfg, dep)
-        if _tr_filter.level != "off" and payload.get("tools"):
+        if (not defer_tool_repair and _tr_filter.level != "off"
+                and payload.get("tools")):
             async def _repaired_gen() -> AsyncIterator[bytes]:
                 try:
                     async for chunk in raw_gen:
@@ -3947,6 +3953,11 @@ truncation_hook=None,
                 tr_result = repair_tool_calls(data, payload, dep, tr_cfg)
                 if tr_result["repaired"]:
                     metrics.inc("nx_tool_repair_total", (cur, "ok"))
+                # PULIZIA CONTENUTO: artefatti di ragionamento interni nel
+                # testo di risposta (es. <previous_reasoning_empty/>Done.).
+                # Vale anche senza tools: e' pulizia del contenuto.
+                if sanitize_response(data):
+                    metrics.inc("nx_content_sanitized_total", (cur,))
 
                 # ---- L2 #6: recupero tool-call resi come testo ----
                 _text_parsed = False

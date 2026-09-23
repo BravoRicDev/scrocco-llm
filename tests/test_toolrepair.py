@@ -21,6 +21,8 @@ from app.toolrepair import (
     parse_tool_repair_value,
     resolve_level,
     create_tool_repair_config,
+    sanitize_reasoning_content,
+    sanitize_response,
 )
 
 
@@ -51,6 +53,57 @@ def _payload_with_tools():
     return {"tools": [{"type": "function", "function": {
         "name": "search", "parameters": {"type": "object",
         "properties": {"q": {"type": "string"}}}}}]}
+
+
+# --------------------------------------------------- content sanitation
+
+class TestReasoningArtifactSanitizer:
+    def test_removes_repeated_internal_reasoning_marker(self):
+        text = "I controlli sono iniziati.\n\n" + \
+            "<previous_reasoning_empty/>Done." * 3
+        cleaned, changed = sanitize_reasoning_content(text)
+        assert changed
+        assert cleaned == "I controlli sono iniziati."
+
+    def test_preserves_regular_text_and_other_tags(self):
+        text = "Testo normale <think/> e conclusione."
+        cleaned, changed = sanitize_reasoning_content(text)
+        assert not changed
+        assert cleaned == text
+
+    def test_removes_trailing_marker_without_dot(self):
+        # Caso reale rid 082fcf5fa15b: 233 ripetizioni CON punto + l'ultima
+        # SENZA punto finale. Il vecchio pattern `Done\.` lasciava il residuo.
+        text = ("I modelli proxy sono virtuali.\n\n"
+                + "<previous_reasoning_empty/>Done." * 233
+                + "\n\n<previous_reasoning_empty/>Done")
+        cleaned, changed = sanitize_reasoning_content(text)
+        assert changed
+        assert cleaned == "I modelli proxy sono virtuali."
+        assert "<previous_reasoning_empty/>" not in cleaned
+
+    def test_removes_single_marker_without_dot(self):
+        text = "ok\n\n<previous_reasoning_empty/>Done"
+        cleaned, changed = sanitize_reasoning_content(text)
+        assert changed
+        assert cleaned == "ok"
+
+    def test_sanitize_response_strips_content_marker(self):
+        data = {"choices": [{"message": {
+            "content": "fatto.\n\n"
+                       + "<previous_reasoning_empty/>Done." * 3,
+            "reasoning_content": "<previous_reasoning_empty/>Done." * 2,
+        }, "finish_reason": "stop"}]}
+        assert sanitize_response(data) is True
+        msg = data["choices"][0]["message"]
+        assert msg["content"] == "fatto."
+        assert msg["reasoning_content"] == ""
+
+    def test_sanitize_response_noop_on_clean(self):
+        data = {"choices": [{"message": {"content": "ciao"},
+                             "finish_reason": "stop"}]}
+        assert sanitize_response(data) is False
+        assert data["choices"][0]["message"]["content"] == "ciao"
 
 
 # --------------------------------------------------- parse / resolve

@@ -2419,20 +2419,23 @@ def _strip_sse_content(chunk: bytes, stripper) -> bytes:
     return b"\n".join(out_lines) if changed else chunk
 
 
-def _collapse_sse_content(chunks, text):
-    """Riscrive l'intero content di uno stream SSE (choices[0]) con `text`.
+def _collapse_sse_field(chunks, field: str, text):
+    """Riscrive il campo `field` (content/reasoning_content) dei delta di uno
+    stream SSE (choices[0]) con `text`.
 
-    Usato dopo la pulizia/riparazione dell'output STRUTTURATO in HOLD: la
-    risposta e' gia' completa in `chunks`, quindi si sostituisce il contenuto
-    originale (che espone JSON sporco) con quello sanificato, preservando
-    finish_reason, usage e [DONE]. Ritorna una NUOVA lista di chunk.
+    Usato dopo la pulizia/riparazione in HOLD: la risposta e' gia' completa in
+    `chunks`, quindi si sostituisce il valore originale con quello sanificato,
+    preservando finish_reason, usage e [DONE]. Il testo viene scritto una sola
+    volta (la prima occorrenza del campo); le successive diventano vuote.
+    Ritorna una NUOVA lista di chunk.
     """
     if not isinstance(text, str) or not chunks:
         return chunks
+    key = ('"%s"' % field).encode()
     out = []
     placed = False
     for chunk in chunks:
-        if not isinstance(chunk, bytes) or b'"content"' not in chunk:
+        if not isinstance(chunk, bytes) or key not in chunk:
             out.append(chunk)
             continue
         changed = False
@@ -2455,8 +2458,8 @@ def _collapse_sse_content(chunks, text):
             chs = obj.get("choices") if isinstance(obj, dict) else None
             ch0 = chs[0] if isinstance(chs, list) and chs else None
             d = ch0.get("delta") if isinstance(ch0, dict) else None
-            if isinstance(d, dict) and isinstance(d.get("content"), str):
-                d["content"] = text if not placed else ""
+            if isinstance(d, dict) and isinstance(d.get(field), str):
+                d[field] = text if not placed else ""
                 placed = True
                 hit = True
             if hit:
@@ -2468,7 +2471,82 @@ def _collapse_sse_content(chunks, text):
         out.append(b"\n".join(new_lines) if changed else chunk)
     if not placed:
         try:
-            synth = {"choices": [{"index": 0, "delta": {"content": text},
+            synth = {"choices": [{"index": 0, "delta": {field: text},
+                                  "finish_reason": None}]}
+            out.insert(0, b"data: " + json.dumps(
+                synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
+        except Exception:                # noqa: BLE001
+            pass
+    return out
+
+
+def _collapse_sse_content(chunks, text):
+    """Riscrive l'intero content di uno stream SSE (choices[0]) con `text`.
+
+    Usato dopo la pulizia/riparazione dell'output STRUTTURATO in HOLD: la
+    risposta e' gia' completa in `chunks`, quindi si sostituisce il contenuto
+    originale (che espone JSON sporco) con quello sanificato, preservando
+    finish_reason, usage e [DONE]. Ritorna una NUOVA lista di chunk.
+    """
+    return _collapse_sse_field(chunks, "content", text)
+
+
+def _rewrite_sse_tool_calls(chunks, tool_calls):
+    """Riscrive i tool_calls di uno stream SSE bufferizzato (HOLD).
+
+    Rimuove i delta `tool_calls` originali e ne inserisce uno sintetico con
+    l'array riparato (formato chat.completion, con `index`), nel punto del
+    primo. Preserva finish_reason, usage e [DONE]. Ritorna una NUOVA lista.
+    """
+    if not isinstance(tool_calls, list) or not tool_calls or not chunks:
+        return chunks
+    tcs = [dict(tc, index=i) for i, tc in enumerate(tool_calls)
+           if isinstance(tc, dict)]
+    if not tcs:
+        return chunks
+    out = []
+    inserted = False
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or b'"tool_calls"' not in chunk:
+            out.append(chunk)
+            continue
+        changed = False
+        new_lines = []
+        for line in chunk.split(b"\n"):
+            st = line.strip()
+            if not st.startswith(b"data:"):
+                new_lines.append(line)
+                continue
+            body = st[5:].strip()
+            if not body or body == b"[DONE]":
+                new_lines.append(line)
+                continue
+            try:
+                obj = json.loads(body)
+            except Exception:
+                new_lines.append(line)
+                continue
+            chs = obj.get("choices") if isinstance(obj, dict) else None
+            ch0 = chs[0] if isinstance(chs, list) and chs else None
+            d = ch0.get("delta") if isinstance(ch0, dict) else None
+            if isinstance(d, dict) and "tool_calls" in d:
+                if not inserted:
+                    d["tool_calls"] = tcs
+                    inserted = True
+                    new_lines.append(b"data: " + json.dumps(
+                        obj, ensure_ascii=False).encode("utf-8"))
+                else:
+                    d.pop("tool_calls", None)
+                    if d:
+                        new_lines.append(b"data: " + json.dumps(
+                            obj, ensure_ascii=False).encode("utf-8"))
+                changed = True
+                continue
+            new_lines.append(line)
+        out.append(b"\n".join(new_lines) if changed else chunk)
+    if not inserted:
+        try:
+            synth = {"choices": [{"index": 0, "delta": {"tool_calls": tcs},
                                   "finish_reason": None}]}
             out.insert(0, b"data: " + json.dumps(
                 synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
@@ -3879,6 +3957,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                              "rimessi PRIMA dell'invio (proattivo)",
                              dep["unique"], _tpr)
             _lease = router.key_lease_acquire(dep)   # P2-8 (opt-in)
+            # HOLD (parita' col non-stream): se la risposta sara' interamente
+            # bufferizzata, la riparazione tool-call NON si fa nel filtro SSE
+            # incrementale ma ALLA FINE sull'output GREZZO totale (stessa
+            # riparazione del percorso non-streaming). Vedi blocco HOLD sotto.
+            _defer_tr = (bool(dep.get("hold_until_finish")) or bool(
+                getattr(router.policy.qc_json,
+                        "stream_hold_until_finish", False)))
             gen = await forwarder.stream_response(dep, payload,
                                                   profile=profile or "",
                                                   ctx_est=ctx,
@@ -3892,7 +3977,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                                    _maxtok.update(
                                                        cap=new, old=old),
                                                    rate_hook=lambda u, rl:
-                                                   router.note_rate_limit(u, rl))
+                                                   router.note_rate_limit(u, rl),
+                                                  defer_tool_repair=_defer_tr)
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe
@@ -4160,6 +4246,48 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                     dep["unique"], _pat)
                         _quality = 0.3
                         verdict = "fake_tool_call"
+            # TOOL REPAIR (HOLD): la risposta e' INTERAMENTE bufferizzata ->
+            # STESSA riparazione del percorso non-streaming, applicata
+            # ALL'OUTPUT GREZZO totale. Sotto hold il filtro SSE incrementale
+            # NON gira (defer_tool_repair), quindi l'intenzione del modello e'
+            # intatta; qui si assembla, si ripara e si riscrive lo stream
+            # bufferizzato (content + tool_calls) prima di inviare i byte.
+            if (verdict == "content" and hold and not _synth):
+                from .protocols import sse_to_chat_obj as _sse2obj
+                from .toolrepair import (repair_tool_calls as _rep_tc,
+                                         sanitize_response as _san_resp)
+                try:
+                    _tr_obj = _sse2obj(prebuf)
+                except ValueError:
+                    _tr_obj = None
+                if _tr_obj is not None:
+                    _tr_rep = _rep_tc(_tr_obj, payload, dep, _tr_cfg)
+                    _tr_san = _san_resp(_tr_obj)
+                    if _tr_rep.get("repaired") or _tr_san:
+                        _tr_msg = _tr_obj["choices"][0]["message"]
+                        if _tr_san:
+                            _tr_c = _tr_msg.get("content")
+                            if isinstance(_tr_c, str):
+                                prebuf = _collapse_sse_field(
+                                    prebuf, "content", _tr_c)
+                            _tr_rc = _tr_msg.get("reasoning_content")
+                            if isinstance(_tr_rc, str):
+                                prebuf = _collapse_sse_field(
+                                    prebuf, "reasoning_content", _tr_rc)
+                            metrics.inc("nx_content_sanitized_total",
+                                        (dep["unique"],))
+                        if _tr_rep.get("repaired"):
+                            _tr_tcs = _tr_msg.get("tool_calls")
+                            if isinstance(_tr_tcs, list):
+                                prebuf = _rewrite_sse_tool_calls(
+                                    prebuf, _tr_tcs)
+                            metrics.inc("nx_tool_repair_total",
+                                        (dep["unique"], "ok"))
+                            repairlog.note(
+                                "repair_args", source="stream", outcome="ok",
+                                dep=dep["unique"], model=dep.get("model", ""),
+                                detail="hold whole-output: moves=%s"
+                                % _tr_rep.get("moves"))
             # OUTPUT STRUTTURATO (HOLD): la risposta e' INTERAMENTE bufferizzata
             # -> la trattiamo come non-streaming. Pulizia (A) / riparazione
             # schema-driven (D) PRIMA di inviare qualunque byte: il client non
