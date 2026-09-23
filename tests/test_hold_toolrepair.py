@@ -268,3 +268,22 @@ def test_hold_unrepairable_toolcall_uses_toolcall_note(rep, monkeypatch):
                 if r["kind"] == "struct_corrective"
                 and r["source"] == "stream"), None)
     assert row and row["detail"] == "toolcall"
+
+
+def test_hold_unrepairable_toolcall_softlands_no_storm(rep, monkeypatch):
+    """Argomenti tool-call non validi ANCHE al 2o tentativo (dopo la nota
+    correttiva): NON si deve ruotare (tempesta di rotazione) -> soft landing,
+    il turno viene consegnato senza la tool-call rotta."""
+    cfg, router, by_key = _mk(_HDR + _GOOD)
+    good = by_key["K-G"]
+    bad1 = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
+    bad2 = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
+    fwd = _FakeFwd({good["unique"]: [bad1, bad2]})
+    out = _stream(monkeypatch, cfg, router, fwd, good, _payload())
+    # un solo deployment, NESSuna rotazione
+    assert fwd.calls == [good["unique"], good["unique"]]
+    # la tool-call rotta non arriva al client
+    assert _toolcall_args_of(out) == ""
+    kinds = {r["kind"] for r in _rows()}
+    assert "struct_softland" in kinds
+    assert "struct_invalid" not in kinds

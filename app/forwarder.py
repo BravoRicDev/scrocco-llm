@@ -4119,13 +4119,13 @@ truncation_hook=None,
                                     503, "empty output (fr=%s) da %s"
                                          % (fr, cur), final=True)
                     if reason:
+                        _ck = _corrective_kind(reason)
                         if (getattr(router.policy,
                                     "corrective_retry_enabled", True)
                                 and cur not in _corrected
                                 and not reason.lower().startswith(
                                     "timeout")):
                             _corrected.add(cur)
-                            _ck = _corrective_kind(reason)
                             payload.setdefault("messages", []).append(
                                 {"role": "system",
                                  "content": _corrective_note(_ck)})
@@ -4140,6 +4140,28 @@ truncation_hook=None,
                                            model=dep.get("model", ""),
                                            detail=_ck)
                             continue
+                        if _ck == "toolcall" and not _looks_empty(data):
+                            # Argomenti tool-call non validi e correttivo gia'
+                            # fatto: ruotare e' INUTILE (tempeste di rotazione).
+                            # SOFT LANDING: consegna il turno senza la tool-call
+                            # rotta (resta l'eventuale contenuto).
+                            _msg = (data.get("choices") or [{}])[0].get(
+                                "message") if isinstance(data, dict) else None
+                            if isinstance(_msg, dict) and _msg.get("tool_calls"):
+                                _msg.pop("tool_calls", None)
+                            metrics.inc("nx_toolcall_softland_total", (cur,))
+                            log.warning("[qc] %s tool-call non valida (%s): "
+                                        "soft-landing senza tool_calls",
+                                        cur, reason)
+                            repairlog.note("struct_softland",
+                                           source="nostream", outcome="ok",
+                                           dep=cur,
+                                           model=dep.get("model", ""),
+                                           detail="toolcall args non validi")
+                            router.note_result(cur,
+                                               (time.monotonic() - t0) * 1000,
+                                               quality=0.5, ctx_est=ctx)
+                            return data, dep, qc_failed
                         qc_failed.append((cur, reason))
                         metrics.inc("nx_qc_discarded_total",
                                     (cur, reason.split(" ")[0]))

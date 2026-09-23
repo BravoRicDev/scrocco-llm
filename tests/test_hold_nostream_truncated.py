@@ -147,6 +147,35 @@ def test_hold_zero_answer_length_ruota_senza_penale():
     assert not router.is_cooled_down(trunc["unique"])   # nessuna penale
 
 
+def test_hold_toolcall_args_non_validi_softland():
+    """Tool-call con args JSON non riparabili, anche al 2o tentativo: NON si
+    ruota (tempeste di rotazione) -> soft-landing: si consegna il turno senza
+    la tool-call rotta."""
+    router = _mk_router(hold=True)
+    trunc, _good = _deps(router)
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(200, json={"choices": [{
+            "message": {"content": "",
+                        "tool_calls": [{"id": "c1", "type": "function",
+                                        "function": {
+                                            "name": "run",
+                                            "arguments": '{"a":1,,"b":2}'}}]},
+            "finish_reason": "tool_calls"}]})
+
+    router.fallback_next = _no_rotate
+    p = dict(PAYLOAD)
+    p["tools"] = [{"type": "function",
+                   "function": {"name": "run", "parameters": {}}}]
+    data, used = _run(router, _fwd(handler), trunc, p)[:2]
+    assert used["api_key"] == "K1"               # nessuna rotazione
+    assert calls == ["trunc.test", "trunc.test"]
+    msg = data["choices"][0]["message"]
+    assert not msg.get("tool_calls")            # tool-call rotta rimossa
+
+
 def test_hold_catena_esaurita_503():
     """Tutti i candidati troncano: mai il moncone -> 503 RETRYABLE."""
     router = _mk_router(hold=True)

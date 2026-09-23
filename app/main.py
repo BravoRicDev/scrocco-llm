@@ -2555,6 +2555,53 @@ def _rewrite_sse_tool_calls(chunks, tool_calls):
     return out
 
 
+def _strip_sse_tool_calls(chunks):
+    """Rimuove TUTTI i delta `tool_calls` da uno stream SSE bufferizzato.
+
+    Usato per il "soft landing" quando una tool-call ha argomenti NON validi e
+    non riparabili: ruotare su un altro modello e' inutile (spesso anche peggio)
+    e provoca tempeste di rotazione. Si consegna invece il turno SENZA la
+    tool-call rotta (resta l'eventuale testo). Ritorna una NUOVA lista.
+    """
+    if not chunks:
+        return chunks
+    out = []
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or b'"tool_calls"' not in chunk:
+            out.append(chunk)
+            continue
+        changed = False
+        new_lines = []
+        for line in chunk.split(b"\n"):
+            st = line.strip()
+            if not st.startswith(b"data:"):
+                new_lines.append(line)
+                continue
+            body = st[5:].strip()
+            if not body or body == b"[DONE]":
+                new_lines.append(line)
+                continue
+            try:
+                obj = json.loads(body)
+            except Exception:                    # noqa: BLE001
+                new_lines.append(line)
+                continue
+            chs = obj.get("choices") if isinstance(obj, dict) else None
+            ch0 = chs[0] if isinstance(chs, list) and chs else None
+            d = ch0.get("delta") if isinstance(ch0, dict) else None
+            if isinstance(d, dict) and "tool_calls" in d:
+                d.pop("tool_calls", None)
+                changed = True
+                if d or (isinstance(ch0, dict) and ch0.get("finish_reason")):
+                    new_lines.append(b"data: " + json.dumps(
+                        obj, ensure_ascii=False).encode("utf-8"))
+                continue
+            new_lines.append(line)
+        out.append(b"\n".join(new_lines) if changed else chunk)
+    return out
+
+
+
 def _delta_has_content(obj) -> bool:
     """True se un oggetto chunk OpenAI-style porta contenuto reale
     (answer, reasoning o tool_call)."""
@@ -4378,23 +4425,40 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     if not _qc_reason and san.enabled:
                         _qc_reason = check_sanity(_qc_obj, payload, san)
                 if _qc_reason:
+                    _ck = _corrective_kind(_qc_reason)
                     if (getattr(router.policy, "corrective_retry_enabled", True)
                             and dep["unique"] not in _so_corrected):
                         _so_corrected.add(dep["unique"])
-                        _ck = _corrective_kind(_qc_reason)
                         payload.setdefault("messages", []).append(
                             {"role": "system",
                              "content": _corrective_note(_ck)})
                         metrics.inc("nx_corrective_retry_total",
                                     (dep["unique"], _ck))
                         log.warning("[retry] stream %s contenuto non conforme "
-                                    "(%s): retry correttivo JSON",
-                                    dep["unique"], _qc_reason)
+                                    "(%s): retry correttivo %s",
+                                    dep["unique"], _qc_reason, _ck)
                         repairlog.note("struct_corrective", source="stream",
                                        outcome="ok", dep=dep["unique"],
                                        model=dep.get("model", ""),
                                        detail=_ck)
                         verdict = "struct_corrective"
+                    elif _ck == "toolcall":
+                        # Argomenti tool-call non validi e retry correttivo gia'
+                        # fatto (o disabilitato): ruotare e' INUTILE e provoca
+                        # tempeste di rotazione (nessun modello del pool formatta
+                        # meglio questi args). SOFT LANDING: si consegna il turno
+                        # SENZA la tool-call rotta (resta l'eventuale testo).
+                        prebuf = _strip_sse_tool_calls(prebuf)
+                        metrics.inc("nx_toolcall_softland_total",
+                                    (dep["unique"],))
+                        log.warning("[qc] stream %s tool-call non valida (%s): "
+                                    "soft-landing senza tool_calls",
+                                    dep["unique"], _qc_reason)
+                        repairlog.note("struct_softland", source="stream",
+                                       outcome="ok", dep=dep["unique"],
+                                       model=dep.get("model", ""),
+                                       detail="toolcall args non validi")
+                        verdict = "content"
                     else:
                         metrics.inc("nx_qc_discarded_total",
                                     (dep["unique"],
