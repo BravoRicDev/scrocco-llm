@@ -82,6 +82,31 @@ def test_cache_holder_non_viene_mai_scartato(r):
         assert d["unique"] == luna["unique"]
 
 
+def test_last_go_vince_su_meno_usato(r):
+    """L'ultimo -go servito alla sessione vince anche se piu' usato degli altri."""
+    set_current_session("sess-LG")
+    deep = _by_key(r, "K-D2")
+    # rendi deep molto usato da tutti
+    for _ in range(80):
+        r.note_usage(deep["unique"], ctx_est=8000)
+    # ma e' l'ultimo -go con successo di QUESTA sessione
+    r.note_session_success("sess-LG", deep["unique"], latency_ms=100, ctx_est=100)
+    for _ in range(10):
+        d = r.pick_deployment(f"{BASE}-go", need=None, ctx=100)
+        assert d["unique"] == deep["unique"], "last_go deve vincere"
+
+
+def test_senza_last_go_si_usa_il_meno_usato(r):
+    """Sessione senza storia -go -> meno usato (non salta a caso)."""
+    set_current_session("sess-new")
+    luna = _by_key(r, "K-L1")
+    for _ in range(50):
+        r.note_usage(luna["unique"], ctx_est=8000)
+    for _ in range(10):
+        d = r.pick_deployment(f"{BASE}-go", need=None, ctx=100)
+        assert d["unique"] != luna["unique"]
+
+
 def test_cold_pick_usa_i_dep_meno_usati(r):
     """Tra chiavi gemelle dello stesso modello, si usa quella con meno uso 24h.
 

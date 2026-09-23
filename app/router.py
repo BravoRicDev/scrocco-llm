@@ -5701,11 +5701,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                               -int(d.get("model_preference", 0) or 0))
             best_key = min(_key(d) for d in deps)
             best = [d for d in deps if _key(d) == best_key]
-            # Entro il tier: il detentore cache della sessione vince SEMPRE
-            # (mai scartato: e' la KV-cache calda della sessione). Altrimenti
-            # si sceglie A FREDDO il MENO USATO da tutte le sessioni (finestra
-            # 24h, pesata sui token di prefill): le sessioni si spartiscono le
-            # chiavi (4-2, 3-3, ...) invece di martellare sempre la stessa.
+            # Entro il tier: l'ULTIMO -go servito con successo a QUESTA sessione
+            # (`last_go`) vince SEMPRE se vivo e dentro il tier: e' la key con
+            # cache potenzialmente ancora calda. Fallback: il detentore cache
+            # generico se e' un dep del tier. Altrimenti A FREDDO il MENO USATO
+            # da tutte le sessioni (finestra 24h, pesata sui token di prefill):
+            # le sessioni si spartiscono le chiavi (4-2, 3-3) invece di
+            # martellare sempre la stessa.
+            _lg_u = self.last_go()
+            if _lg_u and any(_lg_u == d["unique"] for d in best):
+                log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
+                         "last-go)", group_name, _lg_u)
+                return self.config.deployment_by_unique(_lg_u)
             _ch = self.cache_holder(need=need, ctx=ctx)
             if _ch and any(_ch["unique"] == d["unique"] for d in best):
                 log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
