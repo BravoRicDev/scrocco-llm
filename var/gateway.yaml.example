@@ -752,7 +752,9 @@ aliases:
 # Usa un * iniziale se vuoi matchare a prescindere dal prefisso.
 capability_routing:
   # Mappa pattern/modello-esatto -> capacità dichiarate.
-  # Capacità ammesse: text, vision, video, audio, image_gen, tools, stt, tts
+  # Capacità ammesse: text, vision, video, audio, image_gen, tools, stt, tts,
+  # image_edit (accetta un'immagine di riferimento: /v1/images/edits) e
+  # image_multi_ref (accetta PIÙ immagini di riferimento).
   model_capabilities:
     Systran/faster-whisper-*: [stt]
     speaches-ai/piper-it_IT-*: [tts]
@@ -762,8 +764,8 @@ capability_routing:
     "*kokoro*": [tts]
     "*piper*": [tts]
     whisper-large-v3*: [stt]
-    models/gemini-*image: [image_gen]
-    "*nano-banana*": [image_gen]
+    models/gemini-*image: [image_gen, image_edit, image_multi_ref]
+    "*nano-banana*": [image_gen, image_edit, image_multi_ref]
 
   # Capacità per modelli NON presenti nella mappa.
   # [text] = conservativo: richiesta con immagini -> 400 chiaro
@@ -776,6 +778,10 @@ capability_routing:
   # POST /v1/images/generations: se l'upstream non espone l'endpoint
   # (404/400 provider-side), ritenta via chat/completions.
   images_chat_fallback: true
+
+  # /v1/images/edits e generations con reference: tetto di sicurezza sul numero
+  # di immagini inviate ai modelli con capacità image_multi_ref.
+  image_refs_hard_max: 16
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…

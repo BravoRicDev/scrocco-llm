@@ -32,7 +32,8 @@ def test_normalize_wrong_type_raises():
 
 def test_canonical_set_complete():
     assert CANONICAL_CAPS == {"text", "vision", "video", "audio",
-                              "image_gen", "tools", "tts", "stt", "video_gen"}
+                              "image_gen", "tools", "tts", "stt", "video_gen",
+                              "image_edit", "image_multi_ref"}
 
 
 def test_normalize_accepts_audio_caps():

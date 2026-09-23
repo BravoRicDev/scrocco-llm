@@ -497,7 +497,8 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
   resort, day number 1–31 = monthly renewal ordering inside `-go`
 - `context`: kilo-units (128 = 128k window); drives the dims ladder
 - `max_input`: soft prompt-token guard for that deployment (0 = no guard)
-- `caps`: comma-separated subset of `text,vision,image_gen,video_gen,tts,stt`
+- `caps`: comma-separated subset of
+  `text,vision,image_gen,image_edit,image_multi_ref,video_gen,tts,stt`
 - `order`: optional explicit per-deployment ordering (integer). Lower value =
   earlier; deployments sharing the same value form a "tier" (you can aggregate
   providers by giving the same value to their deployments, e.g. to prefer a

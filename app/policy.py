@@ -1132,6 +1132,9 @@ class Policy:
     image_token_estimate: int = 800
     # per /v1/images/generations: tenta via chat se /images/generations fallisce
     images_chat_fallback: bool = True
+    # /v1/images/edits (e generations con reference): tetto di sicurezza sul
+    # numero di immagini di riferimento inviate ai modelli multi-ref.
+    image_refs_hard_max: int = 16
 
     # AUTO-LEARN capacità: quando un provider rifiuta una modalità (400 firma
     # provider-side su richiesta instradata PER quella capacità) si conta uno
@@ -2720,6 +2723,11 @@ class Policy:
                 p.image_token_estimate = int(v)
             if "images_chat_fallback" in cr:
                 p.images_chat_fallback = _coerce_bool(cr["images_chat_fallback"], "capability_routing.images_chat_fallback")
+            if "image_refs_hard_max" in cr:
+                v = cr["image_refs_hard_max"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                    raise ValueError("capability_routing.image_refs_hard_max deve essere int >= 1")
+                p.image_refs_hard_max = int(v)
             mlr = cr.get("multimodal_last_resort")
             if mlr is not None:
                 p.multimodal_last_resort = _coerce_bool(

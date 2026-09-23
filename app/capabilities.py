@@ -11,10 +11,11 @@ from __future__ import annotations
 import re
 from typing import Any
 CANONICAL_CAPS = frozenset({"text", "vision", "video", "audio", "image_gen",
-                            "tools", "tts", "stt", "video_gen"})
+                            "tools", "tts", "stt", "video_gen",
+                            "image_edit", "image_multi_ref"})
 # Quelle che guidano il routing (escluso tools = solo metadato)
 ROUTING_CAPS = frozenset({"vision", "video", "audio", "image_gen", "tts",
-                          "stt", "video_gen"})
+                          "stt", "video_gen", "image_edit", "image_multi_ref"})
 # Token di GENERAZIONE: una riga che li contiene partecipa SOLO ai gruppi
 # di generazione corrispondenti (mai alle catene di ingest/analisi)
 GEN_CAPS = frozenset({"image_gen", "video_gen"})
@@ -109,6 +110,17 @@ def count_image_parts(messages: list[dict] | None) -> int:
                 if isinstance(part, dict) and part.get("type") in ("image_url", "input_image"):
                     count += 1
     return count
+
+
+def refs_max_for(declared: frozenset[str], hard_max: int) -> int:
+    """Numero massimo di immagini di riferimento accettate da un modello.
+
+    I modelli con la capacità `image_multi_ref` accettano più reference (fino
+    al tetto di sicurezza `hard_max`); tutti gli altri ne accettano UNA sola
+    (si tiene la prima). `hard_max` <= 0 viene trattato come 1.
+    """
+    hard = int(hard_max) if hard_max and hard_max > 0 else 1
+    return hard if "image_multi_ref" in (declared or frozenset()) else 1
 
 
 # Suffissi/complementi che NON identificano la famiglia del modello: varianti

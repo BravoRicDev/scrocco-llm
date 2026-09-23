@@ -2551,19 +2551,75 @@ def image_chat_fallback_signature(status: int | None,
     return bool(_IMAGES_PAYLOAD_UNSUPPORTED_RE.search(d))
 
 
-def image_chat_payload(payload: dict, model: str) -> dict:
-    """Converte un body OpenAI /images/generations in un body chat/completions
-    per i modelli immagine serviti come chat (`messages` + `modalities`).
+def _ref_urls_from_value(value) -> list[str]:
+    """Normalizza UN campo reference (stringa, lista o dict) in URL."""
+    out: list[str] = []
+    if value is None:
+        return out
+    items = value if isinstance(value, (list, tuple)) else [value]
+    for it in items:
+        if isinstance(it, str) and it.strip():
+            out.append(it.strip())
+        elif isinstance(it, dict):
+            iu = it.get("image_url")
+            if isinstance(iu, dict) and iu.get("url"):
+                out.append(iu["url"])
+            elif it.get("url"):
+                out.append(it["url"])
+            elif it.get("b64_json"):
+                out.append("data:image/png;base64," + str(it["b64_json"]))
+    return out
 
+
+def image_refs_from_payload(payload: dict) -> list[str]:
+    """Immagini di riferimento da un body immagini: campi `image` (singolo o
+    lista), `images` (lista) o `reference_images` (lista). Ritorna URL/data-URI
+    nell'ordine in cui compaiono."""
+    refs: list[str] = []
+    for key in ("image", "images", "reference_images"):
+        refs.extend(_ref_urls_from_value(payload.get(key)))
+    return refs
+
+
+def truncate_refs(refs: list[str], max_refs: int) -> list[str]:
+    """Tiene le prime `max_refs` reference (modelli single-ref -> la prima)."""
+    m = int(max_refs) if max_refs and max_refs > 0 else 1
+    return list(refs)[:m]
+
+
+def image_chat_content(refs: list[str], prompt: str):
+    """Content chat multimodale: prima le reference (image_url), poi il testo.
+
+    Senza reference ritorna la sola stringa del prompt (forma storica)."""
+    if not refs:
+        return prompt
+    content: list[dict] = [
+        {"type": "image_url", "image_url": {"url": r}} for r in refs]
+    content.append({"type": "text", "text": prompt})
+    return content
+
+
+def image_chat_payload(payload: dict, model: str,
+                       refs: list[str] | None = None) -> dict:
+    """Converte un body OpenAI /images/generations o /images/edits in un body
+    chat/completions per i modelli immagine serviti come chat (`messages` +
+    `modalities`).
+
+    Le reference (`image`/`images`/`reference_images`, o il parametro `refs`)
+    diventano parti `image_url` PRIMA del testo: è così che i modelli
+    image-edit (es. Gemini/nano-banana) ricevono l'immagine da modificare.
     Le opzioni specifiche dell'endpoint immagini (n, size, quality, style,
-    response_format, user, stream) non hanno equivalente chat e vengono
+    response_format, user, stream, mask) non hanno equivalente chat e vengono
     scartate; gli altri campi vengono preservati (es. `seed`)."""
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         prompt = "" if prompt is None else str(prompt)
+    if refs is None:
+        refs = image_refs_from_payload(payload)
     out: dict = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user",
+                      "content": image_chat_content(refs, prompt)}],
         "modalities": ["image"],
     }
     n = payload.get("n")
@@ -2571,7 +2627,8 @@ def image_chat_payload(payload: dict, model: str) -> dict:
         out["n"] = n
     out.update({k: v for k, v in payload.items()
                 if k not in ("model", "prompt", "n", "size", "quality",
-                             "style", "response_format", "user", "stream")})
+                             "style", "response_format", "user", "stream",
+                             "image", "images", "reference_images", "mask")})
     return out
 
 

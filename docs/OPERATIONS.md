@@ -42,7 +42,8 @@ The admin API manages everything without editing files or restarting:
 
 Public compat endpoints: `GET /v1/models`, `/v1/models/{id}`, `/api/tags`,
 `/api/show`, `/api/version`. Chat is `POST /v1/chat/completions`; media are
-`/v1/images/generations`, `/v1/audio/{speech,transcriptions,translations}`,
+`/v1/images/generations`, `/v1/images/edits`,
+`/v1/audio/{speech,transcriptions,translations}`,
 `/v1/videos/generations` (+ `/{job_id}` and `/{job_id}/content`).
 
 ## Runbooks

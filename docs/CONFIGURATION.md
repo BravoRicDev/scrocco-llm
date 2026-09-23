@@ -103,8 +103,10 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   `retry_after_floor_by_provider`, `rate_hint_*`, `key_soft_429`, `quota_*`.
 - **Stream / hold**: `stream_stall_sec`, `stall_ttft_*`, `qc_json.*`,
   `hold_until_finish`, `parachute`.
-- **Capabilities / media**: `capability_routing_enabled`, `model_capabilities`,
-  `capabilities_default`, `image_token_estimate`, `cap_auto_learn`,
+- **Capabilities / media**: `capability_routing_enabled`, `model_capabilities`
+  (token: `text,vision,video,audio,image_gen,image_edit,image_multi_ref,tools,tts,stt,video_gen`),
+  `capabilities_default`, `image_token_estimate`, `images_chat_fallback`,
+  `image_refs_hard_max`, `cap_auto_learn`,
   `cap_groups_enabled`, `multimodal_last_resort`, `gen_same_model`.
 - **Other**: `estimate_divisor`, adaptive tuning, `provider_models_ttl`,
   `strip_client_fields` (denylist di campi client-only non standard rimossi dal

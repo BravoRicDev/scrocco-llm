@@ -34,6 +34,7 @@ passive stream watchdog; per-request summary logs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import copy
 import hashlib
@@ -77,7 +78,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         media_reject_signature, media_input_needed,
                         media_modality_signature,
                         image_chat_fallback_signature, image_chat_payload,
-                        extract_chat_images,
+                        extract_chat_images, image_refs_from_payload,
+                        truncate_refs,
                         _looks_context_limit, extract_requested_tokens,
                         _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
@@ -119,7 +121,7 @@ from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             client_can_use_opencode_zen, client_is_opencode,
                             spoof_enabled, opencode_cautious_request,
                             is_opencode_zen_dep)
-from .capabilities import required_caps, count_image_parts
+from .capabilities import required_caps, count_image_parts, refs_max_for
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
 
@@ -5174,6 +5176,150 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
 
 
 # ---------------------------------------------------------- image generations
+def _data_uri(data: bytes, content_type: str = "") -> str:
+    """Bytes -> data-URI base64 (per le reference ricevute in multipart)."""
+    mime = (content_type or "image/png").split(";")[0].strip() or "image/png"
+    return f"data:{mime};base64," + base64.b64encode(data).decode()
+
+
+def _images_pick_dep(profile: str | None, model: str, raw_model: str,
+                     session_id: str | None, need: frozenset[str],
+                     payload: dict):
+    """Risoluzione del primo deployment per gli endpoint immagini.
+
+    Ritorna (dep, profile_effettivo, scope, error_response). `need` vuoto =
+    nessun filtro capacità (routing disattivato)."""
+    scope = "group" if router.is_explicit(model) else "chain"
+    prof = profile or config.profile_of_base(model.split("__")[0]) \
+        or config.profile_of_base(model)
+    group_or_explicit = router.resolve_group_for_request(model, [], session_id,
+                                                         need)
+    if group_or_explicit is None:
+        return None, prof, scope, JSONResponse(
+            status_code=400 if need else 404, content={
+                "error": {"message":
+                          (f"nessun deployment dichiara "
+                           f"{'+'.join(sorted(need)) or 'image_gen'}: configura "
+                           "capability_routing.model_capabilities in gateway.yaml"
+                           if need else
+                           f"model '{model}' not managed by {policy.service_name}"),
+                          "type": "invalid_request_error"}})
+    dep = router.config.deployment_by_unique(group_or_explicit)
+    if dep is None:
+        dep = router.pick_deployment(group_or_explicit, need)
+    if dep is None and prof:
+        dep = router.fallback_after(prof, None, need,
+                                    out_tokens=refill_out_budget(
+                                        payload, router.policy))
+    if dep is None:
+        return None, prof, scope, JSONResponse(status_code=400, content={
+            "error": {"message": (f"nessun deployment disponibile che dichiari "
+                                  f"{'+'.join(sorted(need)) or 'image_gen'}"),
+                      "type": "invalid_request_error"}})
+    return dep, prof, scope, None
+
+
+async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
+                            raw_model: str, model: str, need: frozenset[str],
+                            scope: str, dep: dict, profile: str | None,
+                            session_id: str | None, kind: str = "images",
+                            endpoint: str = "generations"):
+    """Generazione/editing immagini via chat multimodale, con rotazione.
+
+    Usata sia da /v1/images/edits sia da /v1/images/generations quando il body
+    porta immagini di riferimento. Le reference sono troncate per-deployment
+    (modelli single-ref: solo la prima) e inviate come parti `image_url`."""
+    _sess = _opencode_session(request) or session_id
+    _cip = _client_ip(request)
+    _attr = _client_attribution(request)
+    hard_max = int(getattr(router.policy, "image_refs_hard_max", 16) or 16)
+    metrics.inc("nx_images_total", (dep["group"], "attempt"))
+    log.info("[images] %s -> %s (%s, prompt=%d chars, refs=%d)", model,
+             dep["unique"], endpoint, len(str(payload.get("prompt") or "")),
+             len(refs))
+    tried: set[str] = set()
+    attempts: list[str] = []
+    t_req = time.monotonic()
+    last_err: UpstreamError | None = None
+    while dep is not None and len(tried) < 64:
+        cur = dep["unique"]
+        _was_dormant = router.is_cooled_down(cur)
+        tried.add(cur)
+        attempts.append(cur)
+        router.note_start(cur)
+        t0 = time.monotonic()
+        try:
+            declared = router.policy.caps_for(dep.get("model", "")) \
+                | (dep.get("caps") or frozenset())
+            use_refs = truncate_refs(refs, refs_max_for(declared, hard_max))
+            chat_payload = image_chat_payload(payload, raw_model, refs=use_refs)
+            data = await forwarder.call(dep, chat_payload, session=_sess,
+                                        client_ip=_cip, attribution=_attr)
+            imgs = extract_chat_images(data) if isinstance(data, dict) else []
+            if not imgs:
+                raise UpstreamError(502, "risposta chat senza immagini")
+            router.note_result(cur, (time.monotonic() - t0) * 1000)
+            if _was_dormant:
+                router.clear_cooldown(cur)
+            out = {"created": int(time.time()), "data": imgs, "via": "chat",
+                   "nx_deployment": cur}
+            metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
+            _emit_summary(ses=session_id or "-", req=raw_model,
+                          grp=dep["group"], dep=cur, tries=len(attempts),
+                          fb=len(attempts) - 1,
+                          dur_ms=int((time.monotonic() - t_req) * 1000),
+                          stream=False, qc=False, wd=None, usage=None,
+                          kind=kind, via="chat")
+            return JSONResponse(out)
+        except UpstreamError as err:
+            router.note_end(cur)
+            last_err = err
+            detail = err.detail or ""
+            status = err.status if err.status is not None else 0
+            deployment_side = (
+                status > 0
+                or -status in (402, 403, 404, 405, 415, 422)
+                or _MODEL_MISSING_RE.search(detail)
+                or image_chat_fallback_signature(err.status, detail)
+                or (-status == 400 and ("openai_error" in detail
+                                        or "bad_response_status_code" in detail)))
+            if not deployment_side:
+                metrics.inc("nx_images_total", (dep["group"], "client_error"))
+                st = abs(status) if status else 502
+                return JSONResponse(status_code=st if st >= 400 else 502,
+                                    content={"error": {"message": err.detail,
+                                                       "type": "upstream_error"}})
+            if -status in (400, 403) and media_reject_signature(detail):
+                try:
+                    _strike_hook(False, need)(dep["model"], detail)
+                except Exception:
+                    pass
+            if _was_dormant:
+                router.mark_failed_double_residual(
+                    cur, reason=str(err.detail or "")[:80],
+                    status=abs(err.status) if err.status else None)
+            else:
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=abs(err.status) if err.status else None)
+            metrics.inc("nx_images_total", (dep["group"], "retry"))
+            nxt = router.fallback_next(
+                profile, dep, need, scope, tried=tried,
+                out_tokens=refill_out_budget(payload, router.policy)) \
+                if profile else None
+            if nxt is None:
+                break
+            dep = nxt
+        finally:
+            if cur in tried:
+                router.note_end(cur)
+    status = abs(last_err.status) if last_err and last_err.status else 502
+    return JSONResponse(status_code=status if status >= 400 else 502,
+                        content={"error": {
+                            "message": (last_err.detail if last_err
+                                        else "nessun deployment image disponibile"),
+                            "type": "upstream_error"}})
+
+
 @app.post("/v1/images/generations")
 async def images_generations(request: Request):
     """Endpoint OpenAI-compatibile per la generazione immagini.
@@ -5204,9 +5350,27 @@ async def images_generations(request: Request):
         return _forbidden(model, auth.profile)
 
     need = frozenset({"image_gen"}) if router.policy.routing_active() else frozenset()
+    refs = image_refs_from_payload(payload)
+    if refs:
+        need = need | {"image_edit"}
     _set_opencode_gate(request)
     session_id = _session_id(request, payload)
     scope = "group" if router.is_explicit(model) else "chain"
+
+    # Con immagini di riferimento la generazione va SEMPRE via chat multimodale:
+    # i modelli image-edit (Gemini/nano-banana) ricevono la reference solo così.
+    if refs:
+        dep, profile, scope, err = _images_pick_dep(
+            auth.profile, model, raw_model, session_id, need, payload)
+        if err:
+            return err
+        custom_key = router.resolve_alias_key(raw_model, model)
+        if custom_key:
+            dep = {**dep, "api_key": custom_key}
+        return await _images_chat_loop(
+            request, payload=payload, refs=refs, raw_model=raw_model,
+            model=model, need=need, scope=scope, dep=dep, profile=profile,
+            session_id=session_id)
 
     group_or_explicit = router.resolve_group_for_request(model, [], session_id, need)
     if group_or_explicit is None:
@@ -5376,6 +5540,100 @@ async def images_generations(request: Request):
                             "message": (last_err.detail if last_err
                                         else "nessun deployment image_gen disponibile"),
                             "type": "upstream_error"}})
+
+
+# --------------------------------------------------------------- image edits
+@app.post("/v1/images/edits")
+async def images_edits(request: Request):
+    """Endpoint OpenAI-compatibile per l'EDIT di immagini (image-to-image).
+
+    Accetta multipart/form-data (come OpenAI: campo `image`, uno o più file,
+    anche `image[]`) oppure JSON con `image`/`images`/`reference_images`
+    (data-URI base64 o URL). Le reference vengono inviate via chat multimodale
+    (`messages` + `modalities:["image"]`) ai deployment con capacità
+    image_gen+image_edit: la reference va come parte `image_url` prima del
+    prompt. I modelli senza `image_multi_ref` ricevono solo la PRIMA immagine.
+    Il campo `mask` è accettato ma non supportato (ignorato con warning).
+    """
+    ctype = (request.headers.get("content-type") or "").lower()
+    payload: dict = {}
+    refs: list[str] = []
+    if "multipart/form-data" in ctype \
+            or "application/x-www-form-urlencoded" in ctype:
+        try:
+            form = await request.form()
+        except Exception:
+            return JSONResponse(status_code=400, content={
+                "error": {"message": "multipart/form-data non valido",
+                          "type": "invalid_request_error"}})
+        payload["prompt"] = str(form.get("prompt") or "")
+        if form.get("model"):
+            payload["model"] = str(form.get("model"))
+        if form.get("n") is not None:
+            try:
+                payload["n"] = int(str(form.get("n")))
+            except (TypeError, ValueError):
+                pass
+        for k in ("size", "response_format", "quality", "user", "seed"):
+            v = form.get(k)
+            if v is not None and str(v).strip():
+                payload[k] = str(v)
+        if form.get("mask") is not None:
+            log.warning("[images] campo 'mask' ignorato (non supportato)")
+        for field in ("image", "image[]", "images"):
+            for up in form.getlist(field):
+                if isinstance(up, str):
+                    if up.strip():
+                        refs.append(up.strip())
+                    continue
+                try:
+                    raw = await up.read()
+                except Exception:
+                    raw = b""
+                if raw:
+                    refs.append(_data_uri(
+                        raw, getattr(up, "content_type", "") or ""))
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={
+                "error": {"message": "invalid JSON body",
+                          "type": "invalid_request_error"}})
+        refs = image_refs_from_payload(payload)
+
+    raw_model = payload.get("model") or ""
+    if not str(payload.get("prompt") or "").strip():
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "'prompt' è obbligatorio",
+                      "type": "invalid_request_error"}})
+    if not refs:
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "'image' (immagine di riferimento) è obbligatorio",
+                      "type": "invalid_request_error"}})
+
+    model = policy.canonicalize(raw_model)
+    auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
+    if not auth.ok:
+        return _unauthorized(auth.error)
+    if not authn.authorize_model(auth, model):
+        return _forbidden(model, auth.profile)
+
+    need = frozenset({"image_gen", "image_edit"}) \
+        if router.policy.routing_active() else frozenset()
+    _set_opencode_gate(request)
+    session_id = _session_id(request, payload)
+    dep, profile, scope, err = _images_pick_dep(
+        auth.profile, model, raw_model, session_id, need, payload)
+    if err:
+        return err
+    custom_key = router.resolve_alias_key(raw_model, model)
+    if custom_key:
+        dep = {**dep, "api_key": custom_key}
+    return await _images_chat_loop(
+        request, payload=payload, refs=refs, raw_model=raw_model, model=model,
+        need=need, scope=scope, dep=dep, profile=profile,
+        session_id=session_id, endpoint="edits")
 
 
 # ----------------------------------------------------------------- audio TTS
