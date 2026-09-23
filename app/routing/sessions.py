@@ -86,9 +86,14 @@ class SessionMixin:
             ent = {"n": 0, "go_until": 0}
             d[sid] = ent
         n = int(ent.get("n") or 0)
-        go = n < int(ent.get("go_until") or 0)
+        gu = int(ent.get("go_until") or 0)
+        go = n < gu
         ent["n"] = n + 1
         ent["ts"] = time.time()
+        if go:
+            log.info("🎁 [go-refund] %s: turno %d servito in -go "
+                     "(rimborso: n < go_until=%d, restano %d)",
+                     sid, n + 1, gu, gu - (n + 1))
         if len(d) > 4096:
             _ttl = self._warm_ttl() * 4
             _now = time.time()

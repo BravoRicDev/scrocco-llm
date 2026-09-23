@@ -1613,6 +1613,11 @@ def _apply_go_refund(router, group: str | None, profile: str | None,
         metrics.inc("nx_go_refund_total", ("redirect",))
     except Exception:                                  # noqa: BLE001
         pass
+    _st = router.go_refund_status() if hasattr(router, "go_refund_status") \
+        else {}
+    logging.getLogger("nx.api").info(
+        "🎁 [go-refund] atterraggio %s -> %s (turno %d, restano %d)",
+        group, go_group, _st.get("turns", 0), _st.get("refund_left", 0))
     return go_group, True
 
 
