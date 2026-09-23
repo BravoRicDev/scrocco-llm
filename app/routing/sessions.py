@@ -62,6 +62,77 @@ class SessionMixin:
             return None
         return unique
 
+    # ------------------------------------------------- rimborso latenza (-go)
+    def _sess_turns_map(self) -> dict:
+        d = getattr(self, "_session_turns", None)
+        if d is None:
+            d = {}
+            self._session_turns = d
+        return d
+
+    def note_session_turn(self, session_id: str | None) -> bool:
+        """Conta un turno della sessione e dice se va servito in -go.
+
+        Ritorna True se il turno corrente e' coperto dal "rimborso latenza"
+        (n < go_until): va instradato al bucket -go come se il client l'avesse
+        chiesto. Il conteggio avviene QUI, all'atterraggio (una volta per
+        richiesta)."""
+        sid = session_id or current_session()
+        if not sid:
+            return False
+        d = self._sess_turns_map()
+        ent = d.get(sid)
+        if ent is None:
+            ent = {"n": 0, "go_until": 0}
+            d[sid] = ent
+        n = int(ent.get("n") or 0)
+        go = n < int(ent.get("go_until") or 0)
+        ent["n"] = n + 1
+        ent["ts"] = time.time()
+        if len(d) > 4096:
+            _ttl = self._warm_ttl() * 4
+            _now = time.time()
+            for s, e in list(d.items()):
+                if _now - float(e.get("ts") or 0) > _ttl:
+                    d.pop(s, None)
+        return go
+
+    def grant_go_refund(self, session_id: str | None) -> int:
+        """Concede il rimborso latenza: `go_until = max(go_until, n + refund)`
+        con `refund = clamp(round(pct% * n), min, max)`. Ritorna i turni
+        regalati (0 se disabilitato o sessione assente)."""
+        if not getattr(self.policy, "go_refund_enabled", True):
+            return 0
+        sid = session_id or current_session()
+        if not sid:
+            return 0
+        d = self._sess_turns_map()
+        ent = d.get(sid)
+        if ent is None:
+            ent = {"n": 0, "go_until": 0}
+            d[sid] = ent
+        n = int(ent.get("n") or 0)
+        pct = float(getattr(self.policy, "go_refund_pct", 20) or 0)
+        lo = int(getattr(self.policy, "go_refund_min_turns", 5) or 0)
+        hi = int(getattr(self.policy, "go_refund_max_turns", 20) or 0)
+        refund = max(lo, min(hi, int(round(pct / 100.0 * n))))
+        target = n + refund
+        prev = int(ent.get("go_until") or 0)
+        if target > prev:
+            ent["go_until"] = target
+            ent["ts"] = time.time()
+            log.info("🎁 [go-refund] %s: +%d turni -go (n=%d, pct=%.0f%%, "
+                     "go_until=%d)", sid, refund, n, pct, target)
+        return refund
+
+    def go_refund_status(self, session_id: str | None = None) -> dict:
+        sid = session_id or current_session()
+        ent = (self._sess_turns_map().get(sid) if sid else None) or {}
+        n = int(ent.get("n") or 0)
+        gu = int(ent.get("go_until") or 0)
+        return {"session": sid, "turns": n, "go_until": gu,
+                "active": n < gu, "refund_left": max(0, gu - n)}
+
     def sticky_get(self, session_id: str) -> str | None:
         entry = self._sticky.get(session_id)
         if not entry:

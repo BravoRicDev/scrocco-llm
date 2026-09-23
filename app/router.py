@@ -2766,6 +2766,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         if hard or soft:
             _was = unique in (d.get(session_id) or {})
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
+            if hard:
+                # rimborso latenza: un marchio HARD regala turni -go
+                self.grant_go_refund(session_id)
             if not _was:
                 metrics.inc("nx_slow_flag_total", ("set",))
                 log.info("🐢 [slow-flag] %s: marcato %s lento per la sessione "
@@ -2846,6 +2849,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # tutti i lettori) + `_session_slow_timer` (STICKY: ripulito solo da
         # un successo assolutamente rapido, non dalla regola relativa F1).
         self._sess_slow_timer().setdefault(session_id, {})[unique] = now
+        # rimborso latenza: anche la gara lenta (marchio HARD immediato) regala
+        # turni -go alla sessione.
+        self.grant_go_refund(session_id)
         if not _was:
             metrics.inc("nx_slow_flag_total", ("set",))
             log.info("🐢 [slow-flag] %s: marcato LENTO per la sessione %s "
@@ -3312,6 +3318,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         if len(_sf) > 4096:
             for s in sorted(_sf, key=lambda k: _sf[k][1])[:len(_sf) - 4096]:
                 _sf.pop(s, None)
+        # TURNI/RIMBORSO -go per-sessione: TTL sticky + cap 4096.
+        _tn = getattr(self, "_session_turns", None)
+        if isinstance(_tn, dict):
+            for s in [s for s, e in _tn.items()
+                      if now - float((e or {}).get("ts") or 0.0)
+                      > self.policy.sticky_ttl_sec]:
+                _tn.pop(s, None)
+            if len(_tn) > 4096:
+                for s in sorted(_tn, key=lambda k: float(
+                        (_tn[k] or {}).get("ts") or 0.0))[:len(_tn) - 4096]:
+                    _tn.pop(s, None)
         # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
         _gttl = self._guard_sec() * 2
         _ds = self._dep_sess()
@@ -4543,6 +4560,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     continue
             if keep:
                 session_slow_timer[str(sid)] = keep
+        _st = getattr(self, "_session_turns", None)
+        session_turns = {}
+        for sid, e in (_st or {}).items():
+            try:
+                ts = float((e or {}).get("ts") or 0.0)
+                if now - ts <= sticky_ttl:
+                    session_turns[str(sid)] = [
+                        int((e or {}).get("n") or 0),
+                        int((e or {}).get("go_until") or 0), ts]
+            except (TypeError, ValueError):
+                continue
         return {
             "saved_at": now,
             "sticky": _pairs(getattr(self, "_sticky", None), sticky_ttl),
@@ -4559,6 +4587,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 for sid in {str(v[0]) for v in deps_map.values()}},
             "session_slow": session_slow,
             "session_slow_timer": session_slow_timer,
+            "session_turns": session_turns,
             "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
                                    guard),
             "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
@@ -4651,6 +4680,21 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 except (TypeError, ValueError):
                     continue
         report["session_slow_timer"] = n
+        dtn = self._sess_turns_map()
+        n = 0
+        for sid, rec in (data.get("session_turns") or {}).items():
+            try:
+                if not isinstance(rec, (list, tuple)) or len(rec) < 3:
+                    continue
+                ts = float(rec[2])
+                if now - ts > sticky_ttl or now < ts:
+                    continue
+                dtn[str(sid)] = {"n": int(rec[0]), "go_until": int(rec[1]),
+                                 "ts": ts}
+                n += 1
+            except (TypeError, ValueError, IndexError):
+                continue
+        report["session_turns"] = n
         dis = self._discovered()
         n = 0
         for u, lim in (data.get("discovered_max_input") or {}).items():

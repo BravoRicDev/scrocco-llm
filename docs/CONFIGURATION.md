@@ -114,6 +114,16 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   `remote_timeout_sec`, `remote_max_bytes`. Ogni immagine di
   `/v1/images/*` torna con `url` (del gateway) **e** `b64_json`; l'endpoint
   pubblico `GET /v1/images/files/{id}` serve i byte.
+- **Rimborso latenza**: blocco `go_refund.*` — `enabled` (kill-switch),
+  `pct` (% dei turni totali della sessione, default 20), `min_turns` (default
+  5), `max_turns` (default 20). Quando un deployment è marcato **lento** per
+  una sessione (marchio HARD di `_note_session_slow`, o gara lenta) la sessione
+  riceve `clamp(pct%·turni_totali, min_turns, max_turns)` turni serviti sul
+  bucket `-go` del profilo, come se il client avesse chiamato
+  `scrocco-llm-<profilo>-go`. Vale solo per richieste di **testo** che
+  atterrano su un dim (`-Nk`); media/cap, `-go`/`-fallback` e i unique
+  espliciti restano invariati. Il conteggio dei turni e la deviazione avvengono
+  **all'atterraggio** (scelta del gruppo); ladder e selezione sono invariati.
 - **Other**: `estimate_divisor`, adaptive tuning, `provider_models_ttl`,
   `strip_client_fields` (denylist di campi client-only non standard rimossi dal
   body prima dell'invio, default `["fallback_models"]`),

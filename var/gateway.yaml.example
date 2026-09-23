@@ -803,6 +803,20 @@ images:
   remote_max_bytes: 20971520   # 20 MiB
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RIMBORSO LATENZA — quando un deployment viene marcato LENTO per una sessione
+# le si "regalano" N turni sul bucket -go (come se il client avesse chiamato
+# scrocco-llm-<profilo>-go). N = pct% dei turni totali della sessione,
+# limitato tra min_turns e max_turns. Solo richieste di testo su un dim (-Nk).
+# La variazione avviene all'atterraggio (scelta del gruppo): ladder e
+# selezione restano INVARIATI. Vedi docs/CONFIGURATION.md.
+# ─────────────────────────────────────────────────────────────────────────────
+go_refund:
+  enabled: true                # kill-switch del rimborso
+  pct: 20                      # % dei turni totali della sessione
+  min_turns: 5                 # minimo turni -go regalati
+  max_turns: 20                # massimo turni -go regalati
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…
 # ─────────────────────────────────────────────────────────────────────────────
 # Ogni cap ha la terna <P>-C (free/priority) / -C-go (rinnovi) / -C-fallback

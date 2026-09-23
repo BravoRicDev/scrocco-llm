@@ -1594,6 +1594,28 @@ def _strike_hook(explicit: bool, need=frozenset()):
     return hook
 
 
+def _apply_go_refund(router, group: str | None, profile: str | None,
+                     turn_go: bool) -> tuple[str | None, bool]:
+    """Rimborso latenza all'atterraggio: se il turno corrente e' coperto dal
+    regalo (`turn_go`) e la richiesta atterra su un dim testo (-Nk), sposta il
+    gruppo sul bucket -go del profilo. Ritorna (gruppo, rediretto?).
+
+    Invariante: media/cap, -go/-fallback e i unique espliciti (`__`) NON sono
+    toccati (il regex `-\\d+k$` seleziona solo i dim testo)."""
+    if not turn_go or not group:
+        return group, False
+    if not re.search(r"-\d+k$", group):
+        return group, False
+    go_group = f"{router.config.proxy_prefix}{profile}{router.config.go_suffix}"
+    if not router.config.groups.get(go_group):
+        return group, False
+    try:
+        metrics.inc("nx_go_refund_total", ("redirect",))
+    except Exception:                                  # noqa: BLE001
+        pass
+    return go_group, True
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, response: Response):
     _api_log = logging.getLogger("nx.api")
@@ -1733,12 +1755,26 @@ async def chat_completions(request: Request, response: Response):
                                  f"{policy.service_name}",
                       "type": "invalid_request_error"}})
 
+    # RIMBORSO LATENZA: conta il turno della sessione (all'atterraggio) e, se
+    # un "lento" ha regalato turni -go, atterra sul bucket -go come se il
+    # client avesse chiamato scrocco-llm-<profilo>-go. Solo richieste di testo
+    # su un dim (-Nk): media/cap, -go/-fallback e i unique espliciti restano
+    # invariati. Ladder/selezione a valle sono INVARIATI.
+    _turn_go = False
+    if session_id:
+        try:
+            _turn_go = router.note_session_turn(session_id)
+        except Exception:                              # noqa: BLE001
+            _turn_go = False
+    group_or_explicit, _refund_go = _apply_go_refund(
+        router, group_or_explicit, auth.profile, _turn_go)
+
     explicit_req = router.is_explicit(model)
     # Se il client chiama esplicitamente un gruppo diverso (es. -200k -> -1000k
     # o -go), rilascia lo sticky per-deployment cosi' la richiesta esplicita
     # atterra sul nuovo gruppo/key scelta dal routing, non resta incollata al
     # vecchio deployment dello sticky precedente.
-    if explicit_req and session_id:
+    if (explicit_req or _refund_go) and session_id:
         cur = router.dep_sticky_get(session_id)
         sd = router.config.deployment_by_unique(cur) if cur else None
         # Rilascia dep-sticky SOLO se il gruppo è cambiato o non c'è sticky:

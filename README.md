@@ -59,6 +59,11 @@ individual account limits instead of dying on the first 429.
   the gateway itself (`GET /v1/images/files/{id}`) for immediate download, even
   when the upstream answers in base64 (stored locally) or with a provider URL
   (mirrored). See the `images:` policy block.
+- **Latency refund (`go_refund`)**: when a deployment is marked slow for a
+  session, that session is gifted `clamp(pct%·turns, min, max)` turns served
+  from the `-go` bucket (as if it had called `scrocco-llm-<profile>-go`), for
+  text requests only. Counted and applied at landing; ladder/selection
+  unchanged. See the `go_refund:` policy block.
 - **Chained failover**: free dims → renewal bucket (`-go`) → paid fallback
   (`-fallback`). Cooldown escalation is **linear** (30 min base + 30 min per
   failure in the last 24h, capped at 5h). **Timeouts are penalised 10×**

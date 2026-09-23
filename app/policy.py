@@ -1153,6 +1153,16 @@ class Policy:
     images_remote_timeout_sec: int = 60
     images_remote_max_bytes: int = 20971520        # 20 MiB
 
+    # RIMBORSO LATENZA ("go_refund"): quando un deployment viene marcato LENTO
+    # per una sessione, le si "regalano" N turni sul bucket -go (come se il
+    # client avesse chiamato scrocco-llm-<profilo>-go). N = percentuale dei
+    # turni totali della sessione, con minimo e massimo. La variazione avviene
+    # solo ALL'ATTERRAGGIO (scelta del gruppo): ladder/selezione invariati.
+    go_refund_enabled: bool = True
+    go_refund_pct: int = 20                 # % dei turni totali
+    go_refund_min_turns: int = 5            # minimo turni regalati
+    go_refund_max_turns: int = 20           # massimo turni regalati
+
     # AUTO-LEARN capacità: quando un provider rifiuta una modalità (400 firma
     # provider-side su richiesta instradata PER quella capacità) si conta uno
     # strike sul modello; al superamento della soglia la capacità viene rimossa
@@ -2819,6 +2829,34 @@ class Policy:
                 if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
                     raise ValueError("images.remote_max_bytes deve essere int >= 0")
                 p.images_remote_max_bytes = int(v)
+
+        # rimborso latenza: turni -go regalati alla sessione dopo un "lento"
+        gr = raw.get("go_refund")
+        if gr is not None:
+            if not isinstance(gr, dict):
+                raise ValueError("go_refund deve essere una mappa")
+            if "enabled" in gr:
+                p.go_refund_enabled = _coerce_bool(
+                    gr["enabled"], "go_refund.enabled")
+            if "pct" in gr:
+                v = gr["pct"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= v <= 100):
+                    raise ValueError("go_refund.pct deve essere un numero "
+                                     "tra 0 e 100")
+                p.go_refund_pct = int(v)
+            if "min_turns" in gr:
+                v = gr["min_turns"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("go_refund.min_turns deve essere int >= 0")
+                p.go_refund_min_turns = int(v)
+            if "max_turns" in gr:
+                v = gr["max_turns"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("go_refund.max_turns deve essere int >= 0")
+                p.go_refund_max_turns = int(v)
+            if p.go_refund_max_turns < p.go_refund_min_turns:
+                raise ValueError("go_refund.max_turns deve essere >= min_turns")
 
         # cooldown escalation
         ce = raw.get("cooldown_escalation")
