@@ -52,6 +52,18 @@ def test_bare_json():
     assert calls and calls[0]["function"]["name"] == "bash"
 
 
+def test_tool_args_envelope():
+    """Envelope compatto {"tool": NAME, "args": {...}} reso come testo
+    (convenzione di alcuni agenti, es. pi): va riconvertito in tool-call."""
+    import json
+    content = ('{"tool":"bravoric-ssh_run_command","args":'
+               '{"alias":"host","command":"date"}}')
+    calls = parse_text_toolcalls(content, _tools("bravoric-ssh_run_command"))
+    assert calls and calls[0]["function"]["name"] == "bravoric-ssh_run_command"
+    assert json.loads(calls[0]["function"]["arguments"]) == {
+        "alias": "host", "command": "date"}
+
+
 def test_prose_returns_none():
     assert parse_text_toolcalls("Ciao, come posso aiutarti?", _tools("bash")) is None
 

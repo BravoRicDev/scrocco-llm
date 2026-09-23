@@ -93,10 +93,13 @@ class _FakeFwd:
         self.by_unique = by_unique
         self.calls = []
         self.kwargs = []
+        self.payload_snapshot = []
 
     async def stream_response(self, d, payload, **kwargs):
         self.calls.append(d["unique"])
         self.kwargs.append(kwargs)
+        self.payload_snapshot.append(
+            {"messages": [dict(m) for m in payload.get("messages", [])]})
         seq = self.by_unique[d["unique"]]
         item = seq[min(len(self.calls) - 1, len(seq) - 1)]
         if isinstance(item, Exception):
@@ -230,3 +233,38 @@ def test_hold_clean_output_untouched(rep, monkeypatch):
     fwd = _FakeFwd({good["unique"]: [raw]})
     out = _stream(monkeypatch, cfg, router, fwd, good, _payload(tools=False))
     assert _content_of(out) == "risposta pulita"
+
+
+def test_corrective_kind_toolcall_vs_json():
+    from app.forwarder import _corrective_kind
+    assert _corrective_kind(
+        "tool_calls.function.arguments JSON non valido (x)") == "toolcall"
+    assert _corrective_kind(
+        "tool_calls.function.arguments non è una stringa") == "toolcall"
+    assert _corrective_kind("JSON non valido (x)") == "json"
+    assert _corrective_kind(None) == "json"
+
+
+def test_hold_unrepairable_toolcall_uses_toolcall_note(rep, monkeypatch):
+    """Argomenti tool-call NON riparabili -> il retry correttivo deve chiedere
+    di riemettere la tool-call col MECCANISMO previsto (non 'solo JSON'), e il
+    client deve continuare a ricevere una tool-call."""
+    cfg, router, by_key = _mk(_HDR + _GOOD)
+    good = by_key["K-G"]
+    # 1o tentativo: argomenti con doppia virgola (non riparabili)
+    bad = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
+    # 2o tentativo (dopo la nota correttiva): tool-call VALIDA
+    fixed = _sse_toolcall("search", '{"alias":"x","command":"y"}')
+    fwd = _FakeFwd({good["unique"]: [bad, fixed]})
+    out = _stream(monkeypatch, cfg, router, fwd, good, _payload())
+    assert fwd.calls == [good["unique"], good["unique"]]
+    note = [m["content"] for m in fwd.payload_snapshot[-1]["messages"]
+            if m.get("role") == "system"][-1]
+    assert "meccanismo di tool-call" in note
+    assert "SOLO con un oggetto JSON" not in note
+    assert json.loads(_toolcall_args_of(out)) == {"alias": "x", "command": "y"}
+    assert _finish_of(out) == "tool_calls"
+    row = next((r for r in _rows()
+                if r["kind"] == "struct_corrective"
+                and r["source"] == "stream"), None)
+    assert row and row["detail"] == "toolcall"

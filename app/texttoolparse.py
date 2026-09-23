@@ -162,6 +162,21 @@ def _call(name, arguments):
 
 def _obj_to_calls(obj) -> list[dict]:
     out: list[dict] = []
+    # Envelope compatto {"tool": NAME, "args"/"arguments": {...}} (usato da
+    # alcuni client/agenti, es. pi): NON e' la forma OpenAI, quindi va
+    # riconosciuto esplicitamente altrimenti la tool-call resa come testo
+    # resta tale e l'agente perde il meccanismo di tool-call.
+    if isinstance(obj, dict) and "function" not in obj \
+            and isinstance(obj.get("tool"), str):
+        name = obj.get("tool")
+        args = obj.get("args")
+        if args is None:
+            args = obj.get("arguments")
+        if args is None:
+            args = obj.get("input")
+        c = _call(name, args)
+        if c:
+            return [c]
     items = obj
     if isinstance(obj, dict) and isinstance(obj.get("tool_calls"), list):
         items = obj["tool_calls"]

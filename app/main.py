@@ -3827,7 +3827,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _sm = sampling_config_from_policy(router.policy)
     from .schemaout import (enforce_response,
                             schemaout_config_from_policy)
-    from .forwarder import _corrective_note
+    from .forwarder import _corrective_note, _corrective_kind
     _so = schemaout_config_from_policy(router.policy)
     # QC di contenuto (parita' col non-stream): attivi anche in hold.
     qc = router.policy.qc_json
@@ -4381,18 +4381,19 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     if (getattr(router.policy, "corrective_retry_enabled", True)
                             and dep["unique"] not in _so_corrected):
                         _so_corrected.add(dep["unique"])
+                        _ck = _corrective_kind(_qc_reason)
                         payload.setdefault("messages", []).append(
                             {"role": "system",
-                             "content": _corrective_note("json")})
+                             "content": _corrective_note(_ck)})
                         metrics.inc("nx_corrective_retry_total",
-                                    (dep["unique"], "json"))
+                                    (dep["unique"], _ck))
                         log.warning("[retry] stream %s contenuto non conforme "
                                     "(%s): retry correttivo JSON",
                                     dep["unique"], _qc_reason)
                         repairlog.note("struct_corrective", source="stream",
                                        outcome="ok", dep=dep["unique"],
                                        model=dep.get("model", ""),
-                                       detail="json")
+                                       detail=_ck)
                         verdict = "struct_corrective"
                     else:
                         metrics.inc("nx_qc_discarded_total",

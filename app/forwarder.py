@@ -105,6 +105,20 @@ def _corrective_note(kind: str) -> str:
             "nuovo SOLO con un oggetto JSON valido, senza testo "
             "attorno.")
 
+
+def _corrective_kind(reason: str | None) -> str:
+    """Classifica il motivo QC -> tipo di nota correttiva da iniettare.
+
+    Un errore sugli ARGOMENTI di una tool-call NON va corretto dicendo al
+    modello di rispondere "solo con JSON": quella nota lo spinge a rendere la
+    tool-call come TESTO JSON nel content, facendogli perdere il meccanismo di
+    tool-call (bug reale: agente pi che smette di chiamare i tool). Per quel
+    caso si usa la nota dedicata `toolcall`, che chiede di riemettere la
+    chiamata tramite il meccanismo previsto.
+    """
+    return "toolcall" if str(reason or "").startswith("tool_calls.") else "json"
+
+
 log = logging.getLogger("nx.forwarder")
 
 # Provider che NON accettano `reasoning_effort` nel body (400 garantito):
@@ -4111,11 +4125,12 @@ truncation_hook=None,
                                 and not reason.lower().startswith(
                                     "timeout")):
                             _corrected.add(cur)
+                            _ck = _corrective_kind(reason)
                             payload.setdefault("messages", []).append(
                                 {"role": "system",
-                                 "content": _corrective_note("json")})
+                                 "content": _corrective_note(_ck)})
                             metrics.inc("nx_corrective_retry_total",
-                                        (cur, "json"))
+                                        (cur, _ck))
                             log.warning("[retry] %s contenuto non "
                                         "valido (%s): retry correttivo",
                                         cur, reason)
@@ -4123,7 +4138,7 @@ truncation_hook=None,
                                            source="nostream", outcome="ok",
                                            dep=cur,
                                            model=dep.get("model", ""),
-                                           detail="json")
+                                           detail=_ck)
                             continue
                         qc_failed.append((cur, reason))
                         metrics.inc("nx_qc_discarded_total",
