@@ -209,6 +209,7 @@ def _make_client(monkeypatch, tmp_path, csv_text):
 
 
 def _teardown(m, orig):
+    m.imagestore.clear()
     m.router.policy.cap_groups_enabled = orig[2]
     m.router._cooldown.clear()
     m.authn.master_key = orig[0]
@@ -240,7 +241,7 @@ def _fun(monkeypatch, m, native, chat) -> _FakeForwarder:
 
 
 _IMG_ONLY = lambda dep, p: (200, {"choices": [{"message": {"images": [
-    {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZZZ"}}]}}]})
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]}}]})
 _NATIVE_URL = lambda dep, p: (200, {"created": 1,
                                     "data": [{"url": "https://img/native.png"}]})
 
@@ -253,7 +254,11 @@ def test_e2e_nativo_404_chat_fallback_ok(client, monkeypatch):
                json={"model": "scrocco-llm-test", "prompt": "un gatto"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["data"] == [{"url": "data:image/png;base64,ZZZ"}]
+    item = body["data"][0]
+    assert item["url"].startswith("http://testserver/v1/images/files/")
+    assert item["b64_json"] == "QUJD"
+    got = c.get(item["url"])
+    assert got.status_code == 200 and got.content == b"ABC"
     assert body["via"] == "chat"
     assert fwd.images_calls == ["google"]
     assert fwd.chat_calls == ["google"]
@@ -315,11 +320,15 @@ def test_e2e_chain_raggiunge_fallback_openrouter(client, monkeypatch):
     assert r.status_code == 200, r.text
     assert fwd.images_calls == ["google", "openrouter"]
     assert fwd.chat_calls == ["openrouter"]
-    assert r.json()["data"] == [{"url": "data:image/png;base64,ZZZ"}]
+    assert r.json()["data"][0]["url"].startswith(
+        "http://testserver/v1/images/files/")
+    assert r.json()["data"][0]["b64_json"] == "QUJD"
 
 
 def test_e2e_nativo_ok_passthrough(client, monkeypatch):
     c, m = client
+    monkeypatch.setattr(m.router.policy, "images_mirror_remote",
+                        False)   # no rete: url provider intatto
     fwd = _fun(monkeypatch, m, native=_NATIVE_URL, chat=_IMG_ONLY)
     r = c.post("/v1/images/generations", headers=MK,
                json={"model": "scrocco-llm-test", "prompt": "x"})

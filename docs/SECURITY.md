@@ -38,6 +38,18 @@ python scripts/gen_client_keys.py --profiles alice,bob --write  # update policy 
 Rotate the master key by changing `GATEWAY_MASTER_KEY` and recreating the
 container. Never reuse a key across environments.
 
+## Image download endpoint
+
+`GET /v1/images/files/{id}` is **public** (no auth) by design: the `url` returned
+by `/v1/images/*` must be usable by a browser/`<img>` for immediate download.
+Protection is the **unguessable** random id (`secrets.token_urlsafe(24)`) plus the
+TTL (`images.store_ttl_sec`, default 24h); the store is in-memory and capped
+(`images.store_max_items` / `store_max_bytes`). No directory listing, no
+traversal (the id is looked up in a dict). Mirroring provider URLs
+(`images.mirror_remote`) fetches only `http(s)` URLs and enforces
+`remote_max_bytes`; disable it if you do not want the gateway to make outbound
+requests.
+
 ## Secrets handling
 
 - `var/keys_rotation.csv`, `var/gateway.yaml`, `.env.gateway`, `web/.env` and

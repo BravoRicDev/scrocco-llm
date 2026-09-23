@@ -2675,6 +2675,40 @@ def extract_chat_images(data: dict) -> list[dict]:
     return items
 
 
+def _split_data_uri(uri) -> tuple[str, str] | None:
+    """(mime, base64) da un data-URI base64; None se non è un data-URI base64."""
+    if not isinstance(uri, str) or not uri.startswith("data:"):
+        return None
+    head, _, payload = uri.partition(",")
+    if ";base64" not in head or not payload:
+        return None
+    mime = head[5:].split(";")[0].strip() or "image/png"
+    return mime, payload
+
+
+def image_item_dual(item: dict) -> dict:
+    """Rende un item immagine "duale" (url + b64_json quando derivabile).
+
+    - se `url` è un data-URI base64 -> aggiunge `b64_json` con la parte base64;
+    - se c'è solo `b64_json` -> aggiunge il `url` data-URI (mime image/png);
+    - un `url` http(s) resta invariato (non lo scarichiamo qui)."""
+    out = dict(item)
+    url = out.get("url")
+    if isinstance(url, str) and url.startswith("data:"):
+        parsed = _split_data_uri(url)
+        if parsed and not out.get("b64_json"):
+            out["b64_json"] = parsed[1]
+    elif out.get("b64_json") and not url:
+        out["url"] = "data:image/png;base64," + str(out["b64_json"])
+    return out
+
+
+def images_dual(items) -> list[dict]:
+    """Applica `image_item_dual` a una lista di item immagine (scarta i non-dict)."""
+    return [image_item_dual(it) for it in (items or [])
+            if isinstance(it, dict)]
+
+
 def dep_host(dep: dict) -> str:
     """Hostname dell'endpoint di un deployment (chiave di skip/quarantena)."""
     url = str((dep or {}).get("api_base") or (dep or {}).get("endpoint") or "")

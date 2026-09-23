@@ -1136,6 +1136,23 @@ class Policy:
     # numero di immagini di riferimento inviate ai modelli multi-ref.
     image_refs_hard_max: int = 16
 
+    # STORE LOCALE IMMAGINI: gli endpoint /v1/images/* restituiscono un `url`
+    # NOSTRO (download al volo) accanto a `b64_json`, anche quando l'upstream
+    # risponde in base64 o con un URL temporaneo del provider (che viene
+    # scaricato e ri-ospitato). Store IN-MEMORY con TTL e cap, stesso pattern
+    # dei job video: al restart gli URL gia' consegnati decadono (404).
+    images_store_enabled: bool = True
+    images_store_ttl_sec: int = 86400
+    images_store_max_items: int = 500
+    images_store_max_bytes: int = 536870912        # 512 MiB
+    # base URL pubblico per i download; vuoto -> derivato dalla request
+    # (X-Forwarded-Proto/Host, altrimenti Host)
+    images_url_base: str = ""
+    # scarica e ri-ospita gli URL immagine restituiti dai provider
+    images_mirror_remote: bool = True
+    images_remote_timeout_sec: int = 60
+    images_remote_max_bytes: int = 20971520        # 20 MiB
+
     # AUTO-LEARN capacità: quando un provider rifiuta una modalità (400 firma
     # provider-side su richiesta instradata PER quella capacità) si conta uno
     # strike sul modello; al superamento della soglia la capacità viene rimossa
@@ -2761,6 +2778,47 @@ class Policy:
                     raise ValueError("capability_routing.auto_learn_threshold "
                                      "deve essere 1..50")
                 p.cap_auto_learn_threshold = int(alt)
+
+        # immagini: store locale (url di download) + mirror degli URL provider
+        im = raw.get("images")
+        if im is not None:
+            if not isinstance(im, dict):
+                raise ValueError("images deve essere una mappa")
+            if "store_enabled" in im:
+                p.images_store_enabled = _coerce_bool(
+                    im["store_enabled"], "images.store_enabled")
+            if "store_ttl_sec" in im:
+                v = im["store_ttl_sec"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                    raise ValueError("images.store_ttl_sec deve essere int >= 0")
+                p.images_store_ttl_sec = int(v)
+            if "store_max_items" in im:
+                v = im["store_max_items"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                    raise ValueError("images.store_max_items deve essere int >= 1")
+                p.images_store_max_items = int(v)
+            if "store_max_bytes" in im:
+                v = im["store_max_bytes"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                    raise ValueError("images.store_max_bytes deve essere int >= 0")
+                p.images_store_max_bytes = int(v)
+            if "url_base" in im:
+                if not isinstance(im["url_base"], str):
+                    raise ValueError("images.url_base deve essere una stringa")
+                p.images_url_base = im["url_base"].strip().rstrip("/")
+            if "mirror_remote" in im:
+                p.images_mirror_remote = _coerce_bool(
+                    im["mirror_remote"], "images.mirror_remote")
+            if "remote_timeout_sec" in im:
+                v = im["remote_timeout_sec"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 1:
+                    raise ValueError("images.remote_timeout_sec deve essere int >= 1")
+                p.images_remote_timeout_sec = int(v)
+            if "remote_max_bytes" in im:
+                v = im["remote_max_bytes"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                    raise ValueError("images.remote_max_bytes deve essere int >= 0")
+                p.images_remote_max_bytes = int(v)
 
         # cooldown escalation
         ce = raw.get("cooldown_escalation")

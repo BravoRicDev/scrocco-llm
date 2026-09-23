@@ -24,8 +24,29 @@ from fastapi.testclient import TestClient
 from app.capabilities import normalize_caps, refs_max_for
 from app.config import parse_caps
 from app.forwarder import (Forwarder, UpstreamError, extract_chat_images,
-                           image_chat_payload, image_refs_from_payload,
-                           truncate_refs)
+                           image_chat_payload, image_item_dual,
+                           image_refs_from_payload, images_dual, truncate_refs)
+
+
+# ------------------------------------------------------- unit: dual url+b64
+def test_image_item_dual_data_uri_aggiunge_b64():
+    it = image_item_dual({"url": "data:image/png;base64,QUJD"})
+    assert it == {"url": "data:image/png;base64,QUJD", "b64_json": "QUJD"}
+
+
+def test_image_item_dual_b64_aggiunge_url():
+    it = image_item_dual({"b64_json": "QUJD"})
+    assert it == {"url": "data:image/png;base64,QUJD", "b64_json": "QUJD"}
+
+
+def test_image_item_dual_http_url_invariato():
+    it = image_item_dual({"url": "https://img/x.png"})
+    assert it == {"url": "https://img/x.png"}
+
+
+def test_images_dual_lista():
+    assert images_dual([{"url": "data:image/jpeg;base64,QQ=="}, "x", None]) == \
+        [{"url": "data:image/jpeg;base64,QQ==", "b64_json": "QQ=="}]
 
 
 # ------------------------------------------------------------------ unit: refs
@@ -123,7 +144,7 @@ _CSV_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
 _GOOGLE = "https://generativelanguage.googleapis.com/v1beta/openai"
 _IMG_ONLY = lambda dep, p: (200, {"choices": [{"message": {"images": [
     {"type": "image_url",
-     "image_url": {"url": "data:image/png;base64,ZZZ"}}]}}]})
+     "image_url": {"url": "data:image/png;base64,QUJD"}}]}}]})
 
 
 def _make_client(monkeypatch, tmp_path, csv_text):
@@ -145,6 +166,7 @@ def _make_client(monkeypatch, tmp_path, csv_text):
 
 
 def _teardown(m, orig):
+    m.imagestore.clear()
     m.router.policy.cap_groups_enabled = orig[2]
     m.router._cooldown.clear()
     m.authn.master_key = orig[0]
@@ -202,7 +224,11 @@ def test_edits_multipart_single_ref(client_single, monkeypatch):
                files={"image": ("ref.png", b"\x89PNG\x00ref", "image/png")})
     assert r.status_code == 200, r.text
     assert r.json()["via"] == "chat"
-    assert r.json()["data"] == [{"url": "data:image/png;base64,ZZZ"}]
+    item = r.json()["data"][0]
+    assert item["url"].startswith("http://testserver/v1/images/files/")
+    assert item["b64_json"] == "QUJD"
+    got = c.get(item["url"])
+    assert got.status_code == 200 and got.content == b"ABC"
     assert fwd.chat_calls == ["google"]
     content = fwd.chat_payloads[0]["messages"][0]["content"]
     assert content[0]["type"] == "image_url"
@@ -283,6 +309,8 @@ def test_generations_con_refs_usa_chat(client_single, monkeypatch):
 
 def test_generations_senza_refs_usa_nativo(client_single, monkeypatch):
     c, m = client_single
+    monkeypatch.setattr(m.router.policy, "images_mirror_remote",
+                        False)                  # no rete: url provider intatto
     fwd = _fun(monkeypatch, m,
                native=lambda d, p: (200, {"created": 1,
                                           "data": [{"url": "https://img/n.png"}]}))

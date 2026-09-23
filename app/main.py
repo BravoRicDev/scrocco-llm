@@ -57,6 +57,7 @@ from .admin import admin_api
 from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
 from . import journal, metrics
+from . import imagestore
 from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from . import sniff
 from . import repairlog
@@ -79,7 +80,8 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         media_modality_signature,
                         image_chat_fallback_signature, image_chat_payload,
                         extract_chat_images, image_refs_from_payload,
-                        truncate_refs,
+                        truncate_refs, images_dual, image_item_dual,
+                        _split_data_uri,
                         _looks_context_limit, extract_requested_tokens,
                         _client_attribution,
                         _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
@@ -332,6 +334,13 @@ def _apply_misc_policy(pol) -> None:
     restano identici alle costanti storiche dei moduli."""
     set_video_job_ttl_sec(getattr(pol, "video_job_ttl_sec", None))
     set_coalesce_cache_max(getattr(pol, "coalesce_cache_max", None))
+    try:
+        imagestore.configure(
+            ttl_sec=getattr(pol, "images_store_ttl_sec", None),
+            max_items=getattr(pol, "images_store_max_items", None),
+            max_bytes=getattr(pol, "images_store_max_bytes", None))
+    except Exception:                                  # noqa: BLE001
+        pass
     try:
         sniff.set_sniff_caps(
             max_b64_chars=getattr(pol, "sniff_max_b64_chars", None),
@@ -719,6 +728,11 @@ async def _watcher(interval: float) -> None:
                        if now - m.get("created", 0) > VIDEO_JOB_TTL_SEC]
             for j in expired:
                 _videos_jobs.pop(j, None)
+            # purge immagini scadute (store in memoria, TTL policy images.*)
+            try:
+                imagestore.sweep()
+            except Exception:                                  # noqa: BLE001
+                log.debug("[images] sweep error", exc_info=True)
 
             async with _reload_lock:
                 new = maybe_reload(config, last_csv)
@@ -5182,6 +5196,118 @@ def _data_uri(data: bytes, content_type: str = "") -> str:
     return f"data:{mime};base64," + base64.b64encode(data).decode()
 
 
+def _public_base_url(request: Request) -> str:
+    """Base URL pubblico per i download immagine.
+
+    Usa la policy `images.url_base` se impostata; altrimenti la deriva dalla
+    request (X-Forwarded-Proto/Host, poi Host): i client raggiungono il gateway
+    direttamente (LAN/VPN) o via reverse proxy che inoltra quegli header."""
+    cfg = (getattr(router.policy, "images_url_base", "") or "").strip()
+    if cfg:
+        return cfg.rstrip("/")
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip() \
+        or (request.headers.get("host") or "").strip()
+    if not proto:
+        proto = "https" if request.url.scheme == "https" else "http"
+    if host:
+        return f"{proto}://{host}"
+    return f"{request.url.scheme}://{request.url.netloc}"
+
+
+def _b64decode(s):
+    """base64 tollerante (padding aggiunto); None se indecifrabile."""
+    try:
+        data = str(s or "")
+        return base64.b64decode(data + "=" * (-len(data) % 4))
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+async def _download_remote_image(url: str, *, timeout: float,
+                                 max_bytes: int) -> tuple[bytes, str] | None:
+    """Scarica un'immagine da un URL http(s) del provider (mirror locale).
+
+    Ritorna (bytes, content_type) oppure None su errore/superamento del cap."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cli:
+            async with cli.stream("GET", url) as resp:
+                if resp.status_code >= 400:
+                    log.debug("[images] mirror %s: status %s", url,
+                              resp.status_code)
+                    return None
+                ctype = resp.headers.get("content-type") or ""
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if max_bytes and total > max_bytes:
+                        log.warning("[images] mirror %s: supera %d byte",
+                                    url, max_bytes)
+                        return None
+                    chunks.append(chunk)
+                if not chunks:
+                    return None
+                return b"".join(chunks), ctype
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("[images] mirror %s fallito: %s", url, exc)
+        return None
+
+
+async def _localize_images(request: Request, items):
+    """Espone per ogni immagine un `url` NOSTRO + `b64_json`.
+
+    - data-URI / b64_json -> salvata nello store locale (url del gateway);
+    - url http(s) del provider -> scaricata e ri-ospitata (mirror);
+    - store disabilitato o download fallito -> item invariato (url provider).
+    """
+    if not isinstance(items, list) or not items:
+        return items
+    if not bool(getattr(router.policy, "images_store_enabled", True)):
+        return items
+    mirror = bool(getattr(router.policy, "images_mirror_remote", True))
+    base = _public_base_url(request)
+    tmo = float(getattr(router.policy, "images_remote_timeout_sec", 60) or 60)
+    rmax = int(getattr(router.policy, "images_remote_max_bytes", 20971520) or 0)
+    out: list[dict] = []
+    for it in items:
+        dual = image_item_dual(it) if isinstance(it, dict) else None
+        if not isinstance(dual, dict):
+            out.append(it)
+            continue
+        url = dual.get("url")
+        b64 = dual.get("b64_json")
+        mime = None
+        data_bytes: bytes | None = None
+        if isinstance(url, str) and url.startswith("data:"):
+            parsed = _split_data_uri(url)
+            if parsed:
+                mime = parsed[0]
+                data_bytes = _b64decode(parsed[1])
+        elif b64:
+            data_bytes = _b64decode(b64)
+        elif mirror and isinstance(url, str) \
+                and url.startswith(("http://", "https://")):
+            got = await _download_remote_image(url, timeout=tmo, max_bytes=rmax)
+            if got:
+                data_bytes, mime = got
+        if not data_bytes:
+            out.append(dual)
+            continue
+        file_id = imagestore.put(data_bytes, mime)
+        if not file_id:
+            out.append(dual)
+            continue
+        ext = imagestore.ext_for_mime(mime)
+        new = dict(dual)
+        new["url"] = f"{base}/v1/images/files/{file_id}"
+        new["b64_json"] = base64.b64encode(data_bytes).decode()
+        new["mime_type"] = imagestore.normalize_mime(mime)
+        new["file_name"] = f"image.{ext}"
+        out.append(new)
+    return out
+
+
 def _images_pick_dep(profile: str | None, model: str, raw_model: str,
                      session_id: str | None, need: frozenset[str],
                      payload: dict):
@@ -5255,7 +5381,9 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
             chat_payload = image_chat_payload(payload, raw_model, refs=use_refs)
             data = await forwarder.call(dep, chat_payload, session=_sess,
                                         client_ip=_cip, attribution=_attr)
-            imgs = extract_chat_images(data) if isinstance(data, dict) else []
+            imgs = await _localize_images(
+                request, images_dual(extract_chat_images(data))) \
+                if isinstance(data, dict) else []
             if not imgs:
                 raise UpstreamError(502, "risposta chat senza immagini")
             router.note_result(cur, (time.monotonic() - t0) * 1000)
@@ -5429,6 +5557,9 @@ async def images_generations(request: Request):
                                            profile=profile or "",
                                            client_ip=_cip, session=_sess,
                                            attribution=_attr)
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                data["data"] = await _localize_images(
+                    request, images_dual(data["data"]))
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
@@ -5494,7 +5625,8 @@ async def images_generations(request: Request):
                         out = dict(data)
                         out["nx_deployment"] = cur
                         out["via"] = "chat"
-                        imgs = extract_chat_images(data)
+                        imgs = await _localize_images(
+                            request, images_dual(extract_chat_images(data)))
                         if imgs:
                             out["data"] = imgs
                             out.setdefault("created", int(time.time()))
@@ -5634,6 +5766,27 @@ async def images_edits(request: Request):
         request, payload=payload, refs=refs, raw_model=raw_model, model=model,
         need=need, scope=scope, dep=dep, profile=profile,
         session_id=session_id, endpoint="edits")
+
+
+@app.get("/v1/images/files/{file_id}")
+async def images_files(file_id: str):
+    """Download di un'immagine generata/edita (URL restituito da /v1/images/*).
+
+    Pubblico (serve per `<img>`/download al volo): l'id e' un token casuale
+    unguessable e la entry scade col TTL della policy `images.store_ttl_sec`."""
+    got = imagestore.get(file_id)
+    if not got:
+        return JSONResponse(status_code=404, content={
+            "error": {"message": "immagine non trovata o scaduta",
+                      "type": "invalid_request_error"}})
+    content, mime = got
+    ext = imagestore.ext_for_mime(mime)
+    return Response(
+        content=content, media_type=mime,
+        headers={
+            "Cache-Control": f"private, max-age={max(0, imagestore.ttl_sec())}",
+            "Content-Disposition": f'inline; filename="image.{ext}"',
+        })
 
 
 # ----------------------------------------------------------------- audio TTS

@@ -53,6 +53,12 @@ individual account limits instead of dying on the first 429.
 - **Structural capability groups**: `-vision`, `-audio`, `-image_gen`,
   `-video_gen`, `-tts`, `-stt` are separate worlds. A fallback for an image
   request never lands on a text-only model, and vice versa.
+- **Image generation & editing**: `/v1/images/generations` and
+  `/v1/images/edits` (multipart or JSON, one or more reference images). Every
+  returned image carries **both** `url` and `b64_json`: the `url` is served by
+  the gateway itself (`GET /v1/images/files/{id}`) for immediate download, even
+  when the upstream answers in base64 (stored locally) or with a provider URL
+  (mirrored). See the `images:` policy block.
 - **Chained failover**: free dims → renewal bucket (`-go`) → paid fallback
   (`-fallback`). Cooldown escalation is **linear** (30 min base + 30 min per
   failure in the last 24h, capped at 5h). **Timeouts are penalised 10×**

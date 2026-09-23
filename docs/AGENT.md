@@ -35,6 +35,7 @@ admin responses.
 | `GET /v1/models` | models visible to your profile |
 | `POST /v1/images/generations` | image gen (text-to-image; accetta anche `image`/`images` di riferimento) |
 | `POST /v1/images/edits` | image edit / image-to-image (multipart `image`+`prompt`, o JSON con `images`) |
+| `GET /v1/images/files/{id}` | download pubblico dell'immagine (`url` restituito da generations/edits; scade col TTL) |
 | `POST /v1/audio/speech` | TTS |
 | `POST /v1/audio/transcriptions` `/translations` | STT (local speaches sidecar or cloud) |
 | `POST /v1/videos/generations` (+ `/{job_id}`, `/{job_id}/content`) | async video jobs |

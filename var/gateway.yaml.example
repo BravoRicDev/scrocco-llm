@@ -784,6 +784,25 @@ capability_routing:
   image_refs_hard_max: 16
 
 # ─────────────────────────────────────────────────────────────────────────────
+# IMMAGINI — store locale per il download (`url` NOSTRO) accanto a b64_json
+# ─────────────────────────────────────────────────────────────────────────────
+# Gli endpoint /v1/images/* restituiscono, per ogni immagine, sia `url` sia
+# `b64_json`. L'`url` è SEMPRE del gateway (/v1/images/files/{id}): se l'upstream
+# risponde in base64 l'immagine viene salvata nello store locale; se risponde con
+# un URL http(s) del provider viene scaricata e ri-ospitata (mirror). Lo store è
+# in memoria (stesso pattern dei job video): al restart gli URL già consegnati
+# decadono (404). L'endpoint di download è PUBBLICO (id casuale unguessable).
+images:
+  store_enabled: true          # false = nessuno store, url provider intatto
+  store_ttl_sec: 86400         # 0 = nessuna scadenza
+  store_max_items: 500
+  store_max_bytes: 536870912   # 512 MiB
+  url_base: ""                 # vuoto -> derivato dalla request (Host/X-Forwarded-*)
+  mirror_remote: true          # scarica e ri-ospita gli URL immagine dei provider
+  remote_timeout_sec: 60
+  remote_max_bytes: 20971520   # 20 MiB
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…
 # ─────────────────────────────────────────────────────────────────────────────
 # Ogni cap ha la terna <P>-C (free/priority) / -C-go (rinnovi) / -C-fallback
