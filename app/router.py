@@ -5701,19 +5701,23 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                               -int(d.get("model_preference", 0) or 0))
             best_key = min(_key(d) for d in deps)
             best = [d for d in deps if _key(d) == best_key]
-            # Entro il tier: privilegia SEMPRE il detentore cache della
-            # sessione (stessa chiave = cache calda); altrimenti random.
-            chosen = None
+            # Entro il tier: il detentore cache della sessione vince SEMPRE
+            # (mai scartato: e' la KV-cache calda della sessione). Altrimenti
+            # si sceglie A FREDDO il MENO USATO da tutte le sessioni (finestra
+            # 24h, pesata sui token di prefill): le sessioni si spartiscono le
+            # chiavi (4-2, 3-3, ...) invece di martellare sempre la stessa.
             _ch = self.cache_holder(need=need, ctx=ctx)
             if _ch and any(_ch["unique"] == d["unique"] for d in best):
-                chosen = _ch
                 log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
-                         "cache-holder)", group_name, chosen["unique"])
-            else:
-                chosen = random.choice(best)
-                log.info("[pick-final] %s chosen=%s (go/fallback: solo data+"
-                         "pref, tier=%s, %d chiavi)", group_name,
-                         chosen["unique"], best_key, len(best))
+                         "cache-holder)", group_name, _ch["unique"])
+                return _ch
+            _min_usage = min(self.usage_weight_24h(d["unique"]) for d in best)
+            _least = [d for d in best
+                      if self.usage_weight_24h(d["unique"]) == _min_usage]
+            chosen = random.choice(_least)
+            log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
+                     "tier=%s, %d chiavi, least-used=%.1f)", group_name,
+                     chosen["unique"], best_key, len(_least), _min_usage)
             return chosen
         # COLD SPREAD: nasconde il 20% piu' usato (finestra 24h) PRIMA del
         # filtro `order`, cosi' il carico si distribuisce anche su order

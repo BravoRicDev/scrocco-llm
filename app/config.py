@@ -836,7 +836,12 @@ class GatewayConfig:
                     "intelligence": int(meta.get("intelligence") or 5),
                     "tool_repair": meta.get("tool_repair", ""),
                     "model_preference": int(meta.get("model_preference") or 0),
-                    "sort_key": float(meta.get("sort_key") or float("inf")),
+                    # sort_key=0 (rinnovo OGGI) e' un valore VALIDO e va
+                    # preservato: `or float("inf")` lo scambierebbe per
+                    # assente mandando in fondo proprio chi si rinnova oggi.
+                    "sort_key": float(
+                        meta.get("sort_key")
+                        if meta.get("sort_key") is not None else float("inf")),
                     "concurrent_limit": meta.get("concurrent_limit"),
                     "media_defer": bool(meta.get("media_defer", True)),
                     "hold_until_finish": bool(meta.get("hold_until_finish")),
