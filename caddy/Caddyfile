@@ -1,0 +1,16 @@
+{
+  auto_https disable_redirects
+}
+
+# HTTP diretto sulla porta 4001 per VPN/LAN (nessun certificato).
+# Bind porte in docker-compose: 10.9.0.2 (VPN) e 192.168.1.100 (LAN).
+:4001 {
+  # Access log a livello DEBUG: a INFO (default) sono solo rumore su ogni
+  # richiesta. Per vederli serve alzare il livello globale (global option
+  # `debug` in cima al Caddyfile).
+  log {
+    level debug
+  }
+  encode zstd gzip
+  reverse_proxy scrocco-llm:4001
+}
