@@ -596,3 +596,101 @@ class SessionMixin:
             d = {}
             self._session_compact = d
         d[sid] = time.time()
+
+    # ------------------------------------------------ VISTE STATO (read-only)
+    def slow_timer_view(self, now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        ttl = self._warm_ttl()
+        src = getattr(self, "_session_slow_timer", None)
+        out: list[dict] = []
+        for sid, marks in (src if isinstance(src, dict) else {}).items():
+            if not isinstance(marks, dict):
+                continue
+            for u, ts in list(marks.items()):
+                try:
+                    age = now - float(ts)
+                except (TypeError, ValueError):
+                    continue
+                if age > ttl:
+                    continue
+                out.append({"session_id": sid, "unique": u,
+                            "age_sec": round(age, 1),
+                            "ttl_left_sec": round(max(0.0, ttl - age), 1)})
+        return out
+
+    def go_refund_view(self, now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        out: list[dict] = []
+        for sid, e in self._sess_turns_map().items():
+            n = int((e or {}).get("n") or 0)
+            gu = int((e or {}).get("go_until") or 0)
+            out.append({"session_id": sid, "turns": n, "go_until": gu,
+                        "active": n < gu, "refund_left": max(0, gu - n),
+                        "age_sec": round(
+                            now - float((e or {}).get("ts") or 0.0), 1)})
+        return out
+
+    def last_go_view(self, now: float | None = None) -> list[dict]:
+        """Vista READ-ONLY dell'ultimo -go per sessione. NON chiama
+        `last_go()` (che muta la mappa espellendo gli scaduti): la validita' e'
+        ricalcolata qui, in modo difensivo, dal solo TTL di policy."""
+        now = time.time() if now is None else now
+        ttl = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
+        out: list[dict] = []
+        for sid, ent in (getattr(self, "_last_go", None) or {}).items():
+            try:
+                unique, ts = ent[0], float(ent[1])
+            except (TypeError, IndexError, ValueError):
+                continue
+            age = now - ts
+            out.append({"session_id": sid, "unique": unique,
+                        "age_sec": round(age, 1), "ttl_sec": ttl,
+                        "valid": age <= ttl})
+        return out
+
+    def ctx_frontier_view(self, session_id: str | None = None,
+                          now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        src = getattr(self, "_ctx_frontier", None)
+        out: list[dict] = []
+        for sid, rec in (src if isinstance(src, dict) else {}).items():
+            if session_id and sid != session_id:
+                continue
+            try:
+                b, ts = int(rec[0]), float(rec[1])
+            except (TypeError, IndexError, ValueError):
+                continue
+            out.append({"session_id": sid, "boundary": b,
+                        "age_sec": round(now - ts, 1)})
+        return out
+
+    def prefix_fp_view(self, session_id: str | None = None) -> list[dict]:
+        now = time.time()
+        src = getattr(self, "_prefix_fp", None)
+        out: list[dict] = []
+        for sid, rec in (src if isinstance(src, dict) else {}).items():
+            if session_id and sid != session_id:
+                continue
+            try:
+                h_body, h_sys, ts = rec[0], rec[1], float(rec[2])
+            except (TypeError, IndexError, ValueError):
+                continue
+            out.append({"session_id": sid, "body_fp": h_body,
+                        "sys_fp": h_sys, "age_sec": round(now - ts, 1)})
+        return out
+
+    def session_dep_guard_view(self, now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        guard = self._guard_sec()
+        out: list[dict] = []
+        for u, ent in (self._dep_sess() or {}).items():
+            try:
+                sid, ts = str(ent[0] or ""), float(ent[1] or 0.0)
+            except (TypeError, IndexError, ValueError):
+                continue
+            out.append({"unique": u, "session_id": sid,
+                        "age_sec": round(now - ts, 1),
+                        "guard_sec": guard,
+                        "expired": (now - ts) >= guard})
+        out.sort(key=lambda r: -r["age_sec"])
+        return out

@@ -946,7 +946,9 @@ app.include_router(admin_api)
 app.include_router(bootstrap_api)
 
 # --- Observability: Trace ID, JSON logging, Prometheus /metrics ---
-from .observability import setup_observability, setup_replay_endpoint
+from .observability import (
+    setup_observability, setup_replay_endpoint, render_prometheus,
+)
 _obs_enabled = os.environ.get("GATEWAY_OBSERVABILITY", "1").strip() != "0"
 if _obs_enabled:
     setup_observability(
@@ -1055,30 +1057,16 @@ async def healthz() -> dict:
 
 @app.get("/metrics")
 async def metrics_endpoint():
-    """Formato testo Prometheus. Loopback-only come tutto il servizio."""
+    """Formato testo Prometheus. Unica route /metrics. Loopback-only.
+
+    Espone SIA le metriche HTTP di observability SIA tutti gli nx_* di
+    app.metrics. I gauge di stato router sono aggiornati ad ogni scrape (prima
+    erano settati in una route shadowed -> mai emessi).
+    """
     metrics.set_gauge("nx_cooldown_active", len(router._cooldown))
     metrics.set_gauge("nx_sticky_active", len(router._sticky))
-    return PlainTextResponse(metrics.render(),
-                             media_type="text/plain; version=0.0.4")
-
-
-@app.post("/admin/reload")
-async def admin_reload(request: Request):
-    auth = authn.authenticate(request.headers.get("authorization"))
-    if not auth.ok or auth.mode != "master":
-        return _unauthorized(auth.error or "admin only")
-    config.reload()
-    fresh = Policy.load_or_default(POLICY_PATH)
-    router.policy = fresh
-    globals()["policy"] = fresh
-    try:
-        router.apply_quirks()          # i flag quirk sono in-memory (P2-9)
-    except Exception:
-        pass
-    return {"reloaded": True, "profiles": config.profiles,
-            "deployments": sum(len(v) for v in config.groups.values()),
-            "policy": {"step_up_pct": fresh.step_up_pct,
-                       "aliases": len(fresh.aliases)}}
+    body = metrics.render() + render_prometheus()
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
 # ------------------------------------------------------------------- models

@@ -415,3 +415,50 @@ class WarmMixin:
             return set()
         return {str(d.get("api_key") or "") for d in pool
                 if d.get("api_key")}
+
+    # ---------------------------------------------------- VISTA WARM (read-only)
+    def warm_pool_view(self, session_id: str | None = None,
+                       now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        ttl = self._warm_ttl()
+        idle_min = float(getattr(self.policy, "warm_borrow_idle_sec",
+                                 240.0) or 0.0)
+        try:
+            lendable = self._lendable_set(now)
+        except Exception:                              # noqa: BLE001
+            lendable = set()
+        sessions: dict[str, dict] = {}
+        for u, ent in list((self._dep_sess() or {}).items()):
+            try:
+                owner, ts = str(ent[0] or ""), float(ent[1] or 0.0)
+            except (TypeError, IndexError, ValueError):
+                continue
+            if session_id and owner != session_id:
+                continue
+            if now - ts > ttl:
+                continue
+            try:
+                idle = self._dep_idle_age(u, now)
+            except Exception:                          # noqa: BLE001
+                idle = 0.0
+            dep = self.config.deployment_by_unique(u) or {}
+            sessions.setdefault(owner, {"owned": []})["owned"].append({
+                "unique": u, "model": dep.get("model"),
+                "group": dep.get("group"), "provider": dep.get("provider"),
+                "age_sec": round(now - ts, 1),
+                "idle_sec": round(idle, 1),
+                "lendable": u in lendable,
+                "holder": u == self.session_holder(owner),
+            })
+        return {
+            "enabled": bool(getattr(self.policy, "warm_pool_enabled", True)),
+            "ttl_sec": round(ttl, 1),
+            "borrow_enabled": bool(getattr(self.policy, "warm_borrow_enabled",
+                                           True)),
+            "borrow_idle_sec": idle_min,
+            "lendable": sorted(lendable),
+            "sessions": sessions,
+            "totals": {"sessions": len(sessions),
+                       "owned": sum(len(v["owned"]) for v in sessions.values()),
+                       "lendable": len(lendable)},
+        }

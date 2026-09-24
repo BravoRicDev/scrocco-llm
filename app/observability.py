@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
@@ -197,41 +197,47 @@ class MetricsCollector:
     def generate_prometheus(self) -> str:
         """Genera output in formato Prometheus text exposition."""
         lines = []
+        typed: set[str] = set()
 
-        # Counters
+        # Counters: UNA sola riga # TYPE per nome metrica (emetterla dentro il
+        # loop delle label produceva TYPE duplicati -> scrape rifiutato).
         for key, value in self._counters.items():
-            lines.append(f"# TYPE {key.split('{')[0]} counter")
+            base = key.split("{")[0]
+            if base not in typed:
+                lines.append(f"# TYPE {base} counter")
+                typed.add(base)
             lines.append(f"{key} {value}")
 
         # Gauges
         for key, value in self._gauges.items():
-            lines.append(f"# TYPE {key.split('{')[0]} gauge")
+            base = key.split("{")[0]
+            if base not in typed:
+                lines.append(f"# TYPE {base} gauge")
+                typed.add(base)
             lines.append(f"{key} {value}")
 
-        # Histograms (solo count, sum, buckets basilari)
+        # Histograms. Le osservazioni sono in MILLISECONDI (nome "*_ms"): i
+        # boundary DEVONO essere in ms (prima 0.05..5.0 -> un 300ms finiva
+        # comunque in +Inf).
         for key, values in self._histograms.items():
             if not values:
                 continue
-            base_name = key.split('{')[0]
+            base_name = key.split("{")[0]
             labels = self._labels.get(key, {})
-            label_str = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items())) if labels else ""
+            label_str = ",".join(
+                f'{k}="{v}"' for k, v in sorted(labels.items())) if labels else ""
             prefix = f"{base_name}{{{label_str}}}" if label_str else base_name
             count = len(values)
             total = sum(values)
-            # p50, p95, p99
-            sorted_vals = sorted(values)
-            p50 = sorted_vals[count // 2]
-            p95 = sorted_vals[int(count * 0.95)] if count > 1 else sorted_vals[0]
-            p99 = sorted_vals[int(count * 0.99)] if count > 1 else sorted_vals[0]
-
-            lines.append(f"# TYPE {base_name} histogram")
+            if base_name not in typed:
+                lines.append(f"# TYPE {base_name} histogram")
+                typed.add(base_name)
             lines.append(f"{prefix}_count {count}")
             lines.append(f"{prefix}_sum {total}")
-            lines.append(f'{prefix}_bucket{{le="0.05"}} {sum(1 for v in values if v <= 0.05)}')
-            lines.append(f'{prefix}_bucket{{le="0.1"}} {sum(1 for v in values if v <= 0.1)}')
-            lines.append(f'{prefix}_bucket{{le="0.5"}} {sum(1 for v in values if v <= 0.5)}')
-            lines.append(f'{prefix}_bucket{{le="1.0"}} {sum(1 for v in values if v <= 1.0)}')
-            lines.append(f'{prefix}_bucket{{le="5.0"}} {sum(1 for v in values if v <= 5.0)}')
+            for bound in _HIST_BUCKETS_MS:
+                lines.append(
+                    f'{prefix}_bucket{{le="{bound}"}} '
+                    f"{sum(1 for v in values if v <= bound)}")
             lines.append(f'{prefix}_bucket{{le="+Inf"}} {count}')
 
         return "\n".join(lines) + "\n"
@@ -239,6 +245,22 @@ class MetricsCollector:
 
 # Istanza globale
 metrics_collector = MetricsCollector()
+
+# Bucket degli istogrammi in MILLISECONDI (le metriche *_ms ricevono ms).
+_HIST_BUCKETS_MS: tuple[int, ...] = (
+    5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+)
+
+# La route /metrics e' registrata UNA sola volta in app/main.py. Questo flag
+# abilita l'inclusione del testo delle metriche HTTP nel corpo unico.
+_PROM_ENABLED = False
+
+
+def render_prometheus() -> str:
+    """Testo Prometheus delle metriche HTTP (vuoto se disabilitate)."""
+    if not _PROM_ENABLED:
+        return ""
+    return metrics_collector.generate_prometheus()
 
 
 def record_request_metrics(
@@ -252,30 +274,6 @@ def record_request_metrics(
     labels = {"method": method, "path": path, "status": str(status)}
     metrics_collector.inc_counter("http_requests_total", 1.0, labels)
     metrics_collector.observe_histogram("http_request_duration_ms", duration_ms, labels)
-
-
-def record_router_metrics(
-    group: str,
-    selected: str | None,
-    need: str | None,
-    latency_ms: float,
-    success: bool,
-) -> None:
-    """Registra metriche per il routing."""
-    labels = {"group": group, "selected": selected or "none", "need": need or "none"}
-    metrics_collector.inc_counter("router_selections_total", 1.0, labels)
-    metrics_collector.observe_histogram("router_selection_latency_ms", latency_ms, labels)
-    metrics_collector.inc_counter("router_outcomes_total", 1.0, {**labels, "success": str(success).lower()})
-
-
-def record_circuit_breaker_metrics(
-    provider: str,
-    state: str,
-    key_hash: str,
-) -> None:
-    """Registra metriche per circuit breaker."""
-    labels = {"provider": provider, "state": state, "key_hash": key_hash[:8]}
-    metrics_collector.inc_counter("circuit_breaker_state_changes_total", 1.0, labels)
 
 
 def setup_observability(
@@ -309,11 +307,12 @@ def setup_observability(
     if enable_trace_id:
         app.add_middleware(TraceIDMiddleware, header_name=trace_header)
 
-    # Prometheus /metrics endpoint
-    if enable_prometheus:
-        @app.get("/metrics", include_in_schema=False)
-        async def metrics_endpoint():
-            return PlainTextResponse(metrics_collector.generate_prometheus(), media_type="text/plain")
+    # La route /metrics e' registrata UNA sola volta in app/main.py. Qui ci
+    # limitiamo ad abilitare il testo delle metriche HTTP: registrarla anche
+    # qui la rendeva l'handler VINCENTE (Starlette usa la PRIMA route) e i
+    # ~50 nx_* di app.metrics non erano mai esposti.
+    global _PROM_ENABLED
+    _PROM_ENABLED = enable_prometheus
 
     log.info("observability configured", extra={
         "json_logging": enable_json_logging,
@@ -378,11 +377,26 @@ def add_replay_entry(
     replay_buffer.add(entry)
 
 
+def _require_master(request: Request) -> JSONResponse | None:
+    """Guardia master condivisa (lazy import: evita cicli admin->main)."""
+    from .admin import _require_master as _check
+    return _check(request)
+
+
 def setup_replay_endpoint(app: FastAPI) -> None:
-    """Aggiunge endpoint /admin/replay per debugging."""
+    """Aggiunge endpoint /admin/replay per debugging (master-only).
+
+    COMPAT: /admin/replay e' include_in_schema=False, non documentato, senza
+    consumer e senza scrittori (add_replay_entry non ha chiamanti): renderlo
+    master-only non rompe client. Il DELETE anonimo azzerava il buffer.
+    """
 
     @app.get("/admin/replay", include_in_schema=False)
-    async def replay_endpoint(limit: int = 100, trace_id: str | None = None):
+    async def replay_endpoint(request: Request, limit: int = 100,
+                              trace_id: str | None = None):
+        denied = _require_master(request)
+        if denied:
+            return denied
         if trace_id:
             entries = replay_buffer.get_by_trace_id(trace_id)
         else:
@@ -403,6 +417,9 @@ def setup_replay_endpoint(app: FastAPI) -> None:
         }
 
     @app.delete("/admin/replay", include_in_schema=False)
-    async def replay_clear():
+    async def replay_clear(request: Request):
+        denied = _require_master(request)
+        if denied:
+            return denied
         replay_buffer.clear()
         return {"ok": True, "message": "Replay buffer cleared"}

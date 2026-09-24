@@ -31,10 +31,12 @@ The admin API manages everything without editing files or restarting:
 | CSV | `GET/PUT /admin/csv` |
 | Backups | `GET /admin/backups`, `POST /admin/backups/restore` |
 | State / pressure | `GET /admin/state`, `POST /admin/cooldowns/clear`, `POST /admin/pressure/clear`, `POST /admin/pressure/inspect`, `POST /admin/sessions/release`, `GET /admin/sessions`, `GET /admin/sessions/{id}` |
+| Warm / drain (F4) | `GET /admin/warm`, `POST /admin/warm/wake`, `POST /admin/hosts/drain`, `POST /admin/hosts/undrain` |
+| Diag / reset (F2-4) | `GET /admin/policy/schema`, `GET /admin/keys/soft`, `GET /admin/circuits`, `POST /admin/metrics/reset`, `POST /admin/scores/reset`, `POST /admin/sessions/purge`, `POST /admin/keys/leases/clear` |
 | Profiles | `GET /admin/profiles`, `POST /admin/profiles/purge` |
 | Insights / stats | `GET /admin/insights`, `/admin/insights/summary`, `/admin/insights/leaderboard`, `/admin/stats/{summary,models,tokens,cache,sessions,deployments,providers}`, `GET /admin/providers/health` |
 | Diagnostics | `GET /admin/logs/calls`, `/admin/logs/errors`, `GET /admin/repairs`, `GET /admin/history`, `GET /admin/tuning`, `GET /admin/guide` |
-| Misc | `POST /admin/reload`, `POST /admin/playground`, `POST /admin/capabilities/audit`, `POST /admin/capabilities/seed-from-map` |
+| Misc | `POST /admin/reload`, `POST /admin/playground`, `POST /admin/capabilities/audit`, `POST /admin/capabilities/seed-from-map`, `GET`/`DELETE /admin/replay` (master-only, not in OpenAPI) |
 | MCP config | `GET /admin/mcp/config/tools`, `POST /admin/mcp/config/execute`, `POST /admin/mcp/config/call` |
 
 > Admin `POST` endpoints expect a JSON body: send `-d '{}'` with
@@ -78,8 +80,10 @@ under `var/backups/`.
 - Per-request debug: set `GATEWAY_DEBUG_SNIFF=1` to dump input/output to
   `var/debug-sniff.log`; `SNIFF_HEADERS=1` logs the headers actually sent
   upstream (opencode identity, spoof, session).
-- Metrics: `/metrics` (`nx_*` counters/gauges: cooldowns active, canary,
-  hedges, opencode headers, content-string, …).
+- Metrics: `/metrics` serves BOTH the observability HTTP collector
+  (`http_*`/`router_*` request metrics) AND the `nx_*` counters/gauges
+  (cooldowns active, canary, hedges, opencode headers, content-string, …) —
+  unified in Phase 1 (no shadowed route, single owner).
 - TUI: `requirements-tui.txt` provides a textual dashboard/console
   (`tui/`). It reads `GATEWAY_URL` (default `http://127.0.0.1:4001`) and the
   master key.

@@ -18,7 +18,7 @@ defaults observe first, punish later.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +162,347 @@ class QcJson:
     # schema nel prompt per i provider NON in native_schema_providers.
     downgrade_response_format: bool = True
     native_schema_providers: tuple[str, ...] = ("openai", "azure")
+
+
+# ------------------------------------------------------------- Fase 2: schema
+# Mappa le SOLO eccezioni: campo canonico -> percorso YAML. I campi non
+# elencati vivono in cima al file con la stessa chiave del campo.
+YAML_PATHS: dict[str, str] = {
+    # --- warm_pool.* ---
+    "warm_pool_enabled": "warm_pool.enabled",
+    "warm_pool_ttl_sec": "warm_pool.ttl_sec",
+    "warm_pool_max_attempts": "warm_pool.max_attempts",
+    "warm_pool_allow_slow": "warm_pool.allow_slow",
+    "warm_refill_enabled": "warm_pool.refill_enabled",
+    "warm_ready_min": "warm_pool.ready_min",
+    "warm_ready_rpm_adaptive": "warm_pool.ready_min_adaptive",
+    "warm_ready_rpm_window_sec": "warm_pool.ready_min_rpm_window_sec",
+    "warm_ready_rpm_base": "warm_pool.ready_min_rpm_base",
+    "warm_ready_rpm_step": "warm_pool.ready_min_rpm_step",
+    "warm_ready_min_max": "warm_pool.ready_min_max",
+    "canary_warm_last": "warm_pool.canary_warm_last",
+    "warm_refill_default_out_tokens": "warm_pool.refill_default_out_tokens",
+    "warm_refill_max_inflight": "warm_pool.max_inflight",
+    "warm_refill_wake_max_attempts": "warm_pool.wake_max_attempts",
+    "warm_borrow_enabled": "warm_pool.borrow_enabled",
+    "warm_borrow_idle_sec": "warm_pool.borrow_idle_sec",
+    "warm_borrow_selectable": "warm_pool.borrow_selectable",
+    "nonstream_canary_allowed": "warm_pool.nonstream_canary_allowed",
+    "stream_slow_race_after_ms": "warm_pool.slow_race_after_ms",
+    "nonstream_slow_race_after_ms": "warm_pool.nonstream_slow_race_after_ms",
+    "slow_canary_after_ms": "warm_pool.slow_canary_after_ms",
+    "stream_slow_race_canaries": "warm_pool.slow_race_canaries",
+    "slow_race_max_warm": "warm_pool.slow_race_max_warm",
+    "warm_pick_fastest": "warm_pool.warm_pick_fastest",
+    "canary_provider_sweep_enabled": "warm_pool.canary_provider_sweep",
+    "provider_alternation_enabled": "warm_pool.provider_alternation",
+    # --- cache_aware.* ---
+    "cache_aware_enabled": "cache_aware.enabled",
+    "cache_prefix_audit": "cache_aware.prefix_audit",
+    "cache_prefer_last_success": "cache_aware.prefer_last_success",
+    "cache_holder_ttl_sec": "cache_aware.holder_ttl_sec",
+    "cache_skip_probe_when_holder": "cache_aware.skip_probe_when_holder",
+    "cache_ctx_truncation_enabled": "cache_aware.context_truncation.enabled",
+    "cache_ctx_keep_turns": "cache_aware.context_truncation.keep_turns",
+    "cache_ctx_max_tool_output_chars":
+        "cache_aware.context_truncation.max_tool_output_chars",
+    "cache_ctx_min_saved_tokens":
+        "cache_aware.context_truncation.min_saved_tokens",
+    "cache_ctx_min_ctx_tokens": "cache_aware.context_truncation.min_ctx_tokens",
+    "cache_ctx_switch_min_tokens":
+        "cache_aware.context_truncation.switch_min_tokens",
+    "cache_ctx_head_chars": "cache_aware.context_truncation.head_chars",
+    "cache_ctx_tail_chars": "cache_aware.context_truncation.tail_chars",
+    "cache_ctx_tool_args_max_chars":
+        "cache_aware.context_truncation.tool_args_max_chars",
+    "cache_ctx_json_struct_max_items":
+        "cache_aware.context_truncation.json_struct_max_items",
+    "cache_ctx_json_struct_head":
+        "cache_aware.context_truncation.json_struct_head",
+    "cache_ctx_json_struct_tail":
+        "cache_aware.context_truncation.json_struct_tail",
+    "cache_ctx_cite_min_freq": "cache_aware.context_truncation.cite_min_freq",
+    "cache_ctx_keep_tail_pct": "cache_aware.context_truncation.keep_tail_pct",
+    "cache_ctx_keep_error_outputs":
+        "cache_aware.context_truncation.keep_error_outputs",
+    "cache_ctx_on_deployment_switch":
+        "cache_aware.context_truncation.on_deployment_switch",
+    "cache_ctx_stub_text": "cache_aware.context_truncation.stub_text",
+    "cache_ctx_abs_headroom_ratio":
+        "cache_aware.context_truncation.abs_headroom_ratio",
+    "cache_ctx_reasoning_headroom_ratio":
+        "cache_aware.context_truncation.reasoning_headroom_ratio",
+    "cache_ctx_reasoning_reserve_ratio":
+        "cache_aware.context_truncation.reasoning_reserve_ratio",
+    "cache_ctx_cite_retention": "cache_aware.context_truncation.cite_retention",
+    # --- debug.* ---
+    "debug_sniff_enabled": "debug.sniff.enabled",
+    "debug_sniff_retention_hours": "debug.sniff.retention_hours",
+    # --- dynamic_scoring.* ---
+    "dynamic_scoring_enabled": "dynamic_scoring.enabled",
+    "dynamic_scoring_latency_p95_weight": "dynamic_scoring.latency_p95_weight",
+    "dynamic_scoring_error_rate_weight": "dynamic_scoring.error_rate_weight",
+    "dynamic_scoring_throughput_weight": "dynamic_scoring.throughput_weight",
+    # --- circuit_breaker.* ---
+    "circuit_breaker_enabled": "circuit_breaker.enabled",
+    "circuit_breaker_threshold": "circuit_breaker.threshold",
+    "circuit_breaker_timeout": "circuit_breaker.timeout",
+    "circuit_breaker_half_open_requests": "circuit_breaker.half_open_requests",
+    "circuit_breaker_scope": "circuit_breaker.scope",
+    # --- tool_repair.* ---
+    "tool_repair_enabled": "tool_repair.enabled",
+    "tool_repair_default_level": "tool_repair.default_level",
+    "tool_repair_disable_for_google": "tool_repair.disable_for_google",
+    "tool_repair_max_args_size": "tool_repair.max_args_size",
+    "tool_repair_annotate_reasoning": "tool_repair.annotate_reasoning",
+    "tool_repair_fake_call_enabled": "tool_repair.fake_call.enabled",
+    "tool_repair_fake_call_patterns": "tool_repair.fake_call.patterns",
+    "tool_repair_fake_call_max_escalations":
+        "tool_repair.fake_call.max_escalations",
+    "tool_repair_fake_call_hold_max_bytes":
+        "tool_repair.fake_call.stream_hold_max_bytes",
+    "tool_repair_fake_call_hold_timeout_ms":
+        "tool_repair.fake_call.stream_hold_timeout_ms",
+    # --- history_normalize.* ---
+    "history_normalize_enabled": "history_normalize.enabled",
+    "history_normalize_tail_only": "history_normalize.tail_only",
+    "history_normalize_drop_orphan_tool": "history_normalize.drop_orphan_tool",
+    "history_normalize_drop_dangling_tool_calls":
+        "history_normalize.drop_dangling_tool_calls",
+    "history_normalize_drop_empty_assistant":
+        "history_normalize.drop_empty_assistant",
+    "history_normalize_dedupe_system": "history_normalize.dedupe_system",
+    "history_normalize_reasoning_content_max_chars":
+        "history_normalize.reasoning_content_max_chars",
+    "history_normalize_reasoning_keep_recent":
+        "history_normalize.reasoning_keep_recent",
+    # --- sampling_defaults.* (loop canonico qui; loop_detector = alias) ---
+    "sampling_enabled": "sampling_defaults.enabled",
+    "sampling_allow_providers": "sampling_defaults.allow_providers",
+    "sampling_provider_params": "sampling_defaults.provider_params",
+    "loop_detector_enabled": "sampling_defaults.loop.enabled",
+    "loop_ngram_size": "sampling_defaults.loop.ngram_size",
+    "loop_repeats": "sampling_defaults.loop.repeats",
+    "loop_toolcall_repeat": "sampling_defaults.loop.toolcall_repeat",
+    "loop_min_tokens": "sampling_defaults.loop.min_tokens",
+    # --- corrective_retry.* ---
+    "corrective_retry_enabled": "corrective_retry.enabled",
+    "corrective_retry_max_attempts": "corrective_retry.max_attempts",
+    # --- text_toolcall.* ---
+    "text_toolcall_enabled": "text_toolcall.enabled",
+    "text_toolcall_require_declared_name":
+        "text_toolcall.require_declared_name",
+    "text_toolcall_allow_formats": "text_toolcall.allow_formats",
+    "text_toolcall_max_bytes": "text_toolcall.max_bytes",
+    "text_toolcall_hold_until_close": "text_toolcall.hold_until_close",
+    "text_toolcall_fallback_to_escalation":
+        "text_toolcall.fallback_to_escalation",
+    # --- toolcall_truncation.* ---
+    "toolcall_truncation_enabled": "toolcall_truncation.enabled",
+    "toolcall_truncation_holdback": "toolcall_truncation.holdback",
+    "toolcall_truncation_cooldown_sec": "toolcall_truncation.cooldown_sec",
+    # --- session_dep_guard.* ---
+    "session_dep_guard_enabled": "session_dep_guard.enabled",
+    "session_dep_guard_sec": "session_dep_guard.sec",
+    # --- capability_routing.* ---
+    "capability_routing_enabled": "capability_routing.enabled",
+    "cap_auto_learn": "capability_routing.auto_learn",
+    "cap_auto_learn_threshold": "capability_routing.auto_learn_threshold",
+    "model_capabilities": "capability_routing.model_capabilities",
+    "capabilities_default": "capability_routing.capabilities_default",
+    "image_token_estimate": "capability_routing.image_token_estimate",
+    "images_chat_fallback": "capability_routing.images_chat_fallback",
+    "image_refs_hard_max": "capability_routing.image_refs_hard_max",
+    "multimodal_last_resort": "capability_routing.multimodal_last_resort",
+    "gen_same_model_failover": "capability_routing.gen_same_model_failover",
+    "dims_ladder_floor": "capability_routing.dims_ladder_floor",
+    "free_last_resort_enabled": "capability_routing.free_last_resort",
+    "free_last_resort_extreme": "capability_routing.free_last_resort_extreme",
+    # --- images.* ---
+    "images_store_enabled": "images.store_enabled",
+    "images_store_ttl_sec": "images.store_ttl_sec",
+    "images_store_max_items": "images.store_max_items",
+    "images_store_max_bytes": "images.store_max_bytes",
+    "images_url_base": "images.url_base",
+    "images_mirror_remote": "images.mirror_remote",
+    "images_remote_timeout_sec": "images.remote_timeout_sec",
+    "images_remote_max_bytes": "images.remote_max_bytes",
+    # --- go_refund.* ---
+    "go_refund_enabled": "go_refund.enabled",
+    "go_refund_pct": "go_refund.pct",
+    "go_refund_min_turns": "go_refund.min_turns",
+    "go_refund_max_turns": "go_refund.max_turns",
+    "go_refund_trigger_ms": "go_refund.trigger_ms",
+    # --- go_balance.* ---
+    "go_balance_enabled": "go_balance.enabled",
+    "go_balance_flat_pool": "go_balance.flat_pool",
+    "go_balance_window_sec": "go_balance.window_sec",
+    # --- capability_groups.* ---
+    "cap_groups_enabled": "capability_groups.enabled",
+    "cap_groups_on_missing": "capability_groups.on_missing",
+    # --- cap_fair_share.* ---
+    "cap_fair_share_enabled": "cap_fair_share.enabled",
+    "cap_fair_share_caps": "cap_fair_share.caps",
+    "cap_fair_share_window_sec": "cap_fair_share.window_sec",
+}
+
+# Campi leggibili SIA in cima al file (chiave piatta) SIA nel blocco annidato.
+# from_dict accetta entrambe le forme: la validazione deve accettarle entrambe.
+DUAL_YAML_KEYS: frozenset[str] = frozenset({
+    "warm_borrow_enabled", "warm_borrow_idle_sec",
+    "warm_borrow_selectable", "nonstream_canary_allowed",
+})
+
+NESTED_BLOCKS: dict[str, type] = {"qc_json": QcJson, "qc_sanity": QcSanity}
+EXTRA_YAML_KEYS: frozenset[str] = frozenset({"profiles", "loop_detector"})
+PROFILE_DYNAMIC_FIELDS: dict[str, str] = {
+    "profile_step_up_pct": "profiles.*.step_up_pct",
+    "profile_speed_min_dim_k": "profiles.*.speed_min_dim_k",
+    "profile_speed_qualify_pct": "profiles.*.speed_qualify_pct",
+}
+FREE_FORM_FIELDS: frozenset[str] = frozenset({
+    "pricing", "budget_guard", "scoring_weights",
+    "effort_temperature_overrides", "aliases", "alias_keys", "client_keys",
+    "retry_after_floor_by_provider", "quirks",
+})
+SECRET_FIELDS: frozenset[str] = frozenset({"alias_keys", "client_keys"})
+FIELD_RANGES: dict[str, tuple[float | None, float | None]] = {
+    "step_up_pct": (1, 200), "speed_qualify_pct": (1, 200),
+    "estimate_divisor": (1, None), "estimate_adaptive_auto_min_n": (1, None),
+    "estimate_adaptive_auto_max_delta_pct": (0, 100),
+    "estimate_calib_alpha": (0.0, 1.0), "session_estimate_margin": (0.5, 3.0),
+    "conc_token_ratio": (0.0, 5.0), "slow_latency_rel_mult": (0, 100),
+    "cooldown_probe_after_ratio": (0, 1), "cooldown_jitter_ratio": (0, 1),
+    "cooldown_jitter_sec_max": (0, 60), "circuit_breaker_threshold": (1, None),
+    "circuit_breaker_timeout": (0, None),
+    "circuit_breaker_half_open_requests": (1, None),
+    "loop_ngram_size": (2, 64), "loop_repeats": (2, 16),
+    "loop_toolcall_repeat": (2, 16), "loop_min_tokens": (1, 2048),
+    "history_normalize_reasoning_content_max_chars": (-1, 200000),
+    "history_normalize_reasoning_keep_recent": (0, 20),
+    "rate_hint_ttl_sec": (0, 300), "rate_hint_proven_sec": (0, 86400),
+    "key_soft_max_sec": (10, 86400), "cold_spread_pct": (0.0, 1.0),
+    "degraded_healthy_ratio": (0.0, 1.0), "cap_auto_learn_threshold": (1, 50),
+    "health_interval_sec": (60, None), "watchdog_cooldown_sec": (0, 3600),
+    "max_attempts": (1, 8), "stream_first_content_ms": (2000, 900000),
+    "stream_first_content_mult": (0.5, 30.0),
+    "stream_first_content_floor_ms": (0, 900000),
+    "stream_hedge_delay_ms": (0, 60000),
+    "stream_hedge_ttft_frac": (0.05, 5.0), "stream_hedge_min_ms": (0, 60000),
+    "stream_hedge_max_ms": (0, 60000), "stream_hedge_tiers": (1, 2),
+    "stream_hedge_max_races": (0, 64), "stream_commit_min_chars": (0, 2000),
+    "stream_total_deadline_ms": (5000, 3600000),
+    "stream_hold_idle_ms": (1000, 600000),
+    "stream_hold_max_buffer_bytes": (1048576, 524288000),
+    "qc_sanity.min_chars": (0, 1000),
+}
+
+
+def _field_path(name: str) -> str:
+    return YAML_PATHS.get(name, name)
+
+
+def _yaml_paths() -> set[str]:
+    paths: set[str] = set()
+    for f in fields(Policy):
+        if f.name in NESTED_BLOCKS or f.name in PROFILE_DYNAMIC_FIELDS:
+            continue
+        p = _field_path(f.name)
+        if f.name in FREE_FORM_FIELDS:
+            p = p + ".*"
+        paths.add(p)
+        if f.name in DUAL_YAML_KEYS:
+            paths.add(f.name)   # forma piatta accettata da from_dict
+    for blk, cls in NESTED_BLOCKS.items():
+        for f in fields(cls):
+            paths.add(f"{blk}.{f.name}")
+    for k in EXTRA_YAML_KEYS:
+        paths.add(k + ".*")
+    return paths
+
+
+def valid_yaml_keys() -> frozenset[str]:
+    return frozenset(p.split(".", 1)[0] for p in _yaml_paths())
+
+
+def _build_tree() -> dict:
+    tree: dict = {}
+    for p in _yaml_paths():
+        node = tree
+        parts = p.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = True
+    return tree
+
+
+def _walk_unknown(node, prefix: str, value, out: list[str]) -> None:
+    if not isinstance(node, dict) or not isinstance(value, dict):
+        return
+    if node.get("*") is True:
+        return
+    for k, v in value.items():
+        p = f"{prefix}.{k}" if prefix else str(k)
+        child = node.get(str(k))
+        if child is None:
+            out.append(p)
+        else:
+            _walk_unknown(child, p, v, out)
+
+
+def unknown_yaml_paths(raw: dict) -> list[str]:
+    out: list[str] = []
+    _walk_unknown(_build_tree(), "", raw, out)
+    return out
+
+
+def _default_of(f) -> Any:
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:   # type: ignore[misc]
+        try:
+            return f.default_factory()
+        except Exception:
+            return None
+    return None
+
+
+def _spec(pol: "Policy", block: str | None, f) -> dict:
+    path = f"{block}.{f.name}" if block else _field_path(f.name)
+    if not block and f.name in PROFILE_DYNAMIC_FIELDS:
+        path = PROFILE_DYNAMIC_FIELDS[f.name]
+    if not block and f.name in FREE_FORM_FIELDS:
+        path = path + ".*"
+    holder = pol if block is None else getattr(pol, block)
+    rng = FIELD_RANGES.get(path) or FIELD_RANGES.get(f.name)
+    secret = f.name in SECRET_FIELDS
+    return {
+        "name": f.name, "yaml_path": path, "block": block,
+        "type": str(f.type), "default": _default_of(f),
+        "effective": None if secret else getattr(holder, f.name),
+        "min": rng[0] if rng else None, "max": rng[1] if rng else None,
+        "settable": f.name not in PROFILE_DYNAMIC_FIELDS, "secret": secret,
+    }
+
+
+def policy_schema(pol: "Policy") -> dict:
+    entries: list[dict] = []
+    for f in fields(Policy):
+        if f.name in NESTED_BLOCKS:
+            continue
+        entries.append(_spec(pol, None, f))
+    for blk, cls in NESTED_BLOCKS.items():
+        for f in fields(cls):
+            entries.append(_spec(pol, blk, f))
+    return {"version": 1, "count": len(entries),
+            "yaml_keys": sorted(valid_yaml_keys()), "fields": entries}
+
+
+def policy_effective_all(pol: "Policy") -> dict:
+    out = asdict(pol)
+    for name in SECRET_FIELDS:
+        out.pop(name, None)
+    return out
 
 
 @dataclass
@@ -1966,6 +2307,13 @@ class Policy:
         if _ee is not None:
             p.enable_effort_temperature_override = _coerce_bool(
                 _ee, "enable_effort_temperature_override")
+        _eiw = raw.get("effort_intel_weight")
+        if _eiw is not None:
+            if isinstance(_eiw, bool) or not isinstance(_eiw, (int, float)) \
+                    or float(_eiw) < 0:
+                raise ValueError(
+                    "effort_intel_weight deve essere un numero >= 0")
+            p.effort_intel_weight = float(_eiw)
         _eto = raw.get("effort_temperature_overrides")
         if _eto is not None:
             if not isinstance(_eto, dict):
@@ -2942,6 +3290,7 @@ class Policy:
             p.cooldown_escalation = _coerce_bool(ce, "cooldown_escalation")
         _set_int(p, raw, "max_cooldown_sec", minimum=10)
         _set_int(p, raw, "timeout_cooldown_mult", minimum=1)
+        _set_int(p, raw, "retire_after_days", minimum=1)
 
         cm = raw.get("cooldown_mode")
         if cm is not None:

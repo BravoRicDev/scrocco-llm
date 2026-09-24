@@ -8,11 +8,14 @@ persistence: history lives in logs/Grafana, not in the gateway.
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from collections import OrderedDict, defaultdict
 from typing import Any
+
+log = logging.getLogger("nx.metrics")
 
 _lock = threading.Lock()
 _started = time.time()
@@ -33,6 +36,14 @@ _latency_count: "OrderedDict[str, float]" = OrderedDict()
 def inc(name: str, labels: tuple[str, ...] = (), value: float = 1.0) -> None:
     with _lock:
         _counters[name][labels] += value
+        # Auto-registrazione: una metrica CON label non dichiarata otterrebbe
+        # nomi placeholder in render() (o serie duplicate). Registriamo qui
+        # nomi deterministici e logghiamo: un declare() esplicito e' meglio.
+        if labels and name not in _metric_labels:
+            _metric_labels[name] = [f"label{i}" for i in range(len(labels))]
+            log.warning("[metrics] metrica %r non dichiarata: label "
+                        "auto-registrate %s (aggiungere declare())",
+                        name, _metric_labels[name])
 
 
 def set_gauge(name: str, value: float) -> None:
@@ -63,16 +74,21 @@ def render() -> str:
             for labels, v in sorted(series.items()):
                 lbl = ""
                 if labels:
+                    names = _label_names(name)
+                    if len(names) != len(labels):
+                        # declare() assente o arity incoerente: non perdere
+                        # mai la serie (nomi placeholder deterministici).
+                        names = [f"label{i}" for i in range(len(labels))]
                     parts = ",".join(
-                        f'{k}="{v}"' for k, v in zip(_label_names(name),
-                                                     labels))
+                        f'{k}="{_safe_label(str(val))}"'
+                        for k, val in zip(names, labels))
                     lbl = "{" + parts + "}"
                 lines.append(f"{name}{lbl} {v}")
         for name, v in sorted(_gauges.items()):
             lines.append(f"# TYPE {name} gauge")
             lines.append(f"{name} {v}")
         if _latency_sum:
-            lines.append("# TYPE nx_upstream_latency_ms gauge  # media")
+            lines.append("# TYPE nx_upstream_latency_ms gauge")
             for u, s in sorted(_latency_sum.items()):
                 n = _latency_count.get(u) or 1
                 safe = _safe_label(u)
@@ -82,7 +98,7 @@ def render() -> str:
 
 
 def reset() -> None:
-    """Solo per i test."""
+    """Reset per test e azione admin /admin/metrics/reset."""
     with _lock:
         _counters.clear()
         _gauges.clear()
@@ -138,3 +154,33 @@ declare("nx_client_fields_stripped_total", "field")
 declare("nx_opencode_headers_total", "result")
 declare("nx_learn_flag_total", "flag", "result")
 declare("nx_json_sse_total", "provider")
+# --- Contatori incrementati senza declare(): senza nomi di label render()
+# emetteva "{}" per ogni serie -> serie identiche duplicate e label perse.
+declare("nx_cache_audit_total", "audit")
+declare("nx_cache_hit_requests_total")
+declare("nx_chain_503_total", "reason")
+declare("nx_content_sanitized_total", "unique")
+declare("nx_corrective_retry_total", "unique", "kind")
+declare("nx_ctx_compacted_forced")
+declare("nx_ctxcompact_tool_total", "tool")
+declare("nx_ctxcompact_total", "status")
+declare("nx_ctx_overflow_total", "group")
+declare("nx_fake_toolcall_total", "unique", "result")
+declare("nx_go_refund_total", "kind")
+declare("nx_histnorm_total", "result")
+declare("nx_loop_detected_total", "unique", "reason")
+declare("nx_max_tokens_clamped")
+declare("nx_repair_events_total", "family", "kind", "outcome")
+declare("nx_resp_format_injected_total", "unique")
+declare("nx_sess_est_fallback_total")
+declare("nx_sess_est_samples_total")
+declare("nx_sess_est_used_total")
+declare("nx_slow_flag_total", "action")
+declare("nx_slow_race_total", "reason")
+declare("nx_struct_out_total", "unique", "status")
+declare("nx_template_tokens_stripped_total", "unique")
+declare("nx_text_toolcall_total", "unique", "result")
+declare("nx_tool_repair_total", "unique", "result")
+declare("nx_toolrepair_truncated_total", "tool")
+declare("nx_truncated_toolcall_total", "unique", "result")
+declare("nx_zen_dim_stay")

@@ -618,12 +618,15 @@ server, so agents can drive the gateway over JSON-RPC 2.0:
 * `POST /admin/mcp/config/call` → JSON-RPC 2.0 (`initialize`, `tools/list`,
   `tools/call`)
 
-48 tools cover policy, deployments (CRUD + bulk), profiles, CSV, backups,
-capabilities, runtime state, cooldowns, sessions (incl. `sessions_detail`),
-statistics (incl. `stats_sessions`, `tuning_get`), persisted scores
-(`deployments_stats`), provider health (`providers_health`), guide
-(`guide_get`), insights, logs and the playground. Legacy tool aliases are
-accepted alongside canonical names.
+59 tools cover policy (incl. `policy_schema_get`), deployments (CRUD + bulk),
+profiles, CSV, backups, capabilities, runtime state, cooldowns, warm pool
+(`warm_get`, `warm_wake`), soft-disabled keys (`keys_soft_get`), circuits
+(`circuits_get`), drain (`hosts_drain`, `hosts_undrain`), runtime resets
+(`metrics_reset`, `scores_reset`, `sessions_purge`, `keys_leases_clear`),
+sessions (incl. `sessions_detail`), statistics (incl. `stats_sessions`,
+`tuning_get`), persisted scores (`deployments_stats`), provider health
+(`providers_health`), guide (`guide_get`), insights, logs and the playground.
+Legacy tool aliases are accepted alongside canonical names.
 
 The same configuration surface is reachable through the **web layer** too:
 `/api/v1/stats/*`, `/api/v1/sessions[/:id]`, `/api/v1/tuning`,
@@ -676,7 +679,7 @@ HOW / WHY decisions were made. Read it before changing code.
 | `app/keyhealth.py` | persistent dead-key evidence, retirement lifecycle |
 | `app/ledger.py` | usage/cost ledger feeding `/admin/insights` |
 | `tui/` | Textual TUI: deployment CRUD, policy editor, observability (live/errors/leaderboard/sessions/statistics), session detail, MCP config browser, tuning view |
-| `app/admin.py` (MCP) | MCP config protocol: `/admin/mcp/config/{tools,execute,call}` (48 tools, JSON-RPC 2.0) |
+| `app/admin.py` (MCP) | MCP config protocol: `/admin/mcp/config/{tools,execute,call}` (59 tools, JSON-RPC 2.0) |
 
 ## Tuning (policy)
 

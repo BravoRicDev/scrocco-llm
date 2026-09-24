@@ -39,7 +39,7 @@ from .capabilities import canonical_family
 from .forwarder import UpstreamError, _client_attribution
 from .provider_models import DEFAULT_TTL_SEC, fetch_provider_models
 from .router import estimate_tokens, estimate_shadow_stats
-from .policy import Policy
+from .policy import Policy, policy_effective_all
 
 log = logging.getLogger("nx.admin")
 
@@ -618,7 +618,10 @@ async def state(request: Request):
                 "enabled": bool(getattr(pol, "session_dep_guard_enabled", True)),
                 "sec": int(getattr(pol, "session_dep_guard_sec", 900)),
                 "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
+                "entries": gw.router.session_dep_guard_view(),
             },
+            "provider_alternation": gw.router.provider_alternation_view(),
+            "probes_in_flight": gw.router.probes_in_flight_view(),
             "warm_pool": {
                 "enabled": bool(getattr(pol, "warm_pool_enabled", True)),
                 "ttl_sec": int(getattr(pol, "warm_pool_ttl_sec", 0) or 0),
@@ -658,6 +661,36 @@ async def state(request: Request):
             "cooldown_sec": pol.cooldown_sec,
         },
     }
+
+
+@admin_api.get("/warm", tags=["admin"])
+async def warm_state(request: Request):
+    """Warm pool reale: contenuto per sessione + prestabili (read-only)."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    return _gw().router.warm_pool_view()
+
+
+@admin_api.get("/keys/soft", tags=["admin"])
+async def keys_soft(request: Request):
+    """Soft-skip/blackout per chiave + hint X-RateLimit + quota giornaliera
+    autoprobe. Chiavi sempre come tag hash (mai in chiaro)."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    return _gw().router.key_soft_view()
+
+
+@admin_api.get("/circuits", tags=["admin"])
+async def circuits(request: Request):
+    """Circuit breaker per-modello (F25) e per-chiave/deployment."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    router = _gw().router
+    return {"models": router.model_circuits_view(),
+            **router.circuit_breakers_view()}
 
 
 @admin_api.post("/cooldowns/clear")
@@ -750,6 +783,191 @@ async def release_sessions(request: Request):
     return {"ok": True, "released": released}
 
 
+# ----------------------------------------------------- runtime actions (F4)
+@admin_api.post("/warm/wake")
+async def warm_wake(request: Request):
+    """Warm-wake forzato: sveglia deployment DORMIENTI (cooldown 429 maturo).
+    Body {"unique"} | {"group"} | {"session_id"}; `min_age_sec`, `limit`."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    body = body or {}
+    unique = str(body.get("unique") or "").strip() or None
+    group = str(body.get("group") or "").strip() or None
+    sid = str(body.get("session_id") or "").strip() or None
+    only_zen = bool(body.get("only_zen"))
+    if not (unique or group or sid):
+        return _err(400, "serve unique, group o session_id")
+    try:
+        limit = int(body.get("limit", 1))
+    except (TypeError, ValueError):
+        return _err(400, "limit non intero")
+    limit = max(1, min(limit, _tune(gw, "warm_refill_wake_max_attempts", 10)))
+    if unique:
+        dep = gw.config.deployment_by_unique(unique)
+        if dep is None:
+            return _err(404, f"deployment non trovato: {unique}")
+        targets = [dep]
+        mode = "unique"
+    else:
+        # `warm_wake_targets` inghiotte internamente un min_age_sec non
+        # numerico (fallback 3600): validiamo QUI esplicitamente -> 400.
+        min_age = body.get("min_age_sec")
+        if min_age is not None:
+            try:
+                min_age = float(min_age)
+            except (TypeError, ValueError):
+                return _err(400, "min_age_sec non numerico")
+        targets = gw.router.warm_wake_targets(
+            group=group, session_id=sid, only_zen=only_zen, limit=limit,
+            min_age_sec=min_age)
+        mode = "group" if group else "session"
+    if not targets:
+        return {"ok": True, "count": 0, "woken": [],
+                "note": "nessun dormiente eleggibile"}
+    cip, sess = _client_ip_of(request), _session_of(request)
+    attr = _client_attribution(request)
+    woken = []
+    async with httpx.AsyncClient() as http:
+        for dep in targets:
+            try:
+                out = await _probe_one(http, dep, True, client_ip=cip,
+                                       session=sess, attribution=attr)
+                if out.get("ok"):
+                    gw.router.clear_cooldown(dep["unique"])
+            except Exception as exc:               # noqa: BLE001
+                out = {"unique": dep.get("unique"), "ok": False,
+                       "error_class": type(exc).__name__}
+            woken.append({k: out.get(k) for k in
+                          ("unique", "ok", "latency_ms", "status",
+                           "error_class")})
+    journal.record(gw.VAR_DIR, "warm_wake", {
+        "mode": mode, "count": len(woken),
+        "ok": sum(1 for w in woken if w.get("ok")),
+        "targets": [w.get("unique") for w in woken]})
+    return {"ok": True, "count": len(woken), "woken": woken}
+
+
+@admin_api.post("/hosts/drain")
+async def drain_host(request: Request):
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    uniq = str((body or {}).get("unique") or "").strip()
+    if not uniq:
+        return _err(400, "serve unique")
+    dep = gw.config.deployment_by_unique(uniq)
+    if dep is None:
+        return _err(404, f"deployment non trovato: {uniq}")
+    if gw.router.is_draining(uniq):
+        return {"ok": True, "unique": uniq, "draining": True, "already": True}
+    try:
+        inflight = max(0, int((body or {}).get(
+            "inflight", gw.router.stats_for(uniq).inflight)))
+    except (TypeError, ValueError):
+        return _err(400, "inflight non intero")
+    gw.router.start_draining(uniq, dep, inflight, operator=True)
+    journal.record(gw.VAR_DIR, "hosts_drain",
+                   {"unique": uniq, "inflight": inflight})
+    return {"ok": True, "unique": uniq, "draining": True, "inflight": inflight}
+
+
+@admin_api.post("/hosts/undrain")
+async def undrain_host(request: Request):
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    uniq = str((body or {}).get("unique") or "").strip()
+    if not uniq:
+        return _err(400, "serve unique")
+    stopped = gw.router.stop_draining(uniq, purge_config=False)
+    journal.record(gw.VAR_DIR, "hosts_undrain",
+                   {"unique": uniq, "was_draining": stopped})
+    return {"ok": True, "unique": uniq, "undrained": stopped,
+            "already": not stopped}
+
+
+@admin_api.post("/metrics/reset")
+async def reset_metrics(request: Request):
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    metrics.reset()
+    journal.record(gw.VAR_DIR, "metrics_reset", {})
+    return {"ok": True, "reset": True}
+
+
+@admin_api.post("/scores/reset")
+async def reset_scores(request: Request):
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    body = body or {}
+    unique = str(body.get("unique") or "").strip() or None
+    model = str(body.get("model") or "").strip() or None
+    out = gw.router.reset_scores(unique=unique, model=model)
+    journal.record(gw.VAR_DIR, "scores_reset",
+                   {"unique": unique, "model": model,
+                    "base": out.get("base"), "provider": out.get("provider"),
+                    "key": out.get("key")})
+    return out
+
+
+@admin_api.post("/sessions/purge")
+async def purge_sessions(request: Request):
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    sid = str((body or {}).get("session_id") or "").strip() or None
+    out = gw.router.purge_sessions(sid)
+    journal.record(gw.VAR_DIR, "sessions_purge", {
+        "session_id": sid,
+        "purged": {k: v for k, v in out["purged"].items() if v}})
+    return out
+
+
+@admin_api.post("/keys/leases/clear")
+async def clear_key_leases(request: Request):
+    denied = _require_master(request)
+    if denied:
+        return denied
+    gw = _gw()
+    body, bad = await _json_body(request)
+    if bad:
+        return bad
+    uniq = str((body or {}).get("unique") or "").strip() or None
+    # Coerente con drain/warm_wake: unique inesistente -> 404. Un unique
+    # valido senza lease -> 200 con keys=0. La api_key non entra mai in output.
+    if uniq and gw.config.deployment_by_unique(uniq) is None:
+        return _err(404, f"deployment non trovato: {uniq}")
+    out = gw.router.clear_key_leases(uniq)
+    journal.record(gw.VAR_DIR, "keys_leases_clear",
+                   {"unique": uniq, "keys": out.get("keys"),
+                    "leases": out.get("leases")})
+    return out
+
+
 # ------------------------------------------------------------------ policy
 def _mask_configured(raw: dict) -> dict:
     """Copia di 'configured' con alias_keys mascherate: mai chiavi in chiaro
@@ -773,8 +991,7 @@ async def get_policy(request: Request):
         with open(gw.POLICY_PATH, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
     pol = gw.router.policy
-    return {"file": str(gw.POLICY_PATH), "configured": _mask_configured(raw),
-            "effective": {
+    effective = {
                 "service_name": pol.service_name,
                 "proxy_prefix": pol.proxy_prefix,
                 "legacy_prefixes": pol.legacy_prefixes,
@@ -872,7 +1089,58 @@ async def get_policy(request: Request):
                     "flat_pool": pol.go_balance_flat_pool,
                     "window_sec": pol.go_balance_window_sec,
                 },
-            }}
+            }
+    # ADDITIVO: tutti i campi (asdict); le chiavi esistenti hanno priorita'.
+    effective = {**policy_effective_all(pol), **effective}
+    effective["alias_keys_masked"] = {k: csv_store.mask_key(v)
+                                      for k, v in pol.alias_keys.items()}
+    effective["client_keys_masked"] = {k: csv_store.mask_key(v)
+                                       for k, v in pol.client_keys.items()}
+    return {"file": str(gw.POLICY_PATH),
+            "configured": _mask_configured(raw),
+            "effective": effective}
+
+
+@admin_api.get("/policy/schema")
+async def get_policy_schema(request: Request):
+    """GET /admin/policy/schema (master): descrizione COMPLETA e DERIVATA di
+    ogni manopola (Policy + QcJson + QcSanity)."""
+    if err := _require_master(request):
+        return err
+    from .policy import policy_schema
+    return policy_schema(_gw().router.policy)
+
+
+_POLICY_REPLACE_KEYS = frozenset({
+    "aliases", "pricing", "scoring_weights", "effort_temperature_overrides",
+    "profiles", "alias_keys", "client_keys",
+})
+
+
+def _deep_merge(base: dict, patch: dict) -> dict:
+    """Merge ricorsivo: dict+dict fusi in profondita'; ogni altro tipo
+    (liste incluse) SOSTITUITO."""
+    out = dict(base)
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _validate_policy_keys(patch: dict, *, allow_unknown: bool):
+    from .policy import unknown_yaml_paths, valid_yaml_keys
+    if allow_unknown:
+        return None
+    bad = unknown_yaml_paths(patch)
+    if not bad:
+        return None
+    return _err(400, (
+        "chiavi policy sconosciute: " + ", ".join(sorted(bad)) + ". "
+        "Chiavi valide (primo livello): "
+        + ", ".join(sorted(valid_yaml_keys()))
+        + ". Usa allow_unknown=true per bypassare."))
 
 
 def _apply_policy_patch(current: dict, patch: dict) -> dict:
@@ -901,7 +1169,12 @@ def _apply_policy_patch(current: dict, patch: dict) -> dict:
                     existing[ak] = av
             merged["client_keys"] = existing
         else:
-            merged[k] = v
+            if (k not in _POLICY_REPLACE_KEYS
+                    and isinstance(v, dict)
+                    and isinstance(merged.get(k), dict)):
+                merged[k] = _deep_merge(merged[k], v)
+            else:
+                merged[k] = v
     return merged
 
 
@@ -1004,6 +1277,14 @@ async def patch_policy(request: Request):
     if bad:
         return bad
     if not isinstance(patch, dict) or not patch:
+        return _err(400, "body deve essere un oggetto non vuoto")
+
+    allow_unknown = bool(
+        patch.pop("allow_unknown", False)
+        or request.query_params.get("allow_unknown") in ("1", "true", "yes"))
+    if (denied := _validate_policy_keys(patch, allow_unknown=allow_unknown)):
+        return denied
+    if not patch:
         return _err(400, "body deve essere un oggetto non vuoto")
 
     current: dict = {}
@@ -1229,6 +1510,15 @@ async def put_policy_raw(request: Request):
         return bad
     if not isinstance(body, dict) or not isinstance(body.get("raw"), str):
         return _err(400, "'raw' (stringa) obbligatorio nel body")
+    allow_unknown = bool(body.get("allow_unknown", False))
+    try:
+        parsed = yaml.safe_load(body["raw"]) or {}
+    except yaml.YAMLError as exc:
+        return _err(400, f"YAML non valido: {exc}")
+    if not isinstance(parsed, dict):
+        return _err(400, "il YAML di root deve essere una mappa")
+    if (denied := _validate_policy_keys(parsed, allow_unknown=allow_unknown)):
+        return denied
     gw = _gw()
     fresh = _persist_policy_raw(gw, body["raw"])
     if fresh is None:
@@ -2613,18 +2903,29 @@ async def list_sessions(request: Request):
                 "hard": hard,
             })
 
+    # Slow-timer (gara lenta >45s), turni/rimborso -go, ultimo -go
+    slow_timer = router.slow_timer_view()
+    go_refund = router.go_refund_view()
+    last_go = router.last_go_view()
+
     return {
         "sticky_sessions": sticky,
         "dep_sticky_sessions": dep_sticky,
         "session_deps": sess_deps,
         "cache_holders": cache_holders,
         "slow_demoted": sess_slow,
+        "slow_timer": slow_timer,
+        "go_refund": go_refund,
+        "last_go": last_go,
         "totals": {
             "sticky": len(sticky),
             "dep_sticky": len(dep_sticky),
             "session_deps": len(sess_deps),
             "cache_holders": len(cache_holders),
             "slow_demoted": len(sess_slow),
+            "slow_timer": len(slow_timer),
+            "go_refund": len(go_refund),
+            "last_go": len(last_go),
         }
     }
 
@@ -2842,6 +3143,16 @@ async def session_detail(request: Request, session_id: str,
     slow = [{"unique": u, "age_sec": round(now - ts, 1), "hard": bool(hard)}
             for u, (ts, hard) in slow_map.items()]
 
+    # stato runtime esteso (solo questa sessione)
+    slow_timer = [r for r in router.slow_timer_view()
+                  if r["session_id"] == session_id]
+    go_refund = router.go_refund_status(session_id)
+    last_go = next((r for r in router.last_go_view()
+                    if r["session_id"] == session_id), None)
+    ctx_frontier = router.ctx_frontier_view(session_id)
+    prefix_fp = router.prefix_fp_view(session_id)
+    sess_est = router.sess_est_view(session_id)
+
     # marcatori di partecipazione runtime per-deployment
     runtime_mark = {}
     for u in owned:
@@ -2882,6 +3193,12 @@ async def session_detail(request: Request, session_id: str,
         "cache_holder": cache_holder,
         "owned_deployments": owned,
         "slow_demoted": slow,
+        "slow_timer": slow_timer,
+        "go_refund": go_refund,
+        "last_go": last_go,
+        "ctx_frontier": ctx_frontier,
+        "prefix_fp": prefix_fp,
+        "sess_est": sess_est,
         "preferred_model": preferred,
         "deployments": ranking,
         "successful_deployments": successful,
@@ -3579,9 +3896,11 @@ async def get_tuning(request: Request):
         "admin": admin_c,
         "storage": storage_c,
         "misc": misc_c,
-        "policy_effective": {
-            _k: getattr(policy, _k, None)
-            for _k in (
+        "policy_effective": dict(
+            policy_effective_all(policy),
+            **{
+                _k: getattr(policy, _k, None)
+                for _k in (
                 "latency_rotate_threshold_ms", "soft_slow_latency_ms",
                 "soft_slow_ctx_min", "ctx_bucket_edges", "ttft_rate_min_ctx",
                 "ttft_rate_floor_ms", "slow_latency_abs_floor_ms",
@@ -3622,8 +3941,9 @@ async def get_tuning(request: Request):
                 "cooldown_mode", "cooldown_base_min",
                 "cooldown_linear_mult_min", "max_cooldown_sec",
                 "scoring_weights",
-            )
-        },
+                )
+            }
+        ),
         "note": ("Configurabile da gateway.yaml (policy). Storage: env "
                  "LEDGER_MAX_BYTES/LEDGER_KEEP/LEDGER_SUMMARY_MIN_ROWS/"
                  "METRICS_LATENCY_MAX/JOURNAL_MAX_BYTES/JOURNAL_KEEP."),
@@ -3868,6 +4188,51 @@ def _mcp_tool_specs() -> list[dict]:
         {"name": "guide_get",
          "description": "Documento guida/agenti (docs/AGENT.md) servito dal gateway.",
          "inputSchema": {"type": "object", "properties": {}}},
+        # ------------------------------------------- Fasi 2-4 (nuovi endpoint)
+        {"name": "policy_schema_get",
+         "description": "Schema JSON della policy (behavior knobs).",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "warm_get",
+         "description": "Stato del pool warm (holder/caldi, TTL, per profilo).",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "keys_soft_get",
+         "description": "Chiavi soft-disabled (soppresse senza retirement).",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "circuits_get",
+         "description": "Stato circuit breaker per provider/unique.",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "warm_wake",
+         "description": "Forza il risveglio del pool warm (sweep/wake).",
+         "inputSchema": {"type": "object", "properties": {
+             "unique": {"type": "string"}, "group": {"type": "string"},
+             "session_id": {"type": "string"},
+             "min_age_sec": {"type": "number"},
+             "limit": {"type": "integer"},
+             "only_zen": {"type": "boolean"}}}},
+        {"name": "hosts_drain",
+         "description": "Mette in drain un host (esclude i suoi deployment).",
+         "inputSchema": {"type": "object", "properties": {
+             "unique": {"type": "string"}, "inflight": {"type": "integer"}},
+             "required": ["unique"]}},
+        {"name": "hosts_undrain",
+         "description": "Rimuove il drain da un host.",
+         "inputSchema": {"type": "object", "properties": {
+             "unique": {"type": "string"}}, "required": ["unique"]}},
+        {"name": "metrics_reset",
+         "description": "Azzera i contatori/istogrammi runtime in memoria.",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "scores_reset",
+         "description": "Azzera i punteggi persistiti (opzionale per profilo).",
+         "inputSchema": {"type": "object", "properties": {
+             "unique": {"type": "string"}, "model": {"type": "string"}}}},
+        {"name": "sessions_purge",
+         "description": "Rimuove sessioni sticky/cache (tutte o una).",
+         "inputSchema": {"type": "object", "properties": {
+             "session_id": {"type": "string"}}}},
+        {"name": "keys_leases_clear",
+         "description": "Rilascia i lease chiave in-flight (tutti o un unique).",
+         "inputSchema": {"type": "object", "properties": {
+             "unique": {"type": "string"}}}},
     ]
 
 
@@ -4119,6 +4484,30 @@ async def _mcp_dispatch(tool_name: str, arguments: dict, request: Request):
         return await admin_providers_health(request)
     if tool_name == "guide_get":
         return await agent_guide()
+
+    # ------------------------------------------- Fasi 2-4 (nuovi endpoint MCP)
+    if tool_name == "policy_schema_get":
+        return await get_policy_schema(request)
+    if tool_name == "warm_get":
+        return await warm_state(request)
+    if tool_name == "keys_soft_get":
+        return await keys_soft(request)
+    if tool_name == "circuits_get":
+        return await circuits(request)
+    if tool_name == "warm_wake":
+        return await warm_wake(synth)
+    if tool_name == "hosts_drain":
+        return await drain_host(synth)
+    if tool_name == "hosts_undrain":
+        return await undrain_host(synth)
+    if tool_name == "metrics_reset":
+        return await reset_metrics(synth)
+    if tool_name == "scores_reset":
+        return await reset_scores(synth)
+    if tool_name == "sessions_purge":
+        return await purge_sessions(synth)
+    if tool_name == "keys_leases_clear":
+        return await clear_key_leases(synth)
 
     return _err(404, f"tool MCP sconosciuto: {tool_name}")
 

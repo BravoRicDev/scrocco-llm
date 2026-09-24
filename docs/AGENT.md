@@ -76,9 +76,14 @@ admin responses.
 | `GET /admin/tuning` | effective runtime tuning params (router/forwarder/admin/storage/misc) |
 | `GET/PUT /admin/csv` | raw CSV view / full validated replace |
 | `GET /admin/backups` · `POST /admin/backups/restore` | list / restore CSV+YAML snapshots |
-| `GET /admin/providers/health` · `GET /admin/pressure/inspect` | provider health / why deployments are skipped |
+| `GET /admin/providers/health` · `POST /admin/pressure/inspect` | provider health / why deployments are skipped |
 | `POST /admin/reload` | force re-read of CSV + policy |
 | `POST /admin/capabilities/seed-from-map` · `/audit` | capability metadata upkeep |
+| `GET /admin/policy/schema` | derived schema of every policy knob (master-only) |
+| `GET /admin/warm` · `GET /admin/keys/soft` · `GET /admin/circuits` | warm pool, soft-disabled keys, circuit breakers |
+| `POST /admin/warm/wake` · `POST /admin/hosts/drain` · `POST /admin/hosts/undrain` | runtime warm/drain actions (master-only) |
+| `POST /admin/metrics/reset` · `POST /admin/scores/reset` · `POST /admin/sessions/purge` · `POST /admin/keys/leases/clear` | runtime reset/purge actions (master-only) |
+| `GET`/`DELETE /admin/replay` | replay buffer debug view / clear (master-only, not in OpenAPI) |
 | `GET /admin/mcp/config/tools` | MCP tool catalogue (name/description/inputSchema) |
 | `POST /admin/mcp/config/execute` | execute an MCP tool: `{tool, arguments}` → MCP envelope |
 | `POST /admin/mcp/config/call` | JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`) |
@@ -94,15 +99,21 @@ POST /admin/mcp/config/call
  "params":{"name":"deploy_list","arguments":{"profile":"example"}}}
 ```
 
-Canonical tool names (48): `policy_get`, `policy_patch`, `policy_raw_get`,
-`policy_raw_put`, `deploy_list|get|create|update|delete|bulk|expiring|probe|
-probe_bulk|unretire`, `profile_list|purge`, `csv_get|put`, `backup_list|
-restore`, `capabilities_seed|audit`, `state_get`, `history_get`,
-`reload_gateway`, `cooldowns_clear`, `pressure_clear|inspect`,
-`sessions_list|release|detail`, `stats_summary|tokens|cache|models|
-deployments|providers|sessions`, `tuning_get`, `deployments_stats`,
-`providers_health`, `guide_get`, `insights_get|summary`,
-`leaderboard_get`, `logs_calls|errors`, `playground`.
+Canonical tool names (59): `policy_get`, `policy_patch`, `policy_raw_get`,
+`policy_raw_put`, `deploy_list`, `deploy_get`, `deploy_create`,
+`deploy_update`, `deploy_delete`, `deploy_bulk`, `deploy_expiring`,
+`deploy_probe`, `deploy_probe_bulk`, `deploy_unretire`, `profile_list`,
+`profile_purge`, `csv_get`, `csv_put`, `backup_list`, `backup_restore`,
+`capabilities_seed`, `capabilities_audit`, `state_get`, `history_get`,
+`reload_gateway`, `cooldowns_clear`, `pressure_clear`, `pressure_inspect`,
+`sessions_list`, `sessions_release`, `sessions_detail`, `stats_summary`,
+`stats_tokens`, `stats_cache`, `stats_models`, `stats_deployments`,
+`stats_providers`, `stats_sessions`, `tuning_get`, `deployments_stats`,
+`providers_health`, `guide_get`, `insights_get`, `insights_summary`,
+`leaderboard_get`, `logs_calls`, `logs_errors`, `playground`,
+`policy_schema_get`, `warm_get`, `keys_soft_get`, `circuits_get`,
+`warm_wake`, `hosts_drain`, `hosts_undrain`, `metrics_reset`,
+`scores_reset`, `sessions_purge`, `keys_leases_clear`.
 Legacy aliases (`get_stats_summary`, `list_deployments`, …) are accepted too.
 
 ## Terminal UI (`tui/`, Textual)
@@ -121,7 +132,7 @@ is reachable from the terminal:
 | `Y` | advanced policy editor · `m` capacities · `E` expirations · `k` client keys |
 | `O` | observability: live, errors, leaderboard, sessions, statistics |
 | `t` `l` `u` | statistics · deployment leaderboard · sessions (ENTER → detail) |
-| `M` | MCP config browser/executor (all 48 tools) |
+| `M` | MCP config browser/executor (all 59 tools) |
 | `T` | effective runtime tuning · `P` persisted scores · `H` provider health |
 | `V` / `G` | raw policy YAML / raw deployment CSV editor |
 | `Z` | operations hub: probe, unretire, purge, capabilities, pressure, backups, insights, history, guide, playground |

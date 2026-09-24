@@ -3559,6 +3559,45 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                       len(stale_stats), len(stale_strikes))
         return len(dead_sessions), len(dead_cd)
 
+    # ------------------------------------------------ purge sessioni (admin)
+    _SESSION_STATE_MAPS = (
+        "_sticky", "_sticky_dep", "_session_group", "_session_last_ok",
+        "_session_deps", "_session_slow", "_session_slow_timer",
+        "_ctx_frontier", "_prefix_fp", "_session_compact", "_sess_ratio",
+        "_sess_floor", "_session_rate", "_session_turns", "_probes_flight",
+    )
+
+    def purge_sessions(self, session_id: str | None = None) -> dict:
+        """Pulisce TUTTO lo stato in-memory legato a una sessione (o a tutte).
+
+        A differenza di `release` (solo `_sticky`), copre le 15 mappe di hint
+        per-sessione + `_dep_last_session` (chiavato per unique). Non tocca
+        l'upstream: spegne solo gli hint locali."""
+        sid = str(session_id) if session_id else None
+        counts: dict[str, int] = {}
+        for name in self._SESSION_STATE_MAPS:
+            m = getattr(self, name, None)
+            if not isinstance(m, dict):
+                continue
+            if sid is not None:
+                counts[name] = 1 if m.pop(sid, None) is not None else 0
+            else:
+                counts[name] = len(m)
+                m.clear()
+        _ds = getattr(self, "_dep_last_session", None)
+        if isinstance(_ds, dict):
+            if sid is None:
+                counts["_dep_last_session"] = len(_ds)
+                _ds.clear()
+            else:
+                dead = [u for u, (s, _ts) in _ds.items() if s == sid]
+                for u in dead:
+                    _ds.pop(u, None)
+                counts["_dep_last_session"] = len(dead)
+        log.warning("[sessions] purge (session=%s): %s", sid or "*",
+                    {k: v for k, v in counts.items() if v})
+        return {"ok": True, "session_id": sid, "purged": counts}
+
     # ------------------------------------------------------------- routing
     def is_explicit(self, name: str) -> bool:
         """True se 'name' è una richiesta ESPLICITA: gruppo (-Nk/-go/-fallback)
@@ -3986,6 +4025,147 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         m = self._key_leases()
         return {k: len(v) for k, v in sorted(m.items())}
 
+    def clear_key_leases(self, unique: str | None = None) -> dict:
+        """Azzera le lease di concorrenza per chiave. Senza `unique` svuota
+        tutto; con `unique` rimuove solo la lease della chiave di quel dep.
+        Nessuna api_key in chiaro nell'output (solo conteggi)."""
+        m = self._key_leases()
+        if not unique:
+            keys = sum(1 for v in m.values() if v)
+            leases = sum(len(v or ()) for v in m.values())
+            m.clear()
+            return {"ok": True, "keys": keys, "leases": leases}
+        dep = self.config.deployment_by_unique(unique) or {}
+        key = str(dep.get("api_key") or "")
+        ent = m.pop(key, None) if key else None
+        return {"ok": True, "keys": 1 if ent else 0, "leases": len(ent or ())}
+
+    # ------------------------------------------- VISTE STATO RUNTIME (read-only)
+    @staticmethod
+    def _tag_key(raw: str) -> str:
+        return hashlib.sha256(
+            str(raw).encode("utf-8", errors="replace")).hexdigest()[:12]
+
+    def key_soft_view(self) -> dict:
+        now = time.time()
+        hints_ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec",
+                                           20.0) or 20.0))
+        soft = getattr(self, "_key_soft", None)
+        hints = getattr(self, "_key_hints", None)
+        soft = soft if isinstance(soft, dict) else {}
+        hints = hints if isinstance(hints, dict) else {}
+        try:
+            from . import autoprobe as _ap
+            quota = getattr(_ap, "_key_quota_day", {}) or {}
+        except Exception:                           # noqa: BLE001
+            quota = {}
+        return {
+            "soft": {k: round(max(0.0, float(v) - now), 1)
+                     for k, v in sorted(soft.items()) if float(v) > now},
+            "hints": {k: {"age_sec": round(now - float(ts), 1),
+                          "remaining": int(rem),
+                          "stale": (now - float(ts)) > hints_ttl}
+                      for k, (ts, rem) in sorted(hints.items())},
+            "quota_day": {self._tag_key(k): round(max(0.0, float(v) - now), 1)
+                          for k, v in sorted(quota.items())
+                          if float(v) > now},
+        }
+
+    def model_circuits_view(self) -> dict:
+        now = time.time()
+        open_sec = float(getattr(self.policy, "model_circuit_open_sec",
+                                 60) or 60)
+        win = float(getattr(self.policy, "model_circuit_window_sec", 60) or 60)
+        need = int(getattr(self.policy, "model_circuit_keys", 3) or 3)
+        _cb = getattr(self, "_model_cb", None)
+        models: dict[str, dict] = {}
+        for mkey, ent in (_cb if isinstance(_cb, dict) else {}).items():
+            opened = float((ent or {}).get("opened") or 0.0)
+            ts = float((ent or {}).get("ts") or 0.0)
+            models[mkey] = {
+                "distinct_keys": len((ent or {}).get("tags") or ()),
+                "keys_needed": need, "opened": bool(opened),
+                "open_remaining_sec": (round(max(0.0, open_sec - (now - opened)),
+                                             1) if opened else 0),
+                "window_age_sec": (round(now - ts, 1) if ts else None),
+            }
+        return {"enabled": bool(getattr(self.policy, "model_circuit_enabled",
+                                        True)),
+                "window_sec": win, "keys_needed": need, "open_sec": open_sec,
+                "open_total": sum(1 for v in models.values() if v["opened"]),
+                "models": models}
+
+    def circuit_breakers_view(self) -> dict:
+        now = time.time()
+
+        def _row(cb: dict) -> dict:
+            lf = float((cb or {}).get("last_failure") or 0.0)
+            op = float((cb or {}).get("opened_at") or 0.0)
+            return {"state": (cb or {}).get("state"),
+                    "failures": int((cb or {}).get("failures") or 0),
+                    "last_failure_age_sec": (round(now - lf, 1) if lf else None),
+                    "opened_age_sec": (round(now - op, 1) if op else None)}
+
+        _kcb = getattr(self, "_circuit_breakers", None)
+        _dcb = getattr(self, "_dep_circuit_breakers", None)
+        return {
+            "keys": {self._tag_key(k): _row(v)
+                     for k, v in (_kcb if isinstance(_kcb, dict) else {}).items()},
+            "deployments": {k: _row(v)
+                            for k, v in (_dcb if isinstance(_dcb, dict)
+                                         else {}).items()},
+            "config": {"threshold": getattr(self.policy,
+                                            "circuit_breaker_threshold", 5),
+                       "timeout": getattr(self.policy,
+                                          "circuit_breaker_timeout", 60.0),
+                       "half_open_requests": getattr(
+                           self.policy, "circuit_breaker_half_open_requests", 3)},
+        }
+
+    def provider_alternation_view(self) -> dict:
+        last = getattr(self, "_last_attempt", None)
+        prov_last = getattr(self, "_prov_last", None)
+        prov_last = prov_last if isinstance(prov_last, dict) else {}
+        now = time.time()
+        rec = None
+        if last:
+            lp = str(last[0] or "")
+            rec = {"provider": lp,
+                   "model": (last[1] if len(last) > 1 else None),
+                   "dim_k": (last[2] if len(last) > 2 else None),
+                   "age_sec": round(now - float(prov_last.get(lp, now)), 1)}
+        return {"enabled": bool(getattr(self.policy,
+                                        "provider_alternation_enabled", True)),
+                "last_attempt": rec}
+
+    def probes_in_flight_view(self, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        out: dict[str, dict] = {}
+        for sid, m in (self._probes() or {}).items():
+            live = {u: round(now - float(ts), 1)
+                    for u, ts in m.items() if now - float(ts) <= 950}
+            if live:
+                out[sid] = {"count": len(live), "uniques": live}
+        return {"total": sum(v["count"] for v in out.values()), "sessions": out}
+
+    def sess_est_view(self, session_id: str | None = None) -> list[dict]:
+        now = time.time()
+        out: list[dict] = []
+        for sid, rec in (self._sess_est() or {}).items():
+            if session_id and sid != session_id:
+                continue
+            pre = int((rec or {}).get("pre") or 0)
+            post = int((rec or {}).get("post") or 0)
+            pt = int((rec or {}).get("pt") or 0)
+            out.append({
+                "session_id": sid, "samples": int((rec or {}).get("n") or 0),
+                "pre_chars": pre, "post_chars": post, "prompt_tokens": pt,
+                "cpt_pre": (round(pre / pt, 3) if pt else None),
+                "cpt_post": (round(post / pt, 3) if pt else None),
+                "age_sec": round(now - float((rec or {}).get("ts") or 0.0), 1),
+            })
+        return out
+
     # --------------------------------------------------- QUIRK LOCALE (P2-9)
     QUIRK_FLAGS = ("thinking_replay", "strip_reasoning", "no_thinking",
                    "hold_until_finish", "media_defer")
@@ -4247,6 +4427,50 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     "rimossi", want_model or "-", unique or "-", len(cleared))
         return {"ok": True, "cleared": cleared, "count": len(cleared)}
 
+    def reset_scores(self, unique: str | None = None,
+                     model: str | None = None) -> dict:
+        """Azzera i punteggi di reputazione (base/provider/key). Senza filtri
+        svuota tutto; con `unique`/`model` rimuove solo le entry selezionate.
+        Il time-decay resta invariato (solo i punteggi correnti sono toccati)."""
+        self._init_scoring_if_needed()
+        want_u = (unique or "").strip() or None
+        want_m = (model or "").strip() or None
+        uniq_sel: set[str] = set()
+        prov_sel: set[str] = set()
+        key_sel: set[str] = set()
+        if want_u or want_m:
+            for deps in self.config.groups.values():
+                for d in deps:
+                    if want_u and d.get("unique") != want_u:
+                        continue
+                    if want_m and str(d.get("model") or "") != want_m:
+                        continue
+                    uniq_sel.add(str(d.get("unique") or ""))
+                    prov_sel.add(self._provider_key(d))
+                    key_sel.add(self._api_key_str(d))
+
+        def _drop(mp: dict, sel: set[str] | None) -> int:
+            targets = (list(mp) if sel is None
+                       else [k for k in list(mp) if k in sel])
+            for k in targets:
+                mp.pop(k, None)
+            return len(targets)
+
+        if want_u or want_m:
+            n_base = _drop(self._base_scores, uniq_sel)
+            n_prov = _drop(self._provider_scores, prov_sel)
+            n_key = _drop(self._key_scores, key_sel)
+        else:
+            n_base = len(self._base_scores)
+            n_prov = len(self._provider_scores)
+            n_key = len(self._key_scores)
+            self._base_scores.clear()
+            self._provider_scores.clear()
+            self._key_scores.clear()
+        log.warning("[scores] reset (unique=%s model=%s): base=%d prov=%d key=%d",
+                    want_u or "-", want_m or "-", n_base, n_prov, n_key)
+        return {"ok": True, "base": n_base, "provider": n_prov, "key": n_key}
+
     # ------------------------------------------------ PROVENIENZA COOLDOWN (P0)
     def _cooldown_prov(self) -> dict:
         d = getattr(self, "_cooldown_prov_map", None)
@@ -4379,18 +4603,23 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
 
     # ------------------------------------------- connection draining (hot-reload)
     def start_draining(self, unique: str, dep: dict,
-                       inflight: int) -> None:
+                       inflight: int, *, operator: bool = False) -> None:
         """Archivia un deployment rimosso dal CSV ma con richieste in volo.
 
         Il dep viene RI-AGGIUNTO alla config (se assente) marcato draining:
         riferimenti/retry/record_* dello stesso ciclo continuano a risolverlo,
         mentre pick_deployment lo ignora per le nuove richieste.
+
+        `operator=True` (drain via /admin): alla fine del drain (inflight=0 o
+        TTL) il dep NON viene rimosso dalla config: e' un drain VOLUTO, non un
+        hot-reload, quindi resta attivo e lo si toglie solo con undrain.
         """
         n = max(0, int(inflight))
         self._drain()[unique] = {
             "ts": time.time(),
             "inflight": n,
             "dep": dep,
+            "operator": bool(operator),
         }
         grp = (dep or {}).get("group")
         if grp and self.config is not None:
@@ -4424,17 +4653,37 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             self._finish_drain(u)
         return len(dead)
 
-    def _finish_drain(self, unique: str) -> None:
+    def stop_draining(self, unique: str, *, purge_config: bool = True) -> bool:
+        """Annulla lo stato draining. purge_config=True (default, TTL/note_end):
+        il dep viene rimosso dalla config. purge_config=False (undrain
+        operatore): il dep resta attivo e torna eleggibile al pick.
+
+        Ritorna True se c'era uno stato draining da annullare, False se non
+        c'era nulla (idempotenza: undrain di un dep non in draining)."""
         d = self._drain().pop(unique, None)
         if d is None:
-            return
-        dep = d.get("dep") or {}
-        grp = dep.get("group")
-        if grp and self.config is not None and grp in self.config.groups:
-            self.config.groups[grp] = [x for x in self.config.groups[grp]
-                                       if x.get("unique") != unique]
-        log.info("[drain] %s: draining completata -> rimosso dalla config",
-                 unique)
+            return False
+        if purge_config:
+            dep = d.get("dep") or {}
+            grp = dep.get("group")
+            if grp and self.config is not None and grp in self.config.groups:
+                self.config.groups[grp] = [
+                    x for x in self.config.groups[grp]
+                    if x.get("unique") != unique]
+            log.info("[drain] %s: draining completata -> rimosso dalla config",
+                     unique)
+        else:
+            log.warning("[drain] %s: draining ANNULLATA (undrain operatore)",
+                        unique)
+        return True
+
+    def _finish_drain(self, unique: str) -> None:
+        d = self._drain().get(unique)
+        # Il flag va letto PRIMA del pop (stop_draining rimuove l'entry): un
+        # drain voluto dall'operatore non deve sparire dalla config su
+        # note_end/TTL, altrimenti undrain non troverebbe piu' l'entry.
+        operator = bool((d or {}).get("operator"))
+        self.stop_draining(unique, purge_config=not operator)
 
     # ------------------------------------------------ persistenza (F4)
     def dump_stats(self) -> dict:
@@ -6300,9 +6549,66 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         m = self.DIM_SUFFIX_RE.search(group_name)
         return int(m.group(1)) if m else 0
 
+    # -------------------------------------------- warm-wake operatore (F4)
+    def _wake_anchor(self, unique: str | None, session_id: str | None,
+                     group: str | None) -> tuple[dict | None, str | None]:
+        if unique:
+            dep = self.config.deployment_by_unique(unique)
+            return dep, (group or (dep or {}).get("group"))
+        if group:
+            deps = self.config.groups.get(group) or []
+            return (deps[0] if deps else None), group
+        if session_id:
+            rec = self._session_group.get(session_id)
+            g = rec[0] if rec else None
+            if not g:
+                su = self._sticky_dep.get(session_id)
+                if su:
+                    dep = self.config.deployment_by_unique(su[0])
+                    g = (dep or {}).get("group")
+            deps = (self.config.groups.get(g) or []) if g else []
+            return (deps[0] if deps else None), g
+        return None, None
 
-
-
+    def warm_wake_targets(self, unique: str | None = None,
+                          session_id: str | None = None,
+                          group: str | None = None,
+                          min_age_sec: float | None = None,
+                          limit: int = 1,
+                          only_zen: bool = False) -> list[dict]:
+        """Seleziona fino a `limit` deployment DORMIENTI maturi (cooldown 429
+        piu' vecchio di `min_age_sec`) da svegliare, ancorandosi a unique /
+        group / session_id. Read-only: NON sonda, ritorna solo i candidati."""
+        if unique:
+            dep = self.config.deployment_by_unique(unique)
+            return [dep] if dep else []
+        anchor, req_group = self._wake_anchor(None, session_id, group)
+        grp_for_profile = req_group or (anchor or {}).get("group")
+        profile = (self._group_profile(grp_for_profile)
+                   if grp_for_profile else None)
+        if only_zen and not profile:
+            return []
+        try:
+            age = (float(min_age_sec) if min_age_sec is not None else float(
+                getattr(self.policy, "warm_refill_wake_min_cooldown_age_sec",
+                        3600.0) or 3600.0))
+        except (TypeError, ValueError):
+            age = 3600.0
+        out: list[dict] = []
+        tried: set[str] = set()
+        for _ in range(max(1, int(limit))):
+            try:
+                c = self.warm_wake_canary(
+                    profile, anchor or {}, None, None, None, tried=tried,
+                    requested_group=req_group, only_zen=bool(only_zen),
+                    min_age_sec=max(0.0, age))
+            except Exception:                      # noqa: BLE001
+                break
+            if not c:
+                break
+            tried.add(c["unique"])
+            out.append(c)
+        return out
 
     # ---------------------------------------------------- WARM REFILL (cascata)
     def _reasoning_reserve_frac(self) -> float:
