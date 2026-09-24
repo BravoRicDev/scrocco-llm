@@ -767,6 +767,12 @@ class Policy:
     # cercare un sostituto senza incastrarsi.
     stream_slow_race_after_ms: int = 45000
     nonstream_slow_race_after_ms: int = 45000
+    # TIMING DEL CANARY LENTO, separato dallo scatto del FLAG lento: il canary
+    # si apre dopo `slow_canary_after_ms` (default 15s) mentre il dep corrente
+    # viene marcato "lento per la sessione" (demozione warm + grant -go) solo
+    # alla soglia `*_slow_race_after_ms` (default 45s). <= 0 = accoppiato
+    # (storico: canary e flag partono insieme alla soglia gara).
+    slow_canary_after_ms: int = 15000
     stream_slow_race_canaries: int = 1
     # GATE del canary lento: si apre SOLO se la sessione ha MENO di questo
     # numero di warm validi (include i prestati). A warm pieno il canary
@@ -2412,6 +2418,13 @@ class Policy:
                         "warm_pool.nonstream_slow_race_after_ms non valido: "
                         f"{_v!r}")
                 p.nonstream_slow_race_after_ms = int(_v)
+            if wp.get("slow_canary_after_ms") is not None:
+                _v = wp["slow_canary_after_ms"]
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                        or _v < 0:
+                    raise ValueError(
+                        f"warm_pool.slow_canary_after_ms non valido: {_v!r}")
+                p.slow_canary_after_ms = int(_v)
             if wp.get("slow_race_canaries") is not None:
                 _v = wp["slow_race_canaries"]
                 if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
@@ -2458,6 +2471,8 @@ class Policy:
                            "stream_slow_race_after_ms"),
                           ("nonstream_slow_race_after_ms",
                            "nonstream_slow_race_after_ms"),
+                          ("slow_canary_after_ms",
+                           "slow_canary_after_ms"),
                           ("stream_slow_race_canaries",
                            "stream_slow_race_canaries")):
             if raw.get(_k) is not None:

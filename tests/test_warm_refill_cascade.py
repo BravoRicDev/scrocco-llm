@@ -701,6 +701,7 @@ def test_nonstream_slow_race_parte_anche_con_refill_in_volo(FW, monkeypatch):
     small = _dep(FW, f"{BASE}-32k", "K-S")
     big = _dep(FW, f"{BASE}-1000k", "K-B")
     FW.policy.nonstream_slow_race_after_ms = 100
+    FW.policy.slow_canary_after_ms = 100
     calls = []
 
     async def fake_call(self, dep, payload, **kw):
@@ -737,6 +738,7 @@ def test_nonstream_slow_race_parte_senza_refill(FW, monkeypatch):
     big = _dep(FW, f"{BASE}-1000k", "K-B")
     FW.policy.warm_refill_enabled = False
     FW.policy.nonstream_slow_race_after_ms = 100
+    FW.policy.slow_canary_after_ms = 100
     calls = []
 
     async def fake_call(self, dep, payload, **kw):
@@ -760,6 +762,43 @@ def test_nonstream_slow_race_parte_senza_refill(FW, monkeypatch):
     assert big["unique"] in calls
     assert used["unique"] == big["unique"]
     assert not FW.is_cooled_down(big["unique"])
+
+
+def test_nonstream_canary_anticipa_il_flag(FW, monkeypatch):
+    """`slow_canary_after_ms` << `nonstream_slow_race_after_ms`: il canario
+    parte al proprio tempo SENZA marcare il dep lento (flag a 45s)."""
+    import app.forwarder as F
+    small = _dep(FW, f"{BASE}-32k", "K-S")
+    big = _dep(FW, f"{BASE}-1000k", "K-B")
+    FW.policy.warm_refill_enabled = False
+    FW.policy.nonstream_slow_race_after_ms = 100000
+    FW.policy.slow_canary_after_ms = 100
+    marked = []
+    monkeypatch.setattr(FW, "mark_session_slow",
+                        lambda sid, u: marked.append(u))
+    calls = []
+
+    async def fake_call(self, dep, payload, **kw):
+        calls.append(dep["unique"])
+        if dep["unique"] == big["unique"]:
+            return _ns_resp("VELOCE")
+        await asyncio.sleep(0.6)
+        return _ns_resp("LENTO")
+    monkeypatch.setattr(F.Forwarder, "call", fake_call)
+    fwd = F.Forwarder()
+
+    async def go():
+        data, used = await fwd.call_with_fallback(
+            FW, "test", small, _ns_payload(), need=frozenset(),
+            scope="chain", ctx=100, attempts_box=[], session="rf-sess",
+            ses="rf-sess", client_ip="", attribution=None,
+            requested_group=None)
+        await _join_ns()
+        return data, used
+    data, used = asyncio.run(go())
+    assert big["unique"] in calls, "canario aperto al proprio timing"
+    assert used["unique"] == big["unique"]
+    assert marked == [], "flag lento NON scatta (soglia ancora lontana)"
 
 
 # ------------------------------------------------ histnorm: testa sporca

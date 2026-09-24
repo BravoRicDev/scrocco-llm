@@ -39,6 +39,7 @@ def _mk(csv_text, *, slow_ms=100, hedge_base=50):
     pol.qc_json.stream_commit_min_chars = 4
     pol.qc_json.stream_hedge_delay_ms = hedge_base
     pol.stream_slow_race_after_ms = slow_ms  # campo su Policy (il bug)
+    pol.slow_canary_after_ms = slow_ms       # canary e flag insieme (come prima)
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     router = Router(cfg, pol)
     os.unlink(path)

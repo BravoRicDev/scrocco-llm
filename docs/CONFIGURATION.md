@@ -95,7 +95,12 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   `warm_refill_*`, `warm_borrow_*`, `warm_pick_fastest`,
   `anon_session_fingerprint`, `cache_aware_*`.
 - **Canary / hedge**: `canary_warm_last`, `go_preferred_models`,
-  `stream_hedge_*`, `slow_race_*`, `hunt_*`, `cold_spread_pct`.
+  `stream_hedge_*`, `slow_race_*`, `slow_canary_after_ms`, `hunt_*`,
+  `cold_spread_pct`. Il canary lento ha un timing **proprio**
+  (`slow_canary_after_ms`, default 15s), separato dal **flag lento** che
+  marca il deployment "lento per la sessione" (demozione warm + grant `-go`)
+  a `stream_slow_race_after_ms` / `nonstream_slow_race_after_ms` (default
+  45s); `0` = accoppiato (storico: canary e flag insieme alla soglia gara).
 - **Cooldown / ladder**: `cooldown_sec`, `mode`, `base`/`linear_mult`,
   `jitter_*`, `probe_*`, `autoprobe_*`, `stale_retry`, `ladder_*`,
   `chronic_*`, `model_circuit_*`.

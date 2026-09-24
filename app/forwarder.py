@@ -3779,14 +3779,27 @@ truncation_hook=None,
                 # refill e' gia' in volo (il timer lento e' indipendente dal
                 # tetto per-sessione e non applica penali al lento).
                 _ns_slow = 0
+                _ns_canary = 0
                 if not _degraded and not _esc_grp:
                     try:
                         _ns_slow = int(getattr(
                             _pol, "nonstream_slow_race_after_ms", 0) or 0)
                     except Exception:
                         _ns_slow = 0
+                    try:
+                        _ns_canary = int(getattr(
+                            _pol, "slow_canary_after_ms", 0) or 0)
+                    except Exception:
+                        _ns_canary = 0
                 _slow_dl = ((t0 + _ns_slow / 1000.0) if _ns_slow > 0
                             else None)
+                # TIMING DEL CANARY separato dal FLAG lento: `slow_canary_ms`
+                # apre il canario, `slow_race_ms` marca il dep "lento per la
+                # sessione". Con `slow_canary_ms <= 0` il canario resta appeso
+                # alla soglia del flag (storico: i due scattano insieme).
+                _canary_dl = ((t0 + _ns_canary / 1000.0) if _ns_canary > 0
+                              else _slow_dl)
+                _flag_marked = False
                 if _fB is None and _fZ is None:
                     # Se il primo tentativo sta ancora generando oltre la
                     # soglia si apre UN canario e si tiene per buono il PRIMO
@@ -3795,7 +3808,7 @@ truncation_hook=None,
                     data = None
                     _A = dep
                     _tA = t0
-                    if _slow_dl is not None:
+                    if _canary_dl is not None:
                         futA = asyncio.ensure_future(self.call(
                             _A, payload, profile=profile or "",
                             ctx_est=ctx, client_ip=client_ip,
@@ -3804,19 +3817,32 @@ truncation_hook=None,
                             router.note_rate_limit(u4, rl)))
                         _d_s, _ = await asyncio.wait(
                             {futA}, timeout=max(
-                                0.0, _slow_dl - time.monotonic()))
+                                0.0, _canary_dl - time.monotonic()))
                         if futA in _d_s:
                             data = futA.result()
                             futA = None
+                            # A ha consegnato: se ha superato la soglia del
+                            # FLAG (e il canary non e' ancora scattato) marchia
+                            # comunque il lento.
+                            if _slow_dl is not None and not _flag_marked \
+                                    and time.monotonic() >= _slow_dl:
+                                with contextlib.suppress(Exception):
+                                    router.mark_session_slow(ses, cur)
+                                _flag_marked = True
                         else:
                             log.info("[slow-race] ns %s in generazione da "
                                      "%.0fs (> %.0fs) -> canario in gara",
                                      cur, time.monotonic() - _tA,
-                                     _ns_slow / 1000.0)
-                            # R3: A e' lento per la sessione, a prescindere
-                            # dall'esito della gara.
-                            with contextlib.suppress(Exception):
-                                router.mark_session_slow(ses, cur)
+                                     (_ns_canary if _ns_canary > 0
+                                      else _ns_slow) / 1000.0)
+                            # FLAG LENTO: indipendente dal canary. Se la sua
+                            # soglia e' gia' scaduta marca subito; se scade
+                            # DOPO la apre il race loop.
+                            if _slow_dl is not None \
+                                    and time.monotonic() >= _slow_dl:
+                                with contextlib.suppress(Exception):
+                                    router.mark_session_slow(ses, cur)
+                                _flag_marked = True
                             # R2: gate — solo se la sessione ha pochi warm.
                             _op = None
                             try:
@@ -3838,6 +3864,16 @@ truncation_hook=None,
                                          getattr(_pol, "slow_race_max_warm",
                                                  6))
                             if _op is None:
+                                # Nessun canario: si attende A, ma il FLAG
+                                # lento scatta comunque alla sua soglia.
+                                if _slow_dl is not None and not _flag_marked:
+                                    _d_f, _ = await asyncio.wait(
+                                        {futA}, timeout=max(
+                                            0.0, _slow_dl - time.monotonic()))
+                                    if futA not in _d_f:
+                                        with contextlib.suppress(Exception):
+                                            router.mark_session_slow(ses, cur)
+                                        _flag_marked = True
                                 data = await futA
                                 futA = None
                             else:
@@ -3874,14 +3910,20 @@ truncation_hook=None,
                         _parts.append({"fut": _fZ, "dep": _BZ, "t": _tZ,
                                        "wake": _wake_z, "a": False})
                     _pending = {p["fut"] for p in _parts}
-                    _slow_opened = _slow_dl is None
+                    _canary_opened = _canary_dl is None
+                    _slow_marked = _slow_dl is None or _flag_marked
                     _errs: list[BaseException] = []
                     data = None
                     _win = None
                     while _pending:
-                        _to = None
-                        if not _slow_opened:
-                            _to = max(0.0, _slow_dl - time.monotonic())
+                        _now_ns = time.monotonic()
+                        _pending_dls = []
+                        if not _canary_opened and _canary_dl is not None:
+                            _pending_dls.append(_canary_dl)
+                        if not _slow_marked and _slow_dl is not None:
+                            _pending_dls.append(_slow_dl)
+                        _to = (max(0.0, min(_pending_dls) - _now_ns)
+                               if _pending_dls else None)
                         _cmp, _rest = await asyncio.wait(
                             _pending, timeout=_to,
                             return_when=asyncio.FIRST_COMPLETED)
@@ -3901,16 +3943,22 @@ truncation_hook=None,
                             break
                         if data is not None:
                             break
-                        if not _slow_opened and time.monotonic() >= _slow_dl:
-                            _slow_opened = True
-                            log.info("[slow-race] ns %s in generazione da "
-                                     "%.0fs (> %.0fs) -> canario in gara",
-                                     cur, time.monotonic() - _tA,
-                                     _ns_slow / 1000.0)
-                            # R3: A e' lento per la sessione, a prescindere
-                            # dall'esito della gara.
+                        _now_ns = time.monotonic()
+                        # FLAG LENTO (timer proprio, indipendente dal canary)
+                        if not _slow_marked and _slow_dl is not None \
+                                and _now_ns >= _slow_dl:
+                            _slow_marked = True
                             with contextlib.suppress(Exception):
                                 router.mark_session_slow(ses, cur)
+                        # CANARY LENTO (timer proprio)
+                        if not _canary_opened and _canary_dl is not None \
+                                and _now_ns >= _canary_dl:
+                            _canary_opened = True
+                            log.info("[slow-race] ns %s in generazione da "
+                                     "%.0fs (> %.0fs) -> canario in gara",
+                                     cur, _now_ns - _tA,
+                                     (_ns_canary if _ns_canary > 0
+                                      else _ns_slow) / 1000.0)
                             # R2: gate — solo se la sessione ha pochi warm.
                             _op = None
                             try:

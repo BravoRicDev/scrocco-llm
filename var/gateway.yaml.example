@@ -991,6 +991,12 @@ warm_pool:
   # (le chiavi in warm restano escluse sempre): true = prima tutti gli altri
   # provider, poi quelli gia' in uso. false = ordine legacy (nessuna coda).
   canary_warm_last: true
+  # TIMING del canary lento, separato dal flag lento: il canario si apre dopo
+  # `slow_canary_after_ms` (default 15s) mentre il dep viene marcato "lento
+  # per la sessione" (demozione warm + grant -go) solo alla soglia
+  # `slow_race_after_ms` / `nonstream_slow_race_after_ms` (default 45s).
+  # 0 = accoppiato (storico: canario e flag partono insieme alla soglia gara).
+  slow_canary_after_ms: 15000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEBUG — scatola nera input/output (solo per debug locale)

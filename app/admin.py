@@ -630,6 +630,8 @@ async def state(request: Request):
                 "borrow_selectable": bool(
                     getattr(pol, "warm_borrow_selectable", True)),
                 "borrowable_now": len(gw.router._lendable_set()),
+                "slow_canary_after_ms": int(
+                    getattr(pol, "slow_canary_after_ms", 0) or 0),
             },
             "endpoint_quarantine": gw.router.endpoint_quarantine_view(),
             "degraded": gw.router.degraded_view(),
@@ -3586,6 +3588,8 @@ async def get_tuning(request: Request):
                 "slow_latency_rel_mult", "slow_latency_min_peers",
                 "slow_gen_mult", "slow_typical_completion_tokens",
                 "slow_rel_baseline_mult", "effort_capable_bonus",
+                "stream_slow_race_after_ms", "nonstream_slow_race_after_ms",
+                "slow_canary_after_ms", "slow_race_max_warm",
                 "latency_penalty_per_sec", "provider_bias_normalization",
                 "go_refund_enabled", "go_refund_pct", "go_refund_min_turns",
                 "go_refund_max_turns", "go_refund_trigger_ms",

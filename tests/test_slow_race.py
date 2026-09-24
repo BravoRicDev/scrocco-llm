@@ -124,7 +124,8 @@ def _run_probe(dep, gen, res, router, *, t0=None, race=None, ctx=100):
         main.router = old
 
 
-def _run_peek(peek, stream_response, router, *, slow_race_ms=0, hedge_ms=60,
+def _run_peek(peek, stream_response, router, *, slow_race_ms=0,
+              slow_canary_ms=0, hedge_ms=60,
               t_att_offset=0.0, session=SESSION, hold=False, refill=False):
     closed = []
     genA = FakeGen(WINNER)
@@ -138,6 +139,7 @@ def _run_peek(peek, stream_response, router, *, slow_race_ms=0, hedge_ms=60,
             requested_group=None, session=session, client_ip="",
             attribution=None, hedge_ms=hedge_ms, _tr_cfg=None,
             _tct_cfg=SimpleNamespace(cooldown_sec=1), slow_race_ms=slow_race_ms,
+            slow_canary_ms=slow_canary_ms,
             hold=hold, refill=refill)
         await _join_probes()
         return out, closed
@@ -242,6 +244,56 @@ def test_slow_race_scatta_con_a_gia_in_streaming():
     assert opened == [B["unique"]], "un solo canario lento"
     assert out[0]["unique"] == B["unique"] and out[3] == "content"
     assert notes["fail"] == [], "nessuna cooldown per il lento"
+
+
+def test_slow_canary_anticipa_il_flag():
+    """`slow_canary_ms` << `slow_race_ms`: il canario lento parte al PROPRIO
+    tempo, senza marcare il dep "lento per la sessione" (flag a 45s)."""
+    B = DEP_B()
+    r, notes = _fake_router(B=None)
+    r.hedge_canaries = lambda *a, **k: [B]
+    opened = []
+
+    async def sr(dep, payload, **kw):
+        opened.append(dep["unique"])
+        return FakeGen(dep["unique"])
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        fb = kw.get("first_byte")
+        if fb is not None:
+            fb.set()
+        if gen.name == B["unique"]:
+            await asyncio.sleep(0.02)
+        else:
+            await asyncio.sleep(0.6)
+        return CONTENT
+
+    out, _ = _run_peek(peek, sr, r, slow_race_ms=100000,
+                       slow_canary_ms=100, hedge_ms=50, hold=True)
+    assert opened == [B["unique"]], "canario aperto al suo timing"
+    assert out[0]["unique"] == B["unique"] and out[3] == "content"
+    assert all(kw.get("hard") is not True for _u, kw in notes["slow"]), \
+        "flag lento NON scatta: soglia del flag ancora lontana"
+
+
+def test_slow_flag_scatta_col_proprio_timer():
+    """`slow_canary_ms` >> `slow_race_ms`: alla soglia del flag il dep e'
+    marcato lento, ma il canario NON parte (timer proprio ancora lontano)."""
+    r, notes = _fake_router(B=None)
+    r.hedge_canaries = lambda *a, **k: [DEP_B()]
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        fb = kw.get("first_byte")
+        if fb is not None:
+            fb.set()
+        await asyncio.sleep(0.5)
+        return CONTENT
+
+    out, _ = _run_peek(peek, _no_stream, r, slow_race_ms=100,
+                       slow_canary_ms=100000, hedge_ms=50, hold=True)
+    assert out[0]["unique"] == WINNER
+    assert (WINNER, {"hard": True}) in notes["slow"], \
+        "flag lento scattato al proprio timer"
 
 
 def test_slow_race_vale_anche_in_refill():

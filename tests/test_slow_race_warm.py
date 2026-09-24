@@ -45,6 +45,7 @@ def test_policy_defaults_slow_race():
     p = Policy.from_dict({})
     assert p.stream_slow_race_after_ms == 45000
     assert p.nonstream_slow_race_after_ms == 45000
+    assert p.slow_canary_after_ms == 15000
     assert p.slow_race_max_warm == 6
     assert p.warm_pick_fastest is True
 
@@ -53,12 +54,24 @@ def test_policy_parsing_slow_race():
     p = Policy.from_dict({"warm_pool": {
         "slow_race_after_ms": 30000,
         "nonstream_slow_race_after_ms": 31000,
+        "slow_canary_after_ms": 12000,
         "slow_race_max_warm": 4,
         "warm_pick_fastest": False}})
     assert p.stream_slow_race_after_ms == 30000
     assert p.nonstream_slow_race_after_ms == 31000
+    assert p.slow_canary_after_ms == 12000
     assert p.slow_race_max_warm == 4
     assert p.warm_pick_fastest is False
+
+
+def test_policy_slow_canary_validation():
+    p = Policy.from_dict({"slow_canary_after_ms": 5000})
+    assert p.slow_canary_after_ms == 5000
+    import pytest
+    with pytest.raises(ValueError):
+        Policy.from_dict({"warm_pool": {"slow_canary_after_ms": -1}})
+    with pytest.raises(ValueError):
+        Policy.from_dict({"slow_canary_after_ms": "x"})
 
 
 # --------------------------------------------------------------- _warm_pool
@@ -269,6 +282,7 @@ def _mk(csv_text, *, slow_ms=100, hedge_base=50):
     pol.qc_json.stream_commit_min_chars = 4
     pol.qc_json.stream_hedge_delay_ms = hedge_base
     pol.stream_slow_race_after_ms = slow_ms
+    pol.slow_canary_after_ms = slow_ms
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
     router = Router(cfg, pol)
     os.unlink(path)
@@ -393,6 +407,7 @@ def test_nonstream_gate_warm_pieno(wr, monkeypatch):
     small = _dep(wr, f"{BASE}-32k", "K-S")
     wr.policy.warm_refill_enabled = False
     wr.policy.nonstream_slow_race_after_ms = 100
+    wr.policy.slow_canary_after_ms = 100
     monkeypatch.setattr(wr, "slow_race_allowed", lambda *a, **k: False)
     marked = []
     monkeypatch.setattr(wr, "mark_session_slow",
