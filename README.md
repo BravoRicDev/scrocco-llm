@@ -106,7 +106,10 @@ individual account limits instead of dying on the first 429.
   *real* content arrives. A per-deployment first-content deadline (default
   4 min) and a total per-request deadline (default 16 min) rotate
   transparently when an upstream hangs; on the final `-go`/`-fallback` rung
-  the timeout becomes a parachute and the partial stream is delivered.
+  the timeout becomes a parachute. With **hold** active (the default) the
+  parachute delivers the **buffered** partial (never live bytes) through the
+  hold tool-repair/QC pipeline, and an empty buffer still yields 503; the live
+  passthrough only applies when hold is off.
 - **Media endpoints**: images, async video jobs (submit / poll / content),
   TTS/STT including the local `speaches` sidecar.
 - **QC + watchdog**: broken-JSON retry with annotated last-response delivery,

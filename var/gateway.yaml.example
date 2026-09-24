@@ -659,9 +659,12 @@ qc_json:
   stream_commit_min_chars: 40
 
   # PARACADUTE (-go/-fallback): True = sulla catena finale del ladder il
-  # timeout sul primo contenuto NON scatta: lo stream parte comunque (non c'è
-  # dove ruotare). False = comportamento legacy (timeout -> rotazione/503),
-  # da usare solo se hai molte chiavi valide in quelle catene.
+  # timeout sul primo contenuto NON scatta: si consegna comunque quello che
+  # arriva (non c'è dove ruotare). False = comportamento legacy (timeout ->
+  # rotazione/503), da usare solo se hai molte chiavi valide in quelle catene.
+  # NOTA: con HOLD attivo (stream_hold_until_finish o riga CSV) la consegna del
+  # paracadute è SEMPRE bufferizzata (mai byte live): buffer parziale + tool
+  # repair; buffer vuoto -> resta timeout/503. Il live vale solo con hold OFF.
   stream_parachute_no_timeout: true
 
   # Cooldown in secondi del watchdog streaming dopo un errore (90s).

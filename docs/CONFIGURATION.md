@@ -102,7 +102,8 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
 - **Budget / rate hints**: `budget_guard`, `retry_after_min_sec`,
   `retry_after_floor_by_provider`, `rate_hint_*`, `key_soft_429`, `quota_*`.
 - **Stream / hold**: `stream_stall_sec`, `stall_ttft_*`, `qc_json.*`,
-  `hold_until_finish`, `parachute`.
+  `hold_until_finish`, `parachute` (sotto hold il paracadute `-go`/`-fallback`
+  consegna il buffer, mai byte live).
 - **Capabilities / media**: `capability_routing_enabled`, `model_capabilities`
   (token: `text,vision,video,audio,image_gen,image_edit,image_multi_ref,tools,tts,stt,video_gen`),
   `capabilities_default`, `image_token_estimate`, `images_chat_fallback`,

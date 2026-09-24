@@ -394,11 +394,12 @@ def _parachute_dep(M, suffix="-go"):
 
 
 def test_parachute_go_timeout_transmits_not_503(M, monkeypatch):
-    """Sulla catena -go (paracadute) il timeout primo-contenuto NON produce 503:
-    lo stream parte comunque (parametro default True)."""
+    """SENZA hold, sulla catena -go (paracadute) il timeout primo-contenuto NON
+    produce 503: lo stream parte comunque (comportamento storico live)."""
     qj = M.router.policy.qc_json
     qj.stream_first_content_ms = 60
     qj.stream_parachute_no_timeout = True
+    monkeypatch.setattr(qj, "stream_hold_until_finish", False, raising=False)
     dep = _parachute_dep(M, suffix="-go")
     monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
 
@@ -409,6 +410,53 @@ def test_parachute_go_timeout_transmits_not_503(M, monkeypatch):
         assert isinstance(resp, StreamingResponse), "deve trasmettere, non 503"
         await _drain(resp)
     asyncio.run(_run())
+
+
+def test_parachute_go_timeout_hold_empty_buffer_is_503(M, monkeypatch):
+    """HOLD attivo: -go timeout con buffer VUOTO -> resta timeout -> 503
+    (mai una risposta vuota/live al client)."""
+    qj = M.router.policy.qc_json
+    qj.stream_first_content_ms = 60
+    qj.stream_parachute_no_timeout = True
+    monkeypatch.setattr(qj, "stream_hold_until_finish", True, raising=False)
+    dep = _parachute_dep(M, suffix="-go")
+    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        assert isinstance(resp, JSONResponse) and resp.status_code == 503
+    asyncio.run(_run())
+
+
+def test_parachute_go_timeout_hold_partial_buffer_transmits(M, monkeypatch):
+    """HOLD attivo: -go timeout con buffer PARZIALE -> consegna bufferizzata
+    (mai byte live), cosi' il tool repair hold gira sul buffer."""
+    qj = M.router.policy.qc_json
+    qj.stream_first_content_ms = 60
+    qj.stream_parachute_no_timeout = True
+    monkeypatch.setattr(qj, "stream_hold_until_finish", True, raising=False)
+    monkeypatch.setattr(qj, "stream_hold_idle_ms", 80, raising=False)
+    dep = _parachute_dep(M, suffix="-go")
+    chunk = (b'data: {"choices":[{"delta":{"content":"'
+             + b"x" * 60 + b'"}}]}\n\n')
+
+    async def _stream_response(dep, payload, **kwargs):
+        async def _gen():
+            yield chunk
+            await asyncio.sleep(5.0)      # poi muto -> idle timeout
+        return _gen()
+    monkeypatch.setattr(M.forwarder, "stream_response", _stream_response)
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        assert isinstance(resp, StreamingResponse), "hold: consegna il buffer"
+        return await _drain(resp)
+    out = asyncio.run(_run())
+    assert b"x" * 60 in out
 
 
 def test_parachute_go_timeout_legacy_503(M, monkeypatch):
@@ -455,6 +503,13 @@ def test_parachute_verdict_helper(M):
     assert M._parachute_verdict("timeout", pol.qc_json, dep_fb, pol) == "content"
     assert M._parachute_verdict("timeout", pol.qc_json, dep_dim, pol) == "timeout"
     assert M._parachute_verdict("empty_eof", pol.qc_json, dep_go, pol) == "empty_eof"
+    # HOLD: consegna bufferizzata solo se c'e' un buffer parziale da mandare
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol,
+                                hold=True, has_buffer=True) == "content"
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol,
+                                hold=True, has_buffer=False) == "timeout"
+    assert M._parachute_verdict("timeout", pol.qc_json, dep_fb, pol,
+                                hold=True, has_buffer=False) == "timeout"
     pol.qc_json.stream_parachute_no_timeout = False
     assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "timeout"
 

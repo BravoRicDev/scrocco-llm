@@ -3015,17 +3015,26 @@ def _payload_text_empty(payload: dict) -> bool:
         return False
 
 
-def _parachute_verdict(verdict: str, qcp, dep: dict, policy) -> str:
+def _parachute_verdict(verdict: str, qcp, dep: dict, policy,
+                       *, hold: bool = False,
+                       has_buffer: bool = False) -> str:
     """Sulla catena PARACADUTE (-go/-fallback, ultimo scaglione del ladder) il
     timeout sul primo contenuto non deve produrre rotazione/503: li' non c'e'
-    piu' nessun deployment dietro, quindi si trasmette comunque quello che
+    piu' nessun deployment dietro, quindi si consegna comunque quello che
     arriva. Attivo con qc_json.stream_parachute_no_timeout (default True);
-    False ripristina il comportamento legacy (timeout -> rotazione/503)."""
+    False ripristina il comportamento legacy (timeout -> rotazione/503).
+
+    Con HOLD attivo la consegna e' SEMPRE bufferizzata (mai byte live, cosi'
+    il tool repair hold si applica): si torna 'content' solo se c'e' un buffer
+    parziale da consegnare, altrimenti si resta 'timeout' (rotazione/503).
+    Senza hold resta il comportamento storico (trasmissione live)."""
     if (verdict == "timeout"
             and getattr(qcp, "stream_parachute_no_timeout", True)):
         grp = dep.get("group") or ""
         if grp.endswith(policy.go_suffix) \
                 or grp.endswith(policy.fallback_suffix):
+            if hold and not has_buffer:
+                return "timeout"
             return "content"
     return verdict
 
@@ -4206,9 +4215,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # FIX paracadute: sulla catena -go/-fallback (ULTIMO scaglione del
             # ladder) il timeout sul primo contenuto NON deve produrre un 503:
             # li' non c'e' piu' nessuno dietro a cui ruotare, quindi si
-            # trasmette comunque quello che arriva (parametro opzionale
-            # stream_parachute_no_timeout, default True).
-            verdict = _parachute_verdict(verdict, qcp, dep, router.policy)
+            # consegna comunque quello che arriva (parametro opzionale
+            # stream_parachute_no_timeout, default True). Sotto HOLD la
+            # consegna e' SEMPRE bufferizzata (mai byte live): si scarta la
+            # coda in volo cosi' il tool repair hold gira sul buffer parziale.
+            _pv = _parachute_verdict(verdict, qcp, dep, router.policy,
+                                     hold=hold, has_buffer=bool(prebuf))
+            if hold and verdict == "timeout" and _pv == "content":
+                await _discard_stream(gen, pending)
+                pending = None
+            verdict = _pv
             # HOLD: finish_reason=length -> risposta TRONCATA dal modello (non
             # dal cap del client): si ruota pre-byte, non si consegna il
             # parziale. Se invece il client ha chiesto max_tokens ed e' stato
