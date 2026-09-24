@@ -125,6 +125,22 @@ log = logging.getLogger("nx.forwarder")
 # il token va rimosso anche se il deployment e' dichiarato effort_capable.
 EFFORT_INCOMPATIBLE_HOSTS = ("api.groq.com",)
 
+# Campi STT extra (`hotwords`, `vad_filter`): li accettano i server whisper
+# self-hosted (Speaches/faster-whisper, `initial_prompt`/hotword boosting).
+# I cloud OpenAI-compat (Groq) li RIFIUTANO con 400 "unknown param", quindi
+# vanno rimossi prima dell'inoltro (allowlist positiva: fail-closed).
+STT_EXTRA_PROVIDERS = ("speaches",)
+STT_EXTRA_HOST_HINTS = ("speaches", "faster-whisper", "whisper.cpp",
+                        "whisper-server")
+
+
+def _stt_extras_supported(dep: dict) -> bool:
+    """True se il deployment STT accetta `hotwords`/`vad_filter`."""
+    prov = (dep.get("provider") or "").lower()
+    host = (dep.get("api_base") or "").lower()
+    return prov in STT_EXTRA_PROVIDERS or any(h in host
+                                              for h in STT_EXTRA_HOST_HINTS)
+
 
 def apply_effort_policy(body: dict, dep: dict) -> dict:
     """Adatta il body all'effort richiesto per lo specifico deployment.
@@ -3265,6 +3281,9 @@ truncation_hook=None,
         """
         data = {k: v for k, v in data_fields.items() if k != "model"}
         data["model"] = dep["model"]
+        if not _stt_extras_supported(dep):
+            for _extra in ("hotwords", "vad_filter"):
+                data.pop(_extra, None)
         headers = {"Authorization": f"Bearer {dep['api_key']}",
                    **_session_headers(dep, profile=profile, client_ip=client_ip,
                                       session=session, attribution=attribution)}

@@ -1,20 +1,25 @@
-"""STT: campi extra inoltrati dal gateway.
+"""STT: campi extra (allowlist del gateway + inoltro selettivo per provider).
 
 `/v1/audio/transcriptions` legge dal multipart una allowlist e la passa a
-`forwarder.transcribe`. Qui si blinda che `prompt`/`language`/`hotwords`/
-`vad_filter` arrivino al forwarder e che i campi sconosciuti siano scartati.
-
-(`hotwords`/`vad_filter` servono ai server whisper self-hosted come Speaches;
-Groq li tollera senza errore — verificato e2e.)
+`forwarder.transcribe`. Qui si blinda che:
+  - `prompt`/`language`/`hotwords`/`vad_filter` arrivino al forwarder;
+  - i campi sconosciuti siano scartati;
+  - `hotwords`/`vad_filter` siano inoltrati SOLO ai server whisper self-hosted
+    (Speaches/faster-whisper) e RIMOSSI sui cloud che li rifiutano (Groq: 400
+    "unknown param" — verificato e2e).
 """
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.forwarder import Forwarder, _stt_extras_supported
+
 _CSV_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
                "priority,scrocco-llm-test,caps\n")
-_ROW = ("a@x.com,whisper-x,groq,https://api.groq.com/openai/v1,free,8,8000,1,"
+_ROW = ("a@x.com,whisper-x,speaches,http://speaches:8000/v1,free,8,8000,1,"
         "sk-stt,stt\n")
 
 MK = {"Authorization": "Bearer test-master-stt"}
@@ -62,7 +67,8 @@ def _post(c, monkeypatch, m, **fields):
     return r, fwd
 
 
-def test_stt_inoltra_prompt_language_hotwords_vad(client, monkeypatch):
+def test_stt_allowlist_inoltra_prompt_language_hotwords_vad(client,
+                                                            monkeypatch):
     c, m = client
     r, fwd = _post(c, monkeypatch, m, language="it",
                    prompt="Dettatura tecnica: scrocco-llm",
@@ -98,3 +104,57 @@ def test_stt_senza_campi_extra_non_ne_inventa(client, monkeypatch):
     data = fwd.calls[0]["data"]
     for k in ("prompt", "hotwords", "vad_filter", "language"):
         assert k not in data
+
+
+# ------------------------------------------------- forwarder: gating provider
+def test_stt_extras_supported_provider():
+    assert _stt_extras_supported({"provider": "speaches"})
+    assert _stt_extras_supported({"api_base": "http://speaches:8000/v1"})
+    assert not _stt_extras_supported(
+        {"provider": "groq", "api_base": "https://api.groq.com/openai/v1"})
+    assert not _stt_extras_supported({"provider": "openai",
+                                      "api_base": "https://api.openai.com/v1"})
+
+
+class _Resp:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+    text = ""
+
+    def json(self):
+        return {"text": "ok"}
+
+
+class _Client:
+    def __init__(self, sink):
+        self.sink = sink
+
+    async def post(self, url, **kw):
+        self.sink.update(kw)
+        return _Resp()
+
+
+def _transcribe_seen(dep):
+    fwd = Forwarder()
+    seen: dict = {}
+    fwd._client_for = lambda url, key="": _Client(seen)
+    fields = {"language": "it", "prompt": "p", "hotwords": "h",
+              "vad_filter": "true"}
+    asyncio.run(fwd.transcribe(dep, fields, b"RIFF", "a.wav", "audio/wav"))
+    return seen["data"]
+
+
+def test_transcribe_inoltra_extras_a_speaches():
+    data = _transcribe_seen({"unique": "u", "model": "m", "api_key": "k",
+                             "api_base": "http://speaches:8000/v1",
+                             "provider": "speaches"})
+    assert data["hotwords"] == "h" and data["vad_filter"] == "true"
+    assert data["prompt"] == "p"
+
+
+def test_transcribe_rimuove_extras_su_groq():
+    data = _transcribe_seen({"unique": "u", "model": "m", "api_key": "k",
+                             "api_base": "https://api.groq.com/openai/v1",
+                             "provider": "groq"})
+    assert "hotwords" not in data and "vad_filter" not in data
+    assert data["prompt"] == "p"        # gli altri campi passano comunque
