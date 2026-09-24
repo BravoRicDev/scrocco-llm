@@ -269,22 +269,37 @@ def test_hold_unrepairable_toolcall_uses_toolcall_note(rep, monkeypatch):
     assert row and row["detail"] == "toolcall"
 
 
-def test_hold_unrepairable_toolcall_leaves_to_repair(rep, monkeypatch):
-    """Args tool-call non riparabili: gli argomenti sono di competenza del
-    tool-repair -> il QC NON deve far scattare retry/rotazioni (tempeste) ne'
-    azzerare la risposta: si consegna il turno cosi' com'e' (tool-call inclusa),
-    senza penali."""
+def test_hold_unrepairable_toolcall_corrective_then_ok(rep, monkeypatch):
+    """Args tool-call non riparabili (doppia virgola): il QC scatta e inietta
+    la nota `toolcall`; al retry il modello produce una tool-call valida ->
+    consegnata correttamente."""
     cfg, router, by_key = _mk(_HDR + _GOOD)
     good = by_key["K-G"]
     bad = _sse_toolcall("search", '{"alias":"x",,"command":"y"}')
-    fwd = _FakeFwd({good["unique"]: [bad]})
+    fixed = _sse_toolcall("search", '{"alias":"x","command":"y"}')
+    fwd = _FakeFwd({good["unique"]: [bad, fixed]})
     out = _stream(monkeypatch, cfg, router, fwd, good, _payload(tools=True))
-    # una sola chiamata (nessun retry correttivo, nessuna rotazione)
-    assert fwd.calls == [good["unique"]]
-    # la tool-call resta (il turno NON e' azzerato)
-    assert _toolcall_args_of(out) != ""
-    assert _finish_of(out) == "tool_calls"
+    assert fwd.calls == [good["unique"], good["unique"]]
+    note = [m["content"] for m in fwd.payload_snapshot[-1]["messages"]
+            if m.get("role") == "system"][-1]
+    assert "meccanismo di tool-call" in note
+    assert json.loads(_toolcall_args_of(out)) == {"alias": "x", "command": "y"}
+    row = next((r for r in _rows()
+                if r["kind"] == "struct_corrective"
+                and r["source"] == "stream"), None)
+    assert row and row["detail"] == "toolcall"
+
+
+def test_hold_valid_fragmented_toolcall_no_qc(rep, monkeypatch):
+    """Tool-call con args frammentati ma VALIDI una volta uniti: il QC non deve
+    segnalare nulla (il merge per index evita il falso 'Unterminated string')."""
+    cfg, router, by_key = _mk(_HDR + _GOOD)
+    good = by_key["K-G"]
+    ok = _sse_toolcall("search", '{"alias":"x","command":"y"}')
+    fwd = _FakeFwd({good["unique"]: [ok]})
+    out = _stream(monkeypatch, cfg, router, fwd, good, _payload(tools=True))
+    assert fwd.calls == [good["unique"]]           # nessun retry
+    assert json.loads(_toolcall_args_of(out)) == {"alias": "x", "command": "y"}
     kinds = {r["kind"] for r in _rows()}
-    assert "struct_softland" in kinds
-    assert "struct_invalid" not in kinds
     assert "struct_corrective" not in kinds
+    assert "struct_invalid" not in kinds

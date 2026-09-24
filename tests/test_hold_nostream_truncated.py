@@ -147,21 +147,22 @@ def test_hold_zero_answer_length_ruota_senza_penale():
     assert not router.is_cooled_down(trunc["unique"])   # nessuna penale
 
 
-def test_hold_toolcall_args_non_validi_lasciati_al_repair():
-    """Args tool-call non riparabili: competenza del tool-repair -> il QC non
-    ruota e non azzera: si consegna il turno con la tool-call cosi' com'e'."""
+def test_hold_toolcall_args_broken_corrective_retry():
+    """Tool-call con args JSON rotti: il QC scatta -> retry correttivo sullo
+    stesso dep (niente rotazione). Al retry valido -> consegnato."""
     router = _mk_router(hold=True)
     trunc, _good = _deps(router)
     calls = []
 
     def handler(request):
         calls.append(request.url.host)
+        # 1o: args rotti; 2o (dopo la nota correttiva): args validi
+        args = '{"a":1,,"b":2}' if len(calls) == 1 else '{"a":1}'
         return httpx.Response(200, json={"choices": [{
             "message": {"content": "",
                         "tool_calls": [{"id": "c1", "type": "function",
-                                        "function": {
-                                            "name": "run",
-                                            "arguments": '{"a":1,,"b":2}'}}]},
+                                        "function": {"name": "run",
+                                                     "arguments": args}}]},
             "finish_reason": "tool_calls"}]})
 
     router.fallback_next = _no_rotate
@@ -169,10 +170,11 @@ def test_hold_toolcall_args_non_validi_lasciati_al_repair():
     p["tools"] = [{"type": "function",
                    "function": {"name": "run", "parameters": {}}}]
     data, used = _run(router, _fwd(handler), trunc, p)[:2]
-    assert used["api_key"] == "K1"               # nessuna rotazione
-    assert calls == ["trunc.test"]              # nessun retry correttivo
-    msg = data["choices"][0]["message"]
-    assert msg.get("tool_calls")                # tool-call mantenuta
+    assert used["api_key"] == "K1"
+    assert calls == ["trunc.test", "trunc.test"]     # retry, nessuna rotazione
+    import json as _json
+    tc = data["choices"][0]["message"]["tool_calls"][0]
+    assert _json.loads(tc["function"]["arguments"]) == {"a": 1}
 
 
 def test_hold_catena_esaurita_503():

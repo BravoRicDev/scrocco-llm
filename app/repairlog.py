@@ -52,7 +52,6 @@ FAMILY: dict[str, str] = {
     "struct_repaired": "struct",        # JSON riparato schema-driven
     "struct_invalid": "struct",         # output strutturato non recuperabile
     "struct_corrective": "struct",      # retry correttivo inviato
-    "struct_softland": "struct",        # args tool-call lasciati al tool-repair
 }
 KINDS: tuple[str, ...] = tuple(FAMILY)
 FAMILIES: tuple[str, ...] = ("repair", "salvage", "struct")

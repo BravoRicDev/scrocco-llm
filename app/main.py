@@ -2357,6 +2357,26 @@ def _sse_data_objs(chunk: bytes):
             continue
 
 
+def _merge_qc_tool_calls(chunk: bytes):
+    """Assembla le tool-call di uno stream SSE bufferizzato UNENDO i frammenti
+    per `index` (come fa OpenAI in streaming).
+
+    Necessario per il QC: gli argomenti di una tool-call arrivano in molti
+    delta; validarli frammento per frammento da' falsi positivi ("Unterminated
+    string" sul primo pezzo `{"`). Qui si uniscono in un array di tool-call
+    complete, pronte per `check_response`.
+    """
+    from .protocols import _merge_tool_call
+    acc: dict[int, dict] = {}
+    for obj in _sse_data_objs(chunk):
+        for ch in (obj.get("choices") or []) if isinstance(obj, dict) else []:
+            d = ch.get("delta") if isinstance(ch, dict) else None
+            tc = d.get("tool_calls") if isinstance(d, dict) else None
+            for one in tc or []:
+                _merge_tool_call(acc, one)
+    return [acc[k] for k in sorted(acc)]
+
+
 def _strip_sse_content(chunk: bytes, stripper) -> bytes:
     """STRIP dei marker di template (Nemotron/Ling) da `delta.content` in SSE.
 
@@ -3805,7 +3825,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
                      or 128)
     # Tool repair config per streaming
-    from .toolrepair import create_tool_repair_config, resolve_level
+    from .toolrepair import create_tool_repair_config
     from .fakecall import (fake_config_from_policy, is_escalation_group,
                            looks_like_fake_tool_call, TemplateTokenStripper)
     _tr_cfg = create_tool_repair_config({
@@ -4358,14 +4378,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     and (qc.enabled or san.enabled)):
                 from .qc import check_response, check_sanity
                 _qc_txt = _buffered_answer_text(prebuf)
-                _qc_tcs: list | None = None
-                for _o in _sse_data_objs(b"".join(prebuf)):
-                    for _ch in (_o.get("choices") or []) \
-                            if isinstance(_o, dict) else []:
-                        _d = _ch.get("delta") if isinstance(_ch, dict) else None
-                        _tc = _d.get("tool_calls") if isinstance(_d, dict) else None
-                        if _tc:
-                            _qc_tcs = (_qc_tcs or []) + list(_tc)
+                _qc_tcs = _merge_qc_tool_calls(b"".join(prebuf)) or None
                 _qc_obj = {"choices": [{"message": {
                     "content": _qc_txt, "tool_calls": _qc_tcs}}]}
                 # QC solo su contenuto REALE: i casi vuoti/zero-answer (e il
@@ -4377,28 +4390,6 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                   if qc.enabled else None)
                     if not _qc_reason and san.enabled:
                         _qc_reason = check_sanity(_qc_obj, payload, san)
-                # Gli ARGOMENTI di una tool-call sono di competenza del
-                # tool-repair (livello effective per questo dep), NON del QC:
-                # se il repair e' attivo ha gia' tentato tutte le mosse. Far
-                # scattare il QC qui genera retry correttivi inutili e (peggio)
-                # rotazioni a catena, oppure soft-landing che azzera la
-                # risposta. Si consegna il turno cosi' com'e'.
-                if _qc_reason and _corrective_kind(_qc_reason) == "toolcall":
-                    try:
-                        _trl = resolve_level(dep, _tr_cfg)
-                    except Exception:                    # noqa: BLE001
-                        _trl = "aggressive"
-                    if _trl != "off":
-                        log.info("[qc] stream %s tool-call args non validi "
-                                 "(%s): lasciati al tool-repair, consegno",
-                                 dep["unique"], _qc_reason)
-                        metrics.inc("nx_toolcall_qc_skipped_total",
-                                    (dep["unique"],))
-                        repairlog.note("struct_softland", source="stream",
-                                       outcome="ok", dep=dep["unique"],
-                                       model=dep.get("model", ""),
-                                       detail="toolcall args non validi")
-                        _qc_reason = None
                 if _qc_reason:
                     _ck = _corrective_kind(_qc_reason)
                     if (getattr(router.policy, "corrective_retry_enabled", True)

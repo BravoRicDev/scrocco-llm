@@ -75,7 +75,7 @@ from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
 from .effort import get_effort, get_temperature_config
 from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          TruncatedToolcallSSEFilter, create_tool_repair_config,
-                         repair_tool_calls, resolve_level, sanitize_response)
+                         repair_tool_calls, sanitize_response)
 from .fakecall import (fake_config_from_policy, is_escalation_group,
                        message_fake_pattern, sanitize_message)
 from .histnorm import (hist_config_from_policy, normalize_messages,
@@ -4120,25 +4120,6 @@ truncation_hook=None,
                                          % (fr, cur), final=True)
                     if reason:
                         _ck = _corrective_kind(reason)
-                        # Gli ARGOMENTI di una tool-call sono di competenza del
-                        # tool-repair (gia' eseguito sopra su questo output),
-                        # NON del QC: se il repair e' attivo si consegna il turno
-                        # cosi' com'e' (niente retry correttivi inutili ne'
-                        # rotazioni a catena). Vale solo per reason tool_calls.*
-                        if _ck == "toolcall" and resolve_level(dep, tr_cfg) != "off":
-                            log.info("[qc] %s tool-call args non validi (%s): "
-                                     "lasciati al tool-repair, consegno",
-                                     cur, reason)
-                            metrics.inc("nx_toolcall_qc_skipped_total", (cur,))
-                            repairlog.note("struct_softland",
-                                           source="nostream", outcome="ok",
-                                           dep=cur,
-                                           model=dep.get("model", ""),
-                                           detail="toolcall args non validi")
-                            router.note_result(cur,
-                                               (time.monotonic() - t0) * 1000,
-                                               quality=0.5, ctx_est=ctx)
-                            return data, dep, qc_failed
                         if (getattr(router.policy,
                                     "corrective_retry_enabled", True)
                                 and cur not in _corrected
