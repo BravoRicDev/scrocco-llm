@@ -129,6 +129,15 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   media/cap, `-go`/`-fallback` e i unique espliciti restano invariati. Il
   conteggio dei turni e la deviazione avvengono **all'atterraggio** (scelta del
   gruppo); ladder e selezione sono invariati.
+- **Fair-share chiavi (cap group)**: blocco `cap_fair_share.*` — `enabled`
+  (default `false`), `caps` (lista di capacità, default `[stt]`), `window_sec`
+  (default 60). Per le capacità elencate, nei **gruppi primary** (`-C`) la
+  chiave non è più scelta dalla reputation (che premia sempre la stessa chiave
+  fino al 429, winner-take-all) ma è la chiave col **minor numero di richieste
+  nella finestra rolling** `window_sec` (tie-break: richieste in volo,
+  `model_preference`, latenza EMA). Serve a distribuire uniformemente il RPM su
+  chiavi gemelle dello stesso modello (es. 5 chiavi groq whisper) evitando
+  cooldown e latenza inutili. Non tocca `-C-go`/`-C-fallback` né il mondo testo.
 - **Other**: `estimate_divisor`, adaptive tuning, `provider_models_ttl`,
   `strip_client_fields` (denylist di campi client-only non standard rimossi dal
   body prima dell'invio, default `["fallback_models"]`),

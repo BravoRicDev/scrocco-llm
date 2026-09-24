@@ -67,6 +67,12 @@ individual account limits instead of dying on the first 429.
   in ~32s gifts `-go` turns but is **not** demoted, so it stays warm/holder and
   is found again on return from the refund turns. See the `go_refund:` policy
   block.
+- **Capability key fair-share (`cap_fair_share`)**: for the listed capabilities
+  (default `stt`) the **primary** cap groups (`-C`) pick the key with the
+  **fewest requests in a rolling window** (`window_sec`, default 60) instead of
+  the reputation winner-take-all, spreading the RPM evenly across twin keys of
+  the same model (e.g. the 5 Groq Whisper keys). `-C-go`/`-C-fallback` and the
+  text world are untouched. Off by default.
 - **Chained failover**: free dims → renewal bucket (`-go`) → paid fallback
   (`-fallback`). Cooldown escalation is **linear** (30 min base + 30 min per
   failure in the last 24h, capped at 5h). **Timeouts are penalised 10×**

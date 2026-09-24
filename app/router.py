@@ -778,6 +778,24 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             dq.popleft()
         return len(dq)
 
+    def usage_count_window(self, unique: str, sec: float,
+                           now: float | None = None) -> int:
+        """Tentativi (start) nella finestra rolling `sec`, usato dal fair-share
+        delle chiavi nei gruppi capacità primary. NON pota il deque: la finestra
+        a 24h del cold-spread deve restare intatta (si limita a contare, dal
+        fondo, le entry piu' recenti di `cut`)."""
+        dq = self._usage().get(unique)
+        if not dq:
+            return 0
+        now = time.time() if now is None else now
+        cut = now - max(0.001, float(sec))
+        n = 0
+        for ts, _w in reversed(dq):
+            if ts < cut:
+                break
+            n += 1
+        return n
+
     def _attached_unique(self, unique: str) -> bool:
         """True se `unique` e' 'attaccato' alla sessione CORRENTE (successo
         recente entro session_dep_guard_sec): resta prioritario e non viene
@@ -5771,6 +5789,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                               "chiavi vive)", group_name, last, len(same),
                               len(deps))
                     deps = same
+        # FAIR-SHARE chiavi (gruppi capacità primary, opt-in): invece del
+        # winner-take-all della reputation, sceglie la chiave col MINOR numero
+        # di richieste nella finestra rolling (RPM pari sulle chiavi gemelle).
+        # Solo bucket primary: -C-go/-C-fallback restano deterministici.
+        if deps and cap_g is not None \
+                and getattr(self.policy, "cap_fair_share_enabled", False) \
+                and cap_g in (getattr(self.policy, "cap_fair_share_caps", None)
+                              or ()) \
+                and not self._is_renewal_bucket(group_name):
+            _win = float(getattr(self.policy, "cap_fair_share_window_sec",
+                                 60) or 60)
+            _now = time.time()
+
+            def _fs_key(_d):
+                return (self.usage_count_window(_d["unique"], _win, _now),
+                        int(self.stats_for(_d["unique"]).inflight),
+                        -int(_d.get("model_preference", 0) or 0),
+                        self._get_avg_latency(_d["unique"]) or float("inf"))
+
+            _bk = min(_fs_key(_d) for _d in deps)
+            _best = [_d for _d in deps if _fs_key(_d) == _bk]
+            chosen = random.choice(_best)
+            log.info("[pick-final] %s chosen=%s (fair-share: count=%d "
+                     "inflight=%d, %d chiavi a pari carico)", group_name,
+                     chosen["unique"], _bk[0], _bk[1], len(_best))
+            return chosen
         if not deps:
             return None
         now = time.time()

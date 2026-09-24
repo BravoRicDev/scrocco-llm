@@ -1191,6 +1191,20 @@ class Policy:
     #   error   -> 400 rigoroso
     cap_groups_on_missing: str = "dynamic"
 
+    # FAIR-SHARE delle chiavi nei gruppi capacità PRIMARY (free/priority). Nel
+    # mondo capacità la selezione ignora lo spread a freddo e usa la reputation
+    # adattiva: `_key_scores` (ATTEMPT +1, SUCCESS -2) fa vincere sempre la
+    # stessa chiave (winner-take-all) finché non prende 429/cooldown. Con questo
+    # flag, per le cap elencate si sceglie invece la chiave col MINOR numero di
+    # richieste nella finestra rolling `window_sec` (tie-break inflight ->
+    # model_preference -> latenza EMA). Serve a distribuire uniformemente il
+    # RPM su chiavi gemelle dello stesso modello (es. 5 chiavi groq whisper),
+    # evitando cooldown e latenza inutili. Si applica SOLO ai bucket primary
+    # (esclude -C-go/-C-fallback). Default OFF: comportamento invariato.
+    cap_fair_share_enabled: bool = False
+    cap_fair_share_caps: list[str] = field(default_factory=lambda: ["stt"])
+    cap_fair_share_window_sec: int = 60
+
     # ------------------------------------------------------------- accessors
     def step_up_for(self, profile: str | None) -> int:
         """Soglia di salita (%) per un profilo, o quella globale."""
@@ -2975,6 +2989,36 @@ class Policy:
                     raise ValueError("capability_groups.on_missing non valido: "
                                      "ammessi dynamic|error")
                 p.cap_groups_on_missing = str(om)
+
+        # fair-share chiavi nei gruppi capacità primary (anti-martellamento)
+        cfs = raw.get("cap_fair_share")
+        if cfs is not None:
+            if not isinstance(cfs, dict):
+                raise ValueError("cap_fair_share deve essere una mappa")
+            if "enabled" in cfs:
+                p.cap_fair_share_enabled = _coerce_bool(
+                    cfs["enabled"], "cap_fair_share.enabled")
+            cs = cfs.get("caps")
+            if cs is not None:
+                if isinstance(cs, str):
+                    cs = [cs]
+                if not isinstance(cs, (list, tuple)):
+                    raise ValueError("cap_fair_share.caps deve essere una lista")
+                from .capabilities import ROUTING_CAPS
+                _caps: list[str] = []
+                for c in cs:
+                    if not isinstance(c, str) or c not in ROUTING_CAPS:
+                        raise ValueError(
+                            "cap_fair_share.caps: capacità non valida "
+                            f"'{c}' (ammesse: {sorted(ROUTING_CAPS)})")
+                    _caps.append(c)
+                p.cap_fair_share_caps = _caps
+            ws = cfs.get("window_sec")
+            if ws is not None:
+                if isinstance(ws, bool) or not isinstance(ws, (int, float)) \
+                        or ws <= 0:
+                    raise ValueError("cap_fair_share.window_sec deve essere > 0")
+                p.cap_fair_share_window_sec = int(ws)
 
         # sanity QC
         qs = raw.get("qc_sanity")

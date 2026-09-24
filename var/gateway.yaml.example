@@ -831,6 +831,19 @@ capability_groups:
   on_missing: dynamic       # dynamic = filtro legacy se la cap non ha gruppo
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FAIR-SHARE CHIAVI (gruppi capacità primary) — distribuisce uniformemente il
+# RPM sulle chiavi gemelle dello stesso modello (es. le 5 chiavi groq whisper),
+# invece di martellare la stessa chiave (winner-take-all della reputation) fino
+# al 429. Si sceglie la chiave col MINOR numero di richieste nella finestra
+# rolling `window_sec` (tie-break: inflight, model_preference, latenza EMA).
+# Solo bucket primary (-C); esclude -C-go/-C-fallback. Default OFF.
+# ─────────────────────────────────────────────────────────────────────────────
+cap_fair_share:
+  enabled: false            # accendere per attivare il fair-share
+  caps: [stt]               # capacità a cui applicarlo (stt, tts, image_gen…)
+  window_sec: 60            # ampiezza finestra rolling (60s = RPM)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PRICING — stima costi per /admin/insights (usata SOLO quando il provider
 # non riporta un costo reale; chiave = pattern fnmatch sul modello)
 # ─────────────────────────────────────────────────────────────────────────────
