@@ -76,11 +76,12 @@ def test_go_tie_stays_in_best_tier(router):
 
 
 def test_data_renewal_dominates_preference():
-    """sort_key (rinnovo) e' il criterio PRIMARIO: early-x rinnova prima
-    di ds-a anche se ds-a ha pref maggiore. I sort_key sono forzati per
-    non dipendere dalla data corrente."""
+    """sort_key (rinnovo) e' il criterio PRIMARIO con `go_balance.flat_pool`
+    DISATTIVATO: early-x rinnova prima di ds-a anche se ds-a ha pref maggiore.
+    I sort_key sono forzati per non dipendere dalla data corrente."""
     r, path = _mkrouter(CSV_EARLY)
     try:
+        r.policy.go_balance_flat_pool = False
         ds = _deps(r, GO)["ds-a"]
         early = _deps(r, GO)["early-x"]
         mimo = _deps(r, GO)["mimo-x"]

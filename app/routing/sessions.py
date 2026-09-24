@@ -48,7 +48,7 @@ class SessionMixin:
         if not ent:
             return None
         unique, ts = ent
-        ttl = float(getattr(self.policy, "sticky_ttl_sec", 3600) or 3600)
+        ttl = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
         if time.time() - ts > ttl:
             d.pop(sid, None)
             return None
@@ -519,7 +519,8 @@ class SessionMixin:
                 if _now - ts > _ttl:
                     d.pop(k, None)
 
-    def session_holder(self, session_id: str | None = None) -> str | None:
+    def session_holder(self, session_id: str | None = None,
+                       ttl: float | None = None) -> str | None:
         sid = session_id or current_session()
         if not sid:
             return None
@@ -528,7 +529,9 @@ class SessionMixin:
         if not ent:
             return None
         unique, ts = ent
-        ttl = float(getattr(self.policy, "cache_holder_ttl_sec", 3600) or 3600)
+        ttl = float(ttl if ttl is not None else
+                    (getattr(self.policy, "cache_holder_ttl_sec", 3600)
+                     or 3600))
         if time.time() - ts > ttl:
             d.pop(sid, None)
             return None
@@ -541,11 +544,13 @@ class SessionMixin:
 
     def cache_holder(self, session_id: str | None = None,
                      need: frozenset[str] | None = None,
-                     ctx: int | None = None) -> dict | None:
-        """Detentore cache per la sessione, se ancora valido."""
+                     ctx: int | None = None,
+                     ttl: float | None = None) -> dict | None:
+        """Detentore cache per la sessione, se ancora valido. `ttl` opzionale
+        per accorciare la validita' (nel bucket -go si usa `go_stick_ttl_sec`)."""
         if not getattr(self.policy, "cache_aware_enabled", True):
             return None
-        unique = self.session_holder(session_id)
+        unique = self.session_holder(session_id, ttl=ttl)
         if not unique:
             return None
         dep = self.config.deployment_by_unique(unique)

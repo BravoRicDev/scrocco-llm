@@ -92,6 +92,10 @@ conc_token_ratio: 0.5
 # per richieste consecutive della stessa sessione.
 #   3600 = 1 ora ; 0 = sticky disabilitato
 sticky_ttl_sec: 3600
+# TTL (s) della stickiness sul SOLO bucket -go: `last_go` e il cache-holder
+# della sessione vengono riusati entro questa finestra, poi la sessione
+# ripesca bilanciando. 600 = 10 minuti (default).
+go_stick_ttl_sec: 600
 # Campi client-only NON standard rimossi dal body prima dell'invio a monte
 # (es. le opzioni degli agenti opencode come `fallback_models`, che i provider
 # severi tipo Google via /v1beta/openai rifiutano con 400 "Unknown name").
@@ -822,6 +826,21 @@ go_refund:
   min_turns: 1                 # minimo turni -go regalati
   max_turns: 5                 # massimo turni -go regalati
   trigger_ms: 20000            # soglia assoluta di regalo (ms); <=0 = off
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BILANCIAMENTO -go — metrica del pick A FREDDO sui bucket rinnovo e forma
+# del pool. `enabled` usa i TOKEN DI OUTPUT consumati nella finestra rolling
+# `window_sec` (default 5h) come metrica: e' la risorsa scarsa di un
+# abbonamento, non il prefill. `flat_pool` (default) tiene come tier assoluto
+# solo il rinnovo di OGGI (sort_key==0) e mette tutti gli altri rinnovi in un
+# UNICO pool, cosi' deepseek/codex/antigravity si spartiscono il carico per uso
+# reale invece di esaurire un tier alla volta. `flat_pool: false` = tier
+# stretti per sort_key (comportamento storico).
+# ─────────────────────────────────────────────────────────────────────────────
+go_balance:
+  enabled: true                # false = torna alla metrica prefill-24h
+  flat_pool: true              # false = tier stretti per sort_key
+  window_sec: 18000            # finestra rolling dei token di output (5h)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…

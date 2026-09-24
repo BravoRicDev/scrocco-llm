@@ -1205,6 +1205,22 @@ class Policy:
     cap_fair_share_caps: list[str] = field(default_factory=lambda: ["stt"])
     cap_fair_share_window_sec: int = 60
 
+    # BILANCIAMENTO -go ("go_balance"): metrica del pick A FREDDO sui bucket
+    # rinnovo. enabled=true -> la chiave col MINOR consumo di TOKEN DI OUTPUT
+    # nella finestra window_sec (default 5h) vince: e' la risorsa scarsa di un
+    # abbonamento (rate-limit/crediti), non il prefill. enabled=false -> torna
+    # alla vecchia metrica prefill-24h. flat_pool=true -> solo il rinnovo di
+    # OGGI (sort_key==0) resta tier assoluto e tutti gli altri rinnovi formano
+    # un UNICO pool bilanciato; flat_pool=false -> tier stretti per sort_key
+    # (comportamento storico, un tier alla volta).
+    go_balance_enabled: bool = True
+    go_balance_flat_pool: bool = True
+    go_balance_window_sec: int = 18000       # 5h
+    # TTL della stickiness sul bucket -go (`last_go` e cache-holder in -go):
+    # default 10 minuti, cosi' una sessione che si ferma o "viaggia" altrove
+    # non resta agganciata per un'ora ma ripesca bilanciando.
+    go_stick_ttl_sec: int = 600
+
     # ------------------------------------------------------------- accessors
     def step_up_for(self, profile: str | None) -> int:
         """Soglia di salita (%) per un profilo, o quella globale."""
@@ -2885,6 +2901,25 @@ class Policy:
                 p.go_refund_trigger_ms = int(v)
             if p.go_refund_max_turns < p.go_refund_min_turns:
                 raise ValueError("go_refund.max_turns deve essere >= min_turns")
+
+        # bilanciamento -go: metrica a freddo (token di output) + pool
+        gb = raw.get("go_balance")
+        if gb is not None:
+            if not isinstance(gb, dict):
+                raise ValueError("go_balance deve essere una mappa")
+            if "enabled" in gb:
+                p.go_balance_enabled = _coerce_bool(
+                    gb["enabled"], "go_balance.enabled")
+            if "flat_pool" in gb:
+                p.go_balance_flat_pool = _coerce_bool(
+                    gb["flat_pool"], "go_balance.flat_pool")
+            if "window_sec" in gb:
+                v = gb["window_sec"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or v <= 0:
+                    raise ValueError("go_balance.window_sec deve essere > 0")
+                p.go_balance_window_sec = int(v)
+        _set_int(p, raw, "go_stick_ttl_sec", minimum=1)
 
         # cooldown escalation
         ce = raw.get("cooldown_escalation")

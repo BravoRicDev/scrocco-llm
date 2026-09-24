@@ -3,7 +3,11 @@ richiesta e' esplicita (prefer_holder=True) il detentore cache della sessione
 vince sul tier di rinnovo (stessa chiave = KV-cache calda; al 429 il holder si
 esclude da solo e la rotazione prosegue nell'ordine normale, cosi' i crediti si
 sommano un account alla volta). Auto-routing ed escalation interne NON usano
-prefer_holder: l'ordine resta data+pref con random nel tier migliore."""
+prefer_holder: l'ordine resta data+pref con random nel tier migliore.
+
+NB: questi test usano `go_balance.flat_pool=False` per isolare la semantica
+"tier stretto + prefer_holder" (con il default flat_pool il pool dei rinnovi
+futuri e' unico e la scelta a freddo e' bilanciata per token di output)."""
 import os
 import tempfile
 from datetime import date
@@ -51,7 +55,7 @@ def router():
     with os.fdopen(fd, "w") as f:
         f.write(CSV)
     cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=1)
-    r = Router(cfg, Policy.from_dict({}))
+    r = Router(cfg, Policy.from_dict({"go_balance": {"flat_pool": False}}))
     yield r
     os.unlink(path)
 

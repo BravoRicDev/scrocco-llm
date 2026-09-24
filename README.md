@@ -67,6 +67,15 @@ individual account limits instead of dying on the first 429.
   in ~32s gifts `-go` turns but is **not** demoted, so it stays warm/holder and
   is found again on return from the refund turns. See the `go_refund:` policy
   block.
+- **Renewal-bucket balancing (`go_balance`)**: the cold pick in the `-go`/
+  `-fallback` buckets ranks deployments by **output tokens** consumed in a
+  rolling window (`window_sec`, default 5h) instead of the 24h prefill weight,
+  and — with `flat_pool` (default) — only *today's* renewal (`sort_key == 0`)
+  stays an absolute tier while all future renewals form a **single pool**
+  balanced by real usage, so the different subscriptions share the load instead
+  of exhausting one tier at a time. `go_stick_ttl_sec` (default 600) caps the
+  `-go` session stickiness (`last_go`/cache-holder, usually 1h) to 10 minutes,
+  after which the session re-picks. See the `go_balance:` policy block.
 - **Capability key fair-share (`cap_fair_share`)**: for the listed capabilities
   (default `stt`) the **primary** cap groups (`-C`) pick the key with the
   **fewest requests in a rolling window** (`window_sec`, default 60) instead of

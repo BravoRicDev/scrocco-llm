@@ -865,6 +865,11 @@ async def get_policy(request: Request):
                     "caps": list(pol.cap_fair_share_caps),
                     "window_sec": pol.cap_fair_share_window_sec,
                 },
+                "go_balance": {
+                    "enabled": pol.go_balance_enabled,
+                    "flat_pool": pol.go_balance_flat_pool,
+                    "window_sec": pol.go_balance_window_sec,
+                },
             }}
 
 
@@ -3586,6 +3591,8 @@ async def get_tuning(request: Request):
                 "go_refund_max_turns", "go_refund_trigger_ms",
                 "cap_fair_share_enabled", "cap_fair_share_caps",
                 "cap_fair_share_window_sec",
+                "go_balance_enabled", "go_balance_flat_pool",
+                "go_balance_window_sec", "go_stick_ttl_sec",
                 "dynamic_scoring_history_window",
                 "probe_concurrency", "probe_timeout_sec",
                 "playground_timeout_sec", "playground_max_attempts",

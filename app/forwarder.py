@@ -4306,6 +4306,14 @@ truncation_hook=None,
                     _q = min(_q, 0.5)
                 router.note_result(cur, (time.monotonic() - t0) * 1000,
                                    quality=_q, ctx_est=ctx)
+                # Bilanciamento -go: consumo di OUTPUT del deployment (non-stream).
+                if isinstance(data, dict):
+                    try:
+                        router.note_output_tokens(
+                            cur, (data.get("usage") or {}).get(
+                                "completion_tokens"))
+                    except Exception:
+                        pass
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"],
                                             (time.monotonic() - t0) * 1000,

@@ -578,6 +578,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         # quando si pesca a freddo, distribuendo il carico a prescindere
         # dall'`order`. In-memory; ricostruita dai log all'avvio.
         self._usage_times: dict[str, "deque[tuple[float, float]]"] = {}
+        # BILANCIAMENTO -go: finestra rolling (default 5h) dei TOKEN DI OUTPUT
+        # realmente consumati per-deployment (solo risposte consegnate). E' la
+        # metrica del pick a freddo sui bucket rinnovo: la risorsa scarsa di un
+        # abbonamento e' l'output, non il prefill. In-memory.
+        self._out_tokens: dict[str, "deque[tuple[float, int]]"] = {}
         # Budget A FINESTRA dei cooldown-wakeup della scala (solo dim nati da
         # 429/quota): evita di riesumare sempre gli stessi deployment.
         self._wake_times: dict[str, "deque[float]"] = {}
@@ -795,6 +800,77 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 break
             n += 1
         return n
+
+    # ------------------------------------------------- bilanciamento -go
+    _GO_BALANCE_DEFAULT_WINDOW = 18000.0   # 5h
+
+    def _out_toks(self) -> dict:
+        d = getattr(self, "_out_tokens", None)
+        if d is None:
+            d = {}
+            self._out_tokens = d
+        return d
+
+    def _go_balance_window(self) -> float:
+        try:
+            v = float(getattr(self.policy, "go_balance_window_sec",
+                              self._GO_BALANCE_DEFAULT_WINDOW)
+                      or self._GO_BALANCE_DEFAULT_WINDOW)
+        except (TypeError, ValueError):
+            v = self._GO_BALANCE_DEFAULT_WINDOW
+        return v if v > 0 else self._GO_BALANCE_DEFAULT_WINDOW
+
+    def _go_balance_enabled(self) -> bool:
+        return bool(getattr(self.policy, "go_balance_enabled", True))
+
+    def _go_balance_flat_pool(self) -> bool:
+        return bool(getattr(self.policy, "go_balance_flat_pool", True))
+
+    def _go_stick_ttl_sec(self) -> float:
+        try:
+            v = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
+        except (TypeError, ValueError):
+            v = 600.0
+        return v if v > 0 else 600.0
+
+    def note_output_tokens(self, unique: str, completion_tokens,
+                           ts: float | None = None) -> None:
+        """Registra i TOKEN DI OUTPUT di una risposta CONSEGNATA nella finestra
+        rolling del bilanciamento -go. Solo successi con token reali: un
+        fallimento (o una risposta a vuoto) non consuma quota di output."""
+        if not unique:
+            return
+        try:
+            n = int(completion_tokens or 0)
+        except (TypeError, ValueError):
+            return
+        if n <= 0:
+            return
+        d = self._out_toks()
+        dq = d.get(unique)
+        if dq is None:
+            dq = deque()
+            d[unique] = dq
+        now = time.time() if ts is None else ts
+        dq.append((now, n))
+        win = self._go_balance_window()
+        cut = now - win
+        while dq and dq[0][0] < cut:
+            dq.popleft()
+
+    def output_tokens_window(self, unique: str, sec: float | None = None,
+                             now: float | None = None) -> int:
+        """Token di output consumati da `unique` nella finestra rolling (default
+        5h, policy `go_balance.window_sec`). 0 se non ci sono campioni."""
+        dq = self._out_toks().get(unique)
+        if not dq:
+            return 0
+        now = time.time() if now is None else now
+        win = self._go_balance_window() if sec is None else float(sec)
+        cut = now - max(0.001, win)
+        while dq and dq[0][0] < cut:
+            dq.popleft()
+        return int(sum(n for _t, n in dq))
 
     def _attached_unique(self, unique: str) -> bool:
         """True se `unique` e' 'attaccato' alla sessione CORRENTE (successo
@@ -2243,6 +2319,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         'total' (il punteggio di reputazione e l'EMA globale li ha gia'
         contati il commit sul primo contenuto)."""
         self._note_latency_sample(unique, dur_ms, ctx_est, "total", 0.1)
+        # Bilanciamento -go: consumo reale di OUTPUT del deployment.
+        self.note_output_tokens(unique, completion_tokens)
         # Rate di generazione (token/s): servono alla stima "total" quando il
         # bucket non ha campioni propri (B3, fallback rate-based).
         try:
@@ -3361,6 +3439,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 for s in sorted(_tn, key=lambda k: float(
                         (_tn[k] or {}).get("ts") or 0.0))[:len(_tn) - 4096]:
                     _tn.pop(s, None)
+        # BILANCIAMENTO -go: token di output — pota la finestra e limita le voci.
+        _ot = getattr(self, "_out_tokens", None)
+        if isinstance(_ot, dict):
+            _owin = self._go_balance_window()
+            for u in [u for u, dq in _ot.items()
+                      if not dq or now - dq[-1][0] > _owin]:
+                _ot.pop(u, None)
+            if len(_ot) > 4096:
+                for u in sorted(
+                        _ot, key=lambda k: (_ot[k][-1][0] if _ot[k] else 0.0)
+                )[:len(_ot) - 4096]:
+                    _ot.pop(u, None)
         # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
         _gttl = self._guard_sec() * 2
         _ds = self._dep_sess()
@@ -4551,6 +4641,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         p = self.policy
         sticky_ttl = float(getattr(p, "sticky_ttl_sec", 3600) or 3600)
         holder_ttl = float(getattr(p, "cache_holder_ttl_sec", 3600) or 3600)
+        go_ttl = self._go_stick_ttl_sec()
         guard = self._guard_sec()
         slow_ttl = self._warm_ttl()
         esc_ttl = float(getattr(p, "escalation_pin_ttl_sec", 300) or 300)
@@ -4623,7 +4714,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
                                    guard),
             "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
-            "last_go": _pairs(getattr(self, "_last_go", None), sticky_ttl),
+            "last_go": _pairs(getattr(self, "_last_go", None), go_ttl),
             "discovered_max_input": {str(u): int(v) for u, v in
                                      (getattr(self, "_discovered_max_input",
                                               None) or {}).items()
@@ -4639,6 +4730,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         p = self.policy
         sticky_ttl = float(getattr(p, "sticky_ttl_sec", 3600) or 3600)
         holder_ttl = float(getattr(p, "cache_holder_ttl_sec", 3600) or 3600)
+        go_ttl = self._go_stick_ttl_sec()
         guard = self._guard_sec()
         slow_ttl = self._warm_ttl()
         esc_ttl = float(getattr(p, "escalation_pin_ttl_sec", 300) or 300)
@@ -4665,7 +4757,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         _load_pairs("sticky_dep", self._sticky_dep, sticky_ttl, "sticky_dep")
         _load_pairs("session_last_ok", self._cache_ok(), holder_ttl, "holder")
         _load_pairs("esc_win", self._esc(), esc_ttl, "esc_win")
-        _load_pairs("last_go", self._last_go_map(), sticky_ttl, "last_go")
+        _load_pairs("last_go", self._last_go_map(), go_ttl, "last_go")
         dls = getattr(self, "_dep_last_session", None)
         if not isinstance(dls, dict):
             dls = {}
@@ -5722,41 +5814,78 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             # se disponibile): se nel bucket ci sono chiavi VIVE del modello
             # preferito, restringi a loro — il holder non scavalca la scelta.
             deps = self._filter_go_preferred(deps)
+            _go_ttl = self._go_stick_ttl_sec()
             if prefer_holder:
-                _ch = self.cache_holder(need=need, ctx=ctx)
+                _ch = self.cache_holder(need=need, ctx=ctx, ttl=_go_ttl)
                 if _ch and any(_ch["unique"] == d["unique"] for d in deps):
                     log.info("[pick-final] %s chosen=%s (esplicito: detentore "
                              "cache, tier scavalcato)", group_name,
                              _ch["unique"])
                     return _ch
-            _key = lambda d: (float(d.get("sort_key", float("inf"))),
-                              -int(d.get("model_preference", 0) or 0))
-            best_key = min(_key(d) for d in deps)
-            best = [d for d in deps if _key(d) == best_key]
-            # Entro il tier: l'ULTIMO -go servito con successo a QUESTA sessione
-            # (`last_go`) vince SEMPRE se vivo e dentro il tier: e' la key con
-            # cache potenzialmente ancora calda. Fallback: il detentore cache
-            # generico se e' un dep del tier. Altrimenti A FREDDO il MENO USATO
-            # da tutte le sessioni (finestra 24h, pesata sui token di prefill):
-            # le sessioni si spartiscono le chiavi (4-2, 3-3) invece di
-            # martellare sempre la stessa.
+            # POOL A FREDDO: con `go_balance.flat_pool` (default) solo il
+            # rinnovo di OGGI (sort_key==0) resta tier assoluto; tutti gli
+            # altri rinnovi finiscono in un UNICO pool, cosi' il carico si
+            # bilancia per uso reale invece di esaurire un tier alla volta.
+            # Con flat_pool=false si torna ai tier stretti (sort_key, pref).
+            def _sk(_d):
+                try:
+                    return float(_d.get("sort_key", float("inf")))
+                except (TypeError, ValueError):
+                    return float("inf")
+
+            def _pref(_d):
+                try:
+                    return int(_d.get("model_preference", 0) or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            if self._go_balance_flat_pool():
+                _urgent = [d for d in deps if _sk(d) == 0.0]
+                best = _urgent or list(deps)
+                _tier = "urgent" if _urgent else "future-pool"
+            else:
+                _key = lambda d: (_sk(d), -_pref(d))
+                best_key = min(_key(d) for d in deps)
+                best = [d for d in deps if _key(d) == best_key]
+                _tier = f"tier={best_key}"
+            # Entro il pool: l'ULTIMO -go servito con successo a QUESTA
+            # sessione (`last_go`, TTL `go_stick_ttl_sec`, default 10min) vince
+            # se vivo (cache potenzialmente ancora calda). Fallback: il
+            # detentore cache generico (stesso TTL nel bucket -go). Altrimenti
+            # A FREDDO la chiave col MINOR consumo — token di OUTPUT nella
+            # finestra 5h (metrica resource-aware), non piu' il prefill 24h:
+            # le sessioni si spartiscono gli account invece di restare
+            # agganciate sempre allo stesso.
             _lg_u = self.last_go()
             if _lg_u and any(_lg_u == d["unique"] for d in best):
-                log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
-                         "last-go)", group_name, _lg_u)
+                log.info("[pick-final] %s chosen=%s (go/fallback: %s, "
+                         "last-go)", group_name, _lg_u, _tier)
                 return self.config.deployment_by_unique(_lg_u)
-            _ch = self.cache_holder(need=need, ctx=ctx)
+            _ch = self.cache_holder(need=need, ctx=ctx, ttl=_go_ttl)
             if _ch and any(_ch["unique"] == d["unique"] for d in best):
-                log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
-                         "cache-holder)", group_name, _ch["unique"])
+                log.info("[pick-final] %s chosen=%s (go/fallback: %s, "
+                         "cache-holder)", group_name, _ch["unique"], _tier)
                 return _ch
-            _min_usage = min(self.usage_weight_24h(d["unique"]) for d in best)
-            _least = [d for d in best
-                      if self.usage_weight_24h(d["unique"]) == _min_usage]
+            if self._go_balance_enabled():
+                _metric = "out5h"
+
+                def _use(_u):
+                    return float(self.output_tokens_window(_u))
+            else:
+                _metric = "prefill24h"
+
+                def _use(_u):
+                    return float(self.usage_weight_24h(_u))
+            _min_usage = min(_use(d["unique"]) for d in best)
+            _least = [d for d in best if _use(d["unique"]) == _min_usage]
+            # Tie-break: `model_preference` piu' alto (i preferiti restano in
+            # testa quando l'uso e' pari), poi scelta casuale.
+            _top = max(_pref(d) for d in _least)
+            _least = [d for d in _least if _pref(d) == _top]
             chosen = random.choice(_least)
-            log.info("[pick-final] %s chosen=%s (go/fallback: data+pref, "
-                     "tier=%s, %d chiavi, least-used=%.1f)", group_name,
-                     chosen["unique"], best_key, len(_least), _min_usage)
+            log.info("[pick-final] %s chosen=%s (go/fallback: %s, %d chiavi, "
+                     "%s=%.1f)", group_name, chosen["unique"], _tier,
+                     len(_least), _metric, _min_usage)
             return chosen
         # COLD SPREAD: nasconde il 20% piu' usato (finestra 24h) PRIMA del
         # filtro `order`, cosi' il carico si distribuisce anche su order

@@ -130,6 +130,18 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   media/cap, `-go`/`-fallback` e i unique espliciti restano invariati. Il
   conteggio dei turni e la deviazione avvengono **all'atterraggio** (scelta del
   gruppo); ladder e selezione sono invariati.
+- **Bilanciamento `-go`**: blocco `go_balance.*` + scalar `go_stick_ttl_sec`.
+  Nei bucket rinnovo (`-go`/`-fallback`) il pick **a freddo** usa come metrica i
+  **token di output** consumati nella finestra rolling `window_sec` (default
+  18000 = 5h) invece del prefill-24h: `enabled: false` ripristina la metrica
+  storica. Con `flat_pool: true` (default) solo il rinnovo di **oggi**
+  (`sort_key == 0`) resta tier assoluto e tutti gli altri rinnovi formano un
+  **unico pool** bilanciato per consumo reale (i vari abbonamenti si spartiscono
+  il carico invece di esaurire un tier alla volta); `flat_pool: false`
+  ripristina i tier stretti per `sort_key`. La stickiness sul `-go` (`last_go` e
+  cache-holder) è limitata a `go_stick_ttl_sec` (default 600 = 10 min): scaduta,
+  la sessione ripesca bilanciando. Tie-break del pool: `model_preference`, poi
+  scelta casuale.
 - **Fair-share chiavi (cap group)**: blocco `cap_fair_share.*` — `enabled`
   (default `false`), `caps` (lista di capacità, default `[stt]`), `window_sec`
   (default 60). Per le capacità elencate, nei **gruppi primary** (`-C`) la
