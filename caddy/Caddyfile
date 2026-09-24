@@ -1,16 +1,20 @@
 {
   auto_https disable_redirects
+  # Soglia del logger di default alzata a WARN: gli access log HTTP sono a
+  # livello INFO, quindi NON vengono piu' emessi (niente rumore di routine).
+  # NOTA: Caddy non sa emettere gli access log a DEBUG (sono solo INFO/ERROR)
+  # e una soglia esplicita NON viene scavalcata dal flag `debug` globale:
+  # per rivedere gli access log quando serve, abbassare temporaneamente a
+  # DEBUG questa soglia.
+  log {
+    level WARN
+  }
 }
 
 # HTTP diretto sulla porta 4001 per VPN/LAN (nessun certificato).
 # Bind porte in docker-compose: 10.9.0.2 (VPN) e 192.168.1.100 (LAN).
 :4001 {
-  # Access log a livello DEBUG: a INFO (default) sono solo rumore su ogni
-  # richiesta. Per vederli serve alzare il livello globale (global option
-  # `debug` in cima al Caddyfile).
-  log {
-    level debug
-  }
+  log
   encode zstd gzip
   reverse_proxy scrocco-llm:4001
 }
