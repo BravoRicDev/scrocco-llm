@@ -275,3 +275,28 @@ def test_endpoint_nonstream_hold_repairs_toolcall(M, monkeypatch):
     tcs = out["choices"][0]["message"]["tool_calls"]
     assert _json.loads(tcs[0]["function"]["arguments"]) == {"q": "hi"}
     assert out["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_immediate_upstream_error_no_unboundlocal(M, monkeypatch):
+    """Regressione: se `stream_response` solleva UpstreamError SUBITO (es. 429
+    all'apertura, prima che `qcp` fosse assegnato) il path d'errore NON deve
+    andare in UnboundLocalError('qcp') -> 500, ma restituire una risposta
+    d'errore JSON (503 o status azionabile)."""
+    dep = _dep(M, "scrocco-llm-test-redirect-early")
+    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+    from app.forwarder import UpstreamError
+
+    async def _boom(dep, payload, **kwargs):
+        raise UpstreamError(429, "rate limit exceeded")
+    monkeypatch.setattr(M.forwarder, "stream_response", _boom)
+    meta: dict = {}
+
+    async def _run():
+        payload = {"model": dep["model"],
+                   "messages": [{"role": "user", "content": "ciao"}]}
+        return await M._stream_with_fallback(
+            "test", dep, payload, scope="chain",
+            result_box=meta, client_stream=False)
+    resp = asyncio.run(_run())
+    assert isinstance(resp, JSONResponse)
+    assert resp.status_code != 500

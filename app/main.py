@@ -3957,6 +3957,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 router.note_model_failure(dep)
             return _r
         router.note_start(dep["unique"], ctx)
+        # qcp PRIMA del try: lo usano anche gli handler `except` (es.
+        # stream_total_deadline_ms), quindi deve essere sempre definito anche se
+        # `stream_response` solleva UpstreamError al primo invio (429/402 subito).
+        qcp = router.policy.qc_json
         try:
             t_att = time.monotonic()
             # hook: a fine stream, se il guard ha trovato un tag tool-call
