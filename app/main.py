@@ -6184,7 +6184,7 @@ async def _audio_transcribe(request: Request, path: str):
                       "type": "invalid_request_error"}})
 
     data_fields = {k: v for k in ("language", "prompt", "response_format",
-                                  "temperature")
+                                  "temperature", "hotwords", "vad_filter")
                    if (v := form.get(k)) is not None}
     raw_model = str(form.get("model") or "")
     response_format = str(data_fields.get("response_format") or "json").lower()
