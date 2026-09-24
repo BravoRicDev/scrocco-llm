@@ -865,7 +865,12 @@ async def _nightly_scheduler():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _watch_task
+    global _watch_task, _health_task, _nightly_task
+    # I tre task sono SEMPRE legati (None finche' non creati): il blocco
+    # `finally` li referenzia anche in modalita' CAUTA, dove health/nightly
+    # NON vengono avviati. Senza questo, `_health_task` resterebbe una locale
+    # non associata -> UnboundLocalError allo shutdown.
+    _watch_task = _health_task = _nightly_task = None
     # Fail-fast in produzione: master key reale + client_keys esplicite.
     # In development (default) e' un no-op.
     authn.enforce_startup()
@@ -884,7 +889,6 @@ async def lifespan(_app: FastAPI):
     else:
         _health_task = asyncio.create_task(
             health_loop(router, policy.health_interval_sec))
-    global _nightly_task
     if not _cautious:
         _nightly_task = asyncio.create_task(_nightly_scheduler())
     log.info("[start] %s su %s:%d · profili=%s · deployment=%d",
