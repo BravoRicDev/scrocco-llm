@@ -858,6 +858,7 @@ async def get_policy(request: Request):
                     "pct": pol.go_refund_pct,
                     "min_turns": pol.go_refund_min_turns,
                     "max_turns": pol.go_refund_max_turns,
+                    "trigger_ms": pol.go_refund_trigger_ms,
                 },
             }}
 
@@ -3577,7 +3578,7 @@ async def get_tuning(request: Request):
                 "slow_rel_baseline_mult", "effort_capable_bonus",
                 "latency_penalty_per_sec", "provider_bias_normalization",
                 "go_refund_enabled", "go_refund_pct", "go_refund_min_turns",
-                "go_refund_max_turns",
+                "go_refund_max_turns", "go_refund_trigger_ms",
                 "dynamic_scoring_history_window",
                 "probe_concurrency", "probe_timeout_sec",
                 "playground_timeout_sec", "playground_max_attempts",

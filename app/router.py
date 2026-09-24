@@ -110,7 +110,7 @@ SLOW_REL_BASELINE_MULT = 2.0
 # 100s e' normale, non lento). Baseline: mediana di FLOTTA del bucket ->
 # stima dal rate di prefill/generazione -> 90s legacy. Floor assoluto per non
 # marchiare quando la flotta e' tutta veloce.
-SLOW_LATENCY_ABS_FLOOR_MS = 30000.0
+SLOW_LATENCY_ABS_FLOOR_MS = 45000.0
 SLOW_LATENCY_REL_MULT = 2.0
 SLOW_LATENCY_MIN_PEERS = 5
 SLOW_GEN_MULT = 6.0                 # total atteso ~ ttft * mult (fallback)
@@ -2595,7 +2595,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 v = 0
             if v > 0:
                 vals.append(v)
-        return min(vals) if vals else 30000
+        return min(vals) if vals else 45000
+
+    def _go_refund_trigger_ms(self) -> int:
+        """Soglia ASSOLUTA del rimborso latenza (-go), indipendente dal floor
+        "lento" della warm: un successo piu' lento di questa soglia regala
+        turni -go alla sessione SENZA demotare il deployment (che resta
+        warm/holder). Default 20s; <= 0 disabilita il trigger."""
+        try:
+            return int(getattr(self.policy, "go_refund_trigger_ms", 20000) or 0)
+        except (TypeError, ValueError):
+            return 20000
 
     # ---- caccia al sostituto: budget/backoff (anti-spreco) ---------------
     def hunt_allowed(self, session_id: str | None, ctx_est=None) -> bool:
@@ -2756,6 +2766,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         soft = (not hard) and lat is not None \
             and lat > max(SOFT_SLOW_LATENCY_MS, _thr * 0.6) \
             and heavy and relative_ok
+        # RIMBORSO LATENZA: soglia PROPRIA e ASSOLUTA, INDIPENDENTE dalla
+        # marcatura "lento" (che resta a 45s). Un dep che serve in ~32s regala
+        # turni -go ma NON viene demoto: resta warm/holder e al ritorno dai
+        # turni regalo viene ritrovato (cache calda). Nessuna guardia relativa.
+        _rf = self._go_refund_trigger_ms()
+        if _rf > 0 and lat is not None and lat > _rf:
+            self.grant_go_refund(session_id)
         # Marchio del TIMER della gara lenta: NON si ripulisce con la sola
         # regola relativa (F1), ma solo con un successo ASSOLUTAMENTE rapido
         # (< soglia gara lenta). Altrimenti un dep lento "di suo" (es. 107s
@@ -2766,9 +2783,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         if hard or soft:
             _was = unique in (d.get(session_id) or {})
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
-            if hard:
-                # rimborso latenza: un marchio HARD regala turni -go
-                self.grant_go_refund(session_id)
             if not _was:
                 metrics.inc("nx_slow_flag_total", ("set",))
                 log.info("🐢 [slow-flag] %s: marcato %s lento per la sessione "

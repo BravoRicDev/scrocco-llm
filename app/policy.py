@@ -297,7 +297,7 @@ class Policy:
     # l'atteso e' la MEDIANA DI FLOTTA del bucket di contesto -> stima dal
     # rate di prefill/generazione -> 90s legacy. Cosi' un 128k che risponde
     # in 100s (normale) NON e' lento; lo e' uno che fa il doppio della norma.
-    slow_latency_abs_floor_ms: int = 30000
+    slow_latency_abs_floor_ms: int = 45000
     slow_latency_rel_mult: float = 2.0
     slow_latency_min_peers: int = 5
     # ANTI-SPRECO della caccia al sostituto: dopo una caccia senza guadagno
@@ -440,7 +440,7 @@ class Policy:
     ctx_bucket_edges: list[int] = field(default_factory=lambda: [8000, 32000, 128000])
     ttft_rate_min_ctx: int = 8000
     ttft_rate_floor_ms: float = 250.0
-    slow_latency_abs_floor_ms: float = 30000.0
+    slow_latency_abs_floor_ms: float = 45000.0
     slow_latency_rel_mult: float = 2.0
     slow_latency_min_peers: int = 5
     slow_gen_mult: float = 6.0
@@ -765,8 +765,8 @@ class Policy:
     # Default 45s: sotto quella soglia il canary non ripaga (la maggior
     # parte delle risposte e' gia' chiusa); sopra, il dep e' lento e vale
     # cercare un sostituto senza incastrarsi.
-    stream_slow_race_after_ms: int = 30000
-    nonstream_slow_race_after_ms: int = 30000
+    stream_slow_race_after_ms: int = 45000
+    nonstream_slow_race_after_ms: int = 45000
     stream_slow_race_canaries: int = 1
     # GATE del canary lento: si apre SOLO se la sessione ha MENO di questo
     # numero di warm validi (include i prestati). A warm pieno il canary
@@ -1153,15 +1153,22 @@ class Policy:
     images_remote_timeout_sec: int = 60
     images_remote_max_bytes: int = 20971520        # 20 MiB
 
-    # RIMBORSO LATENZA ("go_refund"): quando un deployment viene marcato LENTO
-    # per una sessione, le si "regalano" N turni sul bucket -go (come se il
-    # client avesse chiamato scrocco-llm-<profilo>-go). N = percentuale dei
-    # turni totali della sessione, con minimo e massimo. La variazione avviene
-    # solo ALL'ATTERRAGGIO (scelta del gruppo): ladder/selezione invariati.
+    # RIMBORSO LATENZA ("go_refund"): quando una risposta supera la soglia
+    # PROPRIA `go_refund_trigger_ms`, alla sessione si "regalano" N turni sul
+    # bucket -go (come se il client avesse chiamato
+    # scrocco-llm-<profilo>-go). N = percentuale dei turni totali della
+    # sessione, con minimo e massimo. La variazione avviene solo
+    # ALL'ATTERRAGGIO (scelta del gruppo): ladder/selezione invariati.
+    #
+    # INDIPENDENZA dalla marcatura "lento" della warm: la soglia di regalo e'
+    # ASSOLUTA e separata (default 20s). Un dep che serve in ~32s regala turni
+    # -go ma NON viene demoto (il floor "lento" resta 45s): resta warm/holder e
+    # al ritorno dai turni regalo viene ritrovato (cache calda).
     go_refund_enabled: bool = True
     go_refund_pct: int = 20                 # % dei turni totali
-    go_refund_min_turns: int = 3            # minimo turni regalati
-    go_refund_max_turns: int = 15           # massimo turni regalati
+    go_refund_min_turns: int = 1            # minimo turni regalati
+    go_refund_max_turns: int = 5            # massimo turni regalati
+    go_refund_trigger_ms: int = 20000       # soglia assoluta di regalo (ms)
 
     # AUTO-LEARN capacità: quando un provider rifiuta una modalità (400 firma
     # provider-side su richiesta instradata PER quella capacità) si conta uno
@@ -2855,6 +2862,13 @@ class Policy:
                 if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                     raise ValueError("go_refund.max_turns deve essere int >= 0")
                 p.go_refund_max_turns = int(v)
+            if "trigger_ms" in gr:
+                v = gr["trigger_ms"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or v <= 0:
+                    raise ValueError("go_refund.trigger_ms deve essere un "
+                                     "numero > 0 (ms)")
+                p.go_refund_trigger_ms = int(v)
             if p.go_refund_max_turns < p.go_refund_min_turns:
                 raise ValueError("go_refund.max_turns deve essere >= min_turns")
 

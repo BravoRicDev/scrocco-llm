@@ -116,14 +116,19 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   pubblico `GET /v1/images/files/{id}` serve i byte.
 - **Rimborso latenza**: blocco `go_refund.*` — `enabled` (kill-switch),
   `pct` (% dei turni totali della sessione, default 20), `min_turns` (default
-  3), `max_turns` (default 15). Quando un deployment è marcato **lento** per
-  una sessione (marchio HARD di `_note_session_slow`, o gara lenta) la sessione
-  riceve `clamp(pct%·turni_totali, min_turns, max_turns)` turni serviti sul
-  bucket `-go` del profilo, come se il client avesse chiamato
-  `scrocco-llm-<profilo>-go`. Vale solo per richieste di **testo** che
-  atterrano su un dim (`-Nk`); media/cap, `-go`/`-fallback` e i unique
-  espliciti restano invariati. Il conteggio dei turni e la deviazione avvengono
-  **all'atterraggio** (scelta del gruppo); ladder e selezione sono invariati.
+  1), `max_turns` (default 5), `trigger_ms` (soglia assoluta di regalo in ms,
+  default 20000; `<= 0` disabilita il trigger). Quando una risposta supera
+  **`trigger_ms`** la sessione riceve
+  `clamp(pct%·turni_totali, min_turns, max_turns)` turni serviti sul bucket
+  `-go` del profilo, come se il client avesse chiamato
+  `scrocco-llm-<profilo>-go`. La soglia è **indipendente** dal floor "lento"
+  della warm (`slow_latency_abs_floor_ms`, default 45s): un deployment che
+  serve in ~32s regala turni `-go` ma **non** viene demoto, quindi resta
+  warm/holder e viene ritrovato al ritorno dai turni regalo (cache calda).
+  Vale solo per richieste di **testo** che atterrano su un dim (`-Nk`);
+  media/cap, `-go`/`-fallback` e i unique espliciti restano invariati. Il
+  conteggio dei turni e la deviazione avvengono **all'atterraggio** (scelta del
+  gruppo); ladder e selezione sono invariati.
 - **Other**: `estimate_divisor`, adaptive tuning, `provider_models_ttl`,
   `strip_client_fields` (denylist di campi client-only non standard rimossi dal
   body prima dell'invio, default `["fallback_models"]`),

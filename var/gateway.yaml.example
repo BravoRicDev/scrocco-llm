@@ -803,18 +803,22 @@ images:
   remote_max_bytes: 20971520   # 20 MiB
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RIMBORSO LATENZA — quando un deployment viene marcato LENTO per una sessione
-# le si "regalano" N turni sul bucket -go (come se il client avesse chiamato
-# scrocco-llm-<profilo>-go). N = pct% dei turni totali della sessione,
-# limitato tra min_turns e max_turns. Solo richieste di testo su un dim (-Nk).
-# La variazione avviene all'atterraggio (scelta del gruppo): ladder e
-# selezione restano INVARIATI. Vedi docs/CONFIGURATION.md.
+# RIMBORSO LATENZA — quando una risposta supera trigger_ms (soglia PROPRIA,
+# indipendente dal floor "lento" della warm) le si "regalano" N turni sul
+# bucket -go (come se il client avesse chiamato scrocco-llm-<profilo>-go).
+# N = pct% dei turni totali della sessione, limitato tra min_turns e
+# max_turns. Solo richieste di testo su un dim (-Nk). La variazione avviene
+# all'atterraggio (scelta del gruppo): ladder e selezione restano INVARIATI.
+# Indipendenza: un dep che serve in ~32s regala turni -go ma NON viene
+# demoto (il floor "lento" resta 45s) -> resta warm/holder e si ritrova al
+# ritorno dai turni regalo (cache calda). Vedi docs/CONFIGURATION.md.
 # ─────────────────────────────────────────────────────────────────────────────
 go_refund:
   enabled: true                # kill-switch del rimborso
   pct: 20                      # % dei turni totali della sessione
-  min_turns: 3                 # minimo turni -go regalati
-  max_turns: 15                # massimo turni -go regalati
+  min_turns: 1                 # minimo turni -go regalati
+  max_turns: 5                 # massimo turni -go regalati
+  trigger_ms: 20000            # soglia assoluta di regalo (ms); <=0 = off
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRUPPI CAPACITÀ STRUTTURALI — colonna CSV "caps" → -vision/-tts/-stt…
