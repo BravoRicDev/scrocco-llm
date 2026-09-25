@@ -90,6 +90,19 @@ def test_firma_non_scambia_rifiuti_di_politica():
     assert chat_only_image_error(blocked) is False
 
 
+def test_firma_unknown_provider_e_Deployment_side():
+    """cli-proxy-api senza l'account risponde 'unknown provider for model X'.
+
+    Non e' un errore del client: se non lo si riconosce la richiesta viene
+    risposta 400 senza ruotare, e l'unico deployment che SA servire quel
+    modello (openrouter) non viene mai raggiunto."""
+    txt = "unknown provider for model gemini-3.1-flash-image"
+    assert image_chat_fallback_signature(400, txt) is True
+    assert chat_only_image_error(txt) is True
+    for alt in ("model not found", "No such model", "unknown model: x"):
+        assert image_chat_fallback_signature(400, alt) is True
+
+
 def test_firma_schema_400_restano_adattabili():
     assert image_chat_fallback_signature(
         400, 'Invalid JSON payload received. Unknown name "prompt"') is True
@@ -346,6 +359,36 @@ def test_images_generations_fallback_chat_senza_dichiarazione(
         assert fwd.images_calls == ["antigravity"]     # provato il nativo
         assert fwd.chat_calls == ["antigravity"]      # poi adattato in chat
         assert r.json()["via"] == "chat"
+    finally:
+        _teardown(m, orig)
+
+
+def test_images_generations_ruota_se_unknown_provider(monkeypatch, tmp_path):
+    """Un deployment che risponde 'unknown provider' deve far RUOTARE la
+    catena verso il provider successivo che SA servire il modello."""
+    # riga 1 = antigravity (chat-only, ma l'upstream non ha l'account)
+    # riga 2 = openrouter (stesso modello, funziona via /images nativi)
+    csv_text = (_CSV_HEADER
+                + _row("gemini-3.1-flash-image", "antigravity", "chat",
+                       "image_gen")
+                + _row("google/gemini-3.1-flash-image", "openrouter", "images",
+                       "image_gen"))
+    c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
+    fwd = _FakeForwarder(
+        native=lambda d, p: (_NATIVE_OK(d, p)
+                             if d.get("provider") == "openrouter"
+                             else (400, _GEMINI_ERR)),
+        chat=lambda d, p: (400, "unknown provider for model "
+                              "gemini-3.1-flash-image"))
+    monkeypatch.setattr(m, "forwarder", fwd)
+    try:
+        r = c.post("/v1/images/generations", headers=MK,
+                   json={"model": "scrocco-llm-test", "prompt": "un gatto"})
+        assert r.status_code == 200, r.text
+        # ha provato il chat-only dichiarato (senza account) E poi il nativo
+        assert "antigravity" in fwd.chat_calls
+        assert "openrouter" in fwd.images_calls
+        assert r.json()["data"][0]["b64_json"] == _B64
     finally:
         _teardown(m, orig)
 

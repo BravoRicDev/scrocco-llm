@@ -5880,6 +5880,7 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
                 status > 0
                 or -status in (402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)
+                or chat_only_image_error(detail)
                 or image_chat_fallback_signature(err.status, detail)
                 or (-status == 400 and ("openai_error" in detail
                                         or "bad_response_status_code" in detail)))
@@ -6119,8 +6120,13 @@ async def images_generations(request: Request):
                 # OpenRouter a pagamento).
                 or -status in (402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
-                or (router.policy.images_chat_fallback
-                    and image_chat_fallback_signature(err.status, detail))
+                # "unknown provider/model for model X": il deployment non ha
+                # l'account o il modello (es. cli-proxy-api senza login) -> e'
+                # una condizione del DEPLOYMENT, quindi si RUOTA verso il
+                # successivo provider che serve lo stesso modello.
+                or router.policy.images_chat_fallback
+                    and (image_chat_fallback_signature(err.status, detail)
+                         or chat_only_image_error(detail))
                 or (router.policy.images_chat_fallback
                     and -status == 400
                     and ("openai_error" in detail

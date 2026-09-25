@@ -2581,6 +2581,17 @@ _CHAT_ONLY_ENDPOINT_RE = re.compile(
     r"|unsupported" + r"[\w\s'\",.-]{0,60}?" + _IMAGE_PATH,
     re.IGNORECASE)
 
+# "unknown provider for model X" (cli-proxy-api o altro gateway che non ha
+# l'account o il modello registrato): NON e' un errore del client, e' una
+# condizione del DEPLOYMENT. Senza questa firma la richiesta veniva risposta
+# 400 al client senza ruotare, lasciando fuori gioco l'unico deployment
+# sensato (openrouter serve lo stesso modello). Intervento #57.
+_UNKNOWN_PROVIDER_RE = re.compile(
+    r"unknown\s+provider|unknown\s+model|model\s+not\s+found"
+    r"|no\s+such\s+model|not\s+a\s+valid\s+model"
+    r"|unsupported_endpoint|invalid_endpoint|unknown\s+endpoint",
+    re.IGNORECASE)
+
 # Firma STRETTA "campo/argomento sconosciuto al provider" (tipico dei campi
 # client-only come `fallback_models`): il 400 e' colpa della RICHIESTA, non del
 # deployment -> ruota SENZA cooldown (vedi il ramo schema-payload).
@@ -2613,7 +2624,8 @@ def image_chat_fallback_signature(status: int | None,
         return True
     if st not in (400, 403, 422):
         return False
-    return bool(_IMAGES_PAYLOAD_UNSUPPORTED_RE.search(d))
+    return bool(_IMAGES_PAYLOAD_UNSUPPORTED_RE.search(d)
+                or _UNKNOWN_PROVIDER_RE.search(d))
 
 
 def native_images_only_error(detail: str | None) -> bool:
@@ -2639,7 +2651,8 @@ def chat_only_image_error(detail: str | None) -> bool:
     d = detail or ""
     if _IMAGES_ONLY_ENDPOINT_RE.search(d):
         return False          # "only supported on /images/*" =images-native
-    return bool(_CHAT_ONLY_ENDPOINT_RE.search(d))
+    return bool(_CHAT_ONLY_ENDPOINT_RE.search(d)
+                or _UNKNOWN_PROVIDER_RE.search(d))
 
 
 def _ref_urls_from_value(value) -> list[str]:
