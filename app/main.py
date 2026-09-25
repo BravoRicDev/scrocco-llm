@@ -1586,6 +1586,18 @@ def _strike_hook(explicit: bool, need=frozenset()):
     return hook
 
 
+def _note_fb_refund(router, session_id: str | None, fb: int) -> None:
+    """Regalo -go per i fallback attraversati (#50), a risposta consegnata.
+
+    Non tocca la risposta: accredita solo turni `-go` alla sessione (vedi
+    `Router.note_request_fallbacks`). Mai sollevare: un log/regalo non deve
+    mordere la richiesta."""
+    try:
+        router.note_request_fallbacks(session_id, fb)
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
 def _apply_go_refund(router, group: str | None, profile: str | None,
                      turn_go: bool,
                      session_id: str | None = None) -> tuple[str | None, bool]:
@@ -2319,6 +2331,11 @@ async def chat_completions(request: Request, response: Response):
                   dur_ms=int((time.monotonic() - t_req) * 1000),
                   stream=False, qc=bool(qc_failed), wd=None,
                   usage=_u_f14)
+    # Regalo -go per i fallback (#50): SOLO quando il non-stream ha servito
+    # direttamente (con hold ON il motore stream ha gia' regalato: la richiesta
+    # non-stream vi viene rediretta e il suo summary farebbe doppio regalo).
+    if not _redirect:
+        _note_fb_refund(router, session_id, max(0, len(attempts_box) - 1))
     if sniff.enabled(router.policy):
         sniff.begin(_rid, {"model": raw_model, "canonical": model,
                            "profile": profile, "session": _sess or "-",
@@ -5089,6 +5106,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                           dur_ms=int((time.monotonic() - t_req) * 1000),
                           stream=client_stream, qc=False, wd="text-toolcall",
                           ttfb_ms=ttfb_ms, usage=None)
+            _note_fb_refund(router, ses, max(0, len(attempts) - 1))
             return
         sent_first = False
         chunks = 0
@@ -5117,6 +5135,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                           fb=max(0, len(attempts) - 1), dur_ms=dur_ms,
                           stream=client_stream, qc=False, wd=wd, ttfb_ms=ttfb_ms,
                           fr=last_finish_reason, usage=usage_final)
+            _note_fb_refund(router, ses, max(0, len(attempts) - 1))
 
         # corpo del loop fattorizzato: aggiorna lo stato watchdog ed emette
         # il chunk invariato. Condiviso da prebuffer e dal flusso residuo.

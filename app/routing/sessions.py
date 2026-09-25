@@ -102,6 +102,26 @@ class SessionMixin:
                     d.pop(s, None)
         return go
 
+    def _add_go_turns(self, sid: str, refund: int, extra: str = "") -> int:
+        """Accredita `refund` turni -go alla sessione (`go_until = max(prev,
+        n + refund)`, mai ridotto). Ritorna i turni accreditati (0 se <= 0)."""
+        if refund <= 0:
+            return 0
+        d = self._sess_turns_map()
+        ent = d.get(sid)
+        if ent is None:
+            ent = {"n": 0, "go_until": 0}
+            d[sid] = ent
+        n = int(ent.get("n") or 0)
+        target = n + refund
+        prev = int(ent.get("go_until") or 0)
+        if target > prev:
+            ent["go_until"] = target
+            ent["ts"] = time.time()
+            log.info("🎁 [go-refund] %s: +%d turni -go (%sgo_until=%d)",
+                     sid, refund, extra, target)
+        return refund
+
     def grant_go_refund(self, session_id: str | None) -> int:
         """Concede il rimborso latenza: `go_until = max(go_until, n + refund)`
         con `refund = clamp(round(pct% * n), min, max)`. Ritorna i turni
@@ -112,23 +132,38 @@ class SessionMixin:
         if not sid:
             return 0
         d = self._sess_turns_map()
-        ent = d.get(sid)
-        if ent is None:
-            ent = {"n": 0, "go_until": 0}
-            d[sid] = ent
-        n = int(ent.get("n") or 0)
+        n = int((d.get(sid) or {}).get("n") or 0)
         pct = float(getattr(self.policy, "go_refund_pct", 20) or 0)
         lo = int(getattr(self.policy, "go_refund_min_turns", 5) or 0)
         hi = int(getattr(self.policy, "go_refund_max_turns", 20) or 0)
         refund = max(lo, min(hi, int(round(pct / 100.0 * n))))
-        target = n + refund
-        prev = int(ent.get("go_until") or 0)
-        if target > prev:
-            ent["go_until"] = target
-            ent["ts"] = time.time()
-            log.info("🎁 [go-refund] %s: +%d turni -go (n=%d, pct=%.0f%%, "
-                     "go_until=%d)", sid, refund, n, pct, target)
-        return refund
+        return self._add_go_turns(sid, refund, "n=%d, pct=%.0f%%, " % (n, pct))
+
+    def grant_go_refund_fb(self, session_id: str | None, fb: int) -> int:
+        """Regala turni -go per i fallback attraversati dalla richiesta:
+        `turns = clamp(floor(fb_per_fallback * fb), fb_min_turns,
+        fb_max_turns)`. Ritorna i turni accreditati (0 se disabilitato,
+        `fb <= 0`, `per <= 0` o sessione assente)."""
+        if not getattr(self.policy, "go_refund_enabled", True):
+            return 0
+        if not getattr(self.policy, "go_refund_fb_enabled", True):
+            return 0
+        sid = session_id or current_session()
+        if not sid:
+            return 0
+        try:
+            n_fb = int(fb)
+        except (TypeError, ValueError):
+            return 0
+        if n_fb <= 0:
+            return 0
+        per = float(getattr(self.policy, "go_refund_fb_per_fallback", 0.5) or 0)
+        if per <= 0:
+            return 0
+        lo = int(getattr(self.policy, "go_refund_fb_min_turns", 1) or 0)
+        hi = int(getattr(self.policy, "go_refund_fb_max_turns", 3) or 0)
+        refund = max(lo, min(hi, int(n_fb * per)))
+        return self._add_go_turns(sid, refund, "fb=%d, " % n_fb)
 
     def go_refund_status(self, session_id: str | None = None) -> dict:
         sid = session_id or current_session()

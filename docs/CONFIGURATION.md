@@ -135,6 +135,17 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   media/cap, `-go`/`-fallback` e i unique espliciti restano invariati. Il
   conteggio dei turni e la deviazione avvengono **all'atterraggio** (scelta del
   gruppo); ladder e selezione sono invariati.
+  **Secondo trigger (fallback)**: `fb_enabled` (default `true`) è il kill-switch
+  del regalo per i fallback attraversati dalla richiesta; l'importo è
+  `turns = clamp(floor(fb_per_fallback · fb), fb_min_turns, fb_max_turns)` con
+  `fb_per_fallback` (default 0.5), `fb_min_turns` (1), `fb_max_turns` (3). `fb`
+  è il numero già tracciato in `[summary]`/ledger (`tentativi - 1`), quindi
+  conta ogni cambio di deployment (chiave gemella dello stesso gruppo inclusa,
+  non solo i salti free→`-go`→`-fallback`). Con i default: `fb` 1–3 → 1 turno,
+  4–5 → 2, ≥6 → 3. È valutato a risposta **consegnata** sulla sola
+  chat/completions servita (esclusi i 503 e immagini/audio/STT/video) e
+  accredita solo `go_until`, come il rimborso latenza; `go_refund.enabled` è il
+  kill-switch master di entrambi.
 - **Bilanciamento `-go`**: blocco `go_balance.*` + scalar `go_stick_ttl_sec`.
   Nei bucket rinnovo (`-go`/`-fallback`) il pick **a freddo** usa come metrica i
   **token di output** consumati nella finestra rolling `window_sec` (default

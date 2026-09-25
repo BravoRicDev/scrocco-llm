@@ -67,6 +67,14 @@ individual account limits instead of dying on the first 429.
   in ~32s gifts `-go` turns but is **not** demoted, so it stays warm/holder and
   is found again on return from the refund turns. See the `go_refund:` policy
   block.
+  **Second trigger (fallback)**: with `fb_enabled` (default `true`) the
+  fallbacks traversed by the request gift turns too:
+  `turns = clamp(floor(fb_per_fallback · fb), fb_min_turns, fb_max_turns)`
+  (default 0.5 per fallback, min 1, max 3; `fb` = `tries - 1`, so every
+  deployment switch counts, same-group sibling keys included). Evaluated on the
+  served chat/completions only (no 503, no images/audio/STT/video) and credited
+  exactly like the latency refund: `go_until` only, response/ladder/pick
+  untouched. `go_refund.enabled` is the master kill-switch of both.
 - **Renewal-bucket balancing (`go_balance`)**: the cold pick in the `-go`/
   `-fallback` buckets ranks deployments by **output tokens** consumed in a
   rolling window (`window_sec`, default 5h) instead of the 24h prefill weight,

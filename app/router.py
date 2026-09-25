@@ -2703,6 +2703,39 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         except (TypeError, ValueError):
             return 20000
 
+    def note_request_fallbacks(self, session_id: str | None, fb: int) -> int:
+        """SECONDO trigger del regalo -go: i fallback attraversati dalla
+        richiesta regalano turni -go alla sessione
+        (`turns = clamp(floor(fb_per_fallback * fb), fb_min, fb_max)`).
+
+        Chiamato a risposta CONSEGNATA (chat/completions servita), quindi non
+        tocca risposta/ladder/pick: accredita solo `go_until` come il rimborso
+        latenza. Default: 0.5 turni/fallback, min 1, max 3. Kill-switch:
+        `go_refund_enabled` (master) e `go_refund_fb_enabled`. Ritorna i turni
+        accreditati (0 se off/senza sessione/fb<=0)."""
+        if not session_id:
+            return 0
+        if not getattr(self.policy, "go_refund_enabled", True):
+            return 0
+        if not getattr(self.policy, "go_refund_fb_enabled", True):
+            return 0
+        try:
+            n_fb = int(fb)
+        except (TypeError, ValueError):
+            return 0
+        if n_fb <= 0:
+            return 0
+        try:
+            got = self.grant_go_refund_fb(session_id, n_fb)
+        except Exception:                          # noqa: BLE001
+            return 0
+        if got > 0:
+            try:
+                metrics.inc("nx_go_refund_total", ("fb",))
+            except Exception:                      # noqa: BLE001
+                pass
+        return got
+
     # ---- caccia al sostituto: budget/backoff (anti-spreco) ---------------
     def hunt_allowed(self, session_id: str | None, ctx_est=None) -> bool:
         """False se per questa sessione/bucket la caccia e' in backoff (una

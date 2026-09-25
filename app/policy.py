@@ -333,6 +333,10 @@ YAML_PATHS: dict[str, str] = {
     "go_refund_min_turns": "go_refund.min_turns",
     "go_refund_max_turns": "go_refund.max_turns",
     "go_refund_trigger_ms": "go_refund.trigger_ms",
+    "go_refund_fb_enabled": "go_refund.fb_enabled",
+    "go_refund_fb_per_fallback": "go_refund.fb_per_fallback",
+    "go_refund_fb_min_turns": "go_refund.fb_min_turns",
+    "go_refund_fb_max_turns": "go_refund.fb_max_turns",
     # --- go_balance.* ---
     "go_balance_enabled": "go_balance.enabled",
     "go_balance_flat_pool": "go_balance.flat_pool",
@@ -1516,6 +1520,15 @@ class Policy:
     go_refund_min_turns: int = 1            # minimo turni regalati
     go_refund_max_turns: int = 5            # massimo turni regalati
     go_refund_trigger_ms: int = 20000       # soglia assoluta di regalo (ms)
+    # SECONDO trigger (fallback): ogni fallback attraversato dalla richiesta
+    # regala turni -go. turns = clamp(floor(fb_per_fallback * fb), fb_min_turns,
+    # fb_max_turns), valutato in note_request_fallbacks() a risposta consegnata.
+    # Default: 0.5 turni/fallback, min 1, max 3 (fb=1..3 -> 1, 4..5 -> 2,
+    # >=6 -> 3). Spegnibile col kill-switch `go_refund_enabled` o `fb_enabled`.
+    go_refund_fb_enabled: bool = True       # kill-switch del regalo per-fallback
+    go_refund_fb_per_fallback: float = 0.5  # turni -go regalati per fallback
+    go_refund_fb_min_turns: int = 1         # minimo turni regalati (fb)
+    go_refund_fb_max_turns: int = 3         # massimo turni regalati (fb)
 
     # AUTO-LEARN capacità: quando un provider rifiuta una modalità (400 firma
     # provider-side su richiesta instradata PER quella capacità) si conta uno
@@ -3262,8 +3275,33 @@ class Policy:
                     raise ValueError("go_refund.trigger_ms deve essere un "
                                      "numero > 0 (ms)")
                 p.go_refund_trigger_ms = int(v)
+            if "fb_enabled" in gr:
+                p.go_refund_fb_enabled = _coerce_bool(
+                    gr["fb_enabled"], "go_refund.fb_enabled")
+            if "fb_per_fallback" in gr:
+                v = gr["fb_per_fallback"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or v < 0:
+                    raise ValueError("go_refund.fb_per_fallback deve essere "
+                                     "un numero >= 0")
+                p.go_refund_fb_per_fallback = float(v)
+            if "fb_min_turns" in gr:
+                v = gr["fb_min_turns"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("go_refund.fb_min_turns deve essere "
+                                     "int >= 0")
+                p.go_refund_fb_min_turns = int(v)
+            if "fb_max_turns" in gr:
+                v = gr["fb_max_turns"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("go_refund.fb_max_turns deve essere "
+                                     "int >= 0")
+                p.go_refund_fb_max_turns = int(v)
             if p.go_refund_max_turns < p.go_refund_min_turns:
                 raise ValueError("go_refund.max_turns deve essere >= min_turns")
+            if p.go_refund_fb_max_turns < p.go_refund_fb_min_turns:
+                raise ValueError("go_refund.fb_max_turns deve essere >= "
+                                 "fb_min_turns")
 
         # bilanciamento -go: metrica a freddo (token di output) + pool
         gb = raw.get("go_balance")
