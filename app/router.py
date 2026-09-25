@@ -5426,7 +5426,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         groups = cfg.alias_groups.get(alias)
         if not groups:
             return None
-        cap = next((c for c in CAP_PRIORITY_ORDER
+        # Priorita' di scelta della cap quando il need ne contiene piu' di una:
+        # per l'EDITING di immagini `image_edit` deve battere `image_gen`
+        # (un modello puo' avere entrambe: es. gemini-3.1-flash-image). Per il
+        # resto vale CAP_PRIORITY_ORDER.
+        order = CAP_PRIORITY_ORDER
+        if need and "image_edit" in need:
+            order = ("image_edit",) + tuple(c for c in CAP_PRIORITY_ORDER
+                                            if c != "image_edit")
+        cap = next((c for c in order
                     if need and c in need
                     and any(cfg.group_caps.get(g) == c for g in groups)), None)
         # `need` con sola "text" (o vuoto) -> gruppo testo (group_caps None)

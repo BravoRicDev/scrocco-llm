@@ -986,12 +986,22 @@ class GatewayConfig:
             aliases = d.get("aliases") or ()
             if not aliases:
                 continue
-            cap = self.group_caps.get(d.get("group", ""))
+            group_cap = self.group_caps.get(d.get("group", ""))
+            # Un dep puo' coprire PIU' capacita' (es. image_gen + image_edit):
+            # il gruppo-alias va costruito per OGNI cap richiedibile, non solo
+            # per quella del gruppo di provenienza. Per il mondo testo (dep
+            # senza caps) si usa None.
+            dep_caps = set(d.get("caps") or ()) - {"text"}
+            if group_cap is not None:
+                dep_caps.add(group_cap)
+            caps_iter: list[str | None] = (sorted(dep_caps) if dep_caps
+                                           else [None])
             cat = d.get("_category") or ""
-            for a in aliases:
-                cap_map = buckets.setdefault(a, {})
-                cat_map = cap_map.setdefault(cap, {})
-                cat_map.setdefault(cat, []).append(d)
+            for cap in caps_iter:
+                for a in aliases:
+                    cap_map = buckets.setdefault(a, {})
+                    cat_map = cap_map.setdefault(cap, {})
+                    cat_map.setdefault(cat, []).append(d)
         for alias, cap_map in sorted(buckets.items()):
             for cap, cat_map in cap_map.items():
                 c_free = cat_map.get("priority", []) + cat_map.get("zen", [])

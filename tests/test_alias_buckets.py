@@ -204,3 +204,32 @@ def test_alias_condivide_unique_senza_errore_self_check():
               if d["unique"] == alias_dep["unique"]]
     assert normal and normal[0] is alias_dep
 
+
+
+def test_alias_dep_multicap_crea_gruppi_per_ogni_cap():
+    """Un dep con caps multiple (es. image_gen+image_edit) deve produrre un
+    gruppo-alias per OGNI cap richiedibile, non solo per quella del gruppo di
+    provenienza (#55: gemini-3.1-flash-image chat-only con image_edit)."""
+    c = _cfg([
+        'a@x,gemini-3.1-flash-image,antigravity,http://proxy/v1,free,128,0,5,'
+        'k1,"image_gen,image_edit",gemini31-image\n',
+    ])
+    assert "scrocco-llm-t-gemini31-image-image_gen" in c.groups
+    assert "scrocco-llm-t-gemini31-image-image_edit" in c.groups
+    assert c.group_caps["scrocco-llm-t-gemini31-image-image_gen"] == "image_gen"
+    assert c.group_caps["scrocco-llm-t-gemini31-image-image_edit"] == "image_edit"
+    # i due gruppi condividono la STESSA istanza-dep
+    g1 = c.groups["scrocco-llm-t-gemini31-image-image_gen"][0]
+    g2 = c.groups["scrocco-llm-t-gemini31-image-image_edit"][0]
+    assert g1 is g2 or g1["unique"] == g2["unique"]
+
+
+def test_alias_target_sceglie_la_cap_image_edit():
+    c = _cfg([
+        'a@x,gemini-3.1-flash-image,antigravity,http://proxy/v1,free,128,0,5,'
+        'k1,"image_gen,image_edit",gemini31-image\n',
+    ])
+    assert c.alias_target("gemini31-image", "image_edit") == \
+        "scrocco-llm-t-gemini31-image-image_edit"
+    assert c.alias_target("gemini31-image", "image_gen") == \
+        "scrocco-llm-t-gemini31-image-image_gen"
