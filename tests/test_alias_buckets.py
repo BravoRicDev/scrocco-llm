@@ -182,3 +182,25 @@ def test_router_alias_cap_richiesta_non_disponibile_ricade_normale():
     # (il nome non e' un gruppo noto -> None, pass-through)
     assert r.resolve_group_for_request(
         "gemini", [], None, frozenset({"stt"})) is None
+
+
+def test_alias_condivide_unique_senza_errore_self_check():
+    """Regressione #53: i gruppi-alias riusano le STESSE istanze-dep dei
+    gruppi normali. `self_check` non deve segnalare unique duplicati, altrimenti
+    ogni reload con un alias attivo fallisce e viene scartato."""
+    from app.config import self_check
+    c = _cfg([
+        'a@x,whisper-large-v3-turbo,speaches,http://speaches-gpu:8000/v1,'
+        'free,128,0,5,k1,"stt",whisper-gpu\n',
+        'a@x,whisper-large-v3-turbo,groq,https://api.groq.com/openai/v1,'
+        'free,128,0,5,k2,"stt",\n',
+    ])
+    problems = self_check(c)
+    assert not [p for p in problems if "duplicato" in p], problems
+    assert "scrocco-llm-t-whisper-gpu-stt" in c.groups
+    # stessa istanza condivisa tra gruppo-alias e gruppo normale
+    alias_dep = c.groups["scrocco-llm-t-whisper-gpu-stt"][0]
+    normal = [d for d in c.groups["scrocco-llm-t-stt"]
+              if d["unique"] == alias_dep["unique"]]
+    assert normal and normal[0] is alias_dep
+

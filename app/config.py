@@ -510,6 +510,12 @@ def validate_csv(path: str | Path) -> list[str]:
 def self_check(cfg: "GatewayConfig") -> list[str]:
     """Validazione STRUTTURALE dell'istanza ombra (fase 1)."""
     problems: list[str] = []
+    # I gruppi-alias (intervento #53) sono VISTE DERIVATE: riusano le STESSE
+    # istanze-dep dei gruppi normali (stati per `unique` condivisi). La loro
+    # presenza non deve quindi far scattare la regola di unicita' del unique,
+    # che vale solo tra i bucket "reali".
+    _alias_group_names = {g for grps in (getattr(cfg, "alias_groups", {}) or {})
+                          .values() for g in grps}
     seen: dict[str, str] = {}
     for gname, deps in cfg.groups.items():
         if not deps:
@@ -518,8 +524,10 @@ def self_check(cfg: "GatewayConfig") -> list[str]:
         for d in deps:
             u = d.get("unique", "")
             if u in seen:
-                problems.append(f"unique duplicato '{u}' (in '{gname}' e "
-                                f"'{seen[u]}')")
+                if gname not in _alias_group_names \
+                        and seen[u] not in _alias_group_names:
+                    problems.append(f"unique duplicato '{u}' (in '{gname}' e "
+                                    f"'{seen[u]}')")
             else:
                 seen[u] = gname
     return problems
