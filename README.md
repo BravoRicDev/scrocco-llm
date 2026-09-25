@@ -539,6 +539,14 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
 - `max_input`: soft prompt-token guard for that deployment (0 = no guard)
 - `caps`: comma-separated subset of
   `text,vision,image_gen,image_edit,image_multi_ref,video_gen,tts,stt`
+- `alias`: optional comma-separated callable names for this row (e.g.
+  `gemini` or `whisper-gpu`). Calling `model=<alias>` routes to a dedicated
+  `-free → -go → -fallback` chain built **only** from the rows carrying that
+  alias, so several rows — even with different upstream models (e.g. the same
+  Gemini on Zen and on Antigravity, or a local whisper GPU next to Groq) — can
+  be grouped under one short name with the usual priority. When the alias chain
+  is exhausted the request falls through to the normal profile ladder, and if
+  no row carries an alias the behaviour is unchanged.
 - `order`: optional explicit per-deployment ordering (integer). Lower value =
   earlier; deployments sharing the same value form a "tier" (you can aggregate
   providers by giving the same value to their deployments, e.g. to prefer a

@@ -204,7 +204,12 @@ class AuthManager:
 
         L'auth avviene PRIMA dell'hook di routing: il client chiede il NOME BASE
         (o un gruppo/deployment esplicito). Tutti devono essere in whitelist.
+        Gli ALIAS (colonna `alias`) sono nomi richiamabili a tutti gli effetti:
+        il gruppo-alias e' in whitelist ma il token alias no, quindi lo
+        accettiamo qui (la risoluzione avviene poi nel router).
         """
+        if requested_model in self.config.alias_groups:
+            return True
         whitelist = set(self.config.whitelist_for(profile))
         return requested_model in whitelist
 

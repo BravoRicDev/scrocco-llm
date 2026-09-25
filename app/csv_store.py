@@ -32,7 +32,8 @@ from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      NO_THINKING_HEADER, CONTENT_STRING_HEADER,
                      EFFORT_CAPABLE_HEADER, INTELLIGENCE_HEADER,
                      MODEL_PREFERENCE_HEADER, ORDER_HEADER,
-                     HOLD_UNTIL_HEADER, API_STYLE_HEADER, GatewayConfig)
+                     HOLD_UNTIL_HEADER, API_STYLE_HEADER, ALIAS_HEADER,
+                     GatewayConfig)
 from .protocols import VALID_STYLES
 
 # flag booleani "sì/true/1" che l'API e i writer automatici scrivono come
@@ -63,6 +64,7 @@ PAYLOAD_FIELDS = {
     "order": ORDER_HEADER,
     "hold_until_finish": HOLD_UNTIL_HEADER,
     "api_style": API_STYLE_HEADER,
+    "alias": ALIAS_HEADER,
 }
 
 # token ammessi nella colonna caps (speculare a ROUTING_CAPS + text)
@@ -139,7 +141,7 @@ def row_id(row: dict, endpoint: str) -> str:
                        (row.get("chiave") or "").strip()))
     known = {MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, CONTEXT_HEADER,
              MAX_INPUT_HEADER, PRIORITY_HEADER, CAPS_HEADER,
-             TOOL_REPAIR_HEADER, ENABLED_HEADER} | ENDPOINT_HEADERS
+             TOOL_REPAIR_HEADER, ENABLED_HEADER, ALIAS_HEADER} | ENDPOINT_HEADERS
     # Stabilita' su colonne: includi SOLO i valori (non i nomi), ordinati,
     # in modo che aggiungere una colonna metadata non cambi l'ID.
     extra_vals = sorted(v.strip() for v in row.values()
@@ -197,6 +199,17 @@ def ensure_caps_column(header: list[str]) -> list[str]:
     scarterebbe il valore (save_table itera l'header)."""
     if CAPS_HEADER not in header:
         header.append(CAPS_HEADER)
+    return header
+
+
+def ensure_alias_column(header: list[str]) -> list[str]:
+    """Garantisce la colonna 'alias' (nomi richiamabili per modello).
+
+    Da chiamare nei percorsi create/update/bulk PRIMA di apply_payload
+    quando il payload contiene 'alias': senza header la serializzazione
+    scarterebbe il valore (save_table itera l'header)."""
+    if ALIAS_HEADER not in header:
+        header.append(ALIAS_HEADER)
     return header
 
 

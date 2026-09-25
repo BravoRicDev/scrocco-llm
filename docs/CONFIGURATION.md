@@ -68,6 +68,7 @@ One row per deployment. Columns (header in the `.example`):
 | `priority` | integer preference |
 | `scrocco-llm-<profile>` | the API key for that profile (one column per host/profile) |
 | `caps` | capabilities: `text,vision,audio,video,...` |
+| `alias` | comma-separated callable names (e.g. `gemini,fast`): `model=<alias>` routes to the `-free → -go → -fallback` chain built from the rows carrying that alias |
 | `tool_repair` | `aggressive`/`safe`/`off` |
 | `model_preference` | bias `-100..100` |
 | `media_defer` | defer media to another deployment |

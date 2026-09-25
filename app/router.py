@@ -3638,6 +3638,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         scrivono la sticky session: il client ha chiesto quello specifico."""
         if "__" in name:
             return True
+        if name in self.config.alias_groups:
+            # Un alias NON e' un suffisso esplicito: la richiesta deve poter
+            # salire la catena -free -> -go -> fallback normale del profilo.
+            return False
         return any(name.endswith(s) for s in self.config.known_suffixes())
 
     # -------------------------------------------------------- capability helpers
@@ -5372,13 +5376,63 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         self._note_session_group(session_id, target)
         return target
 
+    def _alias_group(self, alias: str,
+                     need: frozenset[str] | None) -> str | None:
+        """Gruppo-alias per la capacita' richiesta (o testo se `need` e'
+        vuoto/text). None se l'alias non ha un gruppo per quella capacita'."""
+        cfg = self.config
+        groups = cfg.alias_groups.get(alias)
+        if not groups:
+            return None
+        cap = next((c for c in CAP_PRIORITY_ORDER
+                    if need and c in need
+                    and any(cfg.group_caps.get(g) == c for g in groups)), None)
+        # `need` con sola "text" (o vuoto) -> gruppo testo (group_caps None)
+        if cap is None and (not need or need == {"text"}):
+            for g in sorted(groups):
+                if cfg.group_caps.get(g) is None:
+                    return g
+            return None
+        if cap is None:
+            return None
+        return cfg.alias_target(alias, cap)
+
+    def _resolve_alias_name(self, requested: str,
+                            need: frozenset[str] | None,
+                            session_id: str | None,
+                            profile: str | None) -> str | None:
+        """Risolve un alias chiesto col NOME NUDO (es. `gemini`).
+
+        Il nome non porta il prefisso del profilo: lo ricostruiamo dal profilo
+        dell'autenticazione. Senza profilo (o alias ignoto) -> None.
+        """
+        cfg = self.config
+        if requested not in cfg.alias_groups:
+            return None
+        profs = [profile] if profile else list(cfg.profiles)
+        for p in profs:
+            if not p:
+                continue
+            base = f"{cfg.proxy_prefix}{p}-"
+            if not any(g.startswith(base) for g in cfg.alias_groups[requested]):
+                continue
+            tgt = self._alias_group(requested, need)
+            if tgt is not None:
+                log.info("[alias] %s -> %s (nudo, profilo=%s)",
+                         requested, tgt, p)
+                self._note_session_group(session_id, tgt)
+                return tgt
+        return None
+
     def resolve_group_for_request(self, requested: str, messages: Any,
                                    session_id: str | None,
                                    need: frozenset[str] | None = None,
-                                   ctx: int | None = None) -> str | None:
+                                   ctx: int | None = None,
+                                   profile: str | None = None) -> str | None:
         """Ritorna il NOME GRUPPO destinazione (o unique esplicito già valido).
 
         Regole:
+          - alias noto (colonna `alias`) -> gruppo-alias (per capacita')
           - nome non nostro            -> None (pass-through)
           - suffisso esplicito         -> rispettato SEMPRE (mai sticky!)
           - nome base + media          -> gruppo capacità -C (se strutturale ON)
@@ -5386,16 +5440,44 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
           - nome base + solo testo     -> hot-word / sticky / minimo sufficiente
 
         `need` = capacità richieste dal payload; `ctx` = stima token opzionale
-        (guardia soft max_input nei gruppi capacità).
+        (guardia soft max_input nei gruppi capacità). `profile` = profilo
+        dell'autenticazione, necessario per risolvere un alias chiesto col
+        NOME NUDO (es. `gemini`), che non porta il prefisso del profilo.
         """
         cfg = self.config
         if not requested.startswith(cfg.proxy_prefix):
-            return None
+            return self._resolve_alias_name(requested, need, session_id,
+                                            profile)
 
         pname = cfg.profile_of_base(requested.split("__")[0]) \
             or cfg.profile_of_base(requested)
 
+        # ---- ALIAS (colonna `alias`) ---------------------------------------
+        # Un alias e' un nome richiamabile che riunisce le righe che lo
+        # portano. Precede la logica dei suffissi: `gemini` non deve essere
+        # interpretato come scala dims/profilo. Il gruppo-alias esiste solo se
+        # c'e' almeno una riga con quell'alias (per la cap richiesta).
+        # Forme accettate: nome nudo (`gemini`) o nome del gruppo-alias
+        # (`scrocco-llm-fissone-gemini`), che e' quello esposto in whitelist.
+        if requested in cfg.alias_groups:
+            _tgt = self._alias_group(requested, need)
+            if _tgt is not None:
+                log.info("[alias] %s -> %s", requested, _tgt)
+                self._note_session_group(session_id, _tgt)
+                return _tgt
+            log.info("[alias] %s: nessun gruppo per cap=%s, routing normale",
+                     requested, sorted(need or ()))
+
         explicit = self.is_explicit(requested)
+
+        # Nome di un GRUPPO-ALIAS gia' completo (esposto in whitelist): e' un
+        # gruppo esplicito a tutti gli effetti (nessuna scala dims).
+        if requested in cfg.alias_groups or any(
+                requested in grps for grps in cfg.alias_groups.values()):
+            if requested in cfg.groups:
+                log.info("[alias] %s (gruppo-alias esplicito)", requested)
+                self._note_session_group(session_id, requested)
+                return requested
 
         # stima contesto (testo + image_token_estimate per parte immagine):
         # serve anche al percorso esplicito -Nk (soglia minima -> start dim)

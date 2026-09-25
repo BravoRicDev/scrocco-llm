@@ -110,10 +110,38 @@ CONTENT_STRING_HEADER = "content_string"
 # (Gemini generateContent). scrocco-llm traduce da/verso Chat Completions.
 API_STYLE_HEADER = "api_style"
 
+# Colonna `alias`: etichette multiple (separate da virgola) che rendono la riga
+# richiamabile per nome. A differenza del `modello`, un alias puo' unire righe
+# di modelli upstream DIVERSI (es. `gemini` su gemini-3-flash e gemini-3-pro,
+# oppure `whisper` su Groq e sul whisper locale). Chiamare `model=<alias>`
+# istrada sulla catena -free -> -go -> -fallback costruita SOLO con le righe
+# che portano quell'alias; la stessa catena e' il paracadute (come chiedere il
+# solo modello base del profilo). Vuoto = la riga non partecipa ad alcun alias.
+ALIAS_HEADER = "alias"
+
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
 CAP_PRIORITY_ORDER = ("image_gen", "video_gen", "tts", "stt",
                       "video", "audio", "vision")
+
+
+def parse_alias(raw: str | None) -> tuple[str, ...]:
+    """Parsing della colonna alias: token separati da virgola.
+
+    Normalizzazione: minuscolo, spazi/underscore -> '-' (stesso alfabeto di
+    slugify_model), dedup preservando l'ordine. Token vuoti scartati. Nessun
+    limite di token (una riga puo' stare in piu' alias).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in (raw or "").split(","):
+        a = slugify_model(tok)
+        if not a or a in seen:
+            continue
+        seen.add(a)
+        out.append(a)
+    return tuple(out)
+
 
 
 def parse_caps(raw: str | None) -> frozenset[str]:
@@ -369,6 +397,7 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "no_thinking": no_thinking,
         "content_string": content_string,
         "api_style": api_style,
+        "aliases": parse_alias(row.get(ALIAS_HEADER)),
     }
 
 
@@ -382,6 +411,26 @@ def _shuffle_bucket(deps: list[dict]) -> list[dict]:
     for _model, grp in by_model.items():
         random.shuffle(grp)
         model_groups.append((max(g["meta"]["priority"] for g in grp), grp))
+    model_groups.sort(key=lambda x: -x[0])
+    out: list[dict] = []
+    for _, grp in model_groups:
+        out.extend(grp)
+    return out
+
+
+def _shuffle_built(deps: list[dict]) -> list[dict]:
+    """Come `_shuffle_bucket` ma su deployment GIA' costruiti (niente
+    `meta`): shuffle dentro ogni modello, modelli ordinati per priorita'
+    massima decrescente. Usato dai gruppi ALIAS, che riusano le istanze
+    dei gruppi normali."""
+    by_model: dict[str, list[dict]] = {}
+    for d in deps:
+        by_model.setdefault(d.get("model", ""), []).append(d)
+    model_groups = []
+    for _model, grp in by_model.items():
+        random.shuffle(grp)
+        model_groups.append((max(int(g.get("priority") or 0) for g in grp),
+                             grp))
     model_groups.sort(key=lambda x: -x[0])
     out: list[dict] = []
     for _, grp in model_groups:
@@ -637,6 +686,11 @@ class GatewayConfig:
         self.chains: dict[str, list[str]] = {}        # profilo -> univoci TESTO
         self.chains_cap: dict[str, dict[str, list[str]]] = {}   # profilo->{cap:[uniques]}
         self.cap_counts: dict[str, dict[str, dict[str, int]]] = {}  # profilo->{cap:{primary,go,fallback}}
+        # Colonna `alias`: alias -> insieme dei nomi-gruppo che lo servono
+        # (es. "gemini" -> {"scrocco-llm-fissone-gemini",
+        # "scrocco-llm-fissone-gemini-go", ...}). Usato dal router per
+        # risolvere `model=<alias>` come richiesta esplicita.
+        self.alias_groups: dict[str, set[str]] = {}
         self._load()
         # snapshot dello stato APPLICATO, per il diff strutturato al reload
         self._last_rows = _csv_field_rows(self.csv_path)
@@ -672,6 +726,7 @@ class GatewayConfig:
             self.groups, self.group_caps = {}, {}
             self.profile_dims, self.profile_caps = {}, {}
             self.chains, self.chains_cap, self.cap_counts = {}, {}, {}
+            self.alias_groups = {}
             return
         # salta le righe di commento (# ...) e vuote PRIMA dell'header:
         # l'example pubblicato nel repo le ha, e il quickstart
@@ -701,6 +756,7 @@ class GatewayConfig:
         self.groups, self.group_caps = {}, {}
         self.profile_dims, self.profile_caps = {}, {}
         self.chains, self.chains_cap, self.cap_counts = {}, {}, {}
+        self.alias_groups = {}
 
         rows: list[tuple[dict, dict[str, str]]] = []
         for r in reader[start + 1:]:
@@ -854,6 +910,11 @@ class GatewayConfig:
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
                     "api_style": normalize_style(meta.get("api_style")),
+                    # categoria grezza (priority/go/fallback/zen/paid...):
+                    # serve alla partizione dei gruppi alias.
+                    "_category": meta.get("category") or "",
+                    # etichette alias della riga (colonna `alias`).
+                    "aliases": meta.get("aliases") or (),
                 })
             self.groups[gname] = lst
             self.group_caps[gname] = cap
@@ -883,6 +944,74 @@ class GatewayConfig:
         self.profile_dims[pname] = dims_sorted
         self.profile_caps[pname] = sorted(cap_world)
 
+        # ---- gruppi ALIAS (colonna `alias`) ------------------------------
+        # Un alias e' un nome richiamabile che riunisce le righe che lo
+        # portano (anche con modelli upstream diversi). Costruiamo, per ogni
+        # (alias, capacita'), la solita terna primario/-go/-fallback usando
+        # SOLO quelle righe, cosi' valgono invariati cooldown, fair-share,
+        # sticky, media-defer e il fallback_after del mondo. I gruppi alias
+        # NON entrano nelle catene di default (self.chains / chains_cap):
+        # restano un percorso esplicito, non cambiano il routing normale.
+        self._build_alias_groups(pname, dims_sorted)
+
+    def _build_alias_groups(self, pname: str, dims_sorted: list[int]) -> None:
+        """Costruisce i gruppi alias per il profilo `pname`.
+
+        Per ogni alias noto e ogni capacita' presente tra le sue righe crea:
+          {prefix}{pname}-{alias}              (primario: priority/free/zen)
+          {prefix}{pname}-{alias}-go           (rinnovo/provider go)
+          {prefix}{pname}-{alias}-fallback     (fallback/paid)
+        con `group_caps` corretta (None = mondo testo). Le righe sono le
+        STESSE istanze dei gruppi normali (nessuna copia): gli stati per
+        `unique` (cooldown, statistiche, sticky) restano condivisi.
+        """
+        # unique -> dep dict, per riusare le stesse istanze.
+        by_unique: dict[str, dict] = {}
+        for _g, _deps in self.groups.items():
+            for d in _deps:
+                by_unique.setdefault(d["unique"], d)
+        if not by_unique:
+            return
+        # alias -> cap (None=testo) -> categoria -> [dep]
+        buckets: dict[str, dict[str | None, dict[str, list[dict]]]] = {}
+        for d in by_unique.values():
+            aliases = d.get("aliases") or ()
+            if not aliases:
+                continue
+            cap = self.group_caps.get(d.get("group", ""))
+            cat = d.get("_category") or ""
+            for a in aliases:
+                cap_map = buckets.setdefault(a, {})
+                cat_map = cap_map.setdefault(cap, {})
+                cat_map.setdefault(cat, []).append(d)
+        for alias, cap_map in sorted(buckets.items()):
+            for cap, cat_map in cap_map.items():
+                c_free = cat_map.get("priority", []) + cat_map.get("zen", [])
+                c_go = cat_map.get("go", [])
+                c_fb = cat_map.get("fallback", []) + cat_map.get("paid", [])
+                # nome base: testo -> {prefix}{pname}-{alias}; cap -> ...-{alias}-{cap}
+                base_g = (f"{self.proxy_prefix}{pname}-{alias}" if cap is None
+                          else f"{self.proxy_prefix}{pname}-{alias}-{cap}")
+                if c_free:
+                    self.groups[base_g] = _shuffle_built(c_free)
+                    self.group_caps[base_g] = cap
+                if c_go:
+                    _g = f"{base_g}{self.go_suffix}"
+                    self.groups[_g] = sorted(
+                        c_go, key=lambda d: d.get("sort_key", float("inf")))
+                    self.group_caps[_g] = cap
+                if c_fb:
+                    _g = f"{base_g}{self.fallback_suffix}"
+                    self.groups[_g] = sorted(
+                        c_fb, key=lambda d: d.get("sort_key", float("inf")))
+                    self.group_caps[_g] = cap
+                # registra TUTTI i gruppi della terna (anche go/fallback):
+                # alias_target li usa per rispettare la capacita' richiesta.
+                self.alias_groups.setdefault(alias, set()).update(
+                    g for g in (base_g, f"{base_g}{self.go_suffix}",
+                                f"{base_g}{self.fallback_suffix}")
+                    if g in self.groups)
+
     # ------------------------------------------------------------- accessors
     def profile_of_base(self, base_name: str) -> str | None:
         """'<proxy_prefix>example' -> 'example', solo se il profilo esiste."""
@@ -907,6 +1036,42 @@ class GatewayConfig:
                 sufs += [f"-{c}", f"-{c}{self.go_suffix}",
                          f"-{c}{self.fallback_suffix}"]
         return sufs
+
+    def alias_names(self) -> list[str]:
+        """Nomi alias richiamabili (colonna `alias`), ordinati."""
+        return sorted(self.alias_groups)
+
+    def alias_names_for(self, pname: str) -> list[str]:
+        """Alias del profilo `pname` (i gruppi-alias hanno il prefisso
+        '<proxy_prefix><pname>-')."""
+        base = f"{self.proxy_prefix}{pname}-"
+        out = [a for a, groups in self.alias_groups.items()
+               if any(g.startswith(base) for g in groups)]
+        return sorted(out)
+
+    def alias_target(self, name: str, cap: str | None = None) -> str | None:
+        """Risolve un nome alias nel gruppo destinazione.
+
+        Ritorna il nome del gruppo (primario) dell'alias, preferendo la
+        variante con la capacità richiesta `cap` (es. 'stt'); senza `cap`
+        usa il gruppo testo. None se l'alias non esiste o non ha un gruppo
+        per quella capacità (il chiamante prosegue col routing normale).
+        """
+        groups = self.alias_groups.get(name)
+        if not groups:
+            return None
+        want = f"{cap}" if cap else None
+        for g in sorted(groups):
+            gc = self.group_caps.get(g)
+            if want is None:
+                if gc is None:
+                    return g
+            elif gc == cap:
+                return g
+        # nessun gruppo per la cap chiesta: se `cap` e' richiesto ma l'alias
+        # ha solo gruppi testo, NON lo forziamo (comportamento sicuro).
+        return None
+
 
     def deployment_by_unique(self, unique: str) -> dict | None:
         for lst in self.groups.values():
@@ -963,6 +1128,7 @@ class GatewayConfig:
             self.chains = shadow.chains
             self.chains_cap = shadow.chains_cap
             self.cap_counts = shadow.cap_counts
+            self.alias_groups = shadow.alias_groups
             # diff strutturato: cosa e' cambiato in questo reload (log CLOG)
             if old_rows is not None:
                 _emit_config_diff(_config_diff(old_rows, new_rows))

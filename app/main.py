@@ -1150,6 +1150,14 @@ def _visible_model_names(request: Request):
     for a, t in policy.aliases.items():
         if allowed is None or t in allowed:
             names.append(a)
+    # Alias della colonna `alias` (nomi richiamabili per modello/gruppo):
+    # visibili come i `policy.aliases`, ma definiti nei dati (CSV) e
+    # limitati al profilo dell'autenticazione (master: tutti).
+    if auth.mode == "master":
+        for p in config.profiles:
+            names.extend(config.alias_names_for(p))
+    else:
+        names.extend(config.alias_names_for(auth.profile or ""))
     # de-dup preservando l'ordine
     seen = set(); out = []
     for n in names:
@@ -1183,6 +1191,7 @@ async def retrieve_model(model_id: str, request: Request):
     canon = policy.canonicalize(model_id)
     known = (model_id in names or canon in names
              or canon in config.groups
+             or canon in config.alias_groups
              or config.deployment_by_unique(canon) is not None
              or any(canon == a or canon == policy.aliases.get(a)
                     for a in policy.aliases))
@@ -1756,7 +1765,8 @@ async def chat_completions(request: Request, response: Response):
 
     group_or_explicit = router.resolve_group_for_request(model, messages,
                                                          session_id, need,
-                                                         ctx_dim)
+                                                         ctx_dim,
+                                                         profile=auth.profile)
     if group_or_explicit is None:
         if need:
             for c in sorted(need):
@@ -5568,7 +5578,7 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
     prof = profile or config.profile_of_base(model.split("__")[0]) \
         or config.profile_of_base(model)
     group_or_explicit = router.resolve_group_for_request(model, [], session_id,
-                                                         need)
+                                                         need, profile=prof)
     if group_or_explicit is None:
         return None, prof, scope, JSONResponse(
             status_code=400 if need else 404, content={
@@ -5749,7 +5759,9 @@ async def images_generations(request: Request):
             model=model, need=need, scope=scope, dep=dep, profile=profile,
             session_id=session_id)
 
-    group_or_explicit = router.resolve_group_for_request(model, [], session_id, need)
+    group_or_explicit = router.resolve_group_for_request(model, [], session_id,
+                                                         need,
+                                                         profile=auth.profile)
     if group_or_explicit is None:
         return JSONResponse(status_code=400 if need else 404, content={
             "error": {"message":
@@ -6045,7 +6057,8 @@ def _audio_route(profile: str | None, model: str, raw_model: str,
     capace (o explicit pass-through) oppure ritorna una JSONResponse d'errore.
     Ritorna (dep, profile, error_response)."""
     group_or_explicit = router.resolve_group_for_request(model, [], session_id,
-                                                         need)
+                                                         need,
+                                                         profile=profile)
     if group_or_explicit is None:
         capname = sorted(need)[0] if need else model
         for c in sorted(need):
@@ -6383,7 +6396,8 @@ async def videos_generations(request: Request):
         model, [], session_id,
         need | {"vision"} if (need and (payload.get("frame_images")
                                         or payload.get("input_references")))
-        else need)
+        else need,
+        profile=auth.profile)
     if group_or_explicit is None:
         for c in sorted(need or {"video_gen"}):
             metrics.inc("nx_caps_unroutable_total", (c,))

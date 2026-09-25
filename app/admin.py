@@ -2731,7 +2731,7 @@ async def admin_playground(request: Request):
                 or gw.config.profile_of_base(model)
 
         group_or_explicit = router.resolve_group_for_request(
-            model, messages, None, need, ctx)
+            model, messages, None, need, ctx, profile=profile)
         if group_or_explicit is None:
             return _playground_result(
                 gw, model_raw, model, profile, None, trace,
