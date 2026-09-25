@@ -295,13 +295,17 @@ def test_edits_senza_cap_image_edit_400(client_no_edit, monkeypatch):
 # ------------------------------------------------- e2e: generations con refs
 def test_generations_con_refs_usa_chat(client_single, monkeypatch):
     c, m = client_single
-    fwd = _fun(monkeypatch, m)
+    # Con reference il gateway e' PROVIDER-AGNOSTICO: prova PRIMA l'endpoint
+    # nativo /images/edits; se il provider non lo supporta (qui 404 con firma)
+    # ritenta via chat multimodale. Il test simula un provider chat-only.
+    fwd = _fun(monkeypatch, m,
+               native=lambda d, p: (404, "no such endpoint"))
     r = c.post("/v1/images/generations", headers=MK,
                json={"model": "scrocco-llm-test", "prompt": "rendilo blu",
                      "image": "data:image/png;base64,AAA"})
     assert r.status_code == 200, r.text
     assert r.json()["via"] == "chat"
-    assert fwd.images_calls == []          # nativo MAI tentato con reference
+    assert fwd.images_calls == ["google"]   # nativo tentato (edits) -> 404
     assert fwd.chat_calls == ["google"]
     content = fwd.chat_payloads[0]["messages"][0]["content"]
     assert content[0]["type"] == "image_url"
@@ -331,3 +335,65 @@ def test_generations_con_refs_senza_image_edit_400(client_no_edit,
                      "images": ["data:image/png;base64,AAA"]})
     assert r.status_code == 400
     assert "image_edit" in r.json()["error"]["message"]
+
+
+# --------------------------------------------- provider-agnostico (#55): nativo
+def test_multipart_image_edit_data_uri_e_campi():
+    from app.forwarder import _multipart_image_edit
+    files, data = _multipart_image_edit(
+        {"model": "x", "prompt": "rendilo blu", "n": 2, "size": "1024x1024",
+         "image": "ignored", "mask": "ignored", "seed": 7},
+        "up-model", ["data:image/png;base64,QUJD"])
+    assert data["model"] == "up-model"
+    assert data["prompt"] == "rendilo blu"
+    assert data["n"] == "2" and data["size"] == "1024x1024"
+    assert data["seed"] == "7"
+    assert "image" not in data and "mask" not in data
+    assert len(files) == 1
+    field, (name, raw, mime) = files[0]
+    assert field == "image" and raw == b"ABC" and mime == "image/png"
+
+
+def test_multipart_image_edit_url_scartato_senza_byte():
+    from app.forwarder import _multipart_image_edit
+    # un URL http non materializzato (senza byte) viene scartato dal multipart;
+    # il materialize async lo trasforma in data-URI prima di arrivare qui.
+    files, _ = _multipart_image_edit(
+        {"prompt": "x"}, "m", ["https://ex.com/foto.jpg"])
+    assert files == []
+
+
+def test_materialize_remote_refs_data_uri_invariato():
+    import asyncio
+    from app.forwarder import _materialize_remote_refs
+    out = asyncio.run(_materialize_remote_refs(
+        ["data:image/png;base64,QUJD", ""]))
+    assert out == ["data:image/png;base64,QUJD", ""]
+
+
+def test_edits_provider_nativo_usa_images_edits(client_single, monkeypatch):
+    """Provider nativo OpenAI (gpt-image): /v1/images/edits va servito
+    sull'endpoint nativo /images/edits, NON via chat."""
+    c, m = client_single
+    fwd = _fun(monkeypatch, m,
+               native=lambda d, p: (200, {"created": 1, "data": [
+                   {"b64_json": "QUJD"}]}))
+    r = c.post("/v1/images/edits", headers=MK,
+               data={"model": "scrocco-llm-test", "prompt": "rendilo blu"},
+               files={"image": ("ref.png", b"\x89PNG\x00ref", "image/png")})
+    assert r.status_code == 200, r.text
+    assert r.json()["via"] in ("images", "images_edits")
+    assert fwd.images_calls == ["google"]   # nativo usato
+    assert fwd.chat_calls == []             # chat NON tentata
+
+
+def test_edits_nativo_poi_chat_se_non_supportato(client_single, monkeypatch):
+    """Provider chat-only: nativo 404 con firma -> fallback automatico chat."""
+    c, m = client_single
+    fwd = _fun(monkeypatch, m, native=lambda d, p: (404, "no such endpoint"))
+    r = c.post("/v1/images/edits", headers=MK,
+               data={"model": "scrocco-llm-test", "prompt": "x"},
+               files={"image": ("r.png", b"\x89PNG\x00r", "image/png")})
+    assert r.status_code == 200, r.text
+    assert r.json()["via"] == "chat"
+    assert fwd.images_calls == ["google"] and fwd.chat_calls == ["google"]

@@ -5610,6 +5610,48 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
     return dep, prof, scope, None
 
 
+async def _try_native_image_edit(request: Request, *, owner: Request,
+                                 dep: dict, payload: dict,
+                                 refs: list[str], session_id: str | None,
+                                 raw_model: str, profile: str | None,
+                                 kind: str = "images") -> JSONResponse | None:
+    """Tenta l'EDIT nativo OpenAI `/images/edits` (multipart) sul deployment.
+
+    Ritorna la JSONResponse finale se il provider lo supporta e risponde con
+    immagini; `None` se l'endpoint non e' supportato (firma tipica
+    "campo/endpoint non riconosciuto" o 404/405/415) cosi' il chiamante puo'
+    ritentare via chat multimodale. Errori non-schema (auth/crediti/quota)
+    diventano un UpstreamError propagato al loop per la rotazione normale."""
+    try:
+        data = await forwarder.call_images(
+            dep, payload, profile=profile or "",
+            client_ip=_client_ip(request),
+            session=_opencode_session(request) or session_id,
+            attribution=_client_attribution(request),
+            endpoint="edits", refs=refs)
+    except UpstreamError as err:
+        detail = err.detail or ""
+        status = err.status if err.status is not None else 0
+        if image_chat_fallback_signature(err.status, detail) \
+                or -status in (404, 405, 415):
+            log.info("[images] %s: /images/edits non disponibile (status=%s): "
+                     "ritento via chat", dep["unique"], -status or "?")
+            return None
+        raise
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        return None
+    data["data"] = await _localize_images(request, images_dual(data["data"]))
+    data["nx_deployment"] = dep["unique"]
+    data.setdefault("via", "images")
+    metrics.inc("nx_images_total", (dep["group"], "ok_native_edit"))
+    _emit_summary(ses=session_id or "-", req=raw_model, grp=dep["group"],
+                  dep=dep["unique"], tries=1, fb=0, dur_ms=0,
+                  stream=False, qc=False, wd=None, usage=None,
+                  kind=kind, via="images_edits")
+    router.note_result(dep["unique"], 0.0)
+    return JSONResponse(data)
+
+
 async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
                             raw_model: str, model: str, need: frozenset[str],
                             scope: str, dep: dict, profile: str | None,
@@ -5629,6 +5671,9 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
              dep["unique"], endpoint, len(str(payload.get("prompt") or "")),
              len(refs))
     tried: set[str] = set()
+    # Marker "nativo gia' tentato" SEPARATO da `tried`: non consuma il budget
+    # di tentativi del deployment (si prova nativo -> chat sullo stesso dep).
+    native_tried: set[str] = set()
     attempts: list[str] = []
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
@@ -5643,7 +5688,22 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
             declared = router.policy.caps_for(dep.get("model", "")) \
                 | (dep.get("caps") or frozenset())
             use_refs = truncate_refs(refs, refs_max_for(declared, hard_max))
+            # PROVIDER-AGNOSTICO: per l'edit si prova PRIMA l'endpoint nativo
+            # OpenAI `/images/edits` (multipart). I provider che servono i
+            # modelli immagine come chat (Gemini/nano-banana) rispondono con
+            # un errore "campo/endpoint non supportato" -> si ritenta via chat
+            # multimodale. Cosi' lo STESSO body client funziona con entrambe
+            # le tipologie di provider.
             chat_payload = image_chat_payload(payload, raw_model, refs=use_refs)
+            _native_try = cur not in native_tried
+            if _native_try:
+                native_tried.add(cur)
+                _nres = await _try_native_image_edit(
+                    request, owner=request, dep=dep, payload=payload,
+                    refs=use_refs, session_id=session_id, raw_model=raw_model,
+                    profile=profile, kind=kind)
+                if _nres is not None:
+                    return _nres
             data = await forwarder.call(dep, chat_payload, session=_sess,
                                         client_ip=_cip, attribution=_attr)
             imgs = await _localize_images(

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import base64
 import hashlib
 import json
 import logging
@@ -2662,6 +2663,84 @@ def image_chat_payload(payload: dict, model: str,
     return out
 
 
+async def _materialize_remote_refs(refs: list[str] | None) -> list[str]:
+    """Rende ogni reference un data-URI: gli URL http(s) vengono SCARICATI
+    (l'endpoint nativo /images/edits vuole i byte nel multipart, a differenza
+    del path chat che accetta URL). Best-effort: un URL che non scarica resta
+    invariato (verra' scartato come ref senza byte)."""
+    out: list[str] = []
+    for r in (refs or []):
+        s = (r or "").strip()
+        if s.startswith("http://") or s.startswith("https://"):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as cli:
+                    resp = await cli.get(s)
+                if resp.status_code < 400 and resp.content:
+                    mime = resp.headers.get("content-type", "image/png") \
+                        .split(";")[0].strip() or "image/png"
+                    out.append("data:" + mime + ";base64,"
+                               + base64.b64encode(resp.content).decode())
+                    continue
+            except httpx.HTTPError:
+                pass
+        out.append(s)
+    return out
+
+
+def _ref_bytes(ref: str) -> tuple[bytes, str, str]:
+    """Da una reference (data-URI o URL) -> (bytes, filename, mime).
+
+    I data-URI base64 sono decodificati; per gli URL si usa il nome file
+    dall'ultimo segmento. MIME dedotto dal prefisso data-URI o dall'estensione.
+    """
+    s = (ref or "").strip()
+    if s.startswith("data:"):
+        head, _, b64 = s.partition(",")
+        mime = head[5:].split(";")[0] or "image/png"
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            raw = b""
+        ext = mime.split("/")[-1] or "png"
+        return raw, f"image.{ext}", mime
+    name = s.rsplit("/", 1)[-1].split("?")[0] or "image.png"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "png"
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp",
+            "gif": "image/gif"}.get(ext, "image/png")
+    return b"", name, mime
+
+
+def _multipart_image_edit(payload: dict, model: str,
+                          refs: list[str] | None) -> tuple[list, dict]:
+    """Costruisce (files, data) multipart per POST /images/edits (OpenAI).
+
+    Le reference diventano file con nome campo `image` (piu' immagini ->
+    `image[]`, che OpenAI accetta). Gli altri campi del body (prompt, n, size,
+    response_format, quality, seed, ...) diventano parti di form; `model` e'
+    riscritto col nome upstream. `mask` e' ignorato (non supportato)."""
+    files: list = []
+    for r in (refs or []):
+        raw, name, mime = _ref_bytes(r)
+        if not raw:
+            continue
+        files.append(("image", (name, raw, mime)))
+    data: dict[str, str] = {"model": model}
+    for k, v in payload.items():
+        if k in ("model", "image", "images", "reference_images", "mask"):
+            continue
+        if v is None:
+            continue
+        if isinstance(v, (dict, list)):
+            data[k] = json.dumps(v, ensure_ascii=False)
+        elif isinstance(v, bool):
+            data[k] = "true" if v else "false"
+        else:
+            data[k] = str(v)
+    if not data.get("prompt"):
+        data["prompt"] = ""
+    return files, data
+
+
 def _image_item(obj) -> dict | None:
     """Normalizza UNA immagine nelle forme note -> {url}|{b64_json}."""
     if isinstance(obj, str):
@@ -3192,32 +3271,53 @@ truncation_hook=None,
                           profile: str = "",
                           client_ip: str = "",
                           session: str | None = None,
-                          attribution: dict | None = None) -> dict:
-        """Generazione immagini: POST {api_base}/images/generations (non streaming).
+                          attribution: dict | None = None,
+                          endpoint: str = "generations",
+                          refs: list[str] | None = None) -> dict:
+        """Generazione/editing immagini sull'endpoint NATIVO OpenAI
+        (`/images/generations` o `/images/edits`, non streaming).
 
-        Il body viene passato quasi intatto (solo il modello è riscritto col
-        nome upstream del deployment). Errori 4xx/5xx -> UpstreamError come
-        per il chat: 404/provider-4xx sono ritriabili lungo la catena.
-        """
-        body = {k: v for k, v in payload.items() if k != "model"}
-        body["model"] = dep["model"]
+        `endpoint="edits"` invia multipart/form-data (come OpenAI): le
+        reference richieste (`refs`, data-URI base64 o URL) come file, il resto
+        dei campi come parti di form. `generations` passa il body JSON quasi
+        intatto (solo il modello è riscritto col nome upstream).
+
+        Errori 4xx/5xx -> UpstreamError come per il chat: 404/provider-4xx
+        sono ritriabili lungo la catena."""
         headers = {
             "Authorization": f"Bearer {dep['api_key']}",
-            "Content-Type": "application/json",
             **_session_headers(dep, profile=profile, client_ip=client_ip,
                                session=session, attribution=attribution),
         }
-        url = f"{dep['api_base']}/images/generations"
-        log.debug("[upstream] %s POST %s (images, stream=%s)",
-                  dep.get("unique", "?"), url, payload.get("stream", False))
-        try:
-            resp = await self._client_for(url, dep.get("api_key", "")).post(url, json=body, headers=headers,
-                                          timeout=httpx.Timeout(connect=10.0,
-                                                                read=300.0,
-                                                                write=60.0,
-                                                                pool=10.0))
-        except httpx.HTTPError as exc:
-            raise UpstreamError(None, f"upstream connection error: {exc}") from exc
+        url = f"{dep['api_base']}/images/{endpoint}"
+        log.debug("[upstream] %s POST %s (images/%s, stream=%s)",
+                  dep.get("unique", "?"), url, endpoint,
+                  payload.get("stream", False))
+        if endpoint == "edits":
+            refs = await _materialize_remote_refs(refs)
+            files, data = _multipart_image_edit(payload, dep["model"], refs)
+            try:
+                resp = await self._client_for(
+                    url, dep.get("api_key", "")).post(
+                        url, data=data, files=files, headers=headers,
+                        timeout=httpx.Timeout(connect=10.0, read=300.0,
+                                              write=60.0, pool=10.0))
+            except httpx.HTTPError as exc:
+                raise UpstreamError(
+                    None, f"upstream connection error: {exc}") from exc
+        else:
+            body = {k: v for k, v in payload.items() if k != "model"}
+            body["model"] = dep["model"]
+            headers["Content-Type"] = "application/json"
+            try:
+                resp = await self._client_for(
+                    url, dep.get("api_key", "")).post(
+                        url, json=body, headers=headers,
+                        timeout=httpx.Timeout(connect=10.0, read=300.0,
+                                              write=60.0, pool=10.0))
+            except httpx.HTTPError as exc:
+                raise UpstreamError(
+                    None, f"upstream connection error: {exc}") from exc
         if resp.status_code >= 400:
             raise UpstreamError(
                 -resp.status_code if resp.status_code not in RETRYABLE_STATUS
