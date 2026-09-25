@@ -97,6 +97,9 @@ def main():
                     help="leggi il CSV da qui con ssh; vuoto = da stdin")
     ap.add_argument("--apply", action="store_true",
                     help="applica davvero (default: solo dry-run)")
+    ap.add_argument("--profile", default=os.environ.get("SYNC_PROFILE", ""),
+                    help="nome della colonna profilo da lasciare su questo host "
+                         "(default: auto, la colonna profilo gia' presente)")
     args = ap.parse_args()
     key = os.environ["GATEWAY_MASTER_KEY"]
 
@@ -107,6 +110,11 @@ def main():
     if len(lprof) != 1:
         raise SystemExit("attesa 1 colonna profilo, trovate: %r" % lprof)
     lprof = lprof[0]
+    # Il profilo finale e' quello locale: la colonna profilo entra nei nomi
+    # modello di /v1/models, quindi deve restare quella di questo host
+    # (l'header della sorgente la rinomina al profilo del mittente -> va
+    # rimessa a posto, o il client smette di riconoscere i propri modelli).
+    out_profile = args.profile or lprof
 
     # --- CSV sorgente (chiavi solo in memoria, mai in un argomento) ---
     src_raw, label = _read_source(args)
@@ -135,6 +143,16 @@ def main():
             s[si] = d[li]          # 1. valore della chiave -> profilo locale
             moved += 1
     out_head, out_rows = shead, srows      # 2. header della sorgente
+    # 2b. il nome della colonna profilo resta quello di DEST
+    if out_profile != sprof:
+        out_head = [out_profile if h == sprof else h for h in out_head]
+    # nessuna colonna profilo "fantasma" deve sopravvivere
+    ghosts = [h for h in out_head
+              if h.startswith("scrocco-llm-") and h != out_profile]
+    if ghosts:
+        keep = [k for k, h in enumerate(out_head) if h not in ghosts]
+        out_head = [out_head[k] for k in keep]
+        out_rows = [[r[k] for k in keep if k < len(r)] for r in out_rows]
 
     # diff riassuntivo (identita' logica: profilo escluso, provider/modello/
     # endpoint/caps confrontati -> dice SE le righe sono le stesse)
@@ -152,6 +170,9 @@ def main():
     print("righe    : %d -> %d" % (len(lrows), len(out_rows)))
     print("colonne  : %d -> %d  aggiunte: %s / rimosse: %s"
           % (len(lhead), len(out_head), added or "-", removed or "-"))
+    print("profilo  : %s -> %s  (colonne profilo finali: %s)"
+          % (lprof, out_profile,
+             [h for h in out_head if h.startswith("scrocco-llm-")]))
     print("identita : %d comuni, %d solo-locali, %d nuove-dalla-sorgente"
           % (len(lset & sset), len(lset - sset), len(sset - lset)))
 
