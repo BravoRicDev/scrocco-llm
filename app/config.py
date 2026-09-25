@@ -204,8 +204,9 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
       1. La colonna 'data' definisce la categoria base (priority/free/fallback/paid).
       2. Se la categoria e' "future" (giorno rinnovo mese), si usa il provider
          per determinare se e' "zen" (solo provider esplicito opencode-zen) o "go".
-      3. Altrimenti, la categoria e' quella definita da 'data', oppure 'free'
-         se il modello contiene "free", altrimenti 'go'.
+      3. Altrimenti (data assente/categoria None) la categoria e' 'zen' se il
+         provider contiene "zen", altrimenti 'go'. Il NOME del modello NON
+         entra mai nella classificazione (nessuna euristica "free" -> free).
     I token 'zen' nei provider nomi sono riconosciuti esplicitamente;
     non sono presenti heuristiche "opencode-zen" obscure ne' endpoint
     speciali (es. NVIDIA NIM NON e' "zen": e' un provider normale).
@@ -231,14 +232,15 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         else:
             category = "go"
     # Se la renewal e' priority o fallback, mantieni quella categoria.
-    # Altrimenti (free o None), determina in base a provider/modello.
+    # Altrimenti (rinnovo mensile o data assente) determina in base al
+    # provider. NB: il NOME del modello NON influenza piu' la categoria
+    # (rimossa la vecchia euristica "free" nel nome -> bucket free): un
+    # rinnovo di un modello "...-free" resta nel bucket "go" come qualsiasi
+    # altro rinnovo.
     if category not in ("priority", "fallback"):
         # Provider esplicito zen
         if "zen" in provider:
             category = "zen"
-        # Modello contiene "free" -> bucket free
-        elif "free" in modello:
-            category = "free"
         # Altrimenti default a go
         else:
             category = "go"

@@ -4,7 +4,7 @@ Blocca i casi chiave della colonna 'data' + provider/modello:
   - data=free  -> priority (il bucket gratuito primario)
   - data=paolo -> fallback
   - giorno del mese (rinnovo) -> go, TRANNE provider esplicito "zen" -> zen
-  - modello con ":free"        -> free
+  - modello con ":free"        -> NESSUNA influenza (il nome non conta)
   - NVIDIA NIM NON e' "zen": con un giorno di rinnovo va in "go" come un
     normale provider (l'endpoint integrate.api.nvidia.com non ha alcun
     trattamento speciale).
@@ -78,15 +78,34 @@ def test_renewal_day_zen_only_for_explicit_provider():
     assert got["category"] == "go"
 
 
-# ----------------------------------------------------- modello ':free' ------
+# ------------------------------------------- nome modello ':free' (ignorato) --
 
-def test_model_with_free_suffix_is_free():
-    # Modello con ":free" -> bucket "free" (il secondo blocco).
+def test_model_name_free_is_ignored_in_classification():
+    # Il nome del modello NON influenza piu' la categoria: un rinnovo mensile
+    # di un modello ":free" resta "go" (prima finiva in "free").
     got = _classify(_row(modello="nvidia/nemotron-3.5-lightning:free",
                          provider="nvidia",
                          endpoint="https://integrate.api.nvidia.com/v1",
                          data="15"), TODAY)
-    assert got["category"] == "free"
+    assert got["category"] == "go"
+
+    # Caso reale: opencode-go space-bunny-free con data=20 -> "go" (bucket -go).
+    got = _classify(_row(modello="space-bunny-free", provider="opencode-go",
+                         endpoint="https://opencode.ai/zen/go/v1", data="20"),
+                    TODAY)
+    assert got["category"] == "go"
+
+    # Data assente: default "go" anche col nome ":free".
+    got = _classify(_row(modello="space-bunny-free", provider="opencode-go",
+                         endpoint="https://opencode.ai/zen/go/v1", data=""),
+                    TODAY)
+    assert got["category"] == "go"
+
+    # data="free" continua a vincere (bucket priority), nome a parte.
+    got = _classify(_row(modello="space-bunny-free", provider="opencode-zen",
+                         endpoint="https://opencode.ai/zen/v1", data="free"),
+                    TODAY)
+    assert got["category"] == "priority"
 
 
 def test_nvidia_endpoint_never_zen():
