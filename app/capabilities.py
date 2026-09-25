@@ -88,10 +88,17 @@ def required_caps(payload: dict) -> frozenset[str]:
                     mime = (file_obj.get("mime_type") or file_obj.get("mime") or "").lower()
                     if mime.startswith("video/"):
                         need.add("video")
+                    elif mime.startswith("image/"):
+                        need.add("vision")
                 elif ptype == "inline_data":
                     mime = (part.get("mime_type") or part.get("mime") or "").lower()
                     if mime.startswith("video/"):
                         need.add("video")
+                    elif mime.startswith("image/"):
+                        # forma Gemini nativa: senza questo riconoscimento la
+                        # richiesta finiva nel mondo TESTO e il modello non
+                        # vedeva l'immagine (capabilities.py, intervento #57)
+                        need.add("vision")
                 # input_text, text, reasoning, tool_calls, etc. -> ignorati
     return frozenset(need)
 
@@ -122,8 +129,33 @@ def wants_image_output(payload: dict) -> bool:
     return False
 
 
+def _is_image_part(part: dict) -> bool:
+    """True se una parte di `content` e' un'immagine, in QUALSIASI forma.
+
+    Riconosce sia lo standard OpenAI (`image_url`, `input_image`) sia le forme
+    Gemini-native (`inline_data` con mime image/*, `file` con file.mime_type
+    image/*): same sorgente per `required_caps` e `count_image_parts`, cosi' la
+    stima dei token non puo' discordare dal routing."""
+    ptype = part.get("type")
+    if ptype in ("image_url", "input_image", "image"):
+        return True
+    if ptype == "inline_data":
+        mime = (part.get("mime_type") or part.get("mime") or "").lower()
+        return mime.startswith("image/")
+    if ptype == "file":
+        file_obj = part.get("file") or {}
+        if not isinstance(file_obj, dict):
+            return False
+        mime = (file_obj.get("mime_type") or file_obj.get("mime") or "").lower()
+        return mime.startswith("image/")
+    return False
+
+
 def count_image_parts(messages: list[dict] | None) -> int:
-    """Conta le parti-immagine nei messaggi per la stima token."""
+    """Conta le parti-immagine nei messaggi per la stima token.
+
+    Usa `_is_image_part`, quindi conta anche le forme Gemini-native
+    (`inline_data`, `file`) oltre allo standard OpenAI."""
     if not messages:
         return 0
     count = 0
@@ -133,7 +165,7 @@ def count_image_parts(messages: list[dict] | None) -> int:
         content = msg.get("content")
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") in ("image_url", "input_image"):
+                if isinstance(part, dict) and _is_image_part(part):
                     count += 1
     return count
 

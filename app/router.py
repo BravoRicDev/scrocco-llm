@@ -3645,6 +3645,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         return any(name.endswith(s) for s in self.config.known_suffixes())
 
     # -------------------------------------------------------- capability helpers
+    def _dep_declared_caps(self, dep: dict) -> frozenset[str]:
+        """Capacita' DICHIARATE da un deployment (mappa advisory unione CSV).
+
+        Stessa fonte di verita' di `_dep_supports`, ma senza il filtro di
+        usabilita': serve per le decisioni strutturali (questo modello puo'
+        vedere immagini?), che non devono cambiare per un cooldown."""
+        if not dep:
+            return frozenset()
+        return self.policy.caps_for(dep.get("model", "")) \
+            | (dep.get("caps") or frozenset())
+
     def _dep_supports(self, dep: dict, need: frozenset[str]) -> bool:
         """True se il deployment dichiara tutte le capacità richieste.
 
@@ -3653,9 +3664,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         nell'architettura a gruppi è l'appartenenza la fonte di verità."""
         if not need:
             return True
-        declared = self.policy.caps_for(dep.get("model", "")) \
-            | (dep.get("caps") or frozenset())
-        return need.issubset(declared)
+        return need.issubset(self._dep_declared_caps(dep))
 
     # token che rendono un modello "multimodale" ai fini della protezione
     # free-tier (multimodal_last_resort): input media + cap generativi.
@@ -3767,6 +3776,34 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                else cfg.fallback_suffix if tier_start == "fallback" else "")
         gname = f"{cfg.proxy_prefix}{pname}-{cap}{sfx}"
         return gname if gname in cfg.groups else None
+
+    def _missing_media_caps(self, requested: str,
+                            need: frozenset[str] | None) -> list[str]:
+        """Capacita' MEDIA richieste che il deployment/richiesta NON dichiara.
+
+        Considera solo la DICHIARAZIONE, non la disponibilita': un cooldown
+        temporaneo non deve trasformarsi in un 400 permanente, e un 400 qui
+        significa "questo modello non puo' farlo", non "ora non puo'".
+
+        `requested` puo' essere un unique (`...__modello__0`) o un nome di
+        gruppo: nei due casi si guarda il deployment singolo o l'unione delle
+        dichiarazioni del gruppo.
+
+        `text` non e' una capacita' media: ogni modello di testo la soddisfa, e
+        chiederla insieme alle altre farebbe fallire la richiesta sempre."""
+        if not need:
+            return []
+        media = {c for c in need if c != "text"}
+        if not media:
+            return []
+        if "__" in requested:
+            dep = self.config.deployment_by_unique(requested)
+            declared = self._dep_declared_caps(dep) if dep else frozenset()
+        else:
+            declared = frozenset()
+            for d in self.config.groups.get(requested, []):
+                declared |= self._dep_declared_caps(d)
+        return sorted(c for c in media if c not in declared)
 
     def _any_capable_in_group(self, group_name: str, need: frozenset[str]) -> bool:
         """True se il gruppo ha almeno un deployment CAPACE (cooldown ignorato)."""
@@ -5321,22 +5358,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
     def _resolve_explicit(self, requested: str, pname: str | None,
                           need: frozenset[str] | None,
                           session_id: str | None,
-                          ctx_est: int) -> str:
-        """Nome esplicito -> gruppo destinazione.
+                          ctx_est: int) -> str | None:
+        """Nome esplicito -> gruppo destinazione (None = rifiuto capace).
 
         - unique completo (__...)              -> passthrough esatto
         - gruppo CAP (-vision, -video_gen, ..) -> passthrough esatto
         - suffisso -go / -fallback             -> tier-start della scala
         - suffisso -Nk                         -> SOGLIA MINIMA: la dim scelta
           è la più piccola >= max(N, stima ctx); mai dim < N.
-        Con dims_ladder_floor OFF tutto torna passthrough legacy."""
+        Con dims_ladder_floor OFF tutto torna passthrough legacy.
+
+        `None` significa "rifiuto esplicito": il client ha chiesto UN deployment
+        preciso (unique `__`) che non dichiara una capacita' media necessaria
+        (es. un'immagine a un modello solo-testo). Il chiamante ne fa un 400
+        invece di inoltrare una richiesta che l'upstream non puo' onorare: un
+        text-only che riceve un'immagine risponde o con 400 grezzo o peggio
+        inventando una risposta senza aver visto nulla. Le DIMENSIONI e gli
+        ALIAS non sono espliciti in questo senso e continuano a scalare nella
+        capacita' richiesta (comportamento camaleontico)."""
         cfg = self.config
         if "__" in requested or not self.policy.dims_ladder_floor:
-            if need and requested in cfg.groups \
-                    and not self._any_capable_in_group(requested, need):
-                log.warning("[caps] %s richiede %s ma %s non ha deployment "
-                            "capace: pass-through",
-                            requested, sorted(need), requested)
+            missing = self._missing_media_caps(requested, need)
+            if missing:
+                log.warning("[caps] %s richiede %s ma il deployment non "
+                            "dichiara %s: 400 esplicito",
+                            requested, sorted(need or ()), missing)
+                return None
             return requested
         if requested in cfg.groups \
                 and cfg.group_caps.get(requested) is not None:

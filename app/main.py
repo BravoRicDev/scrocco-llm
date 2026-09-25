@@ -129,7 +129,7 @@ from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             spoof_enabled, opencode_cautious_request,
                             is_opencode_zen_dep)
 from .capabilities import (required_caps, count_image_parts, refs_max_for,
-                           wants_image_output)
+                           wants_image_output, _is_image_part)
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
 
@@ -1795,6 +1795,26 @@ async def chat_completions(request: Request, response: Response):
         if need:
             for c in sorted(need):
                 metrics.inc("nx_caps_unroutable_total", (c,))
+            # Rifiuto ESPLICITO: il client ha chiesto un deployment preciso
+            # (unique) che non dichiara una capacita' media necessaria. Il
+            # messaggio generico ("configura model_capabilities in
+            # gateway.yaml") sarebbe fuorviante: il deployment esiste, e' la
+            # sua scheda a non avere la capacita'. Meglio un messaggio che
+            # nomini modello e capacita' mancante: l'agente puo' scegliere da
+            # solo al turno dopo invece di fare un giro di scoperta.
+            _missing = router._missing_media_caps(model, need)
+            if _missing:
+                return JSONResponse(status_code=400, content={
+                    "error": {
+                        "message": (
+                            f"il modello '{model}' non supporta: "
+                            f"{', '.join(_missing)}. La richiesta contiene "
+                            f"media che quel modello non puo' elaborare; usa "
+                            f"un modello con capacita' "
+                            f"{'+'.join(_missing)}."),
+                        "type": "invalid_request_error",
+                        "code": "model_capability_unsupported",
+                        "missing_capabilities": _missing}})
             return JSONResponse(status_code=400, content={
                 "error": {"message": f"nessun deployment dichiara le capacità richieste: {sorted(need)}. "
                                      f"Configura capability_routing.model_capabilities in gateway.yaml",
@@ -3862,6 +3882,68 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
                   "svegliare")
 
 
+def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
+    """Tetto alle immagini INVIATE all'upstream, in una copia del payload.
+
+    Tiene le `max_images` piu' RECENTI, dando priorita' alle immagini del turno
+    corrente (l'utente): se il turno corrente ne ha piu' del tetto, si tiene la
+    parte piu' recente di quelle. Le piu' vecchi restano nella history del
+    CLIENT (che non perde nulla) ma non vengono reinviate.
+
+    Restituisce (payload_out, n_rimosse). Con `max_images <= 0` o zero
+    immagini non tocca nulla e restituisce l'ORIGINALE (nessuna copia inutile).
+    La stima del contesto continua a contarle tutte: restare conservativi
+    sull'overflow vale piu' di ottimizzare i token."""
+    if not max_images or max_images <= 0:
+        return payload, 0
+    messages = payload.get("messages") or []
+    if not messages:
+        return payload, 0
+    # indice (msg_index, part_index) di ogni immagine, in ordine di arrivo
+    spots: list[tuple[int, int]] = []
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for j, part in enumerate(content):
+            if isinstance(part, dict) and _is_image_part(part):
+                spots.append((i, j))
+    if len(spots) <= max_images:
+        return payload, 0
+    # da tenere: le ultime N in ordine, con le immagini dell'ULTIMO messaggio
+    # (turno corrente) davanti a tutto il resto a parita' di recency.
+    last_msg = max((i for i, _j in spots), default=-1)
+    current = [s for s in spots if s[0] == last_msg]
+    older = [s for s in spots if s[0] != last_msg]
+    keep = set()
+    for s in reversed(current):                 # turno corrente, piu' recente
+        if len(keep) >= max_images:
+            break
+        keep.add(s)
+    for s in reversed(older):                   # poi il passato, dal piu' recente
+        if len(keep) >= max_images:
+            break
+        keep.add(s)
+    drop = set(spots) - keep
+
+    out_msgs: list = []
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
+            out_msgs.append(msg)
+            continue
+        parts = [p for j, p in enumerate(msg["content"])
+                 if (i, j) not in drop]
+        if len(parts) == len(msg["content"]):
+            out_msgs.append(msg)
+            continue
+        out_msgs.append({**msg, "content": parts})
+    out = dict(payload)
+    out["messages"] = out_msgs
+    return out, len(drop)
+
+
 async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 payload: dict, need: frozenset[str] = frozenset(),
                                 hook=None, scope: str = "chain",
@@ -3887,6 +3969,22 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     post-elaborazione non-stream. `client_stream=False` etichetta summary/sniff
     come non-stream (il client reale ha chiesto non-stream)."""
     dep = first_dep
+    # Tetto immagini: una volta sola, prima di qualsiasi tentativo, cosi' vale
+    # per TUTTA la catena di fallback (niente righe per-deployment e nessuna
+    # copia per tentativo). L'originale resta intatto: i rimedi che
+    # ripristinano la history (reasoning replay) continuano a vedere tutto.
+    try:
+        _imax = int(getattr(router.policy, "chat_images_max", 0) or 0)
+    except Exception:                                          # noqa: BLE001
+        _imax = 0
+    if _imax > 0 and count_image_parts(payload.get("messages") or []) > _imax:
+        payload, _dropped = _trim_chat_images(payload, _imax)
+        if _dropped:
+            metrics.inc("nx_images_total", (dep or {}).get("group", "-"),
+                        "chat_images_trimmed")
+            log.info("[images] tetto chat_images_max=%d: %d immagini non "
+                     "inviate all'upstream (restano nella history del client)",
+                     _imax, _dropped)
     # Gruppo ORIGINARIO della richiesta (es. -200k): serve al pin
     # escalation-winner per valere anche dopo la salita su altre dim.
     requested_group = requested_group or (first_dep or {}).get("group")
@@ -5678,6 +5776,22 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
         group_or_explicit = router.resolve_group_for_request(
             model, [], session_id, need, profile=prof)
     if group_or_explicit is None:
+        # Due cause diverse, due messaggi diversi:
+        #  a) il MODELLO ESPLICITO esiste ma non dichiara la capacita' ->
+        #     nomino modello e capacita' mancante, l'agente sceglie da solo;
+        #  b) il PROFILO non ha deployment con quella capacita' -> il rimando
+        #     alla configurazione e' corretto.
+        _missing = router._missing_media_caps(model, need)
+        if _missing:
+            return None, prof, scope, JSONResponse(
+                status_code=400, content={
+                    "error": {
+                        "message": (f"il modello '{model}' non supporta: "
+                                    f"{', '.join(_missing)}. Usa un modello "
+                                    f"con capacita' {'+'.join(_missing)}."),
+                        "type": "invalid_request_error",
+                        "code": "model_capability_unsupported",
+                        "missing_capabilities": _missing}})
         return None, prof, scope, JSONResponse(
             status_code=400 if need else 404, content={
                 "error": {"message":

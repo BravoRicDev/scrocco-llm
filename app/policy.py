@@ -313,6 +313,7 @@ YAML_PATHS: dict[str, str] = {
     "image_token_estimate": "capability_routing.image_token_estimate",
     "images_chat_fallback": "capability_routing.images_chat_fallback",
     "image_refs_hard_max": "capability_routing.image_refs_hard_max",
+    "chat_images_max": "capability_routing.chat_images_max",
     "multimodal_last_resort": "capability_routing.multimodal_last_resort",
     "gen_same_model_failover": "capability_routing.gen_same_model_failover",
     "dims_ladder_floor": "capability_routing.dims_ladder_floor",
@@ -1486,6 +1487,13 @@ class Policy:
     # /v1/images/edits (e generations con reference): tetto di sicurezza sul
     # numero di immagini di riferimento inviate ai modelli multi-ref.
     image_refs_hard_max: int = 16
+    # CHAT: quante immagini della history vengono mandate all'upstream. 0 = non
+    # limare (comportamento di prima). Serve perche' la history di un agente
+    # cresce di turno in turno e le immagini sono la parte piu' costosa del
+    # prompt: oltre il tetto restano nella history del CLIENT ma non vengono
+    # reinviate. Non e' il tetto di /v1/images/* (`image_refs_hard_max`), che
+    # riguarda le reference di una singola operazione.
+    chat_images_max: int = 3
 
     # STORE LOCALE IMMAGINI: gli endpoint /v1/images/* restituiscono un `url`
     # NOSTRO (download al volo) accanto a `b64_json`, anche quando l'upstream
@@ -3168,6 +3176,11 @@ class Policy:
                 if isinstance(v, bool) or not isinstance(v, int) or v < 1:
                     raise ValueError("capability_routing.image_refs_hard_max deve essere int >= 1")
                 p.image_refs_hard_max = int(v)
+            if "chat_images_max" in cr:
+                v = cr["chat_images_max"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("capability_routing.chat_images_max deve essere int >= 0 (0 = non limare)")
+                p.chat_images_max = int(v)
             mlr = cr.get("multimodal_last_resort")
             if mlr is not None:
                 p.multimodal_last_resort = _coerce_bool(
