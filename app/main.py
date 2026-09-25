@@ -5590,6 +5590,24 @@ async def _localize_images(request: Request, items):
     return out
 
 
+def _images_group_for_base(prof: str, need: frozenset[str]) -> str | None:
+    """Nome del gruppo-capacita' immagine per un modello BASE (generico).
+
+    Un modello generico (`scrocco-llm-fissone`) non nomina alcuna capacita':
+    `resolve_group_for_request` lo manda quindi nel mondo TESTO (bisogna per
+    il sizing) e il dep restituito non genera immagini mai. Qui si sceglie
+    direttamente il gruppo immagine del profilo: `{prefix}{prof}-image_gen`,
+    con lo stesso ordine di preferenza del routing (free, poi -go, poi
+    -fallback). Ritorna None se il profilo non ha quel gruppo."""
+    base = f"{router.config.proxy_prefix}{prof}"
+    for suffix in ("", getattr(router.policy, "go_suffix", "-go"),
+                   getattr(router.policy, "fallback_suffix", "-fallback")):
+        g = f"{base}-image_gen{suffix}"
+        if g in router.config.groups:
+            return g
+    return None
+
+
 def _images_pick_dep(profile: str | None, model: str, raw_model: str,
                      session_id: str | None, need: frozenset[str],
                      payload: dict):
@@ -5600,8 +5618,21 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
     scope = "group" if router.is_explicit(model) else "chain"
     prof = profile or config.profile_of_base(model.split("__")[0]) \
         or config.profile_of_base(model)
-    group_or_explicit = router.resolve_group_for_request(model, [], session_id,
-                                                         need, profile=prof)
+    # Modello BASE (generico, es. `scrocco-llm-fissone`): non porta una
+    # capacita' nel nome, quindi la risoluzione generica lo manderebbe nel
+    # mondo testo e il deployment scelto non genererebbe immagini. Si punta
+    # direttamente al gruppo image_gen del profilo.
+    base_is_generic = bool(prof) and model.rstrip("/").startswith(
+        f"{router.config.proxy_prefix}{prof}")
+    if base_is_generic and need:
+        _cap_g = _images_group_for_base(prof, need)
+        if _cap_g:
+            group_or_explicit = _cap_g
+        else:
+            group_or_explicit = None
+    else:
+        group_or_explicit = router.resolve_group_for_request(
+            model, [], session_id, need, profile=prof)
     if group_or_explicit is None:
         return None, prof, scope, JSONResponse(
             status_code=400 if need else 404, content={

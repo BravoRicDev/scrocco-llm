@@ -393,6 +393,31 @@ def test_images_generations_ruota_se_unknown_provider(monkeypatch, tmp_path):
         _teardown(m, orig)
 
 
+def test_chat_modalities_image_su_modello_generico(monkeypatch, tmp_path):
+    """Il caso 'agente che chiede un'immagine': modello GENERICO del profilo.
+
+    Il modello base non nomina una capacita', quindi la risoluzione generica
+    lo manderebbe nel mondo TESTO e il deployment scelto non genererebbe mai
+    un'immagine. Deve invece finire sul gruppo image_gen del profilo."""
+    csv_text = _CSV_HEADER + _row("gpt-image-2.5", "openai", "images",
+                                  "image_gen,image_edit")
+    c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
+    fwd = _FakeForwarder(_NATIVE_OK, _CHAT_IMG_OK)
+    monkeypatch.setattr(m, "forwarder", fwd)
+    try:
+        r = c.post("/v1/chat/completions", headers=MK, json={
+            "model": "scrocco-llm-test", "modalities": ["image", "text"],
+            "messages": [{"role": "user", "content": "a red cube"}]})
+        assert r.status_code == 200, r.text
+        # il provider image-native ha ricevuto una chiamata /images/*
+        assert fwd.images_calls == ["openai"], fwd.images_calls
+        assert fwd.chat_calls == []
+        imgs = r.json()["choices"][0]["message"]["images"]
+        assert len(imgs) == 1
+    finally:
+        _teardown(m, orig)
+
+
 def test_images_edits_via_chat_su_modello_chat_only(chat_dep):
     c, m, fwd = chat_dep
     r = c.post("/v1/images/edits", headers=MK,
