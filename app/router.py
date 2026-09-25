@@ -3749,6 +3749,25 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                     break
         return capable
 
+    def _capability_tier_group(self, pname: str | None,
+                               need: frozenset[str] | None,
+                               tier_start: str, cfg) -> str | None:
+        """Gruppo CAPACITA' corrispondente al tier richiesto.
+
+        Es. `scrocco-llm-<p>-go` con need=image_gen e senza generatori nel
+        gruppo testo -> `scrocco-llm-<p>-image_gen-go`. None se non esiste un
+        gruppo capacita' per quel tier (il chiamante fa pass-through)."""
+        if not pname or not need:
+            return None
+        cap = next((c for c in CAP_PRIORITY_ORDER if c in need
+                    and f"{cfg.proxy_prefix}{pname}-{c}" in cfg.groups), None)
+        if cap is None:
+            return None
+        sfx = (cfg.go_suffix if tier_start == "go"
+               else cfg.fallback_suffix if tier_start == "fallback" else "")
+        gname = f"{cfg.proxy_prefix}{pname}-{cap}{sfx}"
+        return gname if gname in cfg.groups else None
+
     def _any_capable_in_group(self, group_name: str, need: frozenset[str]) -> bool:
         """True se il gruppo ha almeno un deployment CAPACE (cooldown ignorato)."""
         if not need:
@@ -5335,6 +5354,29 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
         if tier_start is not None:
             if requested not in cfg.groups:
                 return requested                    # nostro ma inesistente
+            # Il nome col suffisso di tier (`<p>-go`/`<p>-fallback`) e' il
+            # tier del MONDO TESTO. Se la richiesta ha capacita' (es.
+            # image_gen) e questo gruppo non ne ha di capaci, il vero tier
+            # richiesto e' il gruppo CAPACITA' con lo stesso suffisso
+            # (`<p>-image_gen-go`): senza questo, la generazione immagini su
+            # `scrocco-llm-<p>-go` finirebbe sui dep di testo (i "free" del
+            # mondo testo) invece che sui generatori -go.
+            if need and not self._any_capable_in_group(requested, need):
+                _pfx = cfg.proxy_prefix
+                _base = requested[:-len(cfg.go_suffix)] if tier_start == "go" \
+                    else requested[:-len(cfg.fallback_suffix)]
+                _pname = _base[len(_pfx):] if _base.startswith(_pfx) else pname
+                cap_tier = self._capability_tier_group(_pname, need,
+                                                       tier_start, cfg)
+                if cap_tier is not None:
+                    log.info("[caps] %s -> %s (tier %s per %s)",
+                             requested, cap_tier, tier_start,
+                             sorted(need))
+                    self._note_session_group(session_id, cap_tier)
+                    return cap_tier
+                log.warning("[caps] %s richiede %s: nessun gruppo capacita' "
+                            "con tier %s, pass-through", requested,
+                            sorted(need), tier_start)
             self._note_session_group(session_id, requested)
             return requested
         m = self.DIM_SUFFIX_RE.search(requested)

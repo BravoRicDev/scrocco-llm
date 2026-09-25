@@ -342,3 +342,78 @@ def test_apply_payload_writes_canonical_caps():
            "endpoint": "https://e/v1", "scrocco-llm-t": "k"*10}
     apply_payload(row, {"caps": ["TEXT", "vision"]}, "scrocco-llm-", "t")
     assert row["caps"] == "text,vision"
+
+
+# ---------------------------------------- tier esplicito vs gruppi capacita'
+# Regressione: `scrocco-llm-<p>-go` e' il tier del MONDO TESTO. Se la richiesta
+# ha capacita' (image_gen) e il gruppo testo non ha generatori, si deve
+# instradare al gruppo capacita' con lo stesso tier (`<p>-image_gen-go`),
+# altrimenti la generazione immagini finirebbe sui dep di testo (i "free").
+
+CSV_CAP_TIER = """commento,modello,provider,endpoint,data,context,max_input,priority,caps,scrocco-llm-ct
+t@x.com,gpt-free-a,groq,https://x/v1,free,128,8000,0,,sk-K1-AAAAAAAAAA
+t@x.com,gpt-go-b,groq,https://x/v1,go,128,8000,0,,sk-K1-AAAAAAAAAA
+t@x.com,img-free-c,google,https://x/v1,free,128,8000,5,image_gen,sk-K1-AAAAAAAAAA
+t@x.com,img-go-d,google,https://x/v1,go,128,8000,5,image_gen,sk-K1-AAAAAAAAAA
+"""
+
+
+def _router_cap_tier(enabled=True):
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w") as f:
+        f.write(CSV_CAP_TIER)
+    pol = Policy.from_dict({"capability_groups": {"enabled": enabled}})
+    cfg = GatewayConfig(path, proxy_prefix="scrocco-llm-", seed=7)
+    return Router(cfg, pol), path
+
+
+def test_explicit_go_devio_al_gruppo_capacita():
+    r, path = _router_cap_tier()
+    try:
+        need = frozenset({"image_gen"})
+        # il gruppo testo -go esiste ma non ha generatori -> devia a -image_gen
+        assert "scrocco-llm-ct-go" in r.config.groups
+        assert not r._any_capable_in_group("scrocco-llm-ct-go", need)
+        got = r.resolve_group_for_request(
+            "scrocco-llm-ct-go", [], None, need, profile="ct")
+        assert got == "scrocco-llm-ct-image_gen-go"
+    finally:
+        os.unlink(path)
+
+
+def test_explicit_go_testo_resta_invariato_senza_need():
+    r, path = _router_cap_tier()
+    try:
+        # senza capacita' richieste (testo): resta il tier testo
+        got = r.resolve_group_for_request(
+            "scrocco-llm-ct-go", [], None, None, profile="ct")
+        assert got == "scrocco-llm-ct-go"
+    finally:
+        os.unlink(path)
+
+
+def test_explicit_fallback_devio_al_gruppo_capacita():
+    r, path = _router_cap_tier()
+    try:
+        need = frozenset({"image_gen"})
+        got = r.resolve_group_for_request(
+            "scrocco-llm-ct-fallback", [], None, need, profile="ct")
+        # nessun gruppo -image_gen-fallback nel CSV: passthrough (nessun devio)
+        assert got == "scrocco-llm-ct-fallback"
+    finally:
+        os.unlink(path)
+
+
+def test_capability_tier_group_helper():
+    r, path = _router_cap_tier()
+    try:
+        cfg = r.config
+        assert r._capability_tier_group("ct", frozenset({"image_gen"}),
+                                        "go", cfg) == \
+            "scrocco-llm-ct-image_gen-go"
+        assert r._capability_tier_group("ct", frozenset({"stt"}),
+                                        "go", cfg) is None
+        assert r._capability_tier_group(None, frozenset({"image_gen"}),
+                                        "go", cfg) is None
+    finally:
+        os.unlink(path)
