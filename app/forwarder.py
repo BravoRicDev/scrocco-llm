@@ -2544,7 +2544,41 @@ _IMAGES_PAYLOAD_UNSUPPORTED_RE = re.compile(
     r"unknown name|unknown field|cannot find field|invalid json payload"
     r"|invalid argument|unrecognized|unexpected (?:field|property|parameter)"
     r"|additional propert|unknown parameter|does not support"
-    r"|no such endpoint|method not allowed|unsupported media type",
+    r"|is not supported on|only supported on|not supported (?:on|by)"
+    r"|only available (?:on|via)|is not available on"
+    r"|no such endpoint|method not allowed|unsupported media type"
+    r"|unsupported_endpoint|invalid_endpoint|unknown endpoint"
+    r"|unsupported (?:model|modality|type)|not a valid model",
+    re.IGNORECASE)
+
+# Firma DEDICATA "questo modello sta su /v1/images/*, non su /chat/completions"
+# (e viceversa). I provider nativi rispondono con messaggi molto specifici:
+#   "model gpt-image-2.5 is only supported on /v1/images/generations and
+#    /v1/images/edits"                      -> da servire via /images/*
+#   "Model gemini-3.1-flash-image is not supported on /v1/images/generations
+#    or /v1/images/edits"                   -> da servire via chat
+# Sono i segnali con cui il gateway impara/decide in quale direzione adattare,
+# quindi vanno riconosciuti anche quando il messaggio NON contiene "does not
+# support" (la firma precedente non li vedeva -> strike e routing errato:
+# intervento #56).
+# Il DISCRIMINANTE e' la parola "only": "only supported on /v1/images/..." dice
+# che il modello sta SOLO li'; "not supported on /v1/images/..." dice che NON
+# ci sta. Per questo le due firme sono costruite complementari e mai entrambe
+# vere sullo stesso testo.
+_IMAGE_PATH = r"[^\"'\n]{0,80}?/(?:v1/)?images/(?:generations|edits)"
+
+# "... is only supported on /v1/images/generations ..." / "only supports the
+# v1/images/generations endpoint" -> modello IMAGE-NATIVE (niente chat).
+_IMAGES_ONLY_ENDPOINT_RE = re.compile(
+    r"(?:only|just)\s+(?:support(?:s|ed)?|available|work(?:s|ing)?)"
+    r"[\w\s'\",.-]{0,60}?" + _IMAGE_PATH,
+    re.IGNORECASE)
+
+# "... is not supported on /v1/images/generations ..." / "does not support
+# /v1/images/generations" -> modello CHAT-ONLY (niente endpoint nativo).
+_CHAT_ONLY_ENDPOINT_RE = re.compile(
+    r"(?:is\s+)?(?:not|n't)\s+support(?:s|ed)?|does\s+not\s+support"
+    r"|unsupported" + r"[\w\s'\",.-]{0,60}?" + _IMAGE_PATH,
     re.IGNORECASE)
 
 # Firma STRETTA "campo/argomento sconosciuto al provider" (tipico dei campi
@@ -2580,6 +2614,32 @@ def image_chat_fallback_signature(status: int | None,
     if st not in (400, 403, 422):
         return False
     return bool(_IMAGES_PAYLOAD_UNSUPPORTED_RE.search(d))
+
+
+def native_images_only_error(detail: str | None) -> bool:
+    """True se l'errore dice che il modello sta SOLO sugli endpoint /images/*.
+
+    E' il segnale che un modello image-native sta essendo chiamato su
+    /chat/completions: il gateway deve allora adattare la chat in una chiamata
+    /images/generations (o /images/edits se ci sono reference)."""
+    d = detail or ""
+    # "only supported on /v1/images/..." ha la precedenza ASSOLUTA: lo stesso
+    # testo contiene anche un "not supported on", ma il discriminante e' "only".
+    if _IMAGES_ONLY_ENDPOINT_RE.search(d):
+        return True
+    return False
+
+
+def chat_only_image_error(detail: str | None) -> bool:
+    """True se l'errore dice che il modello NON e' supportato su /images/*.
+
+    Simmetrico di `native_images_only_error`: il provider espone il modello solo
+    in chat, quindi la richiesta va adattata a /chat/completions con
+    modalities:["image"]."""
+    d = detail or ""
+    if _IMAGES_ONLY_ENDPOINT_RE.search(d):
+        return False          # "only supported on /images/*" =images-native
+    return bool(_CHAT_ONLY_ENDPOINT_RE.search(d))
 
 
 def _ref_urls_from_value(value) -> list[str]:
@@ -2715,15 +2775,21 @@ def _multipart_image_edit(payload: dict, model: str,
     """Costruisce (files, data) multipart per POST /images/edits (OpenAI).
 
     Le reference diventano file con nome campo `image` (piu' immagini ->
-    `image[]`, che OpenAI accetta). Gli altri campi del body (prompt, n, size,
-    response_format, quality, seed, ...) diventano parti di form; `model` e'
-    riscritto col nome upstream. `mask` e' ignorato (non supportato)."""
+    `image[]`, che OpenAI accetta). Il campo `mask` (PNG con alpha, stessa
+    dimensione della reference) diventa il file `mask`, come da API OpenAI.
+    Gli altri campi del body (prompt, n, size, response_format, quality, seed,
+    ...) diventano parti di form; `model` e' riscritto col nome upstream."""
     files: list = []
     for r in (refs or []):
         raw, name, mime = _ref_bytes(r)
         if not raw:
             continue
         files.append(("image", (name, raw, mime)))
+    mask = payload.get("mask")
+    if isinstance(mask, str) and mask.strip():
+        mraw, mname, mmime = _ref_bytes(mask)
+        if mraw:
+            files.append(("mask", (mname, mraw, mmime)))
     data: dict[str, str] = {"model": model}
     for k, v in payload.items():
         if k in ("model", "image", "images", "reference_images", "mask"):
@@ -2816,6 +2882,123 @@ def images_dual(items) -> list[dict]:
     """Applica `image_item_dual` a una lista di item immagine (scarta i non-dict)."""
     return [image_item_dual(it) for it in (items or [])
             if isinstance(it, dict)]
+
+
+# ------------------------------------------------- adattamento bidirezionale
+# Scrocco-llm accetta SEMPRE il body OpenAI e lo traduce nel formato che
+# l'upstream capisce. Un deployment immagine puo' esporre i modelli solo su
+# /v1/chat/completions (modalities:["image"]) o solo sugli endpoint nativi
+# /v1/images/*: in entrambi i casi il client deve poter usare indifferentemente
+# chat e /images/*. La colonna CSV `image_via` dichiara quale dei due usi il
+# provider; se assente ("both") si prova la strada naturale e si adatta su
+# errore.
+IMAGE_VIA_CHAT = "chat"
+IMAGE_VIA_IMAGES = "images"
+IMAGE_VIA_BOTH = "both"
+
+
+def dep_image_via(dep: dict | None) -> str:
+    """Modalita' immagine dichiarata da un deployment: chat|images|both.
+
+    Default 'both': senza dichiarazione il gateway adatta in entrambe le
+    direzioni guidandosi sull'errore dell'upstream."""
+    v = str((dep or {}).get("image_via") or "").strip().lower()
+    return v if v in (IMAGE_VIA_CHAT, IMAGE_VIA_IMAGES) else IMAGE_VIA_BOTH
+
+
+def _text_of_content(content) -> str:
+    """Testo puro di un `content` chat (stringa, lista di parti, None)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("text", "input_text", "output_text"):
+                t = part.get("text")
+                if isinstance(t, str) and t.strip():
+                    out.append(t)
+        return "\n".join(out)
+    return ""
+
+
+def chat_prompt_and_refs(messages) -> tuple[str, list[str]]:
+    """(prompt, refs) da una history chat per la chiamata /images/*.
+
+    - prompt: testo dell'ULTIMO turno utente (l'istruzione di generazione
+      corrente vince sui turni precedenti).
+    - refs: TUTTE le immagini presenti nelle parti `image_url`/`input_image`,
+      nell'ordine in cui compaiono (l'endpoint /images/edits le usa come
+      riferimenti i2i)."""
+    last_text = ""
+    refs: list[str] = []
+    for msg in (messages or []):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type")
+                if ptype in ("image_url", "input_image"):
+                    urls = _ref_urls_from_value(part)
+                    refs.extend(urls)
+        if msg.get("role") != "user":
+            continue
+        t = _text_of_content(content)
+        if t.strip():
+            last_text = t
+    return last_text.strip(), refs
+
+
+def images_payload_from_chat(payload: dict,
+                             refs: list[str] | None = None) -> dict:
+    """Body /images/* derivato da un body chat/completions.
+
+    Tiene i parametri immagine che il client può aver passato anche in chat
+    (`n`, `size`, `quality`, `response_format`, `seed`, `user`, `style`) e usa
+    come prompt il testo dei messaggi utente. `refs` (se fornito) diventa il
+    campo `image`: e' cio' che fa scattare l'adapter sul /images/edits."""
+    out: dict = {k: v for k, v in (payload or {}).items()
+                 if k in ("n", "size", "quality", "response_format",
+                          "seed", "user", "style")}
+    prompt, msg_refs = chat_prompt_and_refs((payload or {}).get("messages"))
+    out["prompt"] = prompt
+    use_refs = list(refs) if refs else msg_refs
+    if use_refs:
+        out["image"] = (use_refs if len(use_refs) > 1 else use_refs[0])
+    return out
+
+
+def images_response_to_chat(data: dict, model: str = "") -> dict | None:
+    """Incapsula una risposta /images/* (schema `{data:[{url|b64_json}]}`) in
+    una risposta chat/completions così il client non deve cambiare endpoint.
+
+    Le immagini finiscono in `choices[0].message.images[]` (la forma che i
+    modelli image-as-chat restituiscono, es. il shim Gemini) e il conteggio
+    va anche in `data[]` per i client che leggono quello. Un `content` testuale
+    con i link rende l'output utilizzabile anche da un client text-only.
+    Ritorna `None` se la risposta non contiene immagini (il chiamante puo'
+    allora ruotare sul deployment successivo invece di rispondere a vuoto)."""
+    items = [image_item_dual(it) for it in (data or {}).get("data") or []
+             if isinstance(it, dict)]
+    if not items:
+        return None
+    images = [{"type": "image_url", "image_url": it} for it in items]
+    text = "\n".join(str(it.get("url") or "") for it in items if it.get("url"))
+    msg: dict = {"role": "assistant", "content": text or None, "images": images}
+    return {
+        "id": f"chatcmpl-img-{os.urandom(8).hex()}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model or (data or {}).get("model") or "",
+        "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}],
+        # spec OpenAI images, per i client che leggono `data[]`
+        "data": items,
+        "nx_via": "images",
+    }
 
 
 def dep_host(dep: dict) -> str:

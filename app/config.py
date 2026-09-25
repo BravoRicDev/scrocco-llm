@@ -119,6 +119,40 @@ API_STYLE_HEADER = "api_style"
 # solo modello base del profilo). Vuoto = la riga non partecipa ad alcun alias.
 ALIAS_HEADER = "alias"
 
+# Colonna `image_via`: COME il provider espone i modelli immagine. Scrocco-llm
+# e' sia client-agnostico (accetta sempre il body OpenAI, chat o /images/*)
+# sia provider-agnostico (traduce nel formato che l'upstream capisce), quindi
+# lo stesso deployment deve poter essere servito da ENTRAMBI i lati client.
+#   "chat"    -> l'upstream espone i modelli immagine SOLO su
+#                /v1/chat/completions con modalities:["image"] (Gemini,
+#                nano-banana, cli-proxy antigravity). Su /v1/images/* risponde
+#                400 "not supported on /v1/images/generations".
+#   "images"  -> l'upstream espone i modelli immagine SOLO sugli endpoint
+#                nativi /v1/images/generations|/v1/images/edits (gpt-image-*).
+#                Su /v1/chat/completions risponde 400 "only supported on
+#                /v1/images/generations".
+#   "both"/"" -> non dichiarato: il gateway prova la strada naturale e, se
+#                l'errore ha la firma "endpoint/modality non supportata", tenta
+#                l'altra (comportamento storico, salvagente per i CSV vecchi).
+IMAGE_VIA_HEADER = "image_via"
+IMAGE_VIA_VALUES = ("chat", "images", "both")
+# default dichiarato: "both" (prova e poi adatta) -> retrocompatibile.
+IMAGE_VIA_DEFAULT = "both"
+
+
+def parse_image_via(raw: str | None) -> str:
+    """Normalizza la colonna `image_via` in 'chat' | 'images' | 'both'.
+
+    Vuoto/ignoto -> 'both' (l'adattamento guidato dall'errore resta il
+    comportamento di default, quindi un valore refuso non blocca mai il
+    deployment)."""
+    v = (raw or "").strip().lower()
+    if v in ("chat", "chat_completions", "completions"):
+        return "chat"
+    if v in ("images", "image", "native", "openai_images", "images_api"):
+        return "images"
+    return IMAGE_VIA_DEFAULT
+
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
 CAP_PRIORITY_ORDER = ("image_gen", "video_gen", "tts", "stt",
@@ -398,6 +432,9 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
         "content_string": content_string,
         "api_style": api_style,
         "aliases": parse_alias(row.get(ALIAS_HEADER)),
+        # come l'upstream espone i modelli immagine (chat/images/both):
+        # pilota l'adattamento bidirezionale client<->provider.
+        "image_via": parse_image_via(row.get(IMAGE_VIA_HEADER)),
     }
 
 
@@ -918,6 +955,10 @@ class GatewayConfig:
                     "order": int(meta.get("order", ORDER_LAST)),
                     "family": canonical_family(model_final),
                     "api_style": normalize_style(meta.get("api_style")),
+                    # 'chat' | 'images' | 'both': come questo deployment
+                    # espone i modelli immagine. Guida l'adattamento
+                    # bidirezionale (chat<->/images/*) nei due endpoint.
+                    "image_via": parse_image_via(meta.get("image_via")),
                     # categoria grezza (priority/go/fallback/zen/paid...):
                     # serve alla partizione dei gruppi alias.
                     "_category": meta.get("category") or "",

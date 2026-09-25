@@ -159,6 +159,9 @@ def _deployment_view(header: list[str], row: dict, prefix: str) -> dict:
         "capabilities": sorted(caps),
         "caps": row_caps,
         "cap_groups": cap_groups,
+        # come l'upstream espone i modelli immagine (chat/images/both):
+        # pilota l'adattamento bidirezionale negli endpoint immagini.
+        "image_via": meta.get("image_via") or "",
     }
 
 
@@ -257,6 +260,8 @@ async def create_deployment(request: Request):
             header = csv_store.ensure_caps_column(header)
         if "enabled" in payload:
             header = csv_store.ensure_enabled_column(header)
+        if "image_via" in payload:
+            header = csv_store.ensure_image_via_column(header)
         row = {h: "" for h in header}
         csv_store.apply_payload(row, payload, prefix)
         csv_store.write_endpoint(row, header, payload["endpoint"])
@@ -298,6 +303,8 @@ async def update_deployment(row_hash: str, request: Request):
             header = csv_store.ensure_caps_column(header)
         if "enabled" in payload:
             header = csv_store.ensure_enabled_column(header)
+        if "image_via" in payload:
+            header = csv_store.ensure_image_via_column(header)
         new_profile = csv_store.apply_payload(row, payload, prefix, old_profile)
         header = csv_store.ensure_profile_column(header, new_profile, prefix)
         if "endpoint" in payload:
@@ -368,6 +375,8 @@ async def bulk_deployments(request: Request):
                     header = csv_store.ensure_caps_column(header)
                 if "enabled" in data_op:
                     header = csv_store.ensure_enabled_column(header)
+                if "image_via" in data_op:
+                    header = csv_store.ensure_image_via_column(header)
                 if action == "create":
                     _required_create(data_op)
                     prof = str(data_op["profile"]).strip()

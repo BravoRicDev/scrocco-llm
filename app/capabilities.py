@@ -96,6 +96,32 @@ def required_caps(payload: dict) -> frozenset[str]:
     return frozenset(need)
 
 
+def wants_image_output(payload: dict) -> bool:
+    """True se un body chat/completions chiede un'immagine in OUTPUT.
+
+    Riconosce le forme con cui i client image-capable lo esprimono:
+      - `modalities: ["image"]` / `["image","text"]` (Gemini/chat shim)
+      - `modalities: ["text","image"]`
+      - `output_modalities` (variante OpenAI/Gemini REST)
+      - flag espliciti `image_output` / `generate_image` truthy
+    Usata per dirotare la richiesta verso la macchina immagini: il modello
+    scelto puo' essere image-native (adattamento chat->/images) o chat-only."""
+    if not isinstance(payload, dict):
+        return False
+    for key in ("modalities", "output_modalities", "response_modalities"):
+        val = payload.get(key)
+        if isinstance(val, str):
+            if val.strip().lower() == "image":
+                return True
+        elif isinstance(val, (list, tuple, set)):
+            if any(str(v).strip().lower() == "image" for v in val):
+                return True
+    for key in ("image_output", "generate_image", "return_image"):
+        if payload.get(key):
+            return True
+    return False
+
+
 def count_image_parts(messages: list[dict] | None) -> int:
     """Conta le parti-immagine nei messaggi per la stima token."""
     if not messages:

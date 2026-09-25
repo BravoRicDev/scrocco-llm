@@ -82,6 +82,9 @@ from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         image_chat_fallback_signature, image_chat_payload,
                         extract_chat_images, image_refs_from_payload,
                         truncate_refs, images_dual, image_item_dual,
+                        dep_image_via, chat_prompt_and_refs,
+                        images_payload_from_chat, images_response_to_chat,
+                        native_images_only_error, chat_only_image_error,
                         _split_data_uri,
                         _looks_context_limit, extract_requested_tokens,
                         _client_attribution,
@@ -124,7 +127,8 @@ from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             client_can_use_opencode_zen, client_is_opencode,
                             spoof_enabled, opencode_cautious_request,
                             is_opencode_zen_dep)
-from .capabilities import required_caps, count_image_parts, refs_max_for
+from .capabilities import (required_caps, count_image_parts, refs_max_for,
+                           wants_image_output)
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
 
@@ -1727,6 +1731,19 @@ async def chat_completions(request: Request, response: Response):
     router.note_session_activity(session_id)
     # RATE per-sessione (SOLO chat): alimenta warm_ready_min adattivo.
     router.note_session_request(session_id)
+
+    # --- ADATTAMENTO chat -> /images/* ---
+    # Il client ha chiesto immagini in output (modalities:["image"]): se il
+    # deployment scelto e' image-native lo si serve con la macchina immagini
+    # (body OpenAI images adattato dal body chat, risposta riconvertita in
+    # chat.completion). Ritorna None per i modelli chat-native, che seguono il
+    # motore chat normale qui sotto.
+    if wants_image_output(payload):
+        _img_resp = await _image_chat_intercept(
+            request, payload=payload, model=model, raw_model=raw_model,
+            auth=auth, session_id=session_id)
+        if _img_resp is not None:
+            return _img_resp
     _sniff_headers(request, logger=_api_log,
                    body_size=len(request._body) if hasattr(request, "_body")
                    else 0, session_id=session_id)
@@ -5610,6 +5627,131 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
     return dep, prof, scope, None
 
 
+# ------------------------------------------------ chat -> images (adattamento)
+# Un client puo' chiedere un'immagine con una CHAT (modalities:["image"]).
+# Scrocco-llm e' client-agnostico: se il deployment scelto e' IMAGE-NATIVE
+# (image_via="images", es. gpt-image-*) la chat viene adattata in una chiamata
+# /images/generations (o /images/edits se il client ha mandato reference) e la
+# risposta nativa viene riconvertita in un oggetto chat.completion. Viceversa,
+# un deployment CHAT-ONLY (image_via="chat", es. gemini-image) resta servito dal
+# motore chat. Con image_via="both" si prova la strada naturale (chat) e si
+# adatta sull'errore "only supported on /v1/images" se il provider lo segnala.
+async def _chat_via_images(request: Request, *, dep: dict, payload: dict,
+                           refs: list[str], session_id: str | None,
+                           raw_model: str, profile: str | None,
+                           model: str) -> dict | None:
+    """Chiamata nativa /images/* per un deployment image-native; ritorna il
+    body chat.completion con le immagini dentro `choices[0].message.images`
+    (None se l'upstream non ha restituito immagini)."""
+    endpoint = "edits" if refs else "generations"
+    body = images_payload_from_chat(payload, refs=refs)
+    data = await forwarder.call_images(
+        dep, body, profile=profile or "", client_ip=_client_ip(request),
+        session=_opencode_session(request) or session_id,
+        attribution=_client_attribution(request), endpoint=endpoint, refs=refs)
+    return images_response_to_chat(data, model)
+
+
+async def _image_chat_intercept(request: Request, *, payload: dict,
+                                model: str, raw_model: str, auth: AuthResult,
+                                session_id: str | None):
+    """Gestisce una richiesta CHAT che vuole immagini in output.
+
+    Ritorna una Response JSON (chat.completion con immagini) se il deployment
+    scelto richiede l'adattamento chat->/images; `None` per lasciare proseguire
+    il motore chat normale (deployment chat-native o `both` senza certezza)."""
+    if not wants_image_output(payload):
+        return None
+    if not router.policy.routing_active():
+        return None
+    need = frozenset({"image_gen"})
+    if payload.get("messages"):
+        # se il client ha mandate immagini di input, serve anche image_edit
+        if any(isinstance(p, dict) and p.get("type") in ("image_url",
+                                                          "input_image")
+               for m in payload["messages"] if isinstance(m, dict)
+               for p in ((m.get("content") or [])
+                         if isinstance(m.get("content"), list) else [])):
+            need = need | {"image_edit"}
+    prompt, refs = chat_prompt_and_refs(payload.get("messages") or [])
+    if not prompt.strip():
+        return None                      # niente prompt: non e' una richiesta immagine
+    dep, profile, scope, err = _images_pick_dep(
+        auth.profile, model, raw_model, session_id, need, payload)
+    if err:
+        return err
+    custom_key = router.resolve_alias_key(raw_model, model)
+    if custom_key:
+        dep = {**dep, "api_key": custom_key}
+    via = dep_image_via(dep)
+    if via == "chat":
+        return None                      # il motore chat lo serve gia' bene
+    _sess = _opencode_session(request) or session_id
+    metrics.inc("nx_images_total", (dep["group"], "attempt_chat_adapt"))
+    router.note_start(dep["unique"])
+    t0 = time.monotonic()
+    try:
+        if via == "images":
+            out = await _chat_via_images(
+                request, dep=dep, payload=payload, refs=refs,
+                session_id=session_id, raw_model=raw_model,
+                profile=profile, model=model)
+        else:                             # "both": prova chat, adatta su errore
+            chat_payload = image_chat_payload(payload, raw_model, refs=refs)
+            try:
+                data = await forwarder.call(dep, chat_payload, session=_sess,
+                                            client_ip=_client_ip(request),
+                                            attribution=_client_attribution(
+                                                request))
+                imgs = images_dual(extract_chat_images(data)) \
+                    if isinstance(data, dict) else []
+                if not imgs:
+                    raise UpstreamError(502, "risposta chat senza immagini")
+                out = images_response_to_chat({"data": imgs}, model)
+            except UpstreamError as err_:
+                if not native_images_only_error(err_.detail):
+                    raise
+                log.info("[images] chat->images adattato su %s: %s",
+                         dep["unique"], (err_.detail or "")[:80])
+                out = await _chat_via_images(
+                    request, dep=dep, payload=payload, refs=refs,
+                    session_id=session_id, raw_model=raw_model,
+                    profile=profile, model=model)
+    except UpstreamError as err_:
+        router.note_end(dep["unique"])
+        metrics.inc("nx_images_total", (dep["group"], "chat_adapt_error"))
+        st = abs(err_.status) if err_.status else 502
+        return JSONResponse(status_code=st if st >= 400 else 502, content={
+            "error": {"message": err_.detail, "type": "upstream_error"}})
+    if not out:
+        # l'upstream ha risposto 200 ma senza immagini: non e' un turno utile,
+        # si risponde 502 cosi' il client puo' ritentare (come per la chat).
+        router.note_end(dep["unique"])
+        metrics.inc("nx_images_total", (dep["group"], "chat_adapt_error"))
+        return JSONResponse(status_code=502, content={
+            "error": {"message": "risposta senza immagini",
+                      "type": "upstream_error"}})
+    imgs = await _localize_images(request, images_dual(out.get("data") or []))
+    out["data"] = imgs
+    msg = out["choices"][0]["message"]
+    # `images[]` nella forma che i modelli image-as-chat restituiscono:
+    # ogni elemento e' {"type":"image_url","image_url":{url,b64_json,...}}.
+    msg["images"] = [{"type": "image_url", "image_url": it} for it in imgs]
+    if not msg.get("content"):
+        msg["content"] = "\n".join(str(it.get("url") or "")
+                                   for it in imgs if it.get("url")) or None
+    out["nx_deployment"] = dep["unique"]
+    out.setdefault("via", "images")
+    router.note_result(dep["unique"], (time.monotonic() - t0) * 1000)
+    metrics.inc("nx_images_total", (dep["group"], "ok_chat_adapt"))
+    _emit_summary(ses=session_id or "-", req=raw_model, grp=dep["group"],
+                  dep=dep["unique"], tries=1, fb=0,
+                  dur_ms=int((time.monotonic() - t0) * 1000),
+                  stream=False, qc=False, wd=None, usage=None,
+                  kind="images", via="chat->images")
+    return JSONResponse(out)
+
+
 async def _try_native_image_edit(request: Request, *, owner: Request,
                                  dep: dict, payload: dict,
                                  refs: list[str], session_id: str | None,
@@ -5688,15 +5830,20 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
             declared = router.policy.caps_for(dep.get("model", "")) \
                 | (dep.get("caps") or frozenset())
             use_refs = truncate_refs(refs, refs_max_for(declared, hard_max))
-            # PROVIDER-AGNOSTICO: per l'edit si prova PRIMA l'endpoint nativo
-            # OpenAI `/images/edits` (multipart). I provider che servono i
-            # modelli immagine come chat (Gemini/nano-banana) rispondono con
-            # un errore "campo/endpoint non supportato" -> si ritenta via chat
-            # multimodale. Cosi' lo STESSO body client funziona con entrambe
-            # le tipologie di provider.
+            # PROVIDER-AGNOSTICO: l'ordine dei tentativi dipende da COME il
+            # provider espone i modelli immagine (colonna `image_via`):
+            #   "chat"   -> si va DIRETTAMENTE in chat multimodale (il nativo
+            #               risponderebbe 400 "not supported on /v1/images"):
+            #               si risparmia una chiamata persa e uno strike.
+            #   "images" -> si prova il NATIVO per primo (l'endpoint giusto).
+            #   "both"   -> nativo prima, poi chat (comportamento storico,
+            #               salvagente per i CSV che non dichiarano nulla).
+            # In ogni caso, se l'errore ha la firma "endpoint non supportata"
+            # si ritenta sull'altra strada: il client resta ignaro.
             chat_payload = image_chat_payload(payload, raw_model, refs=use_refs)
+            _via = dep_image_via(dep)
             _native_try = cur not in native_tried
-            if _native_try:
+            if _via != "chat" and _native_try:
                 native_tried.add(cur)
                 _nres = await _try_native_image_edit(
                     request, owner=request, dep=dep, payload=payload,
@@ -5872,6 +6019,41 @@ async def images_generations(request: Request):
     attempts: list[str] = []
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
+
+    async def _attempt_via_chat(cur: str, t0: float):
+        """Genera via chat multimodale sul deployment `cur`.
+
+        Ritorna la risposta finale, oppure solleva UpstreamError se la chat
+        fallisce. Usata sia come fallback del nativo (firma "endpoint non
+        supportato") sia come PRIMA scelta quando `image_via="chat"` dice che
+        il provider espone il modello solo in chat."""
+        chat_payload = image_chat_payload(payload, raw_model)
+        data = await forwarder.call(dep, chat_payload, session=_sess,
+                                    client_ip=_cip, attribution=_attr)
+        router.note_result(cur, (time.monotonic() - t0) * 1000)
+        metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
+        # normalizza: estrae le immagini dal messaggio se presenti
+        if not isinstance(data, dict):
+            out = data
+        else:
+            out = dict(data)
+            out["nx_deployment"] = cur
+            out["via"] = "chat"
+            imgs = await _localize_images(
+                request, images_dual(extract_chat_images(data)))
+            if imgs:
+                out["data"] = imgs
+                out.setdefault("created", int(time.time()))
+            else:
+                log.warning("[images] chat su %s: nessuna immagine "
+                            "riconosciuta nella risposta", cur)
+        _emit_summary(ses=session_id or "-", req=raw_model, grp=dep["group"],
+                      dep=cur, tries=len(attempts), fb=len(attempts) - 1,
+                      dur_ms=int((time.monotonic() - t_req) * 1000),
+                      stream=False, qc=False, wd=None, usage=None,
+                      kind="images", via="chat")
+        return out
+
     while dep is not None and len(tried) < 64:
         cur = dep["unique"]
         _was_dormant = router.is_cooled_down(cur)
@@ -5879,6 +6061,30 @@ async def images_generations(request: Request):
         attempts.append(cur)
         router.note_start(cur)
         t0 = time.monotonic()
+        # `image_via` dichiara COME il provider espone i modelli immagine:
+        # "chat" salta il nativo (farebbe 400 "not supported on /v1/images"),
+        # risparmiando una chiamata persa e uno strike. Dichiarazione assente
+        # ("both") = comportamento storico nativo-prima, poi chat.
+        _via = dep_image_via(dep)
+        if _via == "chat":
+            try:
+                return await _attempt_via_chat(cur, t0)
+            except UpstreamError as chat_err:
+                last_err = chat_err
+                router.note_end(cur)
+                router.mark_failed(
+                    cur, seconds=chat_err.retry_after,
+                    status=abs(chat_err.status) if chat_err.status else None)
+                metrics.inc("nx_images_total", (dep["group"], "retry"))
+                nxt = router.fallback_next(profile, dep, need, scope,
+                                           tried=tried,
+                                           out_tokens=refill_out_budget(
+                                               payload, router.policy)) \
+                    if profile else None
+                if nxt is None:
+                    break
+                dep = nxt
+                continue
         try:
             data = await forwarder.call_images(dep, payload,
                                            profile=profile or "",
@@ -5929,7 +6135,8 @@ async def images_generations(request: Request):
             # che l'endpoint nativo e' assente o lo schema non e' riconosciuto.
             # Un 403/402 (permessi/crediti) non migliora via chat: ruota e basta.
             _chat_useful = (
-                image_chat_fallback_signature(err.status, detail)
+                chat_only_image_error(detail)
+                or image_chat_fallback_signature(err.status, detail)
                 or (-status in (400, 403)
                     and ("openai_error" in detail
                          or "bad_response_status_code" in detail)))
@@ -5938,35 +6145,8 @@ async def images_generations(request: Request):
                 chat_tried.add(cur)
                 log.info("[images] %s: /images/generations non disponibile "
                          "(status=%s): ritenta via chat", cur, -status or "?")
-                chat_payload = image_chat_payload(payload, raw_model)
                 try:
-                    data = await forwarder.call(dep, chat_payload,
-                                                session=_sess, client_ip=_cip,
-                                                attribution=_attr)
-                    router.note_result(cur, (time.monotonic() - t0) * 1000)
-                    metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
-                    # normalizza: estrae le immagini dal messaggio se presenti
-                    if not isinstance(data, dict):
-                        out = data
-                    else:
-                        out = dict(data)
-                        out["nx_deployment"] = cur
-                        out["via"] = "chat"
-                        imgs = await _localize_images(
-                            request, images_dual(extract_chat_images(data)))
-                        if imgs:
-                            out["data"] = imgs
-                            out.setdefault("created", int(time.time()))
-                        else:
-                            log.warning("[images] chat su %s: nessuna immagine "
-                                        "riconosciuta nella risposta", cur)
-                    _emit_summary(ses=session_id or "-", req=raw_model,
-                                  grp=dep["group"], dep=cur,
-                                  tries=len(attempts), fb=len(attempts) - 1,
-                                  dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=False, qc=False, wd=None, usage=None,
-                                  kind="images", via="chat")
-                    return out
+                    return await _attempt_via_chat(cur, t0)
                 except UpstreamError as chat_err:
                     log.warning("[images] fallback chat su %s fallito: %s",
                                 cur, chat_err.detail[:120])
@@ -6008,11 +6188,11 @@ async def images_edits(request: Request):
 
     Accetta multipart/form-data (come OpenAI: campo `image`, uno o più file,
     anche `image[]`) oppure JSON con `image`/`images`/`reference_images`
-    (data-URI base64 o URL). Le reference vengono inviate via chat multimodale
-    (`messages` + `modalities:["image"]`) ai deployment con capacità
-    image_gen+image_edit: la reference va come parte `image_url` prima del
-    prompt. I modelli senza `image_multi_ref` ricevono solo la PRIMA immagine.
-    Il campo `mask` è accettato ma non supportato (ignorato con warning).
+    (data-URI base64 o URL). Le reference vengono inviate al deployment
+    nell'adattamento giusto per il provider: endpoint nativo
+    `/v1/images/edits` (multipart) per i modelli image-native, oppure chat
+    multimodale (`messages` + `modalities:["image"]`) per i modelli chat-only.
+    Il campo `mask` (PNG con alpha) viene inoltrato al provider nativo.
     """
     ctype = (request.headers.get("content-type") or "").lower()
     payload: dict = {}
@@ -6037,8 +6217,21 @@ async def images_edits(request: Request):
             v = form.get(k)
             if v is not None and str(v).strip():
                 payload[k] = str(v)
-        if form.get("mask") is not None:
-            log.warning("[images] campo 'mask' ignorato (non supportato)")
+        mask_up = form.get("mask")
+        if mask_up is not None:
+            if isinstance(mask_up, str) and mask_up.strip():
+                payload["mask"] = mask_up.strip()      # data-URI/URL
+            else:
+                try:
+                    mraw = await mask_up.read()
+                except Exception:
+                    mraw = b""
+                if mraw:
+                    payload["mask"] = _data_uri(
+                        mraw,
+                        getattr(mask_up, "content_type", "") or "")
+                else:
+                    log.warning("[images] campo 'mask' presente ma vuoto")
         for field in ("image", "image[]", "images"):
             for up in form.getlist(field):
                 if isinstance(up, str):

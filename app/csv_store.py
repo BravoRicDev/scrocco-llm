@@ -32,8 +32,9 @@ from .config import (ENDPOINT_HEADERS, MODEL_HEADER, PROVIDER_HEADER,
                      NO_THINKING_HEADER, CONTENT_STRING_HEADER,
                      EFFORT_CAPABLE_HEADER, INTELLIGENCE_HEADER,
                      MODEL_PREFERENCE_HEADER, ORDER_HEADER,
-                     HOLD_UNTIL_HEADER, API_STYLE_HEADER, ALIAS_HEADER,
-                     GatewayConfig)
+                      HOLD_UNTIL_HEADER, API_STYLE_HEADER, ALIAS_HEADER,
+                      IMAGE_VIA_HEADER, IMAGE_VIA_VALUES,
+                      GatewayConfig)
 from .protocols import VALID_STYLES
 
 # flag booleani "sì/true/1" che l'API e i writer automatici scrivono come
@@ -65,6 +66,7 @@ PAYLOAD_FIELDS = {
     "hold_until_finish": HOLD_UNTIL_HEADER,
     "api_style": API_STYLE_HEADER,
     "alias": ALIAS_HEADER,
+    "image_via": IMAGE_VIA_HEADER,
 }
 
 # token ammessi nella colonna caps (speculare a ROUTING_CAPS + text)
@@ -141,7 +143,8 @@ def row_id(row: dict, endpoint: str) -> str:
                        (row.get("chiave") or "").strip()))
     known = {MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, CONTEXT_HEADER,
              MAX_INPUT_HEADER, PRIORITY_HEADER, CAPS_HEADER,
-             TOOL_REPAIR_HEADER, ENABLED_HEADER, ALIAS_HEADER} | ENDPOINT_HEADERS
+             TOOL_REPAIR_HEADER, ENABLED_HEADER, ALIAS_HEADER,
+             IMAGE_VIA_HEADER} | ENDPOINT_HEADERS
     # Stabilita' su colonne: includi SOLO i valori (non i nomi), ordinati,
     # in modo che aggiungere una colonna metadata non cambi l'ID.
     extra_vals = sorted(v.strip() for v in row.values()
@@ -210,6 +213,17 @@ def ensure_alias_column(header: list[str]) -> list[str]:
     scarterebbe il valore (save_table itera l'header)."""
     if ALIAS_HEADER not in header:
         header.append(ALIAS_HEADER)
+    return header
+
+
+def ensure_image_via_column(header: list[str]) -> list[str]:
+    """Garantisce la colonna 'image_via' (modalita' immagine del provider).
+
+    Da chiamare nei percorsi create/update/bulk PRIMA di apply_payload
+    quando il payload contiene 'image_via': senza header la serializzazione
+    scarterebbe il valore (save_table itera l'header)."""
+    if IMAGE_VIA_HEADER not in header:
+        header.append(IMAGE_VIA_HEADER)
     return header
 
 
@@ -283,6 +297,12 @@ def apply_payload(row: dict, payload: dict, prefix: str,
                 f"(ammessi: {', '.join(VALID_STYLES)})")
     if "endpoint" in payload and not str(payload["endpoint"] or "").strip():
         raise CsvStoreError("'endpoint' non valido")
+    if payload.get("image_via") not in (None, ""):
+        _iv = str(payload["image_via"]).strip().lower()
+        if _iv not in IMAGE_VIA_VALUES:
+            raise CsvStoreError(
+                f"'image_via' non valido: {payload['image_via']!r} "
+                f"(ammessi: {', '.join(IMAGE_VIA_VALUES)})")
     if "modello" in payload and not str(payload["modello"] or "").strip():
         raise CsvStoreError("'modello' non valido")
     if "data" in payload and not str(payload["data"] or "").strip():
