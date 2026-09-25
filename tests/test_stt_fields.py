@@ -106,6 +106,46 @@ def test_stt_senza_campi_extra_non_ne_inventa(client, monkeypatch):
         assert k not in data
 
 
+# ------------------------------------------------- allucinazioni credit STT
+class _FakeFwdText(_FakeFwd):
+    def __init__(self, payload):
+        super().__init__()
+        self.payload = payload
+
+    async def transcribe(self, *a, **k):
+        return dict(self.payload) if isinstance(self.payload, dict) else self.payload
+
+
+def _post_text(c, m, monkeypatch, payload):
+    monkeypatch.setattr(m, "forwarder", _FakeFwdText(payload))
+    return c.post("/v1/audio/transcriptions", headers=MK,
+                  data={"model": "scrocco-llm-test"},
+                  files={"file": ("a.wav", b"RIFF0000", "audio/wav")})
+
+
+def test_stt_route_rimuove_allucinazione_credit(client, monkeypatch):
+    c, m = client
+    r = _post_text(c, m, monkeypatch, {"text": "e revisione a cura di QTSS"})
+    assert r.status_code == 200, r.text
+    assert r.json()["text"] == ""
+
+
+def test_stt_route_preserva_testo_reale(client, monkeypatch):
+    c, m = client
+    r = _post_text(c, m, monkeypatch,
+                   {"text": "Ciao mondo. Sottotitoli e revisione a cura di QTSS"})
+    assert r.status_code == 200, r.text
+    assert r.json()["text"] == "Ciao mondo."
+
+
+def test_stt_route_formato_testo_scrub(client, monkeypatch):
+    c, m = client
+    r = _post_text(c, m, monkeypatch,
+                   "Ciao mondo.\nSottotitoli e revisione a cura di QTSS\n")
+    assert r.status_code == 200, r.text
+    assert r.text.strip() == "Ciao mondo."
+
+
 # ------------------------------------------------- forwarder: gating provider
 def test_stt_extras_supported_provider():
     assert _stt_extras_supported({"provider": "speaches"})

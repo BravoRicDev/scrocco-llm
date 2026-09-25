@@ -62,6 +62,7 @@ from .config import GatewayConfig, csv_mtime_ns, maybe_reload
 from . import sniff
 from . import repairlog
 from . import autoprobe
+from . import sttscrub
 from . import forwarder as fwd
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PERMISSION_DENIED_COOLDOWN_S,
@@ -6275,6 +6276,11 @@ async def _audio_transcribe(request: Request, path: str):
                           dur_ms=int((time.monotonic() - t_req) * 1000),
                           stream=False, qc=False, wd=None, usage=None,
                           kind="stt", path=path)
+            result, _scrubbed = sttscrub.scrub_payload(result)
+            if _scrubbed:
+                log.info("[stt-scrub] %s: rimosse %d allucinazioni credit",
+                         cur, _scrubbed)
+                metrics.inc("nx_stt_scrubbed_total", (dep["group"],))
             if isinstance(result, dict):
                 result.setdefault("nx_deployment", cur)
                 return JSONResponse(result)
