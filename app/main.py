@@ -1127,6 +1127,12 @@ async def list_models(request: Request):
     all_names = sorted(set(names))
     data = [_model_entry(n, False) for n in all_names]
     data += [_model_entry(a, True) for a in usable_aliases]
+    # Alias della colonna `alias` (definiti nei dati CSV, #53): sono nomi
+    # pubblici a tutti gli effetti come i `policy.aliases`; per il master
+    # quelli di tutti i profili, altrimenti solo quelli del profilo autenticato.
+    _data_alias = (config.alias_names() if auth.mode == "master"
+                   else config.alias_names_for(auth.profile or ""))
+    data += [_model_entry(a, True) for a in sorted(set(_data_alias))]
     return {"object": "list", "data": data}
 
 
