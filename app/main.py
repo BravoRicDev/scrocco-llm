@@ -58,7 +58,8 @@ from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
 from . import journal, metrics
 from . import imagestore
-from .config import GatewayConfig, csv_mtime_ns, maybe_reload
+from .config import (GatewayConfig, csv_mtime_ns, maybe_reload,
+                     CAP_PRIORITY_ORDER)
 from . import sniff
 from . import repairlog
 from . import autoprobe
@@ -5593,12 +5594,13 @@ async def _localize_images(request: Request, items):
 def _images_group_for_base(prof: str, need: frozenset[str]) -> str | None:
     """Nome del gruppo-capacita' immagine per un modello BASE (generico).
 
-    Un modello generico (`scrocco-llm-fissone`) non nomina alcuna capacita':
-    `resolve_group_for_request` lo manda quindi nel mondo TESTO (bisogna per
-    il sizing) e il dep restituito non genera immagini mai. Qui si sceglie
-    direttamente il gruppo immagine del profilo: `{prefix}{prof}-image_gen`,
-    con lo stesso ordine di preferenza del routing (free, poi -go, poi
-    -fallback). Ritorna None se il profilo non ha quel gruppo."""
+    Un modello generico (`scrocco-llm-fissone`) o con un suffisso DIM
+    (`-200k`, `-262k`) non nomina alcuna capacita': `resolve_group_for_request`
+    lo manda quindi nel mondo TESTO (e per il sizing) e il dep restituito non
+    genera immagini mai. Qui si sceglie direttamente il gruppo immagine del
+    profilo: `{prefix}{prof}-image_gen`, con lo stesso ordine di preferenza
+    del routing (free, poi -go, poi -fallback). Ritorna None se il profilo non
+    ha quel gruppo."""
     base = f"{router.config.proxy_prefix}{prof}"
     for suffix in ("", getattr(router.policy, "go_suffix", "-go"),
                    getattr(router.policy, "fallback_suffix", "-fallback")):
@@ -5606,6 +5608,44 @@ def _images_group_for_base(prof: str, need: frozenset[str]) -> str | None:
         if g in router.config.groups:
             return g
     return None
+
+
+def _cap_chain_pick_all(prof: str, need: frozenset[str]) -> list[dict]:
+    """Deployment UTILI alla catena capability del profilo, in ordine di rotazione.
+
+    E' il cuore del comportamento "camaleontico" che chiede l'utente: la
+    richiesta va capita A MONTE e il modello richiesto non deve essere un
+    vincolo, ma un punto di partenza. Se il nome chiesto (generico, o con
+    suffisso dim `-200k`) non nomina la capacita', il gateway la sale lui
+    attraversando TUTTI i deployment del profilo per quella capacita', con lo
+    stesso ordine del routing (free -> -go -> -fallback).
+
+    Le capacita' si valutano in `CAP_PRIORITY_ORDER` (image_gen prima di
+    image_edit non per caso: se un deployment soddisfa entrambe la catena lo
+    prende al primo posto) e si pretende che il deployment soddisfi TUTTE le
+    capacita' richieste. Restituisce la lista completa perche' l'intercettore
+    ruoti su piu' deployment, esattamente come fanno gli endpoint /images/*."""
+    chains = getattr(router.config, "chains_cap", {}).get(prof) or {}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for cap in CAP_PRIORITY_ORDER:
+        if cap not in need:
+            continue
+        for u in chains.get(cap) or ():
+            if u in seen:
+                continue
+            d = router.config.deployment_by_unique(u)
+            if d is not None and need <= set(d.get("caps") or ()):
+                seen.add(u)
+                out.append(d)
+    return out
+
+
+def _cap_chain_pick(prof: str, need: frozenset[str]) -> dict | None:
+    """Primo deployment UTILE dalla catena capability (vedi
+    `_cap_chain_pick_all`)."""
+    got = _cap_chain_pick_all(prof, need)
+    return got[0] if got else None
 
 
 def _images_pick_dep(profile: str | None, model: str, raw_model: str,
@@ -5618,18 +5658,22 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
     scope = "group" if router.is_explicit(model) else "chain"
     prof = profile or config.profile_of_base(model.split("__")[0]) \
         or config.profile_of_base(model)
-    # Modello BASE (generico, es. `scrocco-llm-fissone`): non porta una
-    # capacita' nel nome, quindi la risoluzione generica lo manderebbe nel
-    # mondo testo e il deployment scelto non genererebbe immagini. Si punta
-    # direttamente al gruppo image_gen del profilo.
-    base_is_generic = bool(prof) and model.rstrip("/").startswith(
+    # Modello BASE o con suffisso DIM (`-200k`, `-262k`): il nome non porta
+    # una capacita'. La risoluzione generica li manderebbe nel mondo TESTO (per
+    # il sizing del contesto) e il dep scelto non genererebbe immagini. La
+    # richiesta pero' e' di immagine: si sale direttamente nella capacita'
+    # richiesta, esattamente come il routing sale di dim quando il contesto
+    # non entra. Prima si prova la catena capability (che attraversa free/go/
+    # fallback di tutte le righe image del profilo), e solo se non porta nulla
+    # si ripiega sul gruppo image_gen.
+    dim_or_base = bool(prof) and model.rstrip("/").startswith(
         f"{router.config.proxy_prefix}{prof}")
-    if base_is_generic and need:
+    if dim_or_base and need:
+        dep_cap = _cap_chain_pick(prof, need)
+        if dep_cap is not None:
+            return dep_cap, prof, scope, None
         _cap_g = _images_group_for_base(prof, need)
-        if _cap_g:
-            group_or_explicit = _cap_g
-        else:
-            group_or_explicit = None
+        group_or_explicit = _cap_g if _cap_g else None
     else:
         group_or_explicit = router.resolve_group_for_request(
             model, [], session_id, need, profile=prof)
@@ -5683,6 +5727,33 @@ async def _chat_via_images(request: Request, *, dep: dict, payload: dict,
     return images_response_to_chat(data, model)
 
 
+def _profile_of_request(model: str, auth_profile: str | None) -> str | None:
+    """Profililo del modello richiesto, anche se il nome porta un suffisso.
+
+    `profile_of_base` riconosce solo il nome NUDO (`scrocco-llm-fissone`), ma
+    un agente puo' chiedere una dim (`scrocco-llm-fissone-200k`) o il bucket
+    `-go`: il profilo va allora tolto dal suffisso, come fa il routing. Senza
+    questo la richiesta di immagine su un nome con suffisso non trovava la
+    catena capability e rispondeva "nessun deployment dichiara image_gen"."""
+    if auth_profile:
+        return auth_profile
+    for cand in (model.split("__")[0], model):
+        p = config.profile_of_base(cand)
+        if p:
+            return p
+    # ultima risorsa: il nome richiesto puo' gia' essere un suffissato ->
+    # prova a toglierli uno a uno (dim, -go, -fallback, -C).
+    base = model.split("__")[0]
+    if base.startswith(config.proxy_prefix):
+        for suf in sorted(config.known_suffixes(),
+                          key=len, reverse=True) + [""]:
+            stem = base[:-len(suf)] if suf and base.endswith(suf) else base
+            p = config.profile_of_base(stem)
+            if p:
+                return p
+    return None
+
+
 async def _image_chat_intercept(request: Request, *, payload: dict,
                                 model: str, raw_model: str, auth: AuthResult,
                                 session_id: str | None):
@@ -5707,80 +5778,110 @@ async def _image_chat_intercept(request: Request, *, payload: dict,
     prompt, refs = chat_prompt_and_refs(payload.get("messages") or [])
     if not prompt.strip():
         return None                      # niente prompt: non e' una richiesta immagine
-    dep, profile, scope, err = _images_pick_dep(
-        auth.profile, model, raw_model, session_id, need, payload)
-    if err:
-        return err
-    custom_key = router.resolve_alias_key(raw_model, model)
-    if custom_key:
-        dep = {**dep, "api_key": custom_key}
-    via = dep_image_via(dep)
-    if via == "chat":
-        return None                      # il motore chat lo serve gia' bene
-    _sess = _opencode_session(request) or session_id
-    metrics.inc("nx_images_total", (dep["group"], "attempt_chat_adapt"))
-    router.note_start(dep["unique"])
-    t0 = time.monotonic()
-    try:
+    prof = _profile_of_request(model, auth.profile)
+    # Il nome richiesto e' generico o con suffisso DIM? Allora il dep va
+    # cercato nella catena CAPABILITY del profilo, che attraversa free, -go e
+    # -fallback: lo stesso "camaleontismo" con cui il routing sale di dim
+    # quando il contesto non entra. Un modello ESPLICITO di immagine
+    # (`gemini31-image`) resta invece sul suo gruppo-alias.
+    forced = bool(prof) and model.rstrip("/").startswith(
+        f"{router.config.proxy_prefix}{prof}")
+
+    async def _serve(dep: dict, profile: str | None):
+        """Serve UNA richiesta immagine sul deployment `dep`; ritorna il body
+        chat.completion, oppure solleva UpstreamError per far ruotare."""
+        via = dep_image_via(dep)
         if via == "images":
-            out = await _chat_via_images(
+            return await _chat_via_images(
                 request, dep=dep, payload=payload, refs=refs,
                 session_id=session_id, raw_model=raw_model,
                 profile=profile, model=model)
-        else:                             # "both": prova chat, adatta su errore
-            chat_payload = image_chat_payload(payload, raw_model, refs=refs)
-            try:
-                data = await forwarder.call(dep, chat_payload, session=_sess,
-                                            client_ip=_client_ip(request),
-                                            attribution=_client_attribution(
-                                                request))
-                imgs = images_dual(extract_chat_images(data)) \
-                    if isinstance(data, dict) else []
-                if not imgs:
-                    raise UpstreamError(502, "risposta chat senza immagini")
-                out = images_response_to_chat({"data": imgs}, model)
-            except UpstreamError as err_:
-                if not native_images_only_error(err_.detail):
-                    raise
-                log.info("[images] chat->images adattato su %s: %s",
-                         dep["unique"], (err_.detail or "")[:80])
-                out = await _chat_via_images(
-                    request, dep=dep, payload=payload, refs=refs,
-                    session_id=session_id, raw_model=raw_model,
-                    profile=profile, model=model)
-    except UpstreamError as err_:
-        router.note_end(dep["unique"])
-        metrics.inc("nx_images_total", (dep["group"], "chat_adapt_error"))
-        st = abs(err_.status) if err_.status else 502
-        return JSONResponse(status_code=st if st >= 400 else 502, content={
-            "error": {"message": err_.detail, "type": "upstream_error"}})
-    if not out:
-        # l'upstream ha risposto 200 ma senza immagini: non e' un turno utile,
-        # si risponde 502 cosi' il client puo' ritentare (come per la chat).
-        router.note_end(dep["unique"])
-        metrics.inc("nx_images_total", (dep["group"], "chat_adapt_error"))
-        return JSONResponse(status_code=502, content={
-            "error": {"message": "risposta senza immagini",
-                      "type": "upstream_error"}})
-    imgs = await _localize_images(request, images_dual(out.get("data") or []))
-    out["data"] = imgs
-    msg = out["choices"][0]["message"]
-    # `images[]` nella forma che i modelli image-as-chat restituiscono:
-    # ogni elemento e' {"type":"image_url","image_url":{url,b64_json,...}}.
-    msg["images"] = [{"type": "image_url", "image_url": it} for it in imgs]
-    if not msg.get("content"):
-        msg["content"] = "\n".join(str(it.get("url") or "")
-                                   for it in imgs if it.get("url")) or None
-    out["nx_deployment"] = dep["unique"]
-    out.setdefault("via", "images")
-    router.note_result(dep["unique"], (time.monotonic() - t0) * 1000)
-    metrics.inc("nx_images_total", (dep["group"], "ok_chat_adapt"))
-    _emit_summary(ses=session_id or "-", req=raw_model, grp=dep["group"],
-                  dep=dep["unique"], tries=1, fb=0,
-                  dur_ms=int((time.monotonic() - t0) * 1000),
-                  stream=False, qc=False, wd=None, usage=None,
-                  kind="images", via="chat->images")
-    return JSONResponse(out)
+        # via "chat" (modello chat-only, es. gemini/nano-banana) o "both":
+        # si chiama la chat multimodale e, se il provider rimanda che il
+        # modello sta solo su /images/*, si adatta al nativo.
+        chat_payload = image_chat_payload(payload, raw_model, refs=refs)
+        data = await forwarder.call(
+            dep, chat_payload, session=_opencode_session(request) or session_id,
+            client_ip=_client_ip(request),
+            attribution=_client_attribution(request))
+        imgs = images_dual(extract_chat_images(data)) \
+            if isinstance(data, dict) else []
+        if not imgs:
+            raise UpstreamError(502, "risposta chat senza immagini")
+        return images_response_to_chat({"data": imgs}, model)
+
+    # --- scelta dei candidati, in ordine di rotazione ---
+    if forced:
+        candidates = [d for d in (
+            _cap_chain_pick_all(prof, need) or [])]
+        if not candidates:
+            dep, profile, scope, err = _images_pick_dep(
+                auth.profile, model, raw_model, session_id, need, payload)
+            if err:
+                return err
+            candidates = [dep]
+    else:
+        dep, profile, scope, err = _images_pick_dep(
+            auth.profile, model, raw_model, session_id, need, payload)
+        if err:
+            return err
+        if dep_image_via(dep) == "chat":
+            return None          # modello immagine esplicito: motore chat
+        candidates = [dep]
+
+    last_err: UpstreamError | None = None
+    t_req = time.monotonic()
+    tried: set[str] = set()
+    for dep in candidates:
+        cur = dep["unique"]
+        if cur in tried:
+            continue
+        tried.add(cur)
+        custom_key = router.resolve_alias_key(raw_model, model)
+        d_use = {**dep, "api_key": custom_key} if custom_key else dep
+        via = dep_image_via(d_use)
+        if via == "chat" and not forced:
+            return None
+        metrics.inc("nx_images_total", (d_use["group"], "attempt_chat_adapt"))
+        router.note_start(cur)
+        t0 = time.monotonic()
+        try:
+            out = await _serve(d_use, prof)
+            if not out:
+                raise UpstreamError(502, "risposta senza immagini")
+        except UpstreamError as err_:
+            router.note_end(cur)
+            last_err = err_
+            # errore di DEPLOYMENT (quota, endpoint, provider assente...): si
+            # segna e si prova il successivo, che e' esattamente la catena
+            # capability. Non si risponde al client finche' non e' finita.
+            router.mark_failed(cur, seconds=err_.retry_after,
+                               status=abs(err_.status) if err_.status else None)
+            metrics.inc("nx_images_total", (d_use["group"], "chat_adapt_error"))
+            continue
+        imgs = await _localize_images(
+            request, images_dual(out.get("data") or []))
+        out["data"] = imgs
+        msg = out["choices"][0]["message"]
+        # `images[]` nella forma che i modelli image-as-chat restituiscono:
+        # ogni elemento e' {"type":"image_url","image_url":{url,b64_json,...}}.
+        msg["images"] = [{"type": "image_url", "image_url": it} for it in imgs]
+        if not msg.get("content"):
+            msg["content"] = "\n".join(str(it.get("url") or "")
+                                       for it in imgs if it.get("url")) or None
+        out["nx_deployment"] = cur
+        out.setdefault("via", "images")
+        router.note_result(cur, (time.monotonic() - t0) * 1000)
+        metrics.inc("nx_images_total", (d_use["group"], "ok_chat_adapt"))
+        _emit_summary(ses=session_id or "-", req=raw_model,
+                      grp=d_use["group"], dep=cur, tries=len(tried),
+                      fb=len(tried) - 1,
+                      dur_ms=int((time.monotonic() - t_req) * 1000),
+                      stream=False, qc=False, wd=None, usage=None,
+                      kind="images", via="chat->images")
+        return JSONResponse(out)
+
+    # nessun deployment ha prodotto un'immagine
 
 
 async def _try_native_image_edit(request: Request, *, owner: Request,

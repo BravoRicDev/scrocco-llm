@@ -418,6 +418,68 @@ def test_chat_modalities_image_su_modello_generico(monkeypatch, tmp_path):
         _teardown(m, orig)
 
 
+def test_chat_immagine_salve_da_modello_con_suffisso_dim(monkeypatch, tmp_path):
+    """Il caso camaleontico esplicito: `scrocco-llm-<prof>-200k` non ha un
+    gruppo image_gen proprio, ma la richiesta e' comunque di un'immagine.
+
+    Deve salire nella capacita' richiesta, esattamente come il routing sale di
+    dim quando il contesto non entra."""
+    # una riga testo (crea le dim del profilo) + una riga image_gen
+    csv_text = (_CSV_HEADER
+                + _row("some-text-model", "groq", "both", "text")
+                + _row("gpt-image-2.5", "openai", "images",
+                       "image_gen,image_edit"))
+    c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
+    fwd = _FakeForwarder(_NATIVE_OK, _CHAT_IMG_OK)
+    monkeypatch.setattr(m, "forwarder", fwd)
+    try:
+        r = c.post("/v1/chat/completions", headers=MK, json={
+            "model": "scrocco-llm-test-8k", "modalities": ["image"],
+            "messages": [{"role": "user", "content": "a red cube"}]})
+        assert r.status_code == 200, r.text
+        assert fwd.images_calls == ["openai"], fwd.images_calls
+        assert r.json()["choices"][0]["message"]["images"]
+    finally:
+        _teardown(m, orig)
+
+
+def test_chat_immagine_ruota_sulla_catena_capability(monkeypatch, tmp_path):
+    """Se il primo deployment capability fallisce, si prova il successivo.
+
+    E' la catena capability free -> -go -> -fallback: un errore di deployment
+    (quota, endpoint assente, provider non configurato) non viene risposto al
+    client finche' la catena non e' finita."""
+    csv_text = (_CSV_HEADER
+                # prima riga: image-native ma l'upstream fallisce
+                + _row("gpt-image-2.5", "openai", "images",
+                       "image_gen,image_edit")
+                # seconda riga: chat-only, funziona
+                + _row("gemini-3.1-flash-image", "antigravity", "chat",
+                       "image_gen,image_edit"))
+    c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
+    calls = {"openai": 0}
+
+    def native(dep, p):
+        if dep.get("provider") == "openai":
+            calls["openai"] += 1
+            return (400, "unknown provider for model gpt-image-2.5")
+        return (400, _GEMINI_ERR)
+
+    fwd = _FakeForwarder(native, _CHAT_IMG_OK)
+    monkeypatch.setattr(m, "forwarder", fwd)
+    try:
+        r = c.post("/v1/chat/completions", headers=MK, json={
+            "model": "scrocco-llm-test", "modalities": ["image"],
+            "messages": [{"role": "user", "content": "a red cube"}]})
+        assert r.status_code == 200, r.text
+        # ha provato il primo (nativo, fallito) e poi il chat-only
+        assert calls["openai"] == 1
+        assert "antigravity" in fwd.chat_calls
+        assert r.json()["choices"][0]["message"]["images"]
+    finally:
+        _teardown(m, orig)
+
+
 def test_images_edits_via_chat_su_modello_chat_only(chat_dep):
     c, m, fwd = chat_dep
     r = c.post("/v1/images/edits", headers=MK,
