@@ -7038,14 +7038,20 @@ async def systemone(request: Request):
 
     explicit_req = router.is_explicit(model)
     dep = router.config.deployment_by_unique(group_or_explicit)
+    _cap = router.config.group_caps.get(group_or_explicit)
+    # Gruppo capacità con primario VUOTO (es. righe Jev a pagamento tutte
+    # `fallback`): la catena capability attraversa free -> -go -> -fallback e
+    # trova i deployment che il solo gruppo primario non ha.
+    if dep is None and _cap is not None and not explicit_req:
+        dep = _cap_chain_pick(_prof, need)
     if dep is None:
         dep = router.initial_pick(_prof, group_or_explicit,
                                   None if explicit_req else need,
                                   out_tokens=refill_out_budget(payload, policy))
     if dep is None and _prof and not explicit_req:
-        dep = router.fallback_after(_prof, None, need,
-                                    out_tokens=refill_out_budget(
-                                        payload, router.policy))
+        dep = _cap_chain_pick(_prof, need) or router.fallback_after(
+            _prof, None, need,
+            out_tokens=refill_out_budget(payload, router.policy))
     if dep is None:
         return JSONResponse(status_code=503, content={
             "error": {"message": "nessun deployment systemone disponibile",

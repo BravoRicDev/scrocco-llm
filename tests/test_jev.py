@@ -85,8 +85,14 @@ class _FakeFwd:
 
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
+    m, orig = _client_env(monkeypatch, tmp_path, _ROW_A + _ROW_B)
+    yield TestClient(m.app), m
+    _client_teardown(m, orig)
+
+
+def _client_env(monkeypatch, tmp_path, rows):
     csv = tmp_path / "k.csv"
-    csv.write_text(_HEADER + _ROW_A + _ROW_B)
+    csv.write_text(_HEADER + rows)
     import app.main as m
     orig = (m.authn.master_key, m.config.csv_path)
     m.authn.master_key = "test-master-jev"
@@ -96,12 +102,25 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(m.config, "csv_path", csv)
     m.config.reload()
     m.router.policy.cap_groups_enabled = True
-    yield TestClient(m.app), m
+    return m, orig
+
+
+def _client_teardown(m, orig):
     m.router._cooldown.clear()
     m.router.policy.cap_groups_enabled = False
     m.authn.master_key = orig[0]
     m.config.csv_path = orig[1]
     m.config.reload()
+
+
+@pytest.fixture()
+def client_fallback(monkeypatch, tmp_path):
+    """Jev e' SEMPRE a pagamento: le righe reali sono tutte `fallback`."""
+    rows = (_ROW_A.replace(",free,", ",fallback,")
+            + _ROW_B.replace(",free,", ",fallback,"))
+    m, orig = _client_env(monkeypatch, tmp_path, rows)
+    yield TestClient(m.app), m
+    _client_teardown(m, orig)
 
 
 def _pin_initial_pick(monkeypatch, m, model):
@@ -312,3 +331,25 @@ def test_systemone_note_end_no_inflight_leak(client, monkeypatch):
     assert r.status_code == 200
     cur = r.json()["nx_deployment"]
     assert m.router.stats_for(cur).inflight == 0
+
+
+# ------------------------------------------------------- pagamento (fallback)
+def test_decision_fallback_only_group_still_routes(client_fallback, monkeypatch):
+    """Righe Jev a pagamento tutte `fallback` -> esiste solo -decision-fallback:
+    l'endpoint deve comunque trovarle (catena capability free->go->fallback)."""
+    c, m = client_fallback
+    assert m.config.cap_counts["test"]["decision"]["primary"] == 0
+    assert m.config.cap_counts["test"]["decision"]["fallback"] == 2
+    r = _post(c, monkeypatch, m, _FakeFwd())
+    assert r.status_code == 200, r.text
+    assert "department" in r.json()["answers"]
+    assert "-decision-fallback" in r.json()["nx_deployment"]
+
+
+def test_decision_fallback_only_rotates(client_fallback, monkeypatch):
+    c, m = client_fallback
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(429, "rate limited", 2.0)})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 200, r.text
+    assert len(fwd.calls) == 2
