@@ -98,6 +98,13 @@ def put(data: bytes, mime: str | None) -> str | None:
     mime = normalize_mime(mime)
     if not _looks_image(mime, data):
         return None
+    if _MAX_BYTES and len(data) > _MAX_BYTES:
+        # Item monolitico oltre il budget: _evict_locked() lo eliminerebbe
+        # SUBITO (oldest-first), quindi restituire un id qui significa dare al
+        # client un url /v1/images/files/{id} morto al millisecondo (404
+        # silenzioso dopo un 200). Invariante: put() ritorna un id solo se
+        # l'item e' DAVVERO in store. Stesso guard di audiostore.py.
+        return None
     file_id = secrets.token_urlsafe(24)
     with _LOCK:
         _ITEMS[file_id] = {"data": bytes(data), "mime": mime, "ts": time.time()}

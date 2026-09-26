@@ -526,8 +526,20 @@ def chat_to_gemini(body: dict, dep: dict) -> dict:
     if eff:
         # Gemini: includeThoughts chiede il riepilogo dei thinking (parts con
         # thought:true) che gemini_to_chat converte in reasoning_content.
-        gen["thinkingConfig"] = {"includeThoughts": True,
-                                 "thinkingBudget": _THINK_BUDGET.get(eff, 4096)}
+        # thinkingBudget DEVE stare STRETTO sotto maxOutputTokens, altrimenti
+        # Google risponde 400 INVALID_ARGUMENT per l'INTERA chiamata (stesso
+        # vincolo che chat_to_anthropic applica piu' sopra). Il clamp di
+        # contesto del gateway (forwarder.clamp_max_tokens) porta spesso
+        # maxOutputTokens sotto il budget assoluto del livello. Se non c'e'
+        # spazio per il thinking si omette il config (risposta senza thinking)
+        # invece di far fallire la richiesta.
+        budget = _THINK_BUDGET.get(eff, 4096)
+        _mx_out = gen.get("maxOutputTokens")
+        if _mx_out is not None:
+            budget = min(budget, int(_mx_out) - 1)
+        if budget > 0:
+            gen["thinkingConfig"] = {"includeThoughts": True,
+                                     "thinkingBudget": budget}
     if gen:
         out["generationConfig"] = gen
     return out

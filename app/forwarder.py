@@ -3657,7 +3657,16 @@ truncation_hook=None,
         except httpx.HTTPError as exc:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
         if resp.status_code >= 400:
-            raise UpstreamError(-resp.status_code, resp.text[:300])
+            # Tassonomia del modulo (L14-23): status>0 = RITRIABILE, status<0 =
+            # client/deployment. I fratelli (call/call_images/call_speech/
+            # transcribe/submit_video) usano questa stessa espressione: senza,
+            # un 429/5xx diventava negativo e i loop *_any (che avanzano solo
+            # su -404) abbandonavano la rotazione multi-chiave al primo
+            # transient, consegnando 502 invece di 503 retryable.
+            raise UpstreamError(
+                -resp.status_code if resp.status_code not in RETRYABLE_STATUS
+                else resp.status_code,
+                resp.text[:300])
         try:
             return resp.json()
         except ValueError as exc:
@@ -3727,7 +3736,10 @@ truncation_hook=None,
         except httpx.HTTPError as exc:
             raise UpstreamError(None, f"upstream connection error: {exc}") from exc
         if resp.status_code >= 400:
-            raise UpstreamError(-resp.status_code, resp.text[:300])
+            raise UpstreamError(
+                -resp.status_code if resp.status_code not in RETRYABLE_STATUS
+                else resp.status_code,
+                resp.text[:300])
         return resp.content, (resp.headers.get("content-type") or "video/mp4")
 
     # ------------------------------------------------------- fallback loop

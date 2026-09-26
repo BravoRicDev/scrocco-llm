@@ -115,6 +115,18 @@ def clean_json_content(content):
     """Estrae un documento JSON puro da content (fence/prosa). None se fallisce."""
     if not isinstance(content, str) or not content.strip():
         return None
+    stripped = content.strip()
+    # Fast-path: se il contenuto INTERO e' gia' un oggetto/array JSON valido,
+    # NON passare da _strip_fence. La fence puo' stare DENTRO un valore
+    # stringa (es. un esempio di codice che il modello mostra): l'estrazione
+    # prenderebbe il blocco interno e scarterebbe il resto del documento,
+    # facendo fallire un JSON perfettamente valido. Il vincolo "oggetto o
+    # array" e' preservato (gli scalari restano esclusi come prima).
+    if stripped[0] in "{[":
+        try:
+            return json.dumps(json.loads(stripped), ensure_ascii=False)
+        except Exception:
+            pass
     s = _strip_fence(content)
     if not (s.startswith("{") or s.startswith("[")):
         # cerca il primo blocco bilanciato

@@ -8182,18 +8182,24 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             if self._prefer_same_model(cap_cur, cur_dep.get("model", "")):
                 nxt = self.pick_deployment(cur_dep["group"],
                                            exclude=cur_dep["unique"],
-                                           restrict_model=cur_dep.get("model"))
+                                           restrict_model=cur_dep.get("model"),
+                                           ctx=ctx)
                 if nxt is not None:
                     log.info("[restrict] %s: failover same-model -> %s",
                              cur_dep["group"], nxt["unique"])
                     return nxt
                 nxt = self.pick_deployment(cur_dep["group"],
-                                           exclude=cur_dep["unique"])
+                                           exclude=cur_dep["unique"],
+                                           ctx=ctx)
                 if nxt is not None and nxt.get("model") != cur_dep.get("model"):
                     self._note_cross(cur_dep["group"], cur_dep.get("model", "?"),
                                      nxt.get("model", "?"))
                 return nxt
-            return self.pick_deployment(cur_dep["group"], exclude=cur_dep["unique"])
+            # ctx: senza, la rotazione di fallback su un gruppo capacita'
+            # poteva scegliere un dep con max_input < contesto richiesto
+            # (_cap_fits e' no-op con ctx=None) -> 413 upstream sprecato.
+            return self.pick_deployment(cur_dep["group"],
+                                        exclude=cur_dep["unique"], ctx=ctx)
         cap = self.config.group_caps.get(cur_dep["group"])
         if cap is not None:
             # Scorciatoia escalation-winner anche per i cap-group (primario ->
