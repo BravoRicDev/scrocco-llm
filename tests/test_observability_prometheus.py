@@ -26,12 +26,23 @@ sulla forma attesa dal text exposition format:
   - i valori label sono escaped: `\`, `"` -> `\"`, newline -> spazio.
 Una riga con `nome{label}_count` VIOLA la forma (il suffisso deve stare
 prima di `{`) ed e' quindi esattamente cio' che fallisce prima del fix.
+
+B3 (cardinalita' illimitata): `TraceIDMiddleware.dispatch` passava
+`request.url.path` a `record_request_metrics`, quindi ogni {id} di route
+templata (e ogni 404 casuale) creava una serie nuova per sempre ->
+20k+ serie e memory leak. Il fix usa il TEMPLATE della route da
+`request.scope["route"]` (letto DOPO `call_next`, quando il router ha
+valorizzato lo scope) e "unmatched" quando non c'e' match; i LOG
+continuano a usare il path reale.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import app.metrics as nx_metrics
 import app.observability as obs
@@ -232,3 +243,85 @@ def test_cap_preserves_count_sum_coherent(monkeypatch):
     assert int(inf.group(1)) == len(kept)          # +Inf == count
     assert int(b5.group(1)) == sum(1 for v in kept if v <= 5) == 0
     assert int(b50.group(1)) == sum(1 for v in kept if v <= 50) == 5
+
+
+# ------------------------------------------------------- B3 (cardinalita')
+def _cardinality_app() -> FastAPI:
+    """App di prova con una route templata + una che solleva."""
+    app = FastAPI()
+    app.add_middleware(obs.TraceIDMiddleware)
+
+    @app.get("/items/{item_id}")
+    async def get_item(item_id: str):
+        return {"item_id": item_id}
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    return app
+
+
+def test_metrics_use_route_template_not_concrete_path():
+    """Richieste su route templated e 404 non registrati: le metriche
+    usano il TEMPLATE e 'unmatched', mai l'id dinamico.
+
+    Prima del fix ogni /items/<id> distinto creava una serie nuova (etichetta
+    `path` = path reale): cardinalita' illimitata -> memory leak. Qui N id
+    distinti devono collassare su UNA sola serie per template.
+    """
+    ids = [f"id-{i}" for i in range(20)]
+    missing = [f"/does/not/exist/{i}" for i in range(20)]
+
+    with TestClient(_cardinality_app()) as c:
+        for i in ids:
+            assert c.get(f"/items/{i}").status_code == 200
+        for p in missing:
+            assert c.get(p).status_code == 404
+
+    body = obs.metrics_collector.generate_prometheus()
+    _assert_valid_prometheus(body)
+
+    # il template e' l'etichetta, per counter E istogramma
+    assert 'http_requests_total{method="GET",path="/items/{item_id}",status="200"} 20.0' in body
+    assert 'http_request_duration_ms_count{method="GET",path="/items/{item_id}",status="200"} 20' in body
+    # i 404 non hanno route: 'unmatched', NON il path casuale
+    assert 'http_requests_total{method="GET",path="unmatched",status="404"} 20.0' in body
+    assert 'http_request_duration_ms_count{method="GET",path="unmatched",status="404"} 20' in body
+
+    # NESSUNA serie con gli id dinamici o con i path inesistenti
+    for i in ids:
+        assert f'path="/items/{i}"' not in body, i
+    for p in missing:
+        assert f'path="{p}"' not in body, p
+
+    # cardinalita' effettivamente limitata: 2 soli path, non 40
+    paths = set(re.findall(r'path="([^"]*)"', body))
+    assert paths == {"/items/{item_id}", "unmatched"}, paths
+    assert len(obs.metrics_collector._counters) == 2, obs.metrics_collector._counters
+    assert len(obs.metrics_collector._histograms) == 2, obs.metrics_collector._histograms
+
+
+def test_metrics_use_route_template_on_exception():
+    """Anche il ramo `except` (status 500) usa il template, non il path."""
+    with TestClient(_cardinality_app(), raise_server_exceptions=False) as c:
+        assert c.get("/boom").status_code == 500
+
+    body = obs.metrics_collector.generate_prometheus()
+    _assert_valid_prometheus(body)
+    assert 'http_requests_total{method="GET",path="/boom",status="500"} 1.0' in body
+    assert 'path="/boom"' in body
+
+
+def test_logs_keep_concrete_path(caplog):
+    """I LOG devono continuare a riportare il path REALE: il fix cambia
+    solo l'etichetta Prometheus, non la diagnostica."""
+    with caplog.at_level(logging.INFO, logger="nx.observability"):
+        with TestClient(_cardinality_app()) as c:
+            c.get("/items/abc-123")
+
+    paths = [r.path for r in caplog.records
+             if r.name == "nx.observability" and hasattr(r, "path")]
+    assert "/items/abc-123" in paths, paths
+    # ... mentre la metrica resta sul template
+    assert 'path="/items/{item_id}"' in obs.metrics_collector.generate_prometheus()

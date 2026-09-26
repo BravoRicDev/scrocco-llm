@@ -132,8 +132,13 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
                     },
                 )
 
-            # Record Prometheus metrics
-            record_request_metrics(method, path, response.status_code, duration_ms, trace_id)
+            # Record Prometheus metrics. Il template della route (e non il
+            # path concreto) limita la cardinalita' dell'etichetta `path`:
+            # ogni {id} generava una serie nuova -> memoria illimitata.
+            # Va letto DOPO call_next: lo scope e' valorizzato dal router
+            # durante l'instradamento, non prima.
+            record_request_metrics(method, _route_template(request),
+                                   response.status_code, duration_ms, trace_id)
 
             return response
         except Exception as e:
@@ -150,8 +155,11 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
                         "error": str(e),
                     },
                 )
-            # Record error metrics
-            record_request_metrics(method, path, 500, duration_ms, trace_id)
+            # Record error metrics (stessa etichetta di route della riga
+            # sopra: se il router ha instradato, il template; altrimenti
+            # "unmatched" e mai il path concreto).
+            record_request_metrics(method, _route_template(request), 500,
+                                   duration_ms, trace_id)
             raise
         finally:
             # Reset trace ID context
@@ -291,6 +299,12 @@ def render_prometheus() -> str:
     if not _PROM_ENABLED:
         return ""
     return metrics_collector.generate_prometheus()
+
+
+def _route_template(request: Request) -> str:
+    """Ritorna il template della route (es. '/items/{item_id}') o 'unmatched'."""
+    route = request.scope.get("route")
+    return getattr(route, "path", None) or "unmatched"
 
 
 def record_request_metrics(
