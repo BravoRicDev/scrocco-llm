@@ -1012,9 +1012,13 @@ if _obs_enabled:
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError):
     """Gestione centralizzata delle eccezioni AppError e sottoclassi."""
-    log.debug("[error-handler] %s %s -> %d %s: %s",
-              request.method, request.url.path,
-              exc.status, exc.error_type, exc.message)
+    # 5xx -> ERROR (server-side, visibilita' massima), 4xx -> WARNING
+    # (client-side ma anomalia). Mai DEBUG: a INFO il root logger e il
+    # file handler silenziano completamente i log DEBUG.
+    _log_fn = log.error if exc.status >= 500 else log.warning
+    _log_fn("[error-handler] %s %s -> %d %s: %s",
+            request.method, request.url.path,
+            exc.status, exc.error_type, exc.message)
     return JSONResponse(
         status_code=exc.status,
         content={

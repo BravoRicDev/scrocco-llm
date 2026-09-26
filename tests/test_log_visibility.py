@@ -126,10 +126,9 @@ _DEBUG_ERROR_EXEMPT = {
     # fallimento vero e' gia' emesso a WARNING/ERROR dai rami `[fallback]`,
     # `[rep-attempt]`, `[summary]`: qui si annota solo il delta di punteggio.
     ("router.py", "[rep-fail]"),
-    # Escluso esplicitamente dalla mappa: il volume non e' ancora stato
-    # misurato in produzione (vedi output del refactor). Handler `AppError`:
-    # ogni 4xx/409 di API del cliente arriva qui.
-    ("main.py", "[error-handler]"),
+    # NOTE: main.py [error-handler] e' stato PROMOSSO a WARNING/ERROR (Bug 2).
+    # L'eccezione e' stata RIMOSSA: il test test_error_handler_level_by_status
+    # verifica che 4xx=WARNING, 5xx=ERROR, mai DEBUG.
 }
 
 
@@ -355,3 +354,22 @@ def test_config_logger_default():
              and isinstance(n.func, ast.Attribute)
              and n.func.attr == "setLevel"]
     assert inner, "RotatingFileHandler senza setLevel esplicito"
+
+
+# ======================================================= 7. AppError handler
+# Bug 2: l'handler AppError loggava a DEBUG -> invisibile in produzione (INFO).
+# Verifica che il livello dipenda da status: 5xx=ERROR, 4xx=WARNING.
+
+def test_error_handler_level_by_status():
+    """AppError handler usa WARNING per 4xx, ERROR per 5xx, mai DEBUG."""
+    # la regola: warning per 4xx, error per 5xx
+    handlers = _find("main.py", "[error-handler]")
+    # dovrebbe essercene esattamente uno con level warning o error
+    levels = {h["level"] for h in handlers}
+    assert "debug" not in levels, f"nessun debug ammesso: {levels}"
+    assert levels <= {"warning", "error"}, f"livelli inaspettati: {levels}"
+    # verifica che il codice sorgente contenga la selezione dinamica del
+    # livello basata su exc.status (non un livello fisso)
+    src = (Path(__file__).resolve().parent.parent / "app" / "main.py").read_text()
+    assert "exc.status >= 500" in src and "log.error" in src and "log.warning" in src, (
+        "manca selezione dinamica ERROR/WARNING basata su exc.status")
