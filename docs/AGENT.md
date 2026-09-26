@@ -32,7 +32,10 @@ admin responses.
 | Endpoint | Purpose |
 |---|---|
 | `POST /v1/chat/completions` | chat; streaming supported |
-| `GET /v1/models` | models visible to your profile |
+| `GET /v1/models` | models visible to your profile (base + groups + aliases). `?view=stable\|uniques` (master only; a profile key always sees the stable set) |
+| `GET /v1/models/{id}` | retrieve a single model with its capabilities |
+| `GET /v1/model/info` | rich per-model capability dict (LiteLLM-style `supports_*`, `supported_endpoints`, `supported_output_modalities`) |
+| `GET /api/tags`, `POST /api/show` | Ollama-compatible discovery; `/api/show` returns the requested name's real `capabilities` + `model_info.scrocco.*` (caps, endpoints, usage example) |
 | `POST /v1/images/generations` | image gen (text-to-image; accetta anche `image`/`images` di riferimento) |
 | `POST /v1/images/edits` | image edit / image-to-image (multipart `image`+`prompt`, o JSON con `images`) |
 | `GET /v1/images/files/{id}` | download pubblico dell'immagine (`url` restituito da generations/edits; scade col TTL) |

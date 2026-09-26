@@ -483,6 +483,50 @@ individual account limits instead of dying on the first 429.
 5. **On success** record an escalation winner if the request was served
    uphill, clear any cooldown, and emit one `[summary]` log line.
 
+## Discovery: what a client sees, and how capabilities are declared
+
+There is **no standard** for model capabilities in a list-models endpoint: the
+OpenAI `Model` object carries only `id/created/object/owned_by`. Every client
+family invented its own, so this gateway publishes all the common ones from a
+single source of truth (`app/capmeta.py`, derived from the deployment `caps`).
+
+**Which names you see depends on the key** (the two sets have different
+stability):
+
+| Key | `GET /v1/models` shows | Why |
+|---|---|---|
+| master | the deployments (`...-8k__openai-gpt-4o-mini__0`) | the real, inspectable ones — but the `__idx` suffix **shifts on every CSV reload**, so they aren't names to configure |
+| client (profile) | base name, groups (`-Nk`, `-go`, `-fallback`, per-capability) and aliases — **never** a deployment | stable names; a configured client keeps working the next day |
+
+`?view=stable` / `?view=uniques` switch the set for the master key; a profile
+key is always pinned to `stable` (the parameter can't leak another profile).
+Deployments stay **callable** even when unlisted, so pinning one still works.
+
+**Capability fields** (present on `/v1/models`, `/v1/models/{id}`,
+`/api/v1/models`, `/api/tags`; `/api/show` reports the same for the requested
+name):
+
+| Field | Shape | Source |
+|---|---|---|
+| `capabilities` | list: Ollama enum values first, then our own tokens | Ollama `types/model/capability.go` |
+| `architecture.input_modalities` / `output_modalities` | e.g. `decision` → `decisions` | OpenRouter `Model` |
+| `capabilities_sx` | `{cap: {"supported": true}}` | Anthropic-style |
+| `supported_parameters` | the params actually honored | OpenRouter |
+| `supported_endpoints` | **which endpoint serves which capability** (e.g. `decision` → `/v1/systemone`) | LiteLLM |
+| `supports_*`, `supported_output_modalities` | booleans | LiteLLM |
+| `modalities` | `{vision, audio, image, video}` | llama.cpp |
+| `context_length` / `context_length_min` | max / guaranteed-floor input window | — |
+
+`GET /v1/model/info` exposes the LiteLLM-style dict on its own, for clients
+that look there. `POST /api/show` additionally returns
+`model_info.scrocco.endpoints` and `model_info.scrocco.usage` (a ready-to-copy
+request body per capability), so a client can see *how* to call `decision`.
+
+Note: `capabilities` lists the capabilities **routable for that name**, not
+everything the underlying model can do — buckets are mutually exclusive by
+design, so `...-vision` doesn't advertise `text`. On the **base name** the union
+is complete, which is the answer to "what can this gateway do".
+
 ## Quickstart
 
 ```bash
