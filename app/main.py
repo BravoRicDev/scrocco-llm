@@ -1167,6 +1167,14 @@ async def list_models(request: Request):
                 if g.startswith(target + "-"):
                     for d in deps:
                         caps |= _caps_of_dep(d)
+        # Alias (policy o CSV): le capacita' NON stanno in un gruppo
+        # '<target>-*' ma nei gruppi-alias, che si chiamano
+        # '<prefix><profilo>-<alias>[-<cap>]'. Unione di tutti i gruppi
+        # dell'alias (primario/-go/-fallback, per ogni capacita').
+        if is_alias:
+            for g in config.alias_groups.get(name, ()):
+                for d in config.groups.get(g, ()):
+                    caps |= _caps_of_dep(d)
         if caps:
             entry["capabilities"] = sorted(caps)
         return entry

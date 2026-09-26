@@ -90,9 +90,9 @@ def client(monkeypatch, tmp_path):
     _client_teardown(m, orig)
 
 
-def _client_env(monkeypatch, tmp_path, rows):
+def _client_env(monkeypatch, tmp_path, rows, header=_HEADER):
     csv = tmp_path / "k.csv"
-    csv.write_text(_HEADER + rows)
+    csv.write_text(header + rows)
     import app.main as m
     orig = (m.authn.master_key, m.config.csv_path)
     m.authn.master_key = "test-master-jev"
@@ -375,3 +375,23 @@ def test_decision_prefers_free_primary_over_paid_fallback(client_mixed,
     assert r.status_code == 200, r.text
     dep = r.json()["nx_deployment"]
     assert "-decision__" in dep and "-decision-fallback__" not in dep
+
+
+def test_models_alias_exposes_decision_capability(monkeypatch, tmp_path):
+    """L'entry alias (`jev-latest`) in /v1/models deve dichiarare la capacita'
+    reale (`decision`), risolta dai gruppi-alias, non solo id/owned_by."""
+    header = ("commento,modello,provider,endpoint,data,context,max_input,"
+              "priority,scrocco-llm-test,caps,api_style,alias\n")
+    row = ("t1,jev-a,bynara,https://router.bynara.id/v1/systemone,free,32,"
+           "32000,0,sk-k,decision,jev,jev-latest\n")
+    m, orig = _client_env(monkeypatch, tmp_path, row, header=header)
+    try:
+        c = TestClient(m.app)
+        r = c.get("/v1/models", headers=MK)
+        assert r.status_code == 200, r.text
+        entry = next((x for x in r.json()["data"] if x["id"] == "jev-latest"),
+                     None)
+        assert entry is not None, "alias jev-latest assente da /v1/models"
+        assert entry.get("capabilities") == ["decision"]
+    finally:
+        _client_teardown(m, orig)
