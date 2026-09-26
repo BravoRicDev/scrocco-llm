@@ -379,7 +379,10 @@ def test_decision_prefers_free_primary_over_paid_fallback(client_mixed,
 
 def test_models_alias_exposes_decision_capability(monkeypatch, tmp_path):
     """L'entry alias (`jev-latest`) in /v1/models deve dichiarare la capacita'
-    reale (`decision`), risolta dai gruppi-alias, non solo id/owned_by."""
+    reale (`decision`), risolta dai gruppi-alias, non solo id/owned_by.
+
+    Gli alias stanno nella vista `stable` (il master di default elenca i
+    deployment, che non sono nomi stabili)."""
     header = ("commento,modello,provider,endpoint,data,context,max_input,"
               "priority,scrocco-llm-test,caps,api_style,alias\n")
     row = ("t1,jev-a,bynara,https://router.bynara.id/v1/systemone,free,32,"
@@ -387,11 +390,15 @@ def test_models_alias_exposes_decision_capability(monkeypatch, tmp_path):
     m, orig = _client_env(monkeypatch, tmp_path, row, header=header)
     try:
         c = TestClient(m.app)
-        r = c.get("/v1/models", headers=MK)
+        r = c.get("/v1/models?view=stable", headers=MK)
         assert r.status_code == 200, r.text
         entry = next((x for x in r.json()["data"] if x["id"] == "jev-latest"),
                      None)
         assert entry is not None, "alias jev-latest assente da /v1/models"
         assert entry.get("capabilities") == ["decision"]
+        # forma OpenRouter: il modello decisionale dichiara `decisions`
+        assert "decisions" in entry["architecture"]["output_modalities"]
+        # forma LiteLLM: la capability dice DOVE chiamare
+        assert "/v1/systemone" in entry["supported_endpoints"]
     finally:
         _client_teardown(m, orig)

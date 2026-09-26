@@ -110,6 +110,124 @@ def test_api_show(client):
     assert "capabilities" in body
 
 
+# ------------------------------------------------- discovery: chi vede cosa
+def test_master_default_sees_only_uniques(client):
+    """Il master di default elenca i DEPLOYMENT: nomi 'veri' ma non stabili.
+    Nessun alias, nessun gruppo, nessun nome base."""
+    c, m, _ = client
+    ids = [x["id"] for x in c.get("/v1/models", headers=MK).json()["data"]]
+    assert ids, "il master non vede nessun deployment"
+    assert all("__" in i for i in ids), "un nome non-unique nel default master"
+    base = m.config.proxy_prefix + m.config.profiles[0]
+    assert base not in ids
+
+
+def test_master_view_stable_sees_names_not_uniques(client):
+    """?view=stable: nome base + gruppi, e NON i deployment."""
+    c, m, _ = client
+    data = c.get("/v1/models?view=stable", headers=MK).json()["data"]
+    ids = [x["id"] for x in data]
+    base = m.config.proxy_prefix + m.config.profiles[0]
+    assert base in ids
+    assert not any("__" in i for i in ids), "un unique nella vista stable"
+    # la vista ricca porta i campi capability
+    entry = next(x for x in data if x["id"] == base)
+    assert entry.get("capabilities"), "manca capabilities nella vista stable"
+    assert "architecture" in entry and "supported_endpoints" in entry
+
+
+def test_profile_key_never_sees_uniques(client):
+    """Una chiave di profilo (deterministica `sk-<profilo>`, attiva fuori
+    produzione) vede i nomi STABILI del proprio profilo e non i deployment:
+    `?view=uniques` non la fa uscire dalla vista stable."""
+    c, m, _ = client
+    prof = m.config.profiles[0]
+    h = {"Authorization": f"Bearer sk-{prof}"}
+    r = c.get("/v1/models", headers=h)
+    assert r.status_code == 200, r.text
+    for url in ("/v1/models", "/v1/models?view=uniques",
+                "/v1/models?view=stable"):
+        ids = [x["id"] for x in c.get(url, headers=h).json()["data"]]
+        assert base_name(m) in ids, url
+        assert not any("__" in i for i in ids), f"unique visibile in {url}"
+
+
+def base_name(m) -> str:
+    return m.config.proxy_prefix + m.config.profiles[0]
+
+
+def test_uniques_not_in_stable_but_still_callable(client):
+    """Un deployment non e' piu' nella vista stable (nomi stabili), ma resta
+    utilizzabile: non si rompe nessuno che lo aveva pinnato."""
+    c, m, _ = client
+    uid = _real_unique(m)
+    stable = [x["id"] for x in
+              c.get("/v1/models?view=stable", headers=MK).json()["data"]]
+    assert uid not in stable
+    # resta recuperabile
+    r = c.get(f"/v1/models/{uid}", headers=MK)
+    assert r.status_code == 200 and r.json()["id"] == uid
+    # resta instradabile: NON viene respinto come modello sconosciuto
+    r2 = c.post("/v1/chat/completions", headers=MK, json={
+        "model": uid, "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1})
+    body = r2.text
+    assert "model_not_found" not in body and "non gestito" not in body, body
+
+
+def test_capability_fields_on_retrieve(client):
+    """Il retrieve espone le stesse capability della lista."""
+    c, m, _ = client
+    base = base_name(m)
+    listed = next(x for x in c.get("/v1/models?view=stable", headers=MK)
+                  .json()["data"] if x["id"] == base)
+    one = c.get(f"/v1/models/{base}", headers=MK).json()
+    assert one.get("capabilities") == listed.get("capabilities")
+    assert one.get("architecture") == listed.get("architecture")
+
+
+def test_api_tags_entries_have_capabilities(client):
+    c, m, _ = client
+    models = c.get("/api/tags", headers=MK).json()["models"]
+    entry = next(x for x in models if x["name"] == base_name(m))
+    assert entry.get("capabilities"), "manca capabilities in /api/tags"
+    # enum Ollama: i valori ufficiali devono essere presenti
+    assert "completion" in entry["capabilities"]
+
+
+def test_api_show_real_capabilities(client):
+    """Prima /api/show rispondeva sempre ["completion","chat"]: un client non
+    poteva scoprire le capability reali del nome richiesto."""
+    c, m, _ = client
+    base = base_name(m)
+    body = c.post("/api/show", headers=MK, json={"name": base}).json()
+    assert body["capabilities"] != ["completion", "chat"]
+    assert "completion" in body["capabilities"]
+    info = body["model_info"]
+    assert "scrocco.caps" in info
+    assert "scrocco.endpoints" in info
+    assert "/v1/chat/completions" in info["scrocco.endpoints"].values()
+
+
+def test_model_info_endpoint(client):
+    """Endpoint dedicato in stile LiteLLM."""
+    c, m, _ = client
+    r = c.get("/v1/model/info?view=stable", headers=MK)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    entry = next(x for x in data if x["id"] == base_name(m))
+    mi = entry["model_info"]
+    assert mi["supports_function_calling"] is True
+    assert "/v1/chat/completions" in mi["supported_endpoints"]
+    assert mi["max_input_tokens"] > 0
+    assert "architecture" in mi
+
+
+def test_model_info_requires_auth(client):
+    c, m, _ = client
+    assert c.get("/v1/model/info").status_code == 401
+
+
 def test_version_no_auth(client):
     c, m, _ = client
     r = c.get("/version")

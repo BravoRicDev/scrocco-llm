@@ -59,6 +59,7 @@ from .auth import AuthManager, AuthResult, gateway_env
 from . import journal, metrics
 from . import imagestore
 from . import audiostore
+from . import capmeta
 from .config import (GatewayConfig, csv_mtime_ns, maybe_reload,
                      CAP_PRIORITY_ORDER)
 from . import sniff
@@ -1118,77 +1119,165 @@ async def metrics_endpoint():
 
 
 # ------------------------------------------------------------------- models
+# I nomi esposti dipendono DA CHI CHIAMA, perche' i due insiemi hanno
+# stabilita' diversa:
+#   * `uniques`  = `scrocco-llm-<prof>-<grp>__<modello>__<idx>`: il deployment
+#     singolo. CAMBIANO a ogni ricaricamento del CSV (l'indice si riallinea se
+#     una riga viene aggiunta/tolta), quindi non sono "nomi veri": si mostrano
+#     solo al master, che li usa per ispezionare il parco. Restano comunque
+#     CHIAMABILI (routing e /v1/models/{id} li accettano) per non rompere
+#     qualcuno che li ha pinnati.
+#   * `stable`   = nome base, gruppi (`-Nk`, `-go`, `-fallback`, per-capacita')
+#     e alias: nomi che restano validi domani. Sono questi che vede una chiave
+#     di profilo, che non deve mai puntare a un deployment instabile.
+VIEWS = ("uniques", "stable")
+
+
+def _stable_names(cfg, pname: str) -> list[str]:
+    """Nome base + gruppi (`-Nk`, `-go`, `-fallback`, per-capacita').
+
+    `whitelist_for` aggiunge anche gli uniques: qui non vanno, perche' non
+    sono nomi stabili (cambiano a ogni ricaricamento del CSV) ed e' esattamente
+    cio' che una chiave di profilo non deve vedere.
+    """
+    base = cfg.proxy_prefix + pname
+    groups = sorted(g for g in cfg.groups if g.startswith(base + "-"))
+    return [base] + groups
+
+
+def _names_for_auth(auth, view: str) -> list[str]:
+    """Nomi visibili per `auth` nella vista `view` (de-dup, ordine stabile)."""
+    cfg = config
+    master = auth.mode == "master"
+    profs = list(cfg.profiles) if master else [auth.profile or ""]
+    out: list[str] = []
+    if view == "uniques":
+        for p in profs:
+            if not p:
+                continue
+            base = cfg.proxy_prefix + p
+            for g, deps in cfg.groups.items():
+                if g == base or g.startswith(base + "-"):
+                    out.extend(d["unique"] for d in deps)
+    else:
+        for p in profs:
+            if p:
+                out.extend(_stable_names(cfg, p))
+        # alias di policy: pubblici, ma solo se il target è utilizzabile
+        allowed = None if master else set(out)
+        for a, t in policy.aliases.items():
+            if allowed is None or t in allowed:
+                out.append(a)
+        # alias della colonna CSV `alias` (definiti nei dati)
+        for p in profs:
+            if p:
+                out.extend(cfg.alias_names_for(p))
+    seen: set[str] = set()
+    res: list[str] = []
+    for n in out:
+        if n not in seen:
+            seen.add(n)
+            res.append(n)
+    return res
+
+
+def _view_for(request: Request, auth) -> str:
+    """Vista richiesta. Una chiave di profilo vede SEMPRE `stable`: il
+    parametro non puo' farla uscire dal proprio profilo."""
+    if auth.mode != "master":
+        return "stable"
+    view = request.query_params.get("view", "").strip().lower()
+    return view if view in VIEWS else "uniques"
+
+
+def _deps_for_name(name: str) -> list[dict]:
+    """Deployment che compongono un nome: unique, gruppo, alias o nome base."""
+    cfg = config
+    dep = cfg.deployment_by_unique(name)
+    if dep is not None:
+        return [dep]
+    if name in cfg.groups:
+        return list(cfg.groups[name])
+    if name in cfg.alias_groups:
+        out: list[dict] = []
+        for g in sorted(cfg.alias_groups[name]):
+            out.extend(cfg.groups.get(g, ()))
+        return _dedup_deps(out)
+    out = []
+    for g, deps in cfg.groups.items():
+        if g.startswith(name + "-"):
+            out.extend(deps)
+    return _dedup_deps(out)
+
+
+def _dedup_deps(deps) -> list[dict]:
+    seen: set[str] = set()
+    res: list[dict] = []
+    for d in deps:
+        u = d.get("unique")
+        if u not in seen:
+            seen.add(u)
+            res.append(d)
+    return res
+
+
+def _caps_and_deps(name: str) -> tuple[set[str], list[dict]]:
+    """(capability, deployment) di un nome.
+
+    Fonte di verità: MEMBERSHIP (`dep["caps"]`) quando presente; altrimenti la
+    mappa advisory `capability_routing.model_capabilities`."""
+    target = policy.aliases.get(name, name)
+    deps = _deps_for_name(target)
+    caps: set[str] = set()
+    for d in deps:
+        member = d.get("caps") or frozenset()
+        caps |= (member if member else policy.caps_for(d["model"]))
+    return caps, deps
+
+
+def _model_entry(name: str, *, rich: bool = True) -> dict:
+    """Entry modello standard OpenAI + capability nei formati che i client
+    leggono (vedi `capmeta`).
+
+    `rich=False` (vista `uniques`, cioè elenco di oltre 1600 deployment) tiene
+    solo `capabilities` + `architecture`: i campi più grandi sono ridondanti
+    per un deployment singolo e gonfierebbero la risposta di diverse volte.
+    """
+    entry = {"id": name, "object": "model",
+             "created": int(time.time()), "owned_by": policy.service_name,
+             "reasoning_effort": ["default", "low", "medium", "high"],
+             "reasoning_effort_default": "default"}
+    caps, deps = _caps_and_deps(name)
+    if not caps:
+        return entry
+    entry["capabilities"] = capmeta.ollama_capabilities(caps)
+    entry["architecture"] = capmeta.modalities(caps)
+    if not rich:
+        return entry
+    entry["capabilities_sx"] = capmeta.structured_style(caps)
+    entry["supported_parameters"] = capmeta.supported_parameters(caps)
+    entry["modalities"] = capmeta.llama_cpp_modalities(caps)
+    ctx_max, ctx_min = capmeta.context_lengths(deps)
+    if ctx_max:
+        entry["context_length"] = ctx_max
+        entry["context_length_min"] = ctx_min
+        entry["top_provider"] = {"max_completion_tokens": None}
+    entry.update(capmeta.litellm_style(caps))
+    if ctx_max:
+        entry["max_input_tokens"] = ctx_max
+    return entry
+
+
 @app.get("/v1/models")
 async def list_models(request: Request):
     auth = authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
-
-    if auth.mode == "master":
-        allowed: set[str] | None = None          # tutto
-        names: list[str] = []
-        for g, deps in config.groups.items():
-            names.extend(d["unique"] for d in deps)
-    else:
-        wl = config.whitelist_for(auth.profile or "")
-        allowed = set(wl)
-        names = list(wl)
-
-    # gli ALIAS configurati sono nomi pubblici a tutti gli effetti:
-    # visibili solo se il loro target è usabile dalla chiave
-    usable_aliases = sorted(
-        a for a, t in policy.aliases.items()
-        if allowed is None or t in allowed)
-
-    def _model_entry(name: str, is_alias: bool = False) -> dict:
-        """Costruisce l'entry modello con capacità risolte.
-
-        Fonte di verità: MEMBERSHIP (dep["caps"]) quando presente;
-        altrimenti la mappa advisory capability_routing.model_capabilities."""
-        entry = {"id": name, "object": "model",
-                 "created": int(time.time()), "owned_by": policy.service_name,
-                 "reasoning_effort": ["default", "low", "medium", "high"],
-                 "reasoning_effort_default": "default"}
-        target = policy.aliases.get(name, name) if is_alias else name
-
-        def _caps_of_dep(d: dict) -> frozenset:
-            member = d.get("caps") or frozenset()
-            return member if member else policy.caps_for(d["model"])
-
-        caps: set[str] = set()
-        dep = config.deployment_by_unique(target)
-        if dep:
-            caps |= _caps_of_dep(dep)
-        elif target in config.groups:
-            for d in config.groups[target]:
-                caps |= _caps_of_dep(d)
-        else:
-            for g, deps in config.groups.items():
-                if g.startswith(target + "-"):
-                    for d in deps:
-                        caps |= _caps_of_dep(d)
-        # Alias (policy o CSV): le capacita' NON stanno in un gruppo
-        # '<target>-*' ma nei gruppi-alias, che si chiamano
-        # '<prefix><profilo>-<alias>[-<cap>]'. Unione di tutti i gruppi
-        # dell'alias (primario/-go/-fallback, per ogni capacita').
-        if is_alias:
-            for g in config.alias_groups.get(name, ()):
-                for d in config.groups.get(g, ()):
-                    caps |= _caps_of_dep(d)
-        if caps:
-            entry["capabilities"] = sorted(caps)
-        return entry
-
-    all_names = sorted(set(names))
-    data = [_model_entry(n, False) for n in all_names]
-    data += [_model_entry(a, True) for a in usable_aliases]
-    # Alias della colonna `alias` (definiti nei dati CSV, #53): sono nomi
-    # pubblici a tutti gli effetti come i `policy.aliases`; per il master
-    # quelli di tutti i profili, altrimenti solo quelli del profilo autenticato.
-    _data_alias = (config.alias_names() if auth.mode == "master"
-                   else config.alias_names_for(auth.profile or ""))
-    data += [_model_entry(a, True) for a in sorted(set(_data_alias))]
-    return {"object": "list", "data": data}
+    view = _view_for(request, auth)
+    rich = view == "stable"
+    names = sorted(set(_names_for_auth(auth, view)))
+    return {"object": "list",
+            "data": [_model_entry(n, rich=rich) for n in names]}
 
 
 # ------------------------------------------------ compat endpoints (404 fixes)
@@ -1227,25 +1316,30 @@ def _visible_model_names(request: Request):
     return out, auth
 
 
-def _model_obj(name: str) -> dict:
-    return {"id": name, "object": "model", "created": int(time.time()),
-            "owned_by": policy.service_name,
-            "reasoning_effort": ["default", "low", "medium", "high"],
-            "reasoning_effort_default": "default"}
-
-
 def _ollama_entry(name: str) -> dict:
-    return {"name": name, "model": name,
-            "modified_at": "1970-01-01T00:00:00Z", "size": 0, "digest": "",
-            "details": {"parent_model": "", "format": "gguf", "family": "",
-                        "families": None, "parameter_size": "",
-                        "quantization_level": ""}}
+    """Entry Ollama. `capabilities` esiste gia' nel contratto
+    (`api/types.go` -> `ListModelResponse.Capabilities []model.Capability`, con
+    `omitempty`): aggiungerlo e' additivo e non rompe i client."""
+    caps, _deps = _caps_and_deps(name)
+    entry = {"name": name, "model": name,
+             "modified_at": "1970-01-01T00:00:00Z", "size": 0, "digest": "",
+             "details": {"parent_model": "", "format": "gguf", "family": "",
+                         "families": None, "parameter_size": "",
+                         "quantization_level": ""}}
+    if caps:
+        entry["capabilities"] = capmeta.ollama_capabilities(caps)
+    return entry
 
 
 @app.get("/v1/models/{model_id:path}")
 async def retrieve_model(model_id: str, request: Request):
     """OpenAI 'retrieve model'. 200 se il modello è gestito (nome diretto,
-    alias, o canonicalizzabile a un gruppo/base noto), altrimenti 404."""
+    alias, o canonicalizzabile a un gruppo/base noto), altrimenti 404.
+
+    Restituisce le STESSE capability di /v1/models: un client che interroga un
+    nome singolo deve vedere le stesse cose che vede in lista. Nota che sono
+    accettati anche gli `uniques` (deployment): non sono stabili, ma restano
+    chiamabili per non rompere chi li ha pinnati."""
     names, auth = _visible_model_names(request)
     if names is None:
         return _unauthorized(auth.error)
@@ -1261,12 +1355,12 @@ async def retrieve_model(model_id: str, request: Request):
             "message": f"model '{model_id}' not found",
             "type": "invalid_request_error",
             "code": "model_not_found"}})
-    return _model_obj(model_id)
+    return _model_entry(model_id)
 
 
 @app.get("/api/tags")
 async def ollama_tags(request: Request):
-    """Ollama: lista modelli."""
+    """Ollama: lista modelli (nomi stabili: base + gruppi + alias)."""
     names, auth = _visible_model_names(request)
     if names is None:
         return _unauthorized(auth.error)
@@ -1276,15 +1370,57 @@ async def ollama_tags(request: Request):
 @app.get("/api/v1/models")
 async def api_v1_models(request: Request):
     """Alias non-standard di /v1/models usato da alcuni client."""
-    names, auth = _visible_model_names(request)
-    if names is None:
+    auth = authn.authenticate(request.headers.get("authorization"))
+    if not auth.ok:
         return _unauthorized(auth.error)
-    return {"object": "list", "data": [_model_obj(n) for n in names]}
+    view = _view_for(request, auth)
+    rich = view == "stable"
+    names = sorted(set(_names_for_auth(auth, view)))
+    return {"object": "list",
+            "data": [_model_entry(n, rich=rich) for n in names]}
+
+
+@app.get("/v1/model/info")
+async def model_info(request: Request):
+    """Dettaglio capability per modello, stile LiteLLM `/model/info`.
+
+    Vive su un endpoint dedicato (non dentro /v1/models) perche' e' la forma piu'
+    ricca in circolazione e aggiungerla allo standard OpenAI lo inquinerebbe.
+    Stessa segregazione di /v1/models: `?view=uniques|stable`, e una chiave di
+    profilo vede solo i nomi stabili del proprio profilo."""
+    auth = authn.authenticate(request.headers.get("authorization"))
+    if not auth.ok:
+        return _unauthorized(auth.error)
+    view = _view_for(request, auth)
+    rich = view == "stable"
+    data = []
+    for name in sorted(set(_names_for_auth(auth, view))):
+        caps, deps = _caps_and_deps(name)
+        if not caps:
+            continue
+        info = capmeta.litellm_style(caps)
+        ctx_max, ctx_min = capmeta.context_lengths(deps)
+        if ctx_max:
+            info["max_input_tokens"] = ctx_max
+            info["min_input_tokens"] = ctx_min
+        if rich:
+            info["architecture"] = capmeta.modalities(caps)
+            info["supported_parameters"] = capmeta.supported_parameters(caps)
+            info["capabilities_sx"] = capmeta.structured_style(caps)
+        data.append({"id": name, "object": "model_info", "model_info": info})
+    return {"object": "list", "data": data}
 
 
 @app.post("/api/show")
 async def ollama_show(request: Request):
-    """Ollama: dettagli modello. Stub statico + capabilities minime."""
+    """Ollama: dettagli modello. Capabilities REALI del nome richiesto.
+
+    Prima restituiva sempre `["completion", "chat"]`: un client che chiedeva
+    "cosa sa fare scrocco-llm-fissone?" riceveva una risposta fissa, e quindi
+    non poteva sapere che lo stesso nome instrada anche le chiamate Jev
+    (`/v1/systemone`). `model_info` (il posto che Ollama riserva ai metadati
+    arbitrari del modello) riporta capability, endpoint e un esempio d'uso.
+    """
     names, auth = _visible_model_names(request)
     if names is None:
         return _unauthorized(auth.error)
@@ -1300,9 +1436,30 @@ async def ollama_show(request: Request):
         return JSONResponse(status_code=404, content={"error": {
             "message": f"model '{name}' not found",
             "type": "invalid_request_error"}})
+    target = name or policy.service_name
+    caps, deps = _caps_and_deps(target)
+    ctx_max, ctx_min = capmeta.context_lengths(deps)
+    model_info: dict = {}
+    if caps:
+        model_info["scrocco.caps"] = sorted(caps)
+        model_info["scrocco.capabilities_ollama"] = capmeta.ollama_capabilities(caps)
+        model_info["scrocco.endpoints"] = {
+            c: capmeta.supported_endpoints({c})[0]
+            for c in sorted(caps) if capmeta.supported_endpoints({c})}
+        model_info["scrocco.architecture"] = capmeta.modalities(caps)
+        model_info["scrocco.supported_parameters"] = capmeta.supported_parameters(caps)
+        if ctx_max:
+            model_info["scrocco.context_length"] = ctx_max
+            model_info["scrocco.max_input_tokens"] = ctx_max
+            model_info["scrocco.min_input_tokens"] = ctx_min
+        _hint = capmeta.usage_hint(caps)
+        if _hint:
+            model_info["scrocco.usage"] = _hint
     return {"license": "", "modelfile": "", "parameters": "", "template": "",
-            "details": _ollama_entry(name or policy.service_name)["details"],
-            "model_info": {}, "capabilities": ["completion", "chat"]}
+            "details": _ollama_entry(target)["details"],
+            "model_info": model_info,
+            "capabilities": (capmeta.ollama_capabilities(caps) if caps
+                             else ["completion"])}
 
 
 @app.get("/api/version")
