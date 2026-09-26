@@ -58,12 +58,14 @@ from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
 from . import journal, metrics
 from . import imagestore
+from . import audiostore
 from .config import (GatewayConfig, csv_mtime_ns, maybe_reload,
                      CAP_PRIORITY_ORDER)
 from . import sniff
 from . import repairlog
 from . import autoprobe
 from . import sttscrub
+from . import sttchat
 from . import forwarder as fwd
 from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
                         PERMISSION_DENIED_COOLDOWN_S,
@@ -129,7 +131,8 @@ from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
                             spoof_enabled, opencode_cautious_request,
                             is_opencode_zen_dep)
 from .capabilities import (required_caps, count_image_parts, refs_max_for,
-                           wants_image_output, _is_image_part)
+                           wants_image_output, _is_image_part,
+                           count_audio_parts)
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
 
@@ -345,6 +348,14 @@ def _apply_misc_policy(pol) -> None:
             ttl_sec=getattr(pol, "images_store_ttl_sec", None),
             max_items=getattr(pol, "images_store_max_items", None),
             max_bytes=getattr(pol, "images_store_max_bytes", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        # Cache delle trascrizioni STT: TTL dalla policy, gli altri limiti
+        # restano quelli del modulo (il budget e' in caratteri di testo, che
+        # non ha un equivalente nella policy delle immagini).
+        audiostore.configure(
+            ttl_sec=getattr(pol, "stt_chat_cache_ttl_sec", None))
     except Exception:                                  # noqa: BLE001
         pass
     try:
@@ -1709,6 +1720,21 @@ async def chat_completions(request: Request, response: Response):
     if not authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
+    # --- routing ---
+    _set_opencode_gate(request)
+    session_id = _session_id(request, payload)
+
+    # --- STT-BRIDGE: audio in chat -> testo (PRIMA di ogni altra cosa) ---
+    # Va fatto PRIMA del capability detection: con STT sempre l'audio non
+    # deve piu' chiedere la capacita' `audio` al routing, altrimenti finirebbe
+    # nel gruppo -audio (73 deployment che ho verificato non trascrivere
+    # l'audio in modo affidabile) invece che nel pool testo normale. Dopo
+    # questa riga `messages` non ha piu' audio.
+    if count_audio_parts(payload.get("messages") or []):
+        payload = await _stt_bridge(
+            request, payload, auth, session_id, model, raw_model)
+        messages = payload.get("messages") or []
+
     # --- capability detection ---
     # capacità richieste dal payload; OGNI chat produce testo -> "text" è sempre
     # implicita: i modelli solo-tts/stt/image_gen escono dal pool chat automatico
@@ -1718,9 +1744,6 @@ async def chat_completions(request: Request, response: Response):
     else:
         need = frozenset()
 
-    # --- routing ---
-    _set_opencode_gate(request)
-    session_id = _session_id(request, payload)
     # SESSION-DEP GUARD: la sessione corrente dev'essere nota GIA' durante
     # initial_pick/pick_deployment (guardia anti-usurpazione cross-sessione),
     # non solo dopo il pick come in passato.
@@ -3942,6 +3965,140 @@ def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
     out = dict(payload)
     out["messages"] = out_msgs
     return out, len(drop)
+
+
+async def _stt_bridge_transcribe(request: Request, chunk: bytes,
+                                 profile: str | None, raw_model: str,
+                                 session_id: str | None,
+                                 used: set[str]) -> str:
+    """Trascrive un chunk di audio per lo STT-bridge in chat.
+
+    Ruota sui deployment `-stt` chiedendo al router uno SEMPRE diverso per
+    ogni chunk (`used`): cosi' i chunk di un file lungo viaggiano davvero in
+    parallelo su chiavi diverse. La freschezza e la penalizzazione
+    dell'ultimo usato le fa gia' `pick_deployment`: qui non si duplica nulla.
+
+    Ritorna il testo, oppure "" se nessun deployment ha risposto: in quel caso
+    il chiamante mette il marker e la richiesta continua (mai 503 al client)."""
+    if not router.policy.routing_active():
+        # routing disattivato: nessuna selezione capability possibile. Si va
+        # sul gruppo -stt del profilo comunque, per non perdere l'audio.
+        grp = None
+        if profile:
+            for cand in (f"{config.proxy_prefix}{profile}-stt",
+                         f"{config.proxy_prefix}{profile}-stt-fallback"):
+                if cand in router.config.groups:
+                    grp = cand
+                    break
+        if grp is None:
+            return ""
+        dep = router.config.deployment_by_unique(grp) \
+            or router.pick_deployment(grp, frozenset({"stt"}))
+    else:
+        grp, dep = _audio_route(
+            profile, policy.canonicalize(
+                f"{config.proxy_prefix}{profile or ''}-stt"),
+            f"{profile or ''}-stt", session_id, frozenset({"stt"}))[:2]
+    tried = 0
+    last: UpstreamError | None = None
+    _sess = _opencode_session(request) or session_id
+    _cip = _client_ip(request)
+    _attr = _client_attribution(request)
+    while dep is not None and tried < 8:
+        cur = dep["unique"]
+        tried += 1
+        if cur in used:
+            nxt = router.pick_deployment(dep["group"], frozenset({"stt"}),
+                                         exclude=cur) if dep.get("group") \
+                in router.config.groups else None
+            dep = nxt
+            continue
+        used.add(cur)
+        router.note_start(cur)
+        t0 = time.monotonic()
+        try:
+            res = await forwarder.transcribe(
+                dep, {}, chunk, "chunk.ogg", "audio/ogg",
+                path="transcriptions", profile=profile or "",
+                client_ip=_cip, session=_sess, attribution=_attr)
+            router.note_result(cur, (time.monotonic() - t0) * 1000)
+            metrics.inc("nx_stt_total", (dep["group"], "ok"))
+            res, _scrubbed = sttscrub.scrub_payload(res)
+            if _scrubbed:
+                log.info("[stt-bridge] %s: rimosse %d allucinazioni credit",
+                         cur, _scrubbed)
+            if isinstance(res, dict):
+                return str(res.get("text") or "")
+            return str(res or "")
+        except UpstreamError as err:
+            last = err
+            router.note_end(cur)
+            router.mark_failed(cur, seconds=err.retry_after,
+                               status=abs(err.status) if err.status else None)
+            metrics.inc("nx_stt_total", (dep["group"], "chat_bridge_error"))
+            nxt = None
+            if dep.get("group") in router.config.groups:
+                nxt = router.pick_deployment(dep["group"],
+                                             frozenset({"stt"}),
+                                             exclude=cur)
+            dep = nxt
+    if last is not None:
+        log.info("[stt-bridge] nessun deployment ha risposto: %s",
+                 (last.detail or "")[:100])
+    return ""
+
+
+# --- STT-BRIDGE: audio in chat -> testo, prima di ogni altra logica ---
+async def _stt_bridge(request: Request, payload: dict, auth: AuthResult,
+                       session_id: str | None, model: str,
+                       raw_model: str) -> dict:
+    """Trascrive l'audio nella history e lo sostituisce con testo.
+
+    Va eseguita PRIMA di qualunque cosa che guardi la history: l'intercettore
+    immagini, il tetto immagini, la stima del contesto e la compattazione. Se
+    l'audio diventasse testo dopo, la stima conterrebbe byte che poi non
+    esistono piu' e la compattazione taglierebbe a caso.
+
+    Ritorna il payload (eventualmente identico): non solleva mai, perche' un
+    audio non trascrivibile non deve portare via la richiesta.
+    """
+    if not count_audio_parts(payload.get("messages") or []):
+        return payload
+    # Il confine e' quello della COMPATTAZIONE: una sola nozione di "turno
+    # protetto", cosi' trascrizione e compattazione non possono divergere.
+    boundary = None
+    try:
+        from .ctxcompact import (ctxcompact_config_from_policy,
+                                 frontier_boundary)          # noqa: PLC0415
+        _cc = ctxcompact_config_from_policy(router.policy)
+        _b = frontier_boundary(
+            payload.get("messages") or [], _cc,
+            max_in=0, boundary_floor=0)
+        boundary = _b
+    except Exception:                                      # noqa: BLE001
+        boundary = None
+    used: set[str] = set()
+    _prof = auth.profile or _profile_of_request(model, auth.profile)
+
+    async def _one(chunk: bytes, idx: int) -> str:
+        return await _stt_bridge_transcribe(
+            request, chunk, _prof, raw_model, session_id, used)
+
+    try:
+        out = await sttchat.resolve_audio_in_payload(
+            payload, boundary=boundary, transcript_one=_one,
+            policy=router.policy)
+    except Exception as e:                                 # noqa: BLE001
+        log.warning("[stt-bridge] errore inatteso: %s", e)
+        return payload
+    if out is not payload:
+        _n = count_audio_parts(payload.get("messages") or []) \
+            - count_audio_parts(out.get("messages") or [])
+        if _n:
+            log.info("[stt-bridge] %d parti audio sostituite dal testo",
+                     _n)
+            metrics.inc("nx_stt_total", (_prof or "-", "chat_bridge"))
+    return out
 
 
 async def _stream_with_fallback(profile: str | None, first_dep: dict,

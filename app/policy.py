@@ -314,6 +314,14 @@ YAML_PATHS: dict[str, str] = {
     "images_chat_fallback": "capability_routing.images_chat_fallback",
     "image_refs_hard_max": "capability_routing.image_refs_hard_max",
     "chat_images_max": "capability_routing.chat_images_max",
+    "stt_chat_enabled": "capability_routing.stt_chat_enabled",
+    "stt_chat_target_sec": "capability_routing.stt_chat_target_sec",
+    "stt_chat_search_pct": "capability_routing.stt_chat_search_pct",
+    "stt_chat_max_bytes": "capability_routing.stt_chat_max_bytes",
+    "stt_chat_max_parallel": "capability_routing.stt_chat_max_parallel",
+    "stt_chat_unavailable_notice": "capability_routing.stt_chat_unavailable_notice",
+    "stt_chat_cache_ttl_sec": "capability_routing.stt_chat_cache_ttl_sec",
+    "audio_token_estimate": "capability_routing.audio_token_estimate",
     "multimodal_last_resort": "capability_routing.multimodal_last_resort",
     "gen_same_model_failover": "capability_routing.gen_same_model_failover",
     "dims_ladder_floor": "capability_routing.dims_ladder_floor",
@@ -1494,6 +1502,41 @@ class Policy:
     # reinviate. Non e' il tetto di /v1/images/* (`image_refs_hard_max`), che
     # riguarda le reference di una singola operazione.
     chat_images_max: int = 3
+    # CHAT + AUDIO: STT SEMPRE. Un audio in chat viene prima normalizzato e
+    # trascritto, poi il testo va a un LLM qualsiasi. Motivo misurato in
+    # produzione: dei 7 modelli con cap `audio` nessuno trascriveva in forma
+    # `input_audio` (402, "descrive invece di trascrivere", rifiuto esplicito),
+    # mentre i 3 modelli `stt` (whisper) rispondono sempre. Con
+    # stt_chat_enabled=false si torna al comportamento di prima: l'audio
+    # chiede la capacita' `audio` e va al gruppo -audio.
+    stt_chat_enabled: bool = True
+    # Durata target dei chunk: N = ceil(durata/target) chunk, con confine
+    # BILANCIATO (residua/chunk residui) agganciato al silenzio piu' vicino
+    # entro search_pct. 180s = 3 minuti.
+    stt_chat_target_sec: int = 180
+    stt_chat_search_pct: float = 0.2
+    # Rete di sicurezza sui byte dei CHUNK, applicata DOPO la normalizzazione
+    # in OGG (non sull'ingresso grezzo: 7 minuti di WAV sono 13 MB ma diventano
+    # ~1,5 MB compressi, e rifiutarli sarebbe uccidere audio valido). Con 3
+    # minuti di chunk l'OGG resta sotto 1 MB, quindi non vincola mai nella
+    # pratica.
+    stt_chat_max_bytes: int = 7 * 1024 * 1024
+    # Chunk STT in volo contemporaneamente per richiesta: su un file da un'ora
+    # sono 20 chunk, e mandarli tutti insieme fa fallire le quote per lato
+    # upstream.
+    stt_chat_max_parallel: int = 4
+    # Testo inserito al posto dell'audio quando l'STT non ha potuto. Da POLICY
+    # e non contenuto utente: l'LLM lo cita in risposta invece di inventare.
+    stt_chat_unavailable_notice: str = (
+        "Il gateway ha provato a trascrivere l'audio con i modelli STT ma "
+        "nessuno ha potuto rispondere. Chiedi all'utente di riscrivere a testo.")
+    # TTL delle trascrizioni in cache: evitano di ritrascrivere lo stesso audio
+    # a ogni turno, dato che il client lo rimanda nella history.
+    stt_chat_cache_ttl_sec: int = 3600
+    # Token fittizi per secondo di audio nella stima del contesto (0 = audio
+    # non stimato). Whisper para circa 10-25 token/s in media; 25 e' il
+    # peggiore caso misurato, quindi stima conservativa.
+    audio_token_estimate: int = 25
 
     # STORE LOCALE IMMAGINI: gli endpoint /v1/images/* restituiscono un `url`
     # NOSTRO (download al volo) accanto a `b64_json`, anche quando l'upstream
@@ -3181,6 +3224,45 @@ class Policy:
                 if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                     raise ValueError("capability_routing.chat_images_max deve essere int >= 0 (0 = non limare)")
                 p.chat_images_max = int(v)
+            if "stt_chat_enabled" in cr:
+                p.stt_chat_enabled = _coerce_bool(
+                    cr["stt_chat_enabled"], "capability_routing.stt_chat_enabled")
+            if "stt_chat_target_sec" in cr:
+                v = cr["stt_chat_target_sec"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+                    raise ValueError("capability_routing.stt_chat_target_sec deve essere > 0")
+                p.stt_chat_target_sec = int(v)
+            if "stt_chat_search_pct" in cr:
+                v = cr["stt_chat_search_pct"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or v < 0 or v > 1:
+                    raise ValueError("capability_routing.stt_chat_search_pct deve essere 0..1")
+                p.stt_chat_search_pct = float(v)
+            if "stt_chat_max_bytes" in cr:
+                v = cr["stt_chat_max_bytes"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("capability_routing.stt_chat_max_bytes deve essere int >= 0")
+                p.stt_chat_max_bytes = int(v)
+            if "stt_chat_max_parallel" in cr:
+                v = cr["stt_chat_max_parallel"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                    raise ValueError("capability_routing.stt_chat_max_parallel deve essere int >= 1")
+                p.stt_chat_max_parallel = int(v)
+            if "stt_chat_unavailable_notice" in cr:
+                v = cr["stt_chat_unavailable_notice"]
+                if not isinstance(v, str):
+                    raise ValueError("capability_routing.stt_chat_unavailable_notice deve essere stringa")
+                p.stt_chat_unavailable_notice = v
+            if "stt_chat_cache_ttl_sec" in cr:
+                v = cr["stt_chat_cache_ttl_sec"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("capability_routing.stt_chat_cache_ttl_sec deve essere int >= 0")
+                p.stt_chat_cache_ttl_sec = int(v)
+            if "audio_token_estimate" in cr:
+                v = cr["audio_token_estimate"]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise ValueError("capability_routing.audio_token_estimate deve essere int >= 0")
+                p.audio_token_estimate = int(v)
             mlr = cr.get("multimodal_last_resort")
             if mlr is not None:
                 p.multimodal_last_resort = _coerce_bool(

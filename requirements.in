@@ -15,3 +15,12 @@ PyYAML>=6.0.2,<7.0
 # multipart/form-data parsing per /v1/audio/transcriptions|translations
 # (request.form() di Starlette lo richiede: senza, ogni STT torna 400).
 python-multipart>=0.0.18
+
+# Decodifica/codifica audio per lo STT-bridge in chat (audioconvert.py).
+# PyAV porta libav come libreria: nel container non c'e' ffmpeg, e i soli
+# moduli stdlib (wave, audioop) non bastano — `audioop` e' deprecato e rimosso
+# in Python 3.13. Serve a normalizzare QUALSIASI formato audio (mp3, m4a,
+# ogg, flac, webm, wav, PCM grezzo) in OGG/Opus, che e' un formato che i
+# backend STT accettano tutti: ho verificato che groq ha una whitelist e
+# rifiuta il PCM grezzo.
+av>=14,<19

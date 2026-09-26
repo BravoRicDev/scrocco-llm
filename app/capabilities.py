@@ -81,24 +81,21 @@ def required_caps(payload: dict) -> frozenset[str]:
                     need.add("vision")
                 elif ptype == "input_audio":
                     need.add("audio")
+                elif ptype in ("audio_url", "audio"):
+                    need.add("audio")
                 elif ptype == "video_url":
                     need.add("video")
-                elif ptype == "file":
-                    file_obj = part.get("file") or {}
-                    mime = (file_obj.get("mime_type") or file_obj.get("mime") or "").lower()
+                elif ptype in ("file", "inline_data"):
+                    # forme Gemini-native: la MIME decide la capacita'. Prima
+                    # erano guardate SOLO per video/image: un audio inline
+                    # finiva nel mondo testo senza nemmeno chiedere `audio`.
+                    mime = _mime_of(part)
                     if mime.startswith("video/"):
                         need.add("video")
                     elif mime.startswith("image/"):
                         need.add("vision")
-                elif ptype == "inline_data":
-                    mime = (part.get("mime_type") or part.get("mime") or "").lower()
-                    if mime.startswith("video/"):
-                        need.add("video")
-                    elif mime.startswith("image/"):
-                        # forma Gemini nativa: senza questo riconoscimento la
-                        # richiesta finiva nel mondo TESTO e il modello non
-                        # vedeva l'immagine (capabilities.py, intervento #57)
-                        need.add("vision")
+                    elif mime.startswith("audio/"):
+                        need.add("audio")
                 # input_text, text, reasoning, tool_calls, etc. -> ignorati
     return frozenset(need)
 
@@ -129,26 +126,120 @@ def wants_image_output(payload: dict) -> bool:
     return False
 
 
+def _mime_of(part: dict) -> str:
+    """Mime dichiarato in una parte di content, in qualunque forma.
+
+    Copre `mime_type` in linea (Gemini `inline_data`), dentro `file`
+    (`file.mime_type` / `file.mime`) e la `format` dichiarata nelle forme
+    OpenAI (`input_audio.format`, es. "wav")."""
+    for key in ("mime_type", "mime"):
+        v = part.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    fo = part.get("file")
+    if isinstance(fo, dict):
+        for key in ("mime_type", "mime"):
+            v = fo.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip().lower()
+    ia = part.get("input_audio")
+    if isinstance(ia, dict):
+        v = ia.get("format")
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    v = part.get("format")
+    if isinstance(v, str) and v.strip():
+        return v.strip().lower()
+    return ""
+
+
+# Tipi di parte che portano MEDIA di qualsiasi specie, in forma OpenAI o
+# Gemini-native. Serve a non confondere `input_audio` con `image_url`.
+_MEDIA_PART_TYPES = frozenset({
+    "image_url", "input_image", "image", "inline_data", "file",
+    "input_audio", "audio_url", "audio", "video_url", "input_video",
+})
+
+_AUDIO_PART_TYPES = frozenset({
+    "input_audio", "audio_url", "audio", "input_video", "video_url",
+})
+
+
+def _is_audio_part(part: dict) -> bool:
+    """True se una parte di `content` e' AUDIO, in qualunque forma.
+
+    Fratello di `_is_image_part` e stessa regola: standard OpenAI
+    (`input_audio` con `{data, format}`, `audio_url`) e forme Gemini-native
+    (`inline_data` con mime audio/*, `file` con file.mime_type audio/*).
+    `inline_data`/`file` con mime generico (`application/octet-stream`) non
+    vengono classificati come audio: non c'e' modo onesto di saperlo, e
+    sbagliare farebbe scambiare un'immagine per un audio."""
+    ptype = part.get("type")
+    if ptype in ("input_audio", "audio_url", "audio", "input_video",
+                 "video_url"):
+        return True
+    if ptype in ("inline_data", "file"):
+        return _mime_of(part).startswith(("audio/", "video/"))
+    return False
+
+
 def _is_image_part(part: dict) -> bool:
     """True se una parte di `content` e' un'immagine, in QUALSIASI forma.
 
     Riconosce sia lo standard OpenAI (`image_url`, `input_image`) sia le forme
     Gemini-native (`inline_data` con mime image/*, `file` con file.mime_type
-    image/*): same sorgente per `required_caps` e `count_image_parts`, cosi' la
-    stima dei token non puo' discordare dal routing."""
+    image/*): stessa sorgente per `required_caps` e `count_image_parts`, cosi'
+    la stima dei token non puo' discordare dal routing."""
     ptype = part.get("type")
     if ptype in ("image_url", "input_image", "image"):
         return True
-    if ptype == "inline_data":
-        mime = (part.get("mime_type") or part.get("mime") or "").lower()
-        return mime.startswith("image/")
-    if ptype == "file":
-        file_obj = part.get("file") or {}
-        if not isinstance(file_obj, dict):
-            return False
-        mime = (file_obj.get("mime_type") or file_obj.get("mime") or "").lower()
-        return mime.startswith("image/")
+    if ptype in ("inline_data", "file"):
+        return _mime_of(part).startswith("image/")
     return False
+
+
+def count_audio_parts(messages: list[dict] | None) -> int:
+    """Conta le parti-AUDIO nei messaggi (per la stima token e lo STT-bridge).
+
+    Stessa fonte di verita' di `_is_audio_part`."""
+    if not messages:
+        return 0
+    count = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and _is_audio_part(part):
+                    count += 1
+    return count
+
+
+def audio_bytes_estimate(part: dict) -> int:
+    """Byte grezzi di una parte audio, per lo stato di contesto.
+
+    Conta il base64 (4/3 dei byte reali) o, se il dato e' assente ma la parte
+    dichiara un formato, stima 32 kB: meglio una stima che un audio da 5 minuti
+    invisibile al gate di overflow."""
+    if not isinstance(part, dict):
+        return 0
+    for key in ("data", "b64_json", "audio_data"):
+        v = part.get(key)
+        if isinstance(v, str) and v:
+            return (len(v) * 3) // 4
+    for holder in ("input_audio", "audio_url", "audio", "file", "image_url"):
+        h = part.get(holder)
+        if isinstance(h, dict):
+            for key in ("data", "b64_json", "url", "file_data"):
+                v = h.get(key)
+                if isinstance(v, str) and v:
+                    return (len(v) * 3) // 4
+        elif isinstance(h, str) and h:
+            return (len(h) * 3) // 4
+    if _mime_of(part):
+        return 32768
+    return 0
 
 
 def count_image_parts(messages: list[dict] | None) -> int:
