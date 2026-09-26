@@ -280,8 +280,23 @@ async def resolve_audio_in_payload(payload: dict, *, boundary: int | None,
             chunks, transcript_one=transcript_one, max_parallel=max_parallel)
         joined = _join_texts(texts)
         if not joined:
+            # TUTTI i chunk falliti: solo ora l'audio non e' trascrivibile.
+            # (Un chunk solo fallito non deve far fallire l'audio: vedi sotto.)
             replacements[(mi, pi)] = [
                 _text_block(notice, "nessun modello STT ha risposto.")]
+            continue
+        ok_chunks = sum(1 for t in texts if t and t.strip())
+        if ok_chunks < len(chunks):
+            # PARZIALE: si consegna quello che c'e' e lo si dichiara, invece di
+            # scartare una trascrizione quasi completa per un chunk caduto. Non
+            # si mette in cache: un turno successivo puo' completarla, mentre
+            # cachare il parziale lo congelerebbe.
+            missing = len(chunks) - ok_chunks
+            replacements[(mi, pi)] = [{
+                "type": "text",
+                "text": (f'trascrizione audio (parziale: {missing} di '
+                         f'{len(chunks)} segmenti non trascritti): '
+                         f'"{joined}"')}]
             continue
         audiostore.put(key, joined)
         replacements[(mi, pi)] = [transcript_block(joined)]

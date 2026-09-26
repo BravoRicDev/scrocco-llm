@@ -3971,18 +3971,48 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
                                  profile: str | None, raw_model: str,
                                  session_id: str | None,
                                  used: set[str]) -> str:
-    """Trascrive un chunk di audio per lo STT-bridge in chat.
+    """Trascrive un chunk di audio. Ritorna "" SOLO dopo aver provato TUTTI i
+    deployment con la capacita' `stt` del profilo.
 
-    Ruota sui deployment `-stt` chiedendo al router uno SEMPRE diverso per
-    ogni chunk (`used`): cosi' i chunk di un file lungo viaggiano davvero in
-    parallelo su chiavi diverse. La freschezza e la penalizzazione
-    dell'ultimo usato le fa gia' `pick_deployment`: qui non si duplica nulla.
+    Ordine di tentativi (e' la regola della flotta, non una scelta locale):
+      1) free vivi          2) free in cooldown
+      3) -go vivi           4) -go in cooldown
+      5) -fallback
+    Il fallimento si dichiara quando la lista e' esaurita, mai prima: un chunk
+    senza trascrizione e' peggio di un tentativo in piu'.
 
-    Ritorna il testo, oppure "" se nessun deployment ha risposto: in quel caso
-    il chiamante mette il marker e la richiesta continua (mai 503 al client)."""
-    if not router.policy.routing_active():
-        # routing disattivato: nessuna selezione capability possibile. Si va
-        # sul gruppo -stt del profilo comunque, per non perdere l'audio.
+    `used` raccoglie i deployment gia' occupati da altri chunk PARALLELI della
+    stessa richiesta: dentro lo stesso tier si preferiscono quelli liberi, ma
+    nessuno viene scartato. Il parallelismo e' un'ottimizzazione, la
+    trascrizione e' un requisito.
+    """
+    need = frozenset({"stt"})
+
+    def _tier(d: dict) -> int:
+        """0=free, 1=-go, 2=-fallback (dal nome del gruppo)."""
+        g = str(d.get("group") or "")
+        if g.endswith(config.fallback_suffix or "-fallback"):
+            return 2
+        if g.endswith(router.policy.go_suffix or "-go"):
+            return 1
+        return 0
+
+    # --- candidati: la CATENA CAPABILITY del profilo, che e' la lista
+    #     completa dei deployment con cap `stt` (free + -go + -fallback).
+    chains = getattr(router.config, "chains_cap", {}).get(profile or "") or {}
+    uniques = list(chains.get("stt") or ())
+    cands: list[dict] = []
+    seen_u: set[str] = set()
+    for u in uniques:
+        if u in seen_u:
+            continue
+        seen_u.add(u)
+        d = router.config.deployment_by_unique(u)
+        if d is not None:
+            cands.append(d)
+    if not cands:
+        # nessuna catena (routing spento o profilo senza stt): si prova il
+        # gruppo -stt direttamente, se esiste.
         grp = None
         if profile:
             for cand in (f"{config.proxy_prefix}{profile}-stt",
@@ -3992,28 +4022,34 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
                     break
         if grp is None:
             return ""
-        dep = router.config.deployment_by_unique(grp) \
-            or router.pick_deployment(grp, frozenset({"stt"}))
-    else:
-        grp, dep = _audio_route(
-            profile, policy.canonicalize(
-                f"{config.proxy_prefix}{profile or ''}-stt"),
-            f"{profile or ''}-stt", session_id, frozenset({"stt"}))[:2]
-    tried = 0
-    last: UpstreamError | None = None
+        d = router.config.deployment_by_unique(grp) \
+            or router.pick_deployment(grp, need)
+        if d is None:
+            return ""
+        cands = [d]
+
+    # --- ordine: tier, poi i VIVI prima dei raffreddati, poi i liberi prima
+    #     di quelli gia' presi da un altro chunk.
+    def _key(d: dict):
+        return (_tier(d),
+                1 if router.is_cooled_down(d["unique"]) else 0,
+                1 if d["unique"] in used else 0)
+
+    cands.sort(key=_key)
+
+    last_err: UpstreamError | None = None
     _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
-    while dep is not None and tried < 8:
+    t_req = time.monotonic()
+    tried: set[str] = set()
+    for dep in cands:
         cur = dep["unique"]
-        tried += 1
-        if cur in used:
-            nxt = router.pick_deployment(dep["group"], frozenset({"stt"}),
-                                         exclude=cur) if dep.get("group") \
-                in router.config.groups else None
-            dep = nxt
+        if cur in tried:
             continue
+        tried.add(cur)
         used.add(cur)
+        _was_dormant = router.is_cooled_down(cur)
         router.note_start(cur)
         t0 = time.monotonic()
         try:
@@ -4022,29 +4058,44 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
                 path="transcriptions", profile=profile or "",
                 client_ip=_cip, session=_sess, attribution=_attr)
             router.note_result(cur, (time.monotonic() - t0) * 1000)
+            if _was_dormant:
+                router.clear_cooldown(cur)
             metrics.inc("nx_stt_total", (dep["group"], "ok"))
             res, _scrubbed = sttscrub.scrub_payload(res)
             if _scrubbed:
                 log.info("[stt-bridge] %s: rimosse %d allucinazioni credit",
                          cur, _scrubbed)
+            _emit_summary(ses=session_id or "-", req=raw_model,
+                          grp=dep["group"], dep=cur, tries=len(tried),
+                          fb=len(tried) - 1,
+                          dur_ms=int((time.monotonic() - t_req) * 1000),
+                          stream=False, qc=False, wd=None, usage=None,
+                          kind="stt", path="transcriptions")
             if isinstance(res, dict):
                 return str(res.get("text") or "")
             return str(res or "")
         except UpstreamError as err:
-            last = err
+            last_err = err
+            detail = str(err.detail or "")
             router.note_end(cur)
-            router.mark_failed(cur, seconds=err.retry_after,
-                               status=abs(err.status) if err.status else None)
-            metrics.inc("nx_stt_total", (dep["group"], "chat_bridge_error"))
-            nxt = None
-            if dep.get("group") in router.config.groups:
-                nxt = router.pick_deployment(dep["group"],
-                                             frozenset({"stt"}),
-                                             exclude=cur)
-            dep = nxt
-    if last is not None:
-        log.info("[stt-bridge] nessun deployment ha risposto: %s",
-                 (last.detail or "")[:100])
+            st = abs(err.status) if err.status else 0
+            if -err.status in (400, 403) and media_reject_signature(detail):
+                try:
+                    _strike_hook(False, need)(dep["model"], detail)
+                except Exception:                          # noqa: BLE001
+                    pass
+            if _was_dormant:
+                router.mark_failed_double_residual(
+                    cur, reason=detail[:80], status=st or None)
+            else:
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=st or None)
+            metrics.inc("nx_stt_total", (dep["group"], "retry"))
+            # NON si esce: si prosegue col candidato successivo. Solo a lista
+            # esaurita si dichiara il fallimento (ritorno "").
+    if last_err is not None:
+        log.info("[stt-bridge] esauriti %d/%d deployment stt: %s",
+                 len(tried), len(cands), (last_err.detail or "")[:100])
     return ""
 
 
