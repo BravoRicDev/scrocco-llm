@@ -12,10 +12,11 @@ import re
 from typing import Any
 CANONICAL_CAPS = frozenset({"text", "vision", "video", "audio", "image_gen",
                             "tools", "tts", "stt", "video_gen",
-                            "image_edit", "image_multi_ref"})
+                            "image_edit", "image_multi_ref", "decision"})
 # Quelle che guidano il routing (escluso tools = solo metadato)
 ROUTING_CAPS = frozenset({"vision", "video", "audio", "image_gen", "tts",
-                          "stt", "video_gen", "image_edit", "image_multi_ref"})
+                          "stt", "video_gen", "image_edit", "image_multi_ref",
+                          "decision"})
 # Token di GENERAZIONE: una riga che li contiene partecipa SOLO ai gruppi
 # di generazione corrispondenti (mai alle catene di ingest/analisi)
 GEN_CAPS = frozenset({"image_gen", "video_gen"})

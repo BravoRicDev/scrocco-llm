@@ -3526,6 +3526,52 @@ truncation_hook=None,
         except ValueError as exc:
             raise UpstreamError(None, f"upstream non-JSON response: {exc}") from exc
 
+    async def call_systemone(self, dep: dict, payload: dict, *,
+                             profile: str = "",
+                             client_ip: str = "",
+                             session: str | None = None,
+                             attribution: dict | None = None) -> dict:
+        """SystemOne / Jev: decisione strutturata (`POST /v1/systemone`).
+
+        Body nativo `{model, state, questions}` inoltrato quasi intatto (solo il
+        `model` e' riscritto col nome upstream). Non e' Chat Completions: il
+        payload NON viene passato per `strip_client_fields`/clamp/reasoning.
+        Errori 4xx/5xx -> UpstreamError, stessa tassonomia del chat."""
+        headers = proto.apply_auth(dep, {
+            "Authorization": f"Bearer {dep['api_key']}",
+            "Content-Type": "application/json",
+            **_session_headers(dep, profile=profile, client_ip=client_ip,
+                               session=session, attribution=attribution),
+        })
+        url = proto.build_url(dep, stream=False)
+        body = {k: v for k, v in payload.items() if k != "model"}
+        body["model"] = dep["model"]
+        log.debug("[upstream] %s POST %s (systemone, style=%s)",
+                  dep.get("unique", "?"), url, proto.style_of(dep))
+        try:
+            resp = await self._client_for(
+                url, dep.get("api_key", "")).post(
+                    url, json=body, headers=headers,
+                    timeout=httpx.Timeout(connect=10.0, read=60.0,
+                                          write=30.0, pool=10.0))
+        except httpx.TimeoutException as exc:
+            raise UpstreamError(None, f"upstream timeout: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamError(
+                None, f"upstream connection error: {exc}") from exc
+        if resp.status_code >= 400:
+            raise UpstreamError(
+                -resp.status_code if resp.status_code not in RETRYABLE_STATUS
+                else resp.status_code,
+                resp.text[:500],
+                _retry_after_from(resp, resp.text, dep.get("provider", ""))
+                if resp.status_code == 429 else None)
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise UpstreamError(
+                None, f"upstream non-JSON response: {exc}") from exc
+
     async def call_speech(self, dep: dict, payload: dict, *,
                           profile: str = "",
                           client_ip: str = "",

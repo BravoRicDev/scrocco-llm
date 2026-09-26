@@ -26,8 +26,9 @@ CHAT = "chat"
 RESPONSES = "responses"
 MESSAGES = "messages"
 GOOGLE = "google"
+JEV = "jev"
 
-VALID_STYLES = (CHAT, RESPONSES, MESSAGES, GOOGLE)
+VALID_STYLES = (CHAT, RESPONSES, MESSAGES, GOOGLE, JEV)
 
 
 def normalize_style(value: Any) -> str:
@@ -67,6 +68,10 @@ def build_url(dep: dict, *, stream: bool) -> str:
         verb = "streamGenerateContent" if stream else "generateContent"
         q = "?alt=sse" if stream else ""
         return f"{base}/models/{model}:{verb}{q}"
+    if style == JEV:
+        # `api_base` e' gia' il path completo (es. .../v1/systemone):
+        # nessun suffisso, come per gli altri stili non lo aggiungiamo.
+        return base
     return f"{base}/chat/completions"
 
 
@@ -620,6 +625,8 @@ def translate_request(style: str, body: dict, dep: dict) -> dict:
         return chat_to_messages(body, dep)
     if style == GOOGLE:
         return chat_to_gemini(body, dep)
+    # chat e jev: nessuna traduzione. Jev (SystemOne) riceve il body nativo
+    # `{state, questions}` gia' pronto: il passthrough e' intenzionale.
     return body
 
 
@@ -631,6 +638,7 @@ def translate_response(style: str, obj: dict, dep: dict) -> dict:
         return messages_to_chat(obj, dep)
     if style == GOOGLE:
         return gemini_to_chat(obj, dep)
+    # chat e jev: la risposta nativa `{model, answers, usage}` passa intatta.
     return obj
 
 

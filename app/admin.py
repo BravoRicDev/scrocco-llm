@@ -1964,8 +1964,33 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
     from . import main as _gwmod
     cap = _gwmod.config.group_caps.get(dep["group"])
     non_chat = cap in _NON_CHAT_CAPS
+    probe_kind = ("systemone" if cap == "decision"
+                  else "models" if non_chat else "chat")
     try:
-        if non_chat:
+        if cap == "decision":
+            # SystemOne/Jev: non e' Chat Completions. Probe con una domanda
+            # `noul` minima; ok = la chiave richiesta compare in `answers`.
+            resp = await http.post(
+                proto.build_url(dep, stream=False),
+                json={"model": dep["model"], "state": "probe",
+                      "questions": {"ok": {"type": "noul",
+                                           "instructions":
+                                           "The state is not empty"}}},
+                headers=proto.apply_auth(dep, {
+                    "Authorization": f"Bearer {dep['api_key']}",
+                    **_session_headers(dep, client_ip=client_ip,
+                                       session=session,
+                                       attribution=attribution)}),
+                timeout=_tune(_gwmod, "probe_timeout_sec", _PROBE_TIMEOUT_S))
+            ok = False
+            try:
+                _data = resp.json() or {}
+                _ans = _data.get("answers") if isinstance(_data, dict) else None
+                ok = (resp.status_code == 200
+                      and isinstance(_ans, dict) and "ok" in _ans)
+            except Exception:          # body non-JSON / non interpretabile
+                ok = False
+        elif non_chat:
             # Non-chat: la presenza del modello si verifica su /models
             # (una GET, niente consumo quota). ok = (status 200).
             resp = await http.get(
@@ -2008,7 +2033,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
         latency = int((time.monotonic() - t0) * 1000)
         entry = {"ok": ok, "latency_ms": latency, "ts": int(time.time()),
                  "status": resp.status_code, "key_masked": key_sig,
-                 "probe_kind": "models" if non_chat else "chat"}
+                 "probe_kind": probe_kind}
         if not ok:
             txt = (resp.text or "")[:160]
             entry["error_class"] = (
@@ -2021,7 +2046,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
         entry = {"ok": False, "latency_ms": int((time.monotonic() - t0) * 1000),
                  "ts": int(time.time()), "key_masked": key_sig,
                  "error_class": type(exc).__name__,
-                 "probe_kind": "models" if non_chat else "chat"}
+                 "probe_kind": probe_kind}
     # il read-modify-write del file DEVE avvenire dopo gli await, in un
     # blocco sincrono (l'event loop non è preemptive tra le istruzioni
     # sync): due probe concorrenti non si perdono più i risultati.

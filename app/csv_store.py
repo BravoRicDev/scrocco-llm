@@ -72,7 +72,7 @@ PAYLOAD_FIELDS = {
 # token ammessi nella colonna caps (speculare a ROUTING_CAPS + text)
 CAPS_TOKENS = frozenset({"text", "vision", "video", "audio", "image_gen",
                          "tts", "stt", "video_gen", "image_edit",
-                         "image_multi_ref"})
+                         "image_multi_ref", "decision"})
 
 
 def validate_caps(value) -> str:

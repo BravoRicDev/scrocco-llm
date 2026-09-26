@@ -76,7 +76,7 @@ One row per deployment. Columns (header in the `.example`):
 | `order` | integer tier (lower = earlier); zen is demoted at runtime under caution |
 | `enabled` | enable/disable the row |
 | `hold_until_finish` | never deliver a truncated answer from this dep |
-| `api_style` | `chat` / `responses` / `messages` / `google` (protocol adapter) |
+| `api_style` | `chat` / `responses` / `messages` / `google` / `jev` (protocol adapter; `jev` = SystemOne, body/risposta nativi) |
 | `thinking_replay` | replay Gemini thinking signatures |
 
 Bucket derivation (`config._classify`): `data` → `priority`/`free`/`fallback`;
@@ -111,7 +111,7 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   `hold_until_finish`, `parachute` (sotto hold il paracadute `-go`/`-fallback`
   consegna il buffer, mai byte live).
 - **Capabilities / media**: `capability_routing_enabled`, `model_capabilities`
-  (token: `text,vision,video,audio,image_gen,image_edit,image_multi_ref,tools,tts,stt,video_gen`),
+  (token: `text,vision,video,audio,image_gen,image_edit,image_multi_ref,tools,tts,stt,video_gen,decision`),
   `capabilities_default`, `image_token_estimate`, `images_chat_fallback`,
   `image_refs_hard_max`, `cap_auto_learn`,
   `cap_groups_enabled`, `multimodal_last_resort`, `gen_same_model`.

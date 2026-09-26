@@ -57,6 +57,7 @@ def test_normalize_and_style():
     assert P.normalize_style("responses") == P.RESPONSES
     assert P.normalize_style("messages") == P.MESSAGES
     assert P.normalize_style("google") == P.GOOGLE
+    assert P.normalize_style("jev") == P.JEV
     assert P.style_of(_dep("google")) == P.GOOGLE
 
 
@@ -69,6 +70,8 @@ def test_build_url():
         "/models/zen-model:generateContent")
     assert P.build_url(_dep("google"), stream=True).endswith(
         "/models/zen-model:streamGenerateContent?alt=sse")
+    # jev: `api_base` e' gia' il path completo, nessun suffisso aggiunto
+    assert P.build_url(_dep("jev"), stream=False) == "https://api.test/v1"
 
 
 def test_apply_auth():
@@ -79,6 +82,8 @@ def test_apply_auth():
     assert "Authorization" not in g and g["x-goog-api-key"] == "sk-test"
     c = P.apply_auth(_dep("chat"), {"Authorization": "Bearer x"})
     assert c["Authorization"] == "Bearer x"
+    j = P.apply_auth(_dep("jev"), {"Authorization": "Bearer x"})
+    assert j["Authorization"] == "Bearer x"
 
 
 # ------------------------------------------------------------------- responses

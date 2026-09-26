@@ -538,7 +538,7 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
 - `context`: kilo-units (128 = 128k window); drives the dims ladder
 - `max_input`: soft prompt-token guard for that deployment (0 = no guard)
 - `caps`: comma-separated subset of
-  `text,vision,image_gen,image_edit,image_multi_ref,video_gen,tts,stt`
+  `text,vision,image_gen,image_edit,image_multi_ref,video_gen,tts,stt,decision`
 - `alias`: optional comma-separated callable names for this row (e.g.
   `gemini` or `whisper-gpu`). Calling `model=<alias>` routes to a dedicated
   `-free → -go → -fallback` chain built **only** from the rows carrying that
@@ -562,6 +562,10 @@ you@example.com,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128
   i.e. `/chat/completions`). `responses` (OpenAI Responses), `messages`
   (Anthropic) or `google` (native Gemini) make the gateway translate the request,
   response and SSE stream to/from that API (correct URL, auth header and body).
+  `jev` (TypeSafe System One) is special: `endpoint` is the full native path
+  (e.g. `https://openrouter.ai/api/v1/systemone`), the body/response are native
+  (`{state, questions}` <-> `{answers}`, no translation) and the client calls
+  `POST /v1/systemone`; rows use caps `decision`.
 
 Clients call it like OpenAI:
 

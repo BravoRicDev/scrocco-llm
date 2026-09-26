@@ -39,6 +39,7 @@ admin responses.
 | `POST /v1/audio/speech` | TTS |
 | `POST /v1/audio/transcriptions` `/translations` | STT (local speaches sidecar or cloud) |
 | `POST /v1/videos/generations` (+ `/{job_id}`, `/{job_id}/content`) | async video jobs |
+| `POST /v1/systemone` | Jev / TypeSafe System One: decisione strutturata (body nativo `{model, state, questions}`, cap `decision`, non-streaming) |
 
 ### Ops & observability
 

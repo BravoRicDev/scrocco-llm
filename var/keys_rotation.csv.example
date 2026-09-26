@@ -7,7 +7,7 @@
 #
 # Colonna opzionale "caps": membership ai gruppi capacità strutturali.
 #   "" vuoto = solo testo (dims); "vision" = -vision/-vision-go/-vision-fallback;
-#   "text,vision" = anche nei dims. Token: text vision video audio image_gen tts stt
+#   "text,vision" = anche nei dims. Token: text vision video audio image_gen tts stt decision
 #
 # Colonna opzionale "tool_repair": livello di riparazione argomenti tool-call.
 #   "" vuoto = aggressive (default); "safe" = solo mosse sicure; "off" = disattivato.
@@ -42,6 +42,9 @@
 #     "responses"           = /responses          (OpenAI Responses, @ai-sdk/openai — es. muse-spark free su opencode zen)
 #     "messages"            = /messages            (Anthropic Messages, @ai-sdk/anthropic; auth x-api-key)
 #     "google"              = /models/{model}:generateContent (Gemini nativo, @ai-sdk/google; auth x-goog-api-key)
+#     "jev"                 = endpoint nativo SystemOne (Typesafe/Jev, cap `decision`).
+#                             `endpoint` e' il path completo (es. https://openrouter.ai/api/v1/systemone);
+#                             body/risposta nativi {state,questions} <-> {answers}: il client chiama POST /v1/systemone.
 
 commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-myteam,caps,tool_repair,model_preference,media_defer,order,enabled,api_style
 sk-FAKE-KEY-A1B2C3D4E5F6G7H8,openai/gpt-oss-120b,groq,https://api.groq.com/openai/v1,free,128,8000,0,sk-FAKE-KEY-A1B2C3D4E5F6G7H8,,,0,,

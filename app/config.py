@@ -156,7 +156,7 @@ def parse_image_via(raw: str | None) -> str:
 # ordine di specificità per il dispatcher base: i GENERATORI prima degli
 # ingest, così una richiesta i2i/i2v (input+output) cade nel gruppo _gen
 CAP_PRIORITY_ORDER = ("image_gen", "video_gen", "tts", "stt",
-                      "video", "audio", "vision")
+                      "video", "audio", "vision", "decision")
 
 
 def parse_alias(raw: str | None) -> tuple[str, ...]:

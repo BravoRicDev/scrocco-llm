@@ -1,0 +1,314 @@
+"""Integrazione Jev / TypeSafe System One (`decision`).
+
+`/v1/systemone` e' l'unico endpoint NON-OpenAI del gateway: body nativo
+`{model, state, questions}` -> risposta nativa `{model, answers, usage}`.
+Qui si blinda che:
+  - la capacita' `decision` produca un gruppo dedicato e NON finisca nel testo;
+  - l'endpoint validi il payload, autentichi e instradi sulla cap `decision`;
+  - il body sia inoltrato nativo (nessuna traduzione chat);
+  - il QC ruoti se `answers` non copre tutte le chiavi richieste;
+  - la rotazione avvenga anche con master key e sui transient (timeout);
+  - l'esaurimento risponda 503 con trail;
+  - `[summary]`/ledger usino `kind="systemone"` e mappino input/output tokens.
+
+Per la rotazione il primo pick viene FISSATO (`initial_pick` monkeypatchato) su
+`jev-a`: cosi' il test e' deterministico e non dipende dal fatto che
+`_walk_chain` sulle catene piatte non faccia wrap (comportamento pre-esistente).
+"""
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app import protocols as P
+from app.forwarder import UpstreamError
+
+_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
+           "priority,scrocco-llm-test,caps,api_style\n")
+_ROW_A = ("t1,jev-a,openrouter,https://openrouter.ai/api/v1/systemone,free,24,"
+          "24000,1,sk-key-a,decision,jev\n")
+_ROW_B = ("t2,jev-b,openrouter,https://openrouter.ai/api/v1/systemone,free,24,"
+          "24000,1,sk-key-b,decision,jev\n")
+
+MK = {"Authorization": "Bearer test-master-jev"}
+_URL = "/v1/systemone"
+
+
+def _systemone_body(model="scrocco-llm-test", **extra):
+    body = {
+        "model": model,
+        "state": "Il cliente non riesce a collegare Stripe da 3 giorni",
+        "questions": {
+            "department": {
+                "type": "choice",
+                "instructions": "Which team",
+                "criteria": {"billing": "payments", "technical": "bugs"},
+            },
+            "is_urgent": {"type": "noul", "instructions": "urgency"},
+        },
+    }
+    body.update(extra)
+    return body
+
+
+def _answers_for(questions):
+    return {k: {"type": "noul", "noul": 0.9} for k in questions}
+
+
+class _FakeFwd:
+    """Forwarder finto determinista per modello.
+
+    `fail` mappa modello -> eccezione da alzare; `incomplete` e' l'insieme dei
+    modelli che rispondono con `answers` vuote (QC -> rotazione). Tutti gli
+    altri modelli rispondono completo.
+    """
+
+    def __init__(self, fail=None, incomplete=()):
+        self.fail = dict(fail or {})
+        self.incomplete = set(incomplete)
+        self.calls: list[dict] = []
+
+    async def call_systemone(self, dep, payload, **kw):
+        self.calls.append({"dep": dep, "payload": dict(payload), **kw})
+        model = dep["model"]
+        if model in self.fail:
+            raise self.fail[model]
+        if model in self.incomplete:
+            return {"model": model, "answers": {},
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}
+        return {"model": model,
+                "answers": _answers_for(payload.get("questions") or {}),
+                "usage": {"input_tokens": 312, "output_tokens": 48}}
+
+
+@pytest.fixture()
+def client(monkeypatch, tmp_path):
+    csv = tmp_path / "k.csv"
+    csv.write_text(_HEADER + _ROW_A + _ROW_B)
+    import app.main as m
+    orig = (m.authn.master_key, m.config.csv_path)
+    m.authn.master_key = "test-master-jev"
+    m.LEDGER.flush()
+    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(m, "CSV_PATH", str(csv))
+    monkeypatch.setattr(m.config, "csv_path", csv)
+    m.config.reload()
+    m.router.policy.cap_groups_enabled = True
+    yield TestClient(m.app), m
+    m.router._cooldown.clear()
+    m.router.policy.cap_groups_enabled = False
+    m.authn.master_key = orig[0]
+    m.config.csv_path = orig[1]
+    m.config.reload()
+
+
+def _pin_initial_pick(monkeypatch, m, model):
+    """Fissa il primo deployment scelto da `initial_pick` a `model`."""
+    dep = m.config.deployment_by_unique(
+        next(u for u in m.config.chains_cap["test"]["decision"]
+             if m.config.deployment_by_unique(u)["model"] == model))
+    monkeypatch.setattr(m.router, "initial_pick", lambda *a, **k: dep)
+
+
+def _post(c, monkeypatch, m, fwd, body=None, headers=MK):
+    monkeypatch.setattr(m, "forwarder", fwd)
+    return c.post(_URL, headers=headers, json=body or _systemone_body())
+
+
+# ------------------------------------------------------------- capacita'
+def test_decision_capability_groups(client):
+    _c, m = client
+    assert "decision" in m.config.profile_caps["test"]
+    assert m.config.group_caps.get("scrocco-llm-test-decision") == "decision"
+    chain = m.config.chains_cap["test"].get("decision") or []
+    assert len(chain) == 2
+    assert all("scrocco-llm-test-decision" in u for u in chain)
+    # il gruppo e' richiamabile in whitelist (come -stt/-tts/-image_gen)
+    assert "scrocco-llm-test-decision" in m.config.whitelist_for("test")
+
+
+def test_decision_rows_excluded_from_text_dims(client):
+    """Una riga solo `decision` NON compare nei gruppi testo/dims."""
+    _c, m = client
+    assert "scrocco-llm-test-24k" not in (m.config.chains.get("test") or [])
+
+
+# ------------------------------------------------------------- protocollo
+def test_build_url_jev_is_native_path():
+    dep = {"api_base": "https://openrouter.ai/api/v1/systemone",
+           "api_style": "jev", "api_key": "k"}
+    assert P.build_url(dep, stream=False) == \
+        "https://openrouter.ai/api/v1/systemone"
+
+
+def test_call_systemone_native_url_and_model(monkeypatch):
+    """`call_systemone` posta all'endpoint nativo riscrivendo solo il model."""
+    from app.forwarder import Forwarder
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"answers": {}}
+
+    class _Client:
+        async def post(self, url, **kw):
+            captured["url"] = url
+            captured.update(kw)
+            return _Resp()
+
+    class _Stub:
+        def _client_for(self, url, key):
+            return _Client()
+
+    dep = {"unique": "u", "group": "g",
+           "api_base": "https://openrouter.ai/api/v1/systemone",
+           "api_key": "sk-x", "model": "typesafe/jev-1.13",
+           "provider": "openrouter", "api_style": "jev"}
+    payload = {"model": "scrocco-llm-test", "state": "s",
+               "questions": {"q": {"type": "noul", "instructions": "i"}}}
+    out = asyncio.run(Forwarder.call_systemone(_Stub(), dep, payload))
+    assert out == {"answers": {}}
+    assert captured["url"] == "https://openrouter.ai/api/v1/systemone"
+    assert captured["json"]["model"] == "typesafe/jev-1.13"
+    assert captured["json"]["state"] == "s"
+    assert captured["json"]["questions"] == payload["questions"]
+
+
+# ------------------------------------------------------------- endpoint
+def test_systemone_native_success(client, monkeypatch):
+    c, m = client
+    r = _post(c, monkeypatch, m, _FakeFwd())
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert "answers" in data and "department" in data["answers"]
+    assert data["nx_provider"] == "openrouter"
+    assert data["nx_deployment"].startswith("scrocco-llm-test-decision__")
+    assert r.headers.get("x-nx-deployment") == data["nx_deployment"]
+
+
+def test_systemone_payload_forwarded_native(client, monkeypatch):
+    c, m = client
+    fwd = _FakeFwd()
+    body = _systemone_body()
+    r = _post(c, monkeypatch, m, fwd, body=body)
+    assert r.status_code == 200, r.text
+    sent = fwd.calls[0]["payload"]
+    # il body viaggia nativo (il `model` e' riscritto dal forwarder reale)
+    assert sent["state"] == body["state"]
+    assert sent["questions"] == body["questions"]
+    assert sent["model"] == "scrocco-llm-test"
+
+
+def test_systemone_invalid_json_400(client, monkeypatch):
+    c, m = client
+    monkeypatch.setattr(m, "forwarder", _FakeFwd())
+    r = c.post(_URL, content=b"not-json",
+               headers={**MK, "content-type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_systemone_missing_state_400(client, monkeypatch):
+    c, m = client
+    body = _systemone_body()
+    body.pop("state")
+    r = _post(c, monkeypatch, m, _FakeFwd(), body=body)
+    assert r.status_code == 400
+    assert "state" in r.json()["error"]["message"]
+
+
+def test_systemone_missing_or_empty_questions_400(client, monkeypatch):
+    c, m = client
+    for qs in (None, {}, "x"):
+        body = _systemone_body()
+        if qs is None:
+            body.pop("questions")
+        else:
+            body["questions"] = qs
+        r = _post(c, monkeypatch, m, _FakeFwd(), body=body)
+        assert r.status_code == 400, (qs, r.text)
+
+
+def test_systemone_auth_401(client, monkeypatch):
+    c, m = client
+    r = _post(c, monkeypatch, m, _FakeFwd(), headers={})
+    assert r.status_code == 401
+
+
+# ------------------------------------------------------------- QC e rotazione
+def test_systemone_qc_incomplete_answers_rotates(client, monkeypatch):
+    """La prima risposta non copre tutte le chiavi -> rotazione -> seconda ok."""
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    fwd = _FakeFwd(incomplete={"jev-a"})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 200, r.text
+    assert len(fwd.calls) == 2
+    assert "is_urgent" in r.json()["answers"]
+
+
+def test_systemone_rotates_on_429(client, monkeypatch):
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(429, "rate limited", 2.0)})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 200, r.text
+    assert len(fwd.calls) == 2
+
+
+def test_systemone_rotates_on_timeout(client, monkeypatch):
+    """status None (timeout/rete) e' deployment-side: DEVE ruotare."""
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(None, "upstream timeout: x")})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 200, r.text
+    assert len(fwd.calls) == 2
+
+
+def test_systemone_client_error_no_rotation(client, monkeypatch):
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(-400, "invalid state schema")})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 400
+    assert len(fwd.calls) == 1
+
+
+def test_systemone_all_fail_503_with_trail(client, monkeypatch):
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(503, "upstream down"),
+                         "jev-b": UpstreamError(503, "upstream down")})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 503
+    err = r.json()["error"]
+    assert err.get("code") == "no_healthy_deployment"
+    assert len(err.get("attempts") or []) == 2
+    assert r.headers.get("X-Scrocco-Attempts") == "2"
+
+
+# ------------------------------------------------------------- ledger
+def test_systemone_summary_kind_and_usage(client, monkeypatch):
+    c, m = client
+    m.LEDGER.flush()
+    r = _post(c, monkeypatch, m, _FakeFwd())
+    assert r.status_code == 200
+    entries = [e for e in m.LEDGER._buf if e.get("kind") == "systemone"]
+    assert entries, "nessuna entry systemone nel ledger"
+    e = entries[-1]
+    assert e["usage"]["prompt_tokens"] == 312
+    assert e["usage"]["completion_tokens"] == 48
+    assert e["usage"]["total_tokens"] == 360
+
+
+def test_systemone_note_end_no_inflight_leak(client, monkeypatch):
+    c, m = client
+    r = _post(c, monkeypatch, m, _FakeFwd())
+    assert r.status_code == 200
+    cur = r.json()["nx_deployment"]
+    assert m.router.stats_for(cur).inflight == 0

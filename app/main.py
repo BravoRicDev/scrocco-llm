@@ -1577,6 +1577,15 @@ def _usage_of(data) -> dict | None:
         return None
     out = {k: u.get(k) for k in ("prompt_tokens", "completion_tokens",
                                  "total_tokens") if u.get(k) is not None}
+    if not out:
+        # SystemOne/Jev usa `input_tokens`/`output_tokens` (forma nativa).
+        _pt, _ct = u.get("input_tokens"), u.get("output_tokens")
+        if _pt is not None or _ct is not None:
+            if _pt is not None:
+                out["prompt_tokens"] = _pt
+            if _ct is not None:
+                out["completion_tokens"] = _ct
+            out["total_tokens"] = int(_pt or 0) + int(_ct or 0)
     _cached = _cached_tokens_of(u)
     if _cached is not None:
         out["cached_tokens"] = _cached
@@ -6964,6 +6973,181 @@ async def audio_speech(request: Request):
                             "message": (last_err.detail if last_err
                                         else "nessun deployment tts disponibile"),
                             "type": "upstream_error"}})
+
+
+# --------------------------------------------------------- systemone (Jev)
+@app.post("/v1/systemone")
+async def systemone(request: Request):
+    """Jev / TypeSafe System One: decisione strutturata.
+
+    Body nativo `{model, state, questions}` -> risposta nativa
+    `{model, answers, usage}` con `nx_deployment`/`nx_provider` aggiunti.
+    Instrada SOLO su deployment con capacità `decision`. Non-streaming, nessuna
+    traduzione di protocollo, niente tool/reasoning/hold.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "invalid JSON body",
+                      "type": "invalid_request_error"}})
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "il body deve essere un oggetto JSON",
+                      "type": "invalid_request_error"}})
+    raw_model = payload.get("model") or ""
+    if "state" not in payload:
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "'state' è obbligatorio",
+                      "type": "invalid_request_error"}})
+    questions = payload.get("questions")
+    if not isinstance(questions, dict) or not questions:
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "'questions' deve essere un oggetto non vuoto",
+                      "type": "invalid_request_error"}})
+
+    model = policy.canonicalize(raw_model)
+    auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
+    if not auth.ok:
+        return _unauthorized(auth.error)
+    if not authn.authorize_model(auth, model):
+        return _forbidden(model, auth.profile)
+
+    need = frozenset({"decision"}) if router.policy.routing_active() else frozenset()
+    scope = "group" if router.is_explicit(model) else "chain"
+    _set_opencode_gate(request)
+    session_id = _session_id(request, payload)
+    # Ruota anche con master key: il profilo si ricava dal nome richiesto,
+    # altrimenti la rotazione resterebbe spenta (bug dei path audio).
+    _prof = auth.profile or config.profile_of_base(model.split("__")[0]) \
+        or config.profile_of_base(model)
+
+    group_or_explicit = router.resolve_group_for_request(
+        model, [], session_id, need, profile=_prof)
+    if group_or_explicit is None:
+        for c in sorted(need):
+            metrics.inc("nx_caps_unroutable_total", (c,))
+        return JSONResponse(status_code=400 if need else 404, content={
+            "error": {"message":
+                      ("nessun deployment dichiara la capacità 'decision': "
+                       "configura capability_routing.model_capabilities o la "
+                       "colonna caps" if need
+                       else f"model '{model}' non gestito da "
+                       f"{policy.service_name}"),
+                      "type": "invalid_request_error"}})
+
+    explicit_req = router.is_explicit(model)
+    dep = router.config.deployment_by_unique(group_or_explicit)
+    if dep is None:
+        dep = router.initial_pick(_prof, group_or_explicit,
+                                  None if explicit_req else need,
+                                  out_tokens=refill_out_budget(payload, policy))
+    if dep is None and _prof and not explicit_req:
+        dep = router.fallback_after(_prof, None, need,
+                                    out_tokens=refill_out_budget(
+                                        payload, router.policy))
+    if dep is None:
+        return JSONResponse(status_code=503, content={
+            "error": {"message": "nessun deployment systemone disponibile",
+                      "type": "server_error"}})
+
+    metrics.inc("nx_systemone_total", (dep["group"], "attempt"))
+    log.info("[systemone] %s -> %s (questions=%d)", model, dep["unique"],
+             len(questions))
+
+    tried: set[str] = set()
+    attempts: list[str] = []
+    trail: list = []
+    _sess = _opencode_session(request) or session_id
+    _cip = _client_ip(request)
+    _attr = _client_attribution(request)
+    t_req = time.monotonic()
+    last_err: UpstreamError | None = None
+    while dep is not None and len(tried) < 32:
+        cur = dep["unique"]
+        _was_dormant = router.is_cooled_down(cur)
+        tried.add(cur)
+        attempts.append(cur)
+        router.note_start(cur)
+        t0 = time.monotonic()
+        try:
+            out = await forwarder.call_systemone(
+                dep, payload, profile=_prof or "",
+                client_ip=_cip, session=_sess, attribution=_attr)
+            # QC: ogni chiave richiesta in `questions` deve comparire in
+            # `answers`; una risposta incompleta e' un problema del deployment
+            # -> rotazione (502 positivo = ritriabile).
+            _answers = out.get("answers") if isinstance(out, dict) else None
+            _missing = [k for k in questions
+                        if not (isinstance(_answers, dict) and k in _answers)]
+            if _missing:
+                raise UpstreamError(
+                    502, f"risposta systemone incompleta: chiavi mancanti "
+                         f"{_missing}")
+            router.note_result(cur, (time.monotonic() - t0) * 1000)
+            if _was_dormant:
+                router.clear_cooldown(cur)
+            metrics.inc("nx_systemone_total", (dep["group"], "ok"))
+            _emit_summary(ses=session_id or "-", req=raw_model,
+                          grp=dep["group"], dep=cur,
+                          tries=len(attempts), fb=len(attempts) - 1,
+                          dur_ms=int((time.monotonic() - t_req) * 1000),
+                          stream=False, qc=False, wd=None,
+                          usage=_usage_of(out), kind="systemone")
+            result = dict(out)
+            result["nx_deployment"] = cur
+            result["nx_provider"] = dep.get("provider")
+            return JSONResponse(result,
+                                headers={"x-nx-deployment": cur})
+        except UpstreamError as err:
+            last_err = err
+            detail = err.detail or ""
+            status = err.status if err.status is not None else 0
+            # status==0 (timeout/rete/non-JSON) e' transiente del deployment:
+            # DEVE ruotare (i path audio lo consegnano invece come 502).
+            deployment_side = (
+                status >= 0
+                or -status in (401, 402, 403, 404, 405, 415, 422)
+                or _MODEL_MISSING_RE.search(detail)
+                or _PROVIDER_TRANSIENT_RE.search(detail))
+            trail.append({"ord": len(trail) + 1, "dep": cur,
+                          "group": dep.get("group"), "model": dep.get("model"),
+                          "cls": classify_error_class(
+                              abs(status) if status else 0, detail),
+                          "status": abs(status) if status else None,
+                          "ms": int((time.monotonic() - t0) * 1000)})
+            if not deployment_side:
+                metrics.inc("nx_systemone_total", (dep["group"], "client_error"))
+                st = abs(status) if status else 502
+                return JSONResponse(status_code=st if st >= 400 else 502,
+                                    content={"error": {"message": err.detail,
+                                                       "type": "upstream_error"}})
+            if -status in (400, 403) and media_reject_signature(detail):
+                try:
+                    _strike_hook(False, need)(dep["model"], detail)
+                except Exception:
+                    pass
+            if _was_dormant:
+                router.mark_failed_double_residual(
+                    cur, reason=str(err.detail or "")[:80],
+                    status=abs(err.status) if err.status else None)
+            else:
+                router.mark_failed(cur, seconds=err.retry_after,
+                                   status=abs(err.status) if err.status else None)
+            metrics.inc("nx_systemone_total", (dep["group"], "retry"))
+            nxt = router.fallback_next(_prof, dep, need, scope, tried=tried,
+                                       out_tokens=refill_out_budget(
+                                           payload, router.policy)) \
+                if _prof else None
+            if nxt is None:
+                break
+            dep = nxt
+        finally:
+            router.note_end(cur)
+
+    return _exhausted(len(attempts),
+                      last_err.detail if last_err else None,
+                      trail=trail, retry_at_ms=_retry_at_ms(router, trail))
 
 
 # ----------------------------------------------------------------- audio STT
