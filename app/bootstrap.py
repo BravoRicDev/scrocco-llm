@@ -140,14 +140,16 @@ def _playbook() -> dict:
              "goal": "Feed keys into the gateway (hot-reload, no restart).",
              "how_to": "POST /admin/deployments/bulk with master key auth. "
                        "One object per (model x key): "
-                       '{"profile":"example","model":"openai/gpt-oss-120b",'
+                       '{"action":"create","profile":"example",'
+                       '"modello":"openai/gpt-oss-120b",'
                        '"endpoint":"https://api.groq.com/openai/v1",'
                        '"key":"gsk_...","data":"free","context":128,'
                        '"max_input":8000,"priority":0,"caps":"text"}',
              "field_semantics": {
                  "profile": "namespace/tenant (creates sk-<profile> client "
                             "key); groups are named <prefix><profile>-...",
-                 "model": "EXACT upstream id as verified in step 2",
+                 "modello": "EXACT upstream id as verified in step 2 "
+                            "(the field is 'modello', NOT 'model')",
                  "endpoint": "provider api_base",
                  "data": "free|priority -> preferred buckets; paid|fallback"
                          " -> last-resort bucket; a day number = monthly "

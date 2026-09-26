@@ -501,6 +501,17 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
     else:
         try:
             res = await factory()
+        except asyncio.CancelledError:
+            # Il LEADER e' stato cancellato (shutdown, disconnect, timeout
+            # esterno): i waiter hanno connessioni vive e meritano la
+            # risposta. set_exception(CancelledError) li ucciderebbe TUTTI
+            # con un errore che non e' loro -> future.cancel() +
+            # fallback sotto li fa riprovare da soli. cancel() e non
+            # set_exception() perche' non trattiene la traceback.
+            if entry["waiters"] > 0 and not entry["future"].done():
+                entry["future"].cancel()
+            _inflight_coalesce.pop(key, None)
+            raise
         except BaseException as exc:                    # noqa: BLE001
             if entry["waiters"] > 0 and not entry["future"].done():
                 entry["future"].set_exception(exc)
@@ -517,6 +528,14 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
     try:
         res = await asyncio.wait_for(asyncio.shield(entry["future"]), ttl)
     except asyncio.TimeoutError:
+        return await factory()
+    except asyncio.CancelledError:
+        # Il LEADER e' morto (cancellato): la nostra connessione e' viva,
+        # quindi NON dobbiamo propagare la sua morte. Solo se il task
+        # corrente e' stato davvero cancellato dall'esterno (client andato
+        # via, shutdown) il CancelledError va propagato: cancelling() > 0.
+        if asyncio.current_task().cancelling() > 0:
+            raise
         return await factory()
     return copy.deepcopy(res)
 
@@ -6335,7 +6354,16 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
             status = err.status if err.status is not None else 0
             deployment_side = (
                 status > 0
-                or -status in (402, 403, 404, 405, 415, 422)
+                # 401: la NOSTRA chiave upstream e' rifiutata -> SEMPRE
+                # deployment-side (il client si e' gia' autenticato verso il
+                # gateway). Sul path chat lo stesso criterio e' gia' presente
+                # e testato: forwarder.call_with_fallback ruota su 401 prima
+                # di propagarlo, quindi il 401 che ARRIVA qui e' quello a
+                # catena esaurita e va comunque consegnato col suo status
+                # vero (_actionable_upstream_error: 401 actionable, 403 no).
+                # Questi endpoint non usano call_with_fallback -> senza questa
+                # riga il 401 finiva al client senza provare il dep successivo.
+                or -status in (401, 402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)
                 or chat_only_image_error(detail)
                 or image_chat_fallback_signature(err.status, detail)
@@ -6571,11 +6599,13 @@ async def images_generations(request: Request):
             status = err.status if err.status is not None else 0
             deployment_side = (
                 status > 0                       # retryable (429/5xx/timeout)
-                # chiave senza crediti / progetto negato / endpoint o schema non
-                # gestiti: condizioni del DEPLOYMENT, non del client -> ruota
-                # (la catena porta al gruppo -image_gen-fallback, es. le chiavi
-                # OpenRouter a pagamento).
-                or -status in (402, 403, 404, 405, 415, 422)
+                # chiave senza crediti / chiave rifiutata (401) / progetto
+                # negato / endpoint o schema non gestiti: condizioni del
+                # DEPLOYMENT, non del client -> ruota (la catena porta al
+                # gruppo -image_gen-fallback, es. le chiavi OpenRouter a
+                # pagamento). 401 = deployment-side perche' il client si e'
+                # gia' autenticato verso il gateway (vedi TTS/video).
+                or -status in (401, 402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
                 # "unknown provider/model for model X": il deployment non ha
                 # l'account o il modello (es. cli-proxy-api senza login) -> e'
@@ -6883,7 +6913,12 @@ async def audio_speech(request: Request):
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
             deployment_side = (
-                status > 0 or -status == 404 or -status == 402
+                # 401 = la NOSTRA chiave upstream e' rifiutata: SEMPRE
+                # deployment-side (il client si e' gia' autenticato verso il
+                # gateway), quindi si RUOTA come il 403/404/402. Criterio
+                # gia' presente e testato sul path chat
+                # (tests/test_upstream_401.py).
+                status > 0 or -status in (401, 402, 404)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
                 or (-status in (400, 403)
                     and ("openai_error" in detail
@@ -7028,7 +7063,12 @@ async def _audio_transcribe(request: Request, path: str):
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
             deployment_side = (
-                status > 0 or -status == 404 or -status == 402
+                # 401 = la NOSTRA chiave upstream e' rifiutata: SEMPRE
+                # deployment-side (il client si e' gia' autenticato verso il
+                # gateway), quindi si RUOTA come il 403/404/402. Criterio
+                # gia' presente e testato sul path chat
+                # (tests/test_upstream_401.py).
+                status > 0 or -status in (401, 402, 404)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
                 or (-status in (400, 403)
                     and ("openai_error" in detail
@@ -7237,7 +7277,12 @@ async def videos_generations(request: Request):
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
             deployment_side = (
-                status > 0 or -status == 404 or -status == 402
+                # 401 = la NOSTRA chiave upstream e' rifiutata: SEMPRE
+                # deployment-side (il client si e' gia' autenticato verso il
+                # gateway), quindi si RUOTA come il 403/404/402. Criterio
+                # gia' presente e testato sul path chat
+                # (tests/test_upstream_401.py).
+                status > 0 or -status in (401, 402, 404)
                 or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
                 or (-status in (400, 403)
                     and ("openai_error" in detail

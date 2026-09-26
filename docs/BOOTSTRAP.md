@@ -23,13 +23,26 @@ full stack with `docker compose -f docker-compose.full.yml up -d`.
 ## Phase 2 · Insert keys
 
 Sign up at the providers listed by `GET /bootstrap/providers`,
-then add rows via the admin API:
+then add rows via the admin API. `POST /admin/deployments/bulk` is
+**atomic**: one invalid operation and the whole batch is rejected with
+HTTP 400 writing **zero** rows.
+
+Required fields of a `create` operation:
+`profile`, `modello`, `endpoint`, `data`, `key` (plus an integer
+`context` >= 0).
+
+- `profile` — **required**: the tenant/namespace name. It creates the
+  deterministic client key `sk-<profile>` used in Phase 4.
+- `modello` — the exact upstream model id (**not** `model`; `model` is
+  silently ignored and the request is rejected as missing `modello`).
+- `key` — a **real** provider key of **at least 8 characters**. Short
+  placeholders (`gsk_XXXX`) are rejected by the CSV store validation.
 
 ```bash
 curl -X POST localhost:4001/admin/deployments/bulk \
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"operations":[{"action":"create","modello":"openai/gpt-oss-120b","provider":"groq",
+  -d '{"operations":[{"action":"create","profile":"myprofile","modello":"openai/gpt-oss-120b","provider":"groq",
         "endpoint":"https://api.groq.com/openai/v1","data":"free",
         "context":128,"max_input":8000,"priority":0,
         "key":"gsk_XXXX","caps":"text"}]}'

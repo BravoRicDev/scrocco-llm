@@ -13,8 +13,9 @@ Qui si blinda:
   - la firma che decide il fallback (image_chat_fallback_signature);
   - l'estrazione delle immagini dalla risposta chat (extract_chat_images);
   - il percorso end-to-end: nativo 404/400 -> chat 200 -> 200 al client;
-  - la ROTAZIONE su errori deployment-side (403 progetto negato/402 crediti):
-    la catena raggiunge il gruppo -image_gen-fallback (chiavi a pagamento).
+  - la ROTAZIONE su errori deployment-side (403 progetto negato/402 crediti/
+    401 chiave rifiutata): la catena raggiunge il gruppo -image_gen-fallback
+    (chiavi a pagamento).
 """
 import asyncio
 import json
@@ -31,6 +32,9 @@ GEMINI_400 = ('{"error":{"code":400,"message":"Invalid JSON payload '
               '"status":"INVALID_ARGUMENT"}}')
 GOOGLE_403 = ('{"code":403,"message":"Your project has been denied access. '
               'Please contact support.","status":"PERMISSION_DENIED"}')
+# 401 realmente osservato (Bynara/TokenHarbor): envelope OpenAI.
+UPSTREAM_401 = ('{"error":{"type":"unauthorized","message":'
+                '"A valid API key is required.","request_id":"x"}}')
 
 _DEP = {
     "unique": "g__models-gemini-2.5-flash-image__0",
@@ -304,6 +308,22 @@ def test_e2e_403_progetto_negato_ruota_senza_chat(client, monkeypatch):
     assert fwd.images_calls == ["google", "openrouter"]
 
 
+def test_e2e_401_chiave_rifiutata_ruota(client, monkeypatch):
+    """401 upstream = la NOSTRA chiave e' rifiutata -> SEMPRE deployment-side
+    (il client si e' gia' autenticato verso il gateway): si RUOTA come il 403.
+    Prima il path media non ruotava e il client riceveva 401 dopo UNA sola
+    chiamata; ora la catena prova 2 deployment (primario + fallback)."""
+    c, m = client
+    fwd = _fun(monkeypatch, m, native=lambda d, p: (401, UPSTREAM_401),
+               chat=_IMG_ONLY)
+    r = c.post("/v1/images/generations", headers=MK,
+               json={"model": "scrocco-llm-test", "prompt": "x"})
+    assert r.status_code == 401
+    assert fwd.chat_calls == []          # niente spreco di una chiamata chat
+    # primario google + fallback openrouter (entrambi 401) -> 2 tentativi
+    assert fwd.images_calls == ["google", "openrouter"]
+
+
 def test_e2e_chain_raggiunge_fallback_openrouter(client, monkeypatch):
     """Google free morto (403) -> la catena arriva al gruppo -image_gen-fallback
     (OpenRouter a pagamento) che consegna via chat."""
@@ -365,5 +385,97 @@ def test_e2e_catena_non_troncata_dai_marker_chat(monkeypatch, tmp_path):
         assert fwd.images_calls[-1] == "openrouter"
         assert fwd.images_calls.count("openrouter") == 1
         assert len(fwd.images_calls) == 21
+    finally:
+        _teardown(m, orig)
+
+
+# 401 anche sul path image-refs, che passa da `_images_chat_loop`
+# (chat multimodale: il 401 arriva da forwarder.call, NON da
+# call_with_fallback -> era l'unico dei due loop media senza la rotazione).
+def test_e2e_401_chiave_rifiutata_ruota_su_image_refs(monkeypatch, tmp_path):
+    """Stessa rotazione sul path image-refs, che passa da `_images_chat_loop`
+    (chat multimodale: il 401 arriva da forwarder.call, NON da
+    call_with_fallback -> era l'unico dei due loop media senza la rotazione)."""
+    rows = ("commento,modello,provider,endpoint,data,context,max_input,"
+            "priority,scrocco-llm-test,caps,alias\n"
+            "seed,models/gemini-3.1-flash-image,antigravity,https://p.test/v1,"
+            "free,128,0,5,sk-test-key,\"image_gen,image_edit\","
+            "gemini31-image\n"
+            "orfall,models/gemini-3.1-flash-image,openrouter,"
+            "https://o.test/v1,fallback,128,0,0,sk-or-test-key,"
+            "\"image_gen,image_edit\",gemini31-image\n")
+    c, m, orig = _make_client(monkeypatch, tmp_path, rows)
+    try:
+        # nativo 404: nessun endpoint images (deployment chat-only) -> la
+        # richiesta con reference va per forza via _images_chat_loop.
+        fwd = _fun(monkeypatch, m, native=lambda d, p: (404, "no endpoint"),
+                   chat=lambda d, p: (401, UPSTREAM_401))
+        r = c.post("/v1/images/generations", headers=MK,
+                   json={"model": "scrocco-llm-test", "prompt": "x",
+                         "image": ["data:image/png;base64,QUJD"]})
+        assert r.status_code == 401
+        assert fwd.chat_calls == ["antigravity", "openrouter"]
+    finally:
+        _teardown(m, orig)
+
+
+# 401 anche sul path TTS: `call_speech` non ruota da solo (a differenza di
+# call_with_fallback), serve la classificazione deployment_side del loop.
+def test_e2e_401_chiave_rifiutata_ruota_su_tts(monkeypatch, tmp_path):
+    rows = (
+        _CSV_HEADER
+        + "tts1,openai/tts-1,groq,https://api.groq.com/openai/v1,"
+          "free,0,0,1,sk-tts-key,tts\n"
+        + "tts2,openai/tts-1,openrouter,https://openrouter.ai/api/v1,"
+          "fallback,0,0,0,sk-or-tts-key,tts\n"
+    )
+    c, m, orig = _make_client(monkeypatch, tmp_path, rows)
+    try:
+        calls: list[str] = []
+
+        class _F:
+            async def call_speech(self, dep, payload, **kw):
+                calls.append(dep.get("provider") or dep["unique"])
+                raise UpstreamError(-401, UPSTREAM_401)
+
+        monkeypatch.setattr(m, "forwarder", _F())
+        # chiave CLIENTE sk-<profile>: con la master la rotazione dei path
+        # audio non parte (profile assente -> nessun fallback_next).
+        r = c.post("/v1/audio/speech", headers={"Authorization": "Bearer sk-test"},
+                   json={"model": "scrocco-llm-test", "input": "ciao",
+                         "voice": "alloy"})
+        assert r.status_code == 401
+        assert calls == ["groq", "openrouter"]        # la catena prova 2 dep
+    finally:
+        _teardown(m, orig)
+
+
+# 401 anche sul path STT (`forwarder.transcribe` non ruota da solo): stessa
+# condizione di codice dei path media, bloccata qui perche' la riga e' stata
+# modificata (STT e' servito dallo stesso template dei path audio).
+def test_e2e_401_chiave_rifiutata_ruota_su_stt(monkeypatch, tmp_path):
+    rows = (
+        _CSV_HEADER
+        + "stt1,openai/whisper-large-v3,groq,https://api.groq.com/openai/v1,"
+          "free,0,0,1,sk-stt-key,stt\n"
+        + "stt2,openai/whisper-large-v3,openrouter,https://openrouter.ai/api/v1,"
+          "fallback,0,0,0,sk-or-stt-key,stt\n"
+    )
+    c, m, orig = _make_client(monkeypatch, tmp_path, rows)
+    try:
+        calls: list[str] = []
+
+        class _F:
+            async def transcribe(self, dep, *a, **kw):
+                calls.append(dep.get("provider") or dep["unique"])
+                raise UpstreamError(-401, UPSTREAM_401)
+
+        monkeypatch.setattr(m, "forwarder", _F())
+        r = c.post("/v1/audio/transcriptions",
+                   headers={"Authorization": "Bearer sk-test"},
+                   files={"file": ("a.wav", b"RIFF0000WAVE", "audio/wav")},
+                   data={"model": "scrocco-llm-test"})
+        assert r.status_code == 401
+        assert calls == ["groq", "openrouter"]
     finally:
         _teardown(m, orig)

@@ -159,6 +159,15 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
 
 
 # Prometheus metrics
+def _safe_label(v: str) -> str:
+    """Escape dei valori label (identico a app/metrics.py::_safe_label).
+
+    Senza questo un path con `"` o un newline (path URL-encoded, header
+    manomesso) rompe l'intera esposizione: il parser Prometheus rifiuta
+    l'intero body e si perdono TUTTE le metriche."""
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
 class MetricsCollector:
     """Collettore metriche in-memory per Prometheus."""
 
@@ -167,6 +176,11 @@ class MetricsCollector:
         self._gauges: dict[str, float] = {}
         self._histograms: dict[str, list[float]] = {}
         self._labels: dict[str, dict[str, str]] = {}
+        # Tetto per-key delle osservazioni istogramma (stessa difesa di
+        # app/metrics.py::_LATENCY_MAX, che e' gia' LRU). Configurabile via
+        # env OBSERVABILITY_HIST_MAX. 0 = istogrammi disattivati del tutto.
+        self._hist_max = max(
+            0, int(os.environ.get("OBSERVABILITY_HIST_MAX", "512") or "512"))
 
     def inc_counter(self, name: str, value: float = 1.0, labels: dict[str, str] | None = None) -> None:
         key = self._make_key(name, labels)
@@ -181,17 +195,24 @@ class MetricsCollector:
             self._labels[key] = labels
 
     def observe_histogram(self, name: str, value: float, labels: dict[str, str] | None = None) -> None:
+        if self._hist_max <= 0:
+            return
         key = self._make_key(name, labels)
-        if key not in self._histograms:
-            self._histograms[key] = []
-        self._histograms[key].append(value)
+        values = self._histograms.setdefault(key, [])
+        values.append(value)
         if labels:
             self._labels[key] = labels
+        # I5: LRU per osservazioni. Senza tetto ogni (path,status) distinto
+        # cresceva per sempre: memoria illimitata nel processo di lungo
+        # periodo (path URL-encoded = cardinalita' non vincolata).
+        if len(values) > self._hist_max:
+            del values[0:len(values) - self._hist_max]
 
     def _make_key(self, name: str, labels: dict[str, str] | None) -> str:
         if not labels:
             return name
-        label_str = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items()))
+        label_str = ",".join(
+            f'{k}="{_safe_label(v)}"' for k, v in sorted(labels.items()))
         return f"{name}{{{label_str}}}"
 
     def generate_prometheus(self) -> str:
@@ -224,21 +245,30 @@ class MetricsCollector:
                 continue
             base_name = key.split("{")[0]
             labels = self._labels.get(key, {})
+            # ATTENZIONE all'ordine: Prometheus vuole nome_suffix{label...}.
+            # `nome{label}_suffix` e' INVALIDO (ValueError: Invalid value
+            # '_count' col parser di riferimento) e fa rifiutare l'INTERO
+            # body: si perdono anche tutti i nx_* di app/metrics. Il suffisso
+            # va quindi PRIMA delle label; nei bucket `le` sta INSIEME alle
+            # altre (i bucket devono conservare method/path/status).
             label_str = ",".join(
-                f'{k}="{v}"' for k, v in sorted(labels.items())) if labels else ""
-            prefix = f"{base_name}{{{label_str}}}" if label_str else base_name
+                f'{k}="{_safe_label(v)}"' for k, v in sorted(labels.items())) \
+                if labels else ""
+            lbl = f"{{{label_str}}}" if label_str else ""
             count = len(values)
             total = sum(values)
             if base_name not in typed:
                 lines.append(f"# TYPE {base_name} histogram")
                 typed.add(base_name)
-            lines.append(f"{prefix}_count {count}")
-            lines.append(f"{prefix}_sum {total}")
+            lines.append(f"{base_name}_count{lbl} {count}")
+            lines.append(f"{base_name}_sum{lbl} {total}")
             for bound in _HIST_BUCKETS_MS:
                 lines.append(
-                    f'{prefix}_bucket{{le="{bound}"}} '
+                    f'{base_name}_bucket{{le="{bound}"'
+                    f'{"," + label_str if label_str else ""}}} '
                     f"{sum(1 for v in values if v <= bound)}")
-            lines.append(f'{prefix}_bucket{{le="+Inf"}} {count}')
+            lines.append(f'{base_name}_bucket{{le="+Inf"'
+                         f'{"," + label_str if label_str else ""}}} {count}')
 
         return "\n".join(lines) + "\n"
 
