@@ -52,6 +52,74 @@ def test_knob_defaults_e_parse():
         Policy.from_dict({"degraded_healthy_ratio": 2.0})
 
 
+class TestDegradedModeEnabledCoercion:
+    """FIX 1: `degraded_mode_enabled` non era piu' `bool(...)` nudo.
+
+    Con `bool()` una stringa YAML come "false" diventava True (bool di una
+    stringa non vuota) e "0" idem: il knob si disattivava da solo. Ora passa
+    da `_coerce_bool`, che accetta true/on/sì/1 e false/off/no/0 e solleva
+    ValueError (=> 400 admin) su qualsiasi altro input.
+    """
+
+    def test_string_false_is_not_truthy(self):
+        p = Policy.from_dict({"degraded_mode_enabled": "false"})
+        assert p.degraded_mode_enabled is False
+
+    @pytest.mark.parametrize("raw_false", ["false", "False", "FALSE", " off ",
+                                          "no", "0", " false  "])
+    def test_falsy_strings(self, raw_false):
+        p = Policy.from_dict({"degraded_mode_enabled": raw_false})
+        assert p.degraded_mode_enabled is False
+
+    @pytest.mark.parametrize("raw_true", ["true", "True", " on ", "sì", "si",
+                                         "1", "yes"])
+    def test_truthy_strings(self, raw_true):
+        p = Policy.from_dict({"degraded_mode_enabled": raw_true})
+        assert p.degraded_mode_enabled is True
+
+    def test_native_bool_unchanged(self):
+        assert Policy.from_dict(
+            {"degraded_mode_enabled": True}).degraded_mode_enabled is True
+        assert Policy.from_dict(
+            {"degraded_mode_enabled": False}).degraded_mode_enabled is False
+
+    @pytest.mark.parametrize("bad", ["", "  ", "forse", "2", "disabled",
+                                     "maybe"])
+    def test_non_bool_string_raises(self, bad):
+        with pytest.raises(ValueError, match="degraded_mode_enabled"):
+            Policy.from_dict({"degraded_mode_enabled": bad})
+
+    def test_non_scalar_raises(self):
+        with pytest.raises(ValueError, match="degraded_mode_enabled"):
+            Policy.from_dict({"degraded_mode_enabled": ["true"]})
+        with pytest.raises(ValueError, match="degraded_mode_enabled"):
+            Policy.from_dict({"degraded_mode_enabled": 1.5})
+
+    def test_absent_keeps_default(self):
+        assert Policy.from_dict({}).degraded_mode_enabled is True
+        assert Policy.from_dict(
+            {"degraded_mode_enabled": None}).degraded_mode_enabled is True
+
+
+class TestKeyConcurrencyEnabledCoercion:
+    """FIX 1, secondo knob: stessa difetta su `key_concurrency_enabled`."""
+
+    def test_string_false_is_not_truthy(self):
+        p = Policy.from_dict({"key_concurrency_enabled": "false"})
+        assert p.key_concurrency_enabled is False
+
+    def test_string_true(self):
+        p = Policy.from_dict({"key_concurrency_enabled": "on"})
+        assert p.key_concurrency_enabled is True
+
+    def test_default_is_false(self):
+        assert Policy.from_dict({}).key_concurrency_enabled is False
+
+    def test_non_bool_string_raises(self):
+        with pytest.raises(ValueError, match="key_concurrency_enabled"):
+            Policy.from_dict({"key_concurrency_enabled": "forse"})
+
+
 def test_hosts_health_e_degraded_con_grace_zero():
     pol = Policy.from_dict({"degraded_entry_grace_sec": 0,
                             "degraded_exit_grace_sec": 0})

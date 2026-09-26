@@ -45,6 +45,13 @@ log = logging.getLogger("nx.toolrepair")
 _DEGENERATE_REASONING_RE = re.compile(
     r'(?:\s*<previous_reasoning_empty/>\s*Done\.?)+', re.IGNORECASE)
 
+# Alternativa di `_python_style_bools`: consuma come unita' INTATTE le
+# stringhe JSON (virgolette doppie, escape inclusi, anche non chiuse: la
+# riparazione lavora su argomenti spesso troncati) e i keyword Python come
+# gruppi separati. Cosi' i valori DENTRO le stringhe non vengono riscritti.
+_PY_LIT = re.compile(r'"(?:[^"\\]|\\.)*"?|\b(True|False|None)\b', re.S)
+_PY_LIT_MAP = {"True": "true", "False": "false", "None": "null"}
+
 
 def sanitize_reasoning_content(text: str) -> tuple[str, bool]:
     """Rimuove l'artefatto interno ripetuto ``<previous_reasoning_empty/>Done.``.
@@ -311,13 +318,20 @@ def _remove_trailing_comma(args_str: str) -> tuple[str, bool]:
 
 
 def _python_style_bools(args_str: str) -> tuple[str, bool]:
-    """Converte True/False/None stile Python in true/false/null JSON."""
-    cleaned = args_str
-    # Sostituisci True -> true, False -> false, None -> null
-    # Ma solo come parole intere, non dentro stringhe
-    cleaned = re.sub(r'\bTrue\b', 'true', cleaned)
-    cleaned = re.sub(r'\bFalse\b', 'false', cleaned)
-    cleaned = re.sub(r'\bNone\b', 'null', cleaned)
+    """Converte True/False/None stile Python in true/false/null JSON.
+
+    Tokenizer, non sostituzione globale: ogni stringa JSON consumata come
+    UNITA' INTESTATA e lasciata intatta (il gruppo 1 e' None), quindi si
+    convertono i soli keyword Python FUORI dalle stringhe. La versione
+    precedente faceva `re.sub(r'\\bTrue\\b', 'true', ...)` sulla stringa
+    GREZZA e riscriveva i VALORI degli argomenti: `return None` diventava
+    `return null`, `Returns None when empty` diventava `Returns null when
+    empty` (il docstring prometteva il contrario). Fuori dalle stringhe il
+    comportamento e' identico, quindi TestPythonStyleBools resta verde.
+    """
+    cleaned = _PY_LIT.sub(
+        lambda m: m.group(0) if m.group(1) is None
+        else _PY_LIT_MAP[m.group(1)], args_str)
     changed = cleaned != args_str
     return cleaned, changed
 

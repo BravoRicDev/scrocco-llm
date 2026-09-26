@@ -928,3 +928,95 @@ class TestCiteRetention:
         cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["cite_kept"] == 0 and rep["stubbed"] == 1
+
+
+# ================================================== FIX 5: stimatore saturato
+class TestEstimatorSaturated:
+    """`router.estimate_for_session` fa max(est, floor*margin): con il floor
+    di sessione attivo (TTL 3600s) `before` e `after` restituiscono la STESSA
+    costante, il delta e' 0 e `min_saved_tokens` annullava la compressione per
+    un'ora. Caso reale: saved_chars=649750, saved_tokens_est=0, changed=False.
+    """
+
+    def _msgs(self, n=20000):
+        return _conv2(["riga di log\n" * n, "riga di log\n" * n])
+
+    def _saturato(self):
+        """Stimatore che imita il floor: costante indipendente dai byte."""
+        return lambda ms: 500_000
+
+    def test_floor_attivo_comprime(self):
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=500)
+        msgs = self._msgs()
+        new, rep = compact_tool_outputs(msgs, cfg, estimator=self._saturato())
+        assert rep["saved_chars"] > 100_000
+        assert rep["saved_tokens_est"] > 0
+        assert rep["saved_tokens_est"] == rep["saved_chars"] // 4
+        assert rep["changed"] is True
+        assert new != msgs, "la lista compressa deve differire dall'originale"
+
+    def test_delta_zero_senza_salvato_non_inventa_risparmio(self):
+        """Se non e' cambiato nulla, il risparmio deve restare 0: la regola
+        vale solo quando `saved > 0`."""
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=500)
+        small = _conv2(["piccolo"])
+        _new, rep = compact_tool_outputs(small, cfg, estimator=self._saturato())
+        assert rep["saved_chars"] == 0
+        assert rep["saved_tokens_est"] == 0
+        assert rep["changed"] is False
+
+    def test_divisore_esplicito_rispettato(self):
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        _new, rep = compact_tool_outputs(self._msgs(), cfg,
+                                         estimator=self._saturato(),
+                                         divisor=3.0)
+        assert rep["saved_tokens_est"] == rep["saved_chars"] // 3
+
+    def test_divisore_invalido_usa_4(self):
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        _new, rep = compact_tool_outputs(self._msgs(), cfg,
+                                         estimator=self._saturato(),
+                                         divisor=0)
+        assert rep["saved_tokens_est"] == rep["saved_chars"] // 4
+
+    def test_floor_basso_invariato(self):
+        """Floor presente ma NON BINDING: l'output deve essere identico a
+        quello senza floor, cioe' esattamente quello di prima della fix.
+        Questo e' il test di non-regressione del valore."""
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        msgs = self._msgs()
+        n_none, rep_none = compact_tool_outputs(
+            msgs, cfg, estimator=lambda ms: sum(len(str(m)) for m in ms) // 4)
+        # floor 10, non 1000: `estimate_for_session` applica il floor anche
+        # ai SINGOLI messaggi passati a before/after, quindi con 1000 il
+        # floor legava gia' sullo stub e il delta cambiava per costruzione,
+        # indipendentemente dalla fix.
+        n_low, rep_low = compact_tool_outputs(
+            msgs, cfg,
+            estimator=lambda ms: max(sum(len(str(m)) for m in ms) // 4, 10))
+        assert rep_low["saved_tokens_est"] == rep_none["saved_tokens_est"]
+        assert rep_low == rep_none
+        assert n_low == n_none
+        assert rep_none["saved_tokens_est"] > 0
+        assert rep_none["saved_tokens_est"] != rep_none["saved_chars"] // 4, \
+            "il ramo euristico non deve essere entrato"
+
+    def test_floor_alto_satura_e_ripara(self):
+        """Con floor alto il max() satura: il fallback deve sbloccare."""
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        msgs = self._msgs()
+        _n, rep = compact_tool_outputs(
+            msgs, cfg,
+            estimator=lambda ms: max(sum(len(str(m)) for m in ms) // 4, 10**9))
+        assert rep["saved_tokens_est"] == rep["saved_chars"] // 4
+
+    def test_comportamento_invariato_senza_saturazione(self):
+        """L'estimatore NON saturo deve dare esattamente il valore di prima
+        della fix: il ramo di fallback non entra mai."""
+        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        msgs = self._msgs()
+        est = lambda ms: sum(len(str(m)) for m in ms) // 100   # noqa: E731
+        _new, rep = compact_tool_outputs(msgs, cfg, estimator=est)
+        assert rep["saved_tokens_est"] > 0
+        assert rep["saved_tokens_est"] != rep["saved_chars"] // 4, \
+            "il ramo euristico non deve essere entrato"

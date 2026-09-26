@@ -23,6 +23,7 @@ from app.toolrepair import (
     create_tool_repair_config,
     sanitize_reasoning_content,
     sanitize_response,
+    _python_style_bools,
 )
 
 
@@ -204,6 +205,77 @@ class TestPythonStyleBools:
         parsed = json.loads(result)
         assert parsed["flag"] is True
         assert parsed["x"] is False
+
+
+class TestPythonStyleBoolsInsideStrings:
+    """FIX 2: i keyword fuori dalle stringhe si convertono, quelli DENTRO no.
+
+    Prima della fix le tre `re.sub` giravano sulla stringa GREZZA e riscrivevano
+    i valori degli argomenti (`return None` -> `return null`), mentre il
+    docstring prometteva gia' "non dentro stringhe".
+    """
+
+    def _repair(self, args):
+        return repair_arguments(args, "safe", ToolRepairConfig())
+
+    def _step(self, args):
+        """Il solo passo `_python_style_bools`, che e' quello sotto test.
+
+        `repair_arguments` applica anche altri passi (_coerce_stringified_
+        scalars converte "True" in true, _null_on_optional_field rimuove i
+        campi null): per isolare la STRINGA-DENTRO le stringhe si verifica il
+        passo singolo, che e' il bug."""
+        return _python_style_bools(args)
+
+    def test_none_in_sql_string_not_rewritten(self):
+        """Il caso reale: una funzione Python dentro una stringa SQL."""
+        result, changed, _moves = self._repair(
+            '{"sql": "SELECT * FROM t WHERE x IS NOT None"}')
+        assert json.loads(result)["sql"] == (
+            "SELECT * FROM t WHERE x IS NOT None")
+
+    def test_docstring_none_not_rewritten(self):
+        result, _changed, _moves = self._repair(
+            '{"code": "def f(x):\\n    return None"}')
+        assert json.loads(result)["code"] == "def f(x):\n    return None"
+
+    def test_keywords_outside_still_repaired_in_same_payload(self):
+        """Il ramo fuori-dalle-stringhe deve restare verde: e' cio' che faceva
+        gia' TestPythonStyleBools::test_true_false, qui insieme ai valori."""
+        result, changed = self._step(
+            '{"doc": "Returns None when empty", "on": True, "off": False}')
+        assert changed
+        parsed = json.loads(result)
+        assert parsed["doc"] == "Returns None when empty"
+        assert parsed["on"] is True
+        assert parsed["off"] is False
+
+    def test_all_three_keywords_inside_strings_untouched(self):
+        args = '{"a": "True", "b": "False", "c": "None"}'
+        result, changed = self._step(args)
+        assert not changed, "nessun keyword fuori dalle stringhe: invariato"
+        assert json.loads(result) == {"a": "True", "b": "False", "c": "None"}
+
+    def test_escaped_quotes_do_not_break_tokenizer(self):
+        """Una stringa con escape non deve 'finire' a meta' e far riparare il
+        resto: `say "hi" None` deve restare intatto."""
+        result, _changed = self._step('{"msg": "say \\"hi\\" then None", "z": 0}')
+        assert json.loads(result)["msg"] == 'say "hi" then None'
+
+    def test_unterminated_string_swallows_rest(self):
+        """Argomenti troncati dentro una stringa: la riparazione non deve
+        inventare conversioni nel coda che ha gia' mangiato la stringa."""
+        args = '{"msg": "troncato None'
+        result, changed = self._step(args)
+        assert not changed
+        assert result == args
+
+    def test_nested_object_string_values_untouched(self):
+        result, changed = self._step('{"cfg": {"mode": "None", "flag": False}}')
+        assert changed
+        parsed = json.loads(result)
+        assert parsed["cfg"]["mode"] == "None"
+        assert parsed["cfg"]["flag"] is False
 
 
 class TestEmptyStringToObject:

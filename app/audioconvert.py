@@ -68,6 +68,108 @@ class AudioConversionError(Exception):
     chiamante la trasforma in marker per l'LLM, mai in 503."""
 
 
+# ------------------------------------------------------------------ magic
+# Magic dei container reali. Attenzione alla LUNGHEZZA: `data[:4]` su un magic
+# a 3 byte come ID3 non puo' MAI matchare (4 != 3), quindi la guardia non
+# scattava e un mp3 con tag ID3 di lunghezza pari finiva avvolto come PCM.
+# Ogni voce e' (offset, byte attesi) e i magic corti si confrontano con la
+# lunghezza esatta per non creare falsi positivi sui primi byte di un PCM.
+_MAGIC4 = (b"RIFF", b"OggS", b"fLaC", b"\x1a\x45\xdf\xa3")
+_MAGIC3 = (b"ID3", b"ID4")
+# Frame-sync MPEG: 11 bit a 1 (0xFF Ex/Fx) precedono ogni frame audio. Un
+# PCM non puo' iniziare con 0xFFEx: e' un sincronizzatore, non un dato.
+_MPEG_SYNC = 0xFF
+
+
+def _looks_like_container(data: bytes) -> bool:
+    """True se `data` e' un container audio riconoscibile (NON PCM grezzo).
+
+    La versione precedente confrontava `data[:4]` contro una lista di magic
+    di lunghezze diverse. Il buco vero era ISO-BMFF: mp4/m4a NON hanno un
+    magic in testa, hanno un box di 4 byte (`00 00 00 xx`) seguito da `ftyp`
+    a OFFSET 4. Non riconosciuti, questi file passavano la guardia SOLO se
+    la lunghezza era dispari, e venivano avvolti come PCM s16: rumore che lo
+    STT trascrive a caso (risposta cachata 1h) o "audio troppo corto".
+    Misurato su m4a reali rigenerati: 39/69 (56,5%) di lunghezza pari.
+    """
+    if len(data) >= 4 and data[:4] in _MAGIC4:
+        return True
+    if len(data) >= 4 and data[4:8] == b"ftyp":       # ISO-BMFF: mp4/m4a/mov
+        return True
+    if len(data) >= 3 and data[:3] in _MAGIC3:          # ID3: 3 byte, non 4
+        return True
+    if len(data) >= 2 and data[0] == _MPEG_SYNC \
+            and (data[1] & 0xE0) == 0xE0:             # frame-sync MPEG
+        return True
+    return False
+
+
+def _pcm_plausible(data: bytes) -> bool:
+    """True se `data`, avvolto come PCM s16, SOMIGLIA a un segnale audio.
+
+    Seconda barriera oltre al magic: il wrapper WAV accetta qualunque
+    sequenza di byte pari, e un m4a non riconosciuto produce rumore che
+    `_looks_like_signal` ACCETTA (le code AAC hanno ampiezza anche a caso):
+    serve una verifica che guardi i campioni, non il container.
+
+    Cosa distingue un segnale da un payload non audio:
+      - `hi - lo` ampio E NON tutto costante (`_looks_like_signal`): esclude
+        fill, silenzio DC e un'immagine coi pixel quasi uniformi;
+      - cambi di segno in un blocco iniziale: un segnale reale (speech/musica)
+        passa da campioni positivi a negativi molte volte al secondo.
+
+    LIMITE MISURATO, dichiarato per onesta': NON e' un discriminante fra
+    container e PCM. Su 95 blob reali (m4a/mp4/ogg/webm/mp3, 19 durate da 0,5s
+    a 60s) i metadati di un container NON vengono respinti da questo criterio,
+    con soglia assoluta 256 come con soglia relativa peak//64: i bit di un
+    payload audio codificato oscillano anche su valori piccoli. Serve quindi
+    come rete di sicurezza contro i payload NON AUDIO (fill, DC, padding),
+    non come riconoscitore di formato: e' la guardia magic a fare il grosso e
+    questa seconda barriera non deve mai rifiutare un file vero.
+
+    Soglia RELATIVA al picco (1/64, mai sotto 8): una soglia assoluta taglia
+    fuori una voce sussurrata, che e' proprio il caso d'uso dello STT.
+    """
+    if not data:
+        return False
+    n = len(data) // _BYTES_PER_SAMPLE
+    if n < 64 or len(data) % _BYTES_PER_SAMPLE:
+        return False
+    if not _looks_like_signal(data):
+        return False
+    a = array("h")
+    a.frombytes(data[:n * _BYTES_PER_SAMPLE])
+    if sys.byteorder == "big":
+        a.byteswap()
+    peak = max(abs(min(a)), abs(max(a)))
+    thr = max(8, peak // 64)
+    limit = min(n, 8192)
+    prev_sign = 0
+    flips = 0
+    for v in a[:limit]:
+        if -thr < v < thr:                   # zona morta: anti rumore numerico
+            continue
+        s = 1 if v > 0 else -1
+        if prev_sign and s != prev_sign:
+            flips += 1
+        prev_sign = s
+    return flips >= 4
+
+
+def _raw_pcm_payload(data: bytes, sample_rate: int) -> bytes:
+    """Ritorna `data` avvolto in un header WAV PCM s16 mono.
+
+    Riusato dai due call site perche' la regola (quando avvolgere) deve
+    essere IDENTICA fra `decode_pcm` e `probe_pcm`: una guardia diversa
+    farebbe dire a una il m4a "2 secondi" e all'altra "0,04 secondi", e il
+    tetto dei byte verrebbe calcolato sul valore sbagliato."""
+    return (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate,
+                          sample_rate * _BYTES_PER_SAMPLE,
+                          _BYTES_PER_SAMPLE, 16)
+            + b"data" + struct.pack("<I", len(data)) + data)
+
+
 def _av():
     """Import pigro di PyAV: l'assenza non deve rompere l'avvio del gateway."""
     try:
@@ -92,13 +194,13 @@ def decode_pcm(data: bytes, fmt_hint: str = "",
     payload = data
     # Rileva un WAV "a cappello" senza RIFF (base64 di solo dati PCM): alcuni
     # client lo fanno. 44 byte sono lo header canonico del WAV PCM.
-    if (not data[:4] in (b"RIFF", b"OggS", b"fLaC", b"ID3", b"\x1a\x45\xdf\xa3")
-            and len(data) % _BYTES_PER_SAMPLE == 0):
-        payload = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
-                   + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate,
-                                 sample_rate * _BYTES_PER_SAMPLE,
-                                 _BYTES_PER_SAMPLE, 16)
-                   + b"data" + struct.pack("<I", len(data)) + data)
+    # La guardia deverecognoscere TUTTI i container (magic a 3/4 byte, ISO-BMFF
+    # con `ftyp` a offset 4, frame-sync MPEG) E chiedere che i byte restanti
+    # sembrino un segnale: vedi `_looks_like_container` / `_pcm_plausible`.
+    if (not _looks_like_container(data)
+            and len(data) % _BYTES_PER_SAMPLE == 0
+            and _pcm_plausible(data)):
+        payload = _raw_pcm_payload(data, sample_rate)
     try:
         container = av.open(io.BytesIO(payload))
     except Exception as e:                                     # noqa: BLE001
@@ -147,13 +249,13 @@ def probe_pcm(data: bytes, fmt_hint: str = "",
     av = _av()
     import io                                                  # noqa: PLC0415
     payload = data
-    if (not data[:4] in (b"RIFF", b"OggS", b"fLaC", b"ID3", b"\x1a\x45\xdf\xa3")
-            and len(data) % _BYTES_PER_SAMPLE == 0):
-        payload = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
-                   + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate,
-                                 sample_rate * _BYTES_PER_SAMPLE,
-                                 _BYTES_PER_SAMPLE, 16)
-                   + b"data" + struct.pack("<I", len(data)) + data)
+    # STESSA guardia di `decode_pcm`: se qui avvolgesse un m4a (rumore) ma
+    # decode non lo facesse, probe_duration direbbe 0,04s di un file da 2s e
+    # il tetto dei byte sarebbe calcolato sul valore sbagliato.
+    if (not _looks_like_container(data)
+            and len(data) % _BYTES_PER_SAMPLE == 0
+            and _pcm_plausible(data)):
+        payload = _raw_pcm_payload(data, sample_rate)
     try:
         container = av.open(io.BytesIO(payload))
         if not container.streams.audio:

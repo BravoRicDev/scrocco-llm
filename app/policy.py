@@ -2055,9 +2055,11 @@ class Policy:
                     raise ValueError(
                         f"{_fld} deve essere un intero >= 0") from None
         if raw.get("degraded_mode_enabled") is not None:
-            p.degraded_mode_enabled = bool(raw["degraded_mode_enabled"])
+            p.degraded_mode_enabled = _coerce_bool(
+                raw["degraded_mode_enabled"], "degraded_mode_enabled")
         if raw.get("key_concurrency_enabled") is not None:
-            p.key_concurrency_enabled = bool(raw["key_concurrency_enabled"])
+            p.key_concurrency_enabled = _coerce_bool(
+                raw["key_concurrency_enabled"], "key_concurrency_enabled")
         for _fld in ("key_concurrency_max",
                      "key_concurrency_lease_max_age_sec"):
             if raw.get(_fld) is not None:

@@ -879,6 +879,19 @@ def compact_tool_outputs(messages, cfg: CtxCompactConfig, max_in: int = 0,
         before = sum(_cost([o], 0) for o, _n in changed_msgs)
         after = sum(_cost([x], 0) for _o, x in changed_msgs)
         rep["saved_tokens_est"] = max(0, before - after)
+        # L'estimatore puo' essere SATURATO: `router.estimate_for_session`
+        # fa max(est, floor*margin) e il floor di sessione vale per tutta la
+        # TTL (3600s di default), quindi `before` e `after` restituiscono la
+        # STESSA costante, il delta e' 0 e `min_saved_tokens` annullerebbe la
+        # compressione per un'ora intera (caso reale: saved_chars=649750,
+        # saved_tokens_est=0, changed=False). Se il delta e' <= 0 ma i
+        # caratteri risparmiati sono > 0, il risparmio e' reale e l'unica
+        # stima disponibile e' quella euristica gia' usata sotto: si usa.
+        # Quando l'estimatore NON e' saturo il delta e' > 0 e questo ramo non
+        # entra: il comportamento resta identico a prima.
+        if rep["saved_tokens_est"] <= 0 and saved > 0:
+            _d = divisor if divisor and divisor > 0 else 4.0
+            rep["saved_tokens_est"] = int(saved / _d)
     else:
         _d = divisor if divisor and divisor > 0 else 4.0
         rep["saved_tokens_est"] = int(saved / _d)

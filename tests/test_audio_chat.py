@@ -549,3 +549,162 @@ def test_cache_store():
     assert st["items"] == 1
     S.clear()
     assert S.get(k) is None
+
+
+# ============================================ FIX 4: container vs PCM grezzo
+def _enc(fmtname, codec, secs=2, bitrate=None):
+    """Codifica _pcm(secs) nel container indicato (PyAV)."""
+    av = pytest.importorskip("av")
+    data = _pcm(secs)
+    buf = io.BytesIO()
+    c = av.open(buf, "w", format=fmtname)
+    st = c.add_stream(codec, rate=SR)
+    st.layout = "mono"
+    if bitrate:
+        st.bit_rate = bitrate
+    off = 0
+    while off < len(data):
+        chunk = data[off:off + 2048]
+        off += 2048
+        fr = av.AudioFrame(format="s16", layout="mono", samples=len(chunk) // 2)
+        fr.planes[0].update(chunk)
+        fr.sample_rate = SR
+        fr.pts = None
+        for p in st.encode(fr):
+            c.mux(p)
+    for p in st.encode(None):
+        c.mux(p)
+    c.close()
+    return buf.getvalue()
+
+
+class TestContainerGuard:
+    """La guardia magic non copriva ISO-BMFF: `ftyp` sta a OFFSET 4, non in
+    testa. mp4/m4a di lunghezza PARI passavano il fallback PCM ed erano
+    avvolti come s16: rumore che lo STT trascrive a caso (cachato 1h)."""
+
+    def test_ftyp_a_offset_4_riconosciuto(self):
+        m4a = _enc("ipod", "aac", secs=2, bitrate=64000)
+        assert m4a[4:8] == b"ftyp"
+        assert A._looks_like_container(m4a) is True
+
+    def test_m4a_pari_non_viene_avvolto_come_pcm(self):
+        """Il caso del bug: m4a di lunghezza pari. Prima veniva avvolto e il
+        risultato era rumore di 0,4s invece dei 2s di audio vero."""
+        m4a = _enc("ipod", "aac", secs=2, bitrate=64000)
+        if len(m4a) % 2:
+            m4a += b"\x00"                       # forza la lunghezza pari
+        assert len(m4a) % 2 == 0
+        out = b"".join(A.decode_pcm(m4a, fmt_hint="m4a"))
+        assert abs(len(out) / (SR * 2) - 2.0) < 0.3, len(out) / (SR * 2)
+
+    def test_probe_pcm_coerente_con_decode(self):
+        """Stessa guardia nei due call site: altrimenti probe_duration
+        direbbe 0,4s dove decode ne produce 2."""
+        m4a = _enc("ipod", "aac", secs=2, bitrate=64000)
+        if len(m4a) % 2:
+            m4a += b"\x00"
+        total, rate = A.probe_pcm(m4a, fmt_hint="m4a")
+        assert rate == SR
+        assert abs(total / (SR * 2) - 2.0) < 0.3, total / (SR * 2)
+
+    def test_durata_reale_di_un_m4a(self):
+        m4a = _enc("ipod", "aac", secs=2, bitrate=64000)
+        assert abs(A.probe_duration(m4a, fmt_hint="m4a") - 2.0) < 0.3
+
+    def test_mp4_stesso_vincolo(self):
+        mp4 = _enc("mp4", "aac", secs=2, bitrate=64000)
+        if len(mp4) % 2:
+            mp4 += b"\x00"
+        assert A._looks_like_container(mp4) is True
+        assert abs(A.probe_duration(mp4, fmt_hint="mp4") - 2.0) < 0.3
+
+    def test_to_ogg_chunks_m4a(self):
+        m4a = _enc("ipod", "aac", secs=2, bitrate=64000)
+        if len(m4a) % 2:
+            m4a += b"\x00"
+        chunks = A.to_ogg_chunks(m4a, fmt_hint="m4a")
+        assert len(chunks) == 1
+        # Tolleranza 0.5s: il pre-skip dell'Opus aggiunge ~0,2s di padding ed
+        # e' un artefatto preesistente della codifica, non della guardia. Il
+        # bug da scovare era 2s di audio vero che diventavano 0,43s di rumore.
+        assert abs(A.probe_duration(chunks[0]) - 2.0) < 0.5
+
+
+class TestContainerMagicLengths:
+    """`data[:4]` non puo' matchare un magic a 3 byte: `b"ID3"` era CODICE
+    MORTO, la guardia non scattava mai su un mp3 con tag ID3 pari."""
+
+    def test_id3_tre_byte(self):
+        mp3 = _enc("mp3", "mp3", secs=2)
+        assert mp3[:3] == b"ID3"
+        assert A._looks_like_container(mp3) is True
+
+    def test_mp3_id3_resta_riconosciuto_qualunque_parita(self):
+        """NON si padda il file: aggiungere 0x00 a un mp3 di libmp3lame ne
+        corrompe il trailer (InvalidDataError in avcodec_send_packet).
+        Il punto del test e' che la guardia non dipende dalla parita'."""
+        mp3 = _enc("mp3", "mp3", secs=2)
+        assert mp3[:3] == b"ID3"
+        assert A._looks_like_container(mp3) is True
+        # dispari: non wrappata, decodifica normale
+        assert abs(A.probe_duration(mp3, fmt_hint="mp3") - 2.0) < 0.4
+        # pari: la guardia lo riconosce comunque, non lo wrappa. Il file non
+        # viene decodificato perche' e' mutato (coda 0xff): qui si testa la
+        # guardia, non il decoder.
+        pari = mp3 + b"\xff"
+        assert len(pari) % 2 == 0
+        assert A._looks_like_container(pari) is True
+
+    def test_frame_sync_mpeg_senza_id3(self):
+        """Frame-sync MPEG stretto: 11 bit a 1. La guardia stretta (0xFF Ex/Fx)
+        evita di dichiarare 'container' un PCM che comincia per 0xFF."""
+        assert A._looks_like_container(b"\xff\xfb\x90\x00" + b"\x00" * 100)
+        assert A._looks_like_container(b"\xff\xe0" + b"\x00" * 100)
+        # 0xFF seguito da 0b011xxxxx NON e' un frame-sync MPEG
+        assert not A._looks_like_container(b"\xff\x60\x00\x00" + b"\x00" * 100)
+
+    def test_magic_noti_ancora_validi(self):
+        for magic in (b"RIFF", b"OggS", b"fLaC", b"\x1a\x45\xdf\xa3"):
+            assert A._looks_like_container(magic + b"\x00" * 64), magic
+
+
+class TestPcmPlausible:
+    def test_pcm_vero_resta_plausibile(self):
+        for amp in (6000, 500, 30000, 50, 100):
+            assert A._pcm_plausible(_pcm(2, lambda i, a=amp: (
+                int(a * math.sin(2 * math.pi * 440 * i / SR))))) is True, amp
+
+    def test_dc_e_fill_rifiutati(self):
+        assert A._pcm_plausible(b"\x00" * 32000) is False
+        assert A._pcm_plausible((b"\xab\xcd") * 16000) is False
+        assert A._pcm_plausible((b"\x00\x01") * 16000) is False
+
+    def test_dispari_rifiutato(self):
+        assert A._pcm_plausible(_pcm(2) + b"\x00") is False
+
+    def test_troppo_corto_rifiutato(self):
+        assert A._pcm_plausible(_pcm(0.001)) is False
+
+    def test_guardia_magic_e_la_vera_barriera(self):
+        """`_pcm_plausible` NON distingue un container da un segnale: misurato
+        su 95 blob reali (m4a/mp4/ogg/webm/mp3) i metadati non vengono
+        respinti, perche' i bit di un payload codificato oscillano anche su
+        valori piccoli. Il blocco sui container lo mette `_looks_like_container`
+        (ftyp a offset 4 incluso): e' quello il meccanismo che conta, e
+        questo test lo blocca esplicitamente contro un future che lo
+        indebolirebbe."""
+        m4a = _enc("ipod", "aac", secs=2, bitrate=64000)
+        assert A._looks_like_container(m4a) is True
+        assert A._looks_like_container(m4a + b"\x00") is True
+        assert abs(A.probe_duration(m4a, fmt_hint="m4a") - 2.0) < 0.3
+
+    def test_pcm_dispari_non_e_plausibile(self):
+        """Byte dispari: non e' PCM s16, quindi non e' plausibile come tale
+        (il wrapper WAV non lo puo' nemmeno costruire)."""
+        assert A._pcm_plausible(_pcm(2) + b"\x00") is False
+
+    def test_png_ancora_rifiutato(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8000
+        with pytest.raises(A.AudioConversionError):
+            A.to_ogg_chunks(png, target_sec=180)

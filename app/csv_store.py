@@ -100,15 +100,40 @@ class CsvStoreError(ValueError):
 
 # ------------------------------------------------------------------- lettura
 def load_table(path: str | Path) -> tuple[list[str], list[dict]]:
-    """Ritorna (header, righe-come-dict). Righe vuote scartate."""
+    """Ritorna (header, righe-come-dict). Righe vuote scartate.
+
+    Le righe di commento (`#`) e le vuote vengono saltate SOLO PRIMA
+    dell'header: l'example pubblicato (var/keys_rotation.csv.example) ne ha
+    45 e senza questo la sua prima riga diventava l'intestazione (la admin API
+    rispondeva 400 e `GET /admin/deployments` elencava righe-commento come
+    deployment). Stessa regola di `config.py` (GatewayConfig/validate_csv) e
+    di `_csv_field_rows`.
+
+    VINCOLO: dopo l'header i commenti NON si saltano. Nell'exexample le righe
+    `# local-whisper,...,stt` e `# local-tts-it,...,tts` sono deployment REALI
+    commentati (disattivati di default, non righe di preambolo): skippandole,
+    un successivo `save_table` le distruggerebbe perche' riscrive il file senza
+    commenti. Solo le righe interamente vuote restano scartate, come prima.
+    """
     path = Path(path)
     with open(path, newline="", encoding="utf-8-sig") as f:
         raw = list(csv.reader(f))
     if not raw:
         raise CsvStoreError(f"CSV vuoto: {path}")
-    header = [h.strip() for h in raw[0]]
+    start = 0
+    while start < len(raw):
+        first = raw[start]
+        if (not first or not any(c.strip() for c in first)
+                or first[0].lstrip().startswith("#")):
+            start += 1
+        else:
+            break
+    if start >= len(raw):
+        raise CsvStoreError(
+            f"CSV senza intestazione (solo commenti/vuoto): {path}")
+    header = [h.strip() for h in raw[start]]
     rows: list[dict] = []
-    for line in raw[1:]:
+    for line in raw[start + 1:]:
         if not line or not any(c.strip() for c in line):
             continue
         rows.append({header[i]: (line[i] if i < len(line) else "")
