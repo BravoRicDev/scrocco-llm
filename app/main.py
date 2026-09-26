@@ -2597,27 +2597,31 @@ async def chat_completions(request: Request, response: Response):
     if qc_failed and qc_pol.annotate_reasoning and isinstance(data, dict):
         data = annotate_reasoning(data, qc_failed)
     _u_f14 = _usage_of(data)
-    try:
-        if _u_f14 and _u_f14.get("prompt_tokens"):
-            router.note_estimate_error(used["unique"], ctx_est,
-                                       _u_f14["prompt_tokens"])
-            # Stima per-sessione: char REALI del payload inviato a monte
-            # (post inject_identity/histnorm/ctxcompact) / prompt_tokens.
-            router.note_session_estimate(
-                session_id,
-                _est_chars_pre,
-                _prompt_chars(payload.get("messages"), payload.get("tools")),
-                _u_f14["prompt_tokens"])
-            metrics.inc("nx_sess_est_samples_total")
-    except Exception:
-        pass
-    _emit_summary(ses=session_id or "-", req=raw_model,
-                  grp=used.get("group"), dep=used["unique"],
-                  tries=max(1, len(attempts_box)),
-                  fb=max(0, len(attempts_box) - 1),
-                  dur_ms=int((time.monotonic() - t_req) * 1000),
-                  stream=False, qc=bool(qc_failed), wd=None,
-                  usage=_u_f14)
+    # Sotto hold redirect (_redirect=True): il MOTORE STREAM ha GIA'
+    # emesso _emit_summary (via _summary() in sse), note_estimate_error,
+    # note_session_estimate e _note_fb_refund. Evitiamo duplicazione.
+    if not _redirect:
+        try:
+            if _u_f14 and _u_f14.get("prompt_tokens"):
+                router.note_estimate_error(used["unique"], ctx_est,
+                                           _u_f14["prompt_tokens"])
+                # Stima per-sessione: char REALI del payload inviato a monte
+                # (post inject_identity/histnorm/ctxcompact) / prompt_tokens.
+                router.note_session_estimate(
+                    session_id,
+                    _est_chars_pre,
+                    _prompt_chars(payload.get("messages"), payload.get("tools")),
+                    _u_f14["prompt_tokens"])
+                metrics.inc("nx_sess_est_samples_total")
+        except Exception:
+            pass
+        _emit_summary(ses=session_id or "-", req=raw_model,
+                      grp=used.get("group"), dep=used["unique"],
+                      tries=max(1, len(attempts_box)),
+                      fb=max(0, len(attempts_box) - 1),
+                      dur_ms=int((time.monotonic() - t_req) * 1000),
+                      stream=False, qc=bool(qc_failed), wd=None,
+                      usage=_u_f14)
     # Regalo -go per i fallback (#50): SOLO quando il non-stream ha servito
     # direttamente (con hold ON il motore stream ha gia' regalato: la richiesta
     # non-stream vi viene rediretta e il suo summary farebbe doppio regalo).

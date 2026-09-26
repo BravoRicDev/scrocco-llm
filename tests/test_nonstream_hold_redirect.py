@@ -300,3 +300,75 @@ def test_immediate_upstream_error_no_unboundlocal(M, monkeypatch):
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse)
     assert resp.status_code != 500
+
+
+def test_nonstream_hold_redirect_single_summary(M, monkeypatch):
+    """Bug 3: non-stream sotto hold redirect (_redirect=True) NON deve
+    emettere doppio _emit_summary.
+
+    Il motore stream (in hold) emette gia' il suo [summary] via _summary().
+    Il codice non-stream post-redirect deve saltare _emit_summary e il blocco
+    note_estimate_error/note_session_estimate quando _redirect == True.
+    """
+    import json as _json
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    # hold redirect ON
+    M.router.policy.qc_json.stream_hold_until_finish = True
+    M.router.policy.nonstream_hold_redirect = True
+
+    dep = _dep(M, "scrocco-llm-test-single-summary")
+    CLEAN = [
+        b'data: {"id":"x","choices":[{"index":0,"delta":{"content":"ciao"}}]}\n\n',
+        b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    async def _stream_response(dep, payload, **kwargs):
+        async def _gen():
+            for c in CLEAN:
+                yield c
+        return _gen()
+    monkeypatch.setattr(M.forwarder, "stream_response", _stream_response)
+
+    class _A:
+        ok = True; profile = "test"; error = None
+    monkeypatch.setattr(M.authn, "authenticate", lambda h: _A())
+    monkeypatch.setattr(M.authn, "authorize_model", lambda a, m: True)
+    monkeypatch.setattr(M.router, "resolve_group_for_request",
+                        lambda *a, **k: dep["group"])
+    monkeypatch.setattr(M.router, "initial_pick", lambda *a, **k: dep)
+    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+
+    # count _emit_summary calls
+    calls = []
+    _orig = M._emit_summary
+    def _spy(**f):
+        calls.append(f)
+        return _orig(**f)
+    monkeypatch.setattr(M, "_emit_summary", _spy)
+
+    payload = {"model": dep["model"], "stream": False,
+               "messages": [{"role": "user", "content": "ciao"}]}
+    body = _json.dumps(payload).encode()
+    sent = {"done": False}
+    async def receive():
+        if not sent["done"]:
+            sent["done"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+    scope = {"type": "http", "method": "POST",
+             "path": "/v1/chat/completions",
+             "headers": [(b"authorization", b"Bearer x")],
+             "query_string": b""}
+
+    async def _run():
+        return await M.chat_completions(Request(scope, receive), Response())
+    out = asyncio.run(_run())
+
+    assert out["object"] == "chat.completion"
+    assert out["choices"][0]["message"]["content"] == "ciao"
+    # ESATTAMENTE 1 chiamata _emit_summary (quella del motore stream)
+    assert len(calls) == 1, f"attesi 1 _emit_summary, trovati {len(calls)}: {calls}"
+    assert calls[0].get("stream") is False
+    assert calls[0].get("dep") == dep["unique"]
