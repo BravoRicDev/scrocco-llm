@@ -29,10 +29,10 @@ then add rows via the admin API:
 curl -X POST localhost:4001/admin/deployments/bulk \
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"rows":[{"modello":"openai/gpt-oss-120b","provider":"groq",
+  -d '{"operations":[{"action":"create","modello":"openai/gpt-oss-120b","provider":"groq",
         "endpoint":"https://api.groq.com/openai/v1","data":"free",
         "context":128,"max_input":8000,"priority":0,
-        "chiave":"gsk_XXXX","caps":"text"}]}'
+        "key":"gsk_XXXX","caps":"text"}]}'
 ```
 
 CSV hot-reloads atomically within ~5s. No restarts, ever.

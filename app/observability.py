@@ -299,7 +299,7 @@ def setup_observability(
         root = logging.getLogger()
         # Rimuovi handler esistenti per evitare duplicati
         for h in list(root.handlers):
-            if isinstance(h, logging.StreamHandler):
+            if type(h) is logging.StreamHandler:
                 root.removeHandler(h)
         root.addHandler(handler)
 

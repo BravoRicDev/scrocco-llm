@@ -482,6 +482,7 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
             metrics.inc("nx_coalesce_total", ("hit",))
             return copy.deepcopy(hit)
     leader = False
+    _bypass = False
     async with _inflight_lock:
         entry = _inflight_coalesce.get(key)
         if entry is None or entry["future"].done():
@@ -490,9 +491,11 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
             _inflight_coalesce[key] = entry
             leader = True
         elif max_waiters > 0 and entry["waiters"] >= max_waiters:
-            return await factory()
+            _bypass = True
         else:
             entry["waiters"] += 1
+    if _bypass:
+        return await factory()
     if not leader:
         metrics.inc("nx_coalesce_total", ("inflight",))
     else:
@@ -2976,7 +2979,7 @@ def _actionable_upstream_error(err) -> bool:
             or _PAYLOAD_SCHEMA_RE.search(detail)):
         return True
     st = getattr(err, "status", None)
-    return st in (-401, -402)
+    return st in (-401, -402, 401, 402)
 
 
 def _soft_cd(fail_24h: int = 0) -> int:
@@ -4188,8 +4191,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     if _imax > 0 and count_image_parts(payload.get("messages") or []) > _imax:
         payload, _dropped = _trim_chat_images(payload, _imax)
         if _dropped:
-            metrics.inc("nx_images_total", (dep or {}).get("group", "-"),
-                        "chat_images_trimmed")
+            metrics.inc("nx_images_total",
+                        ((dep or {}).get("group", "-"), "chat_images_trimmed"))
             log.info("[images] tetto chat_images_max=%d: %d immagini non "
                      "inviate all'upstream (restano nella history del client)",
                      _imax, _dropped)
