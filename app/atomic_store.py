@@ -42,7 +42,7 @@ def save_json(path, obj, *, indent=None, backup: bool = True) -> bool:
                 pass
         return True
     except (OSError, TypeError, ValueError):
-        log.debug("[atomic] save %s fallito", p, exc_info=True)
+        log.error("[atomic] save %s fallito", p, exc_info=True)
         try:
             os.unlink(tmp)
         except OSError:

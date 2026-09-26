@@ -583,7 +583,7 @@ def _maybe_save_thought_sigs(force: bool = False) -> None:
         return
     from .thought_sig import THOUGHT_SIGS
     if not _save_json(_thought_sigs_file, THOUGHT_SIGS.dump()):
-        log.debug("[thought_sig] save fallito")
+        log.warning("[thought_sig] save fallito")
 
 
 def _maybe_save_adaptive_stats(force: bool = False) -> None:
@@ -596,7 +596,7 @@ def _maybe_save_adaptive_stats(force: bool = False) -> None:
         return
     _last_stats_save = now
     if not _save_json(_stats_file, router.dump_stats()):
-        log.debug("[stats] save fallito")
+        log.error("[stats] save fallito")
 
 
 def _maybe_save_all(force: bool = False) -> None:
@@ -639,11 +639,20 @@ def _maybe_save_routing_state(force: bool = False) -> None:
     if not force and now - _last_routing_save < 60:
         return
     _last_routing_save = now
+    _exc: BaseException | None = None
     try:
-        if not _save_json(_routing_file, router.dump_routing_state()):
-            log.debug("[warmstart] save fallito")
-    except Exception as exc:                 # noqa: BLE001
-        log.debug("[warmstart] save errore (%s)", exc)
+        ok = _save_json(_routing_file, router.dump_routing_state())
+    except Exception as e:            # noqa: BLE001 - mai bloccare lo shutdown
+        ok = False
+        _exc = e
+    if not ok:
+        # save_json() e' best-effort: non solleva, logga gia' l'errore REALE
+        # con traceback in atomic_store. Qui registriamo il fatto (stato di
+        # routing perso -> warm pool perso al restart). Un solo call site per
+        # i due rami: `exc_info` riceve l'eccezione VERA quando c'e', altrimenti
+        # False (non None!) -> niente "NoneType: None", che e' un'evidenza
+        # falsa in on-call.
+        log.error("[warmstart] save fallito", exc_info=_exc or False)
 
 
 def _load_routing_state() -> None:
@@ -693,7 +702,7 @@ def _maybe_save_cooldowns(force: bool = False) -> None:
         return
     _last_cooldown_save = now
     if not _save_json(_cooldown_file, router.save_cooldowns()):
-        log.debug("[cooldown] save fallito")
+        log.error("[cooldown] save fallito")
 
 
 def _all_uniques() -> set:
@@ -760,7 +769,7 @@ async def _watcher(interval: float) -> None:
                                 len(new_retired), ", ".join(new_retired[:5]))
                 KEYHEALTH.save()
             except Exception:           # analytics non deve mai mordere
-                log.debug("[keyhealth] tick error", exc_info=True)
+                log.warning("[keyhealth] tick error", exc_info=True)
             # purge job video scaduti (mapping in memoria, TTL 24h)
             now = time.time()
             expired = [j for j, m in _videos_jobs.items()
@@ -771,7 +780,7 @@ async def _watcher(interval: float) -> None:
             try:
                 imagestore.sweep()
             except Exception:                                  # noqa: BLE001
-                log.debug("[images] sweep error", exc_info=True)
+                log.warning("[images] sweep error", exc_info=True)
 
             async with _reload_lock:
                 new = maybe_reload(config, last_csv)
@@ -3271,7 +3280,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                     log.info("[refill] sveglia %s (429 in cooldown da "
                              "almeno %.0fs)", _W["unique"], _age)
                 else:
-                    log.debug("[refill] nessuna sveglia 429 matura")
+                    log.info("[refill] nessuna sveglia 429 matura")
             # CANARY ZEN DEDICATO (client opencode nativo senza zen in warm):
             # affianca il canary normale e cerca gli zen in TUTTE le dim del
             # profilo (non solo in quella richiesta, che puo' essere senza zen).
@@ -3923,8 +3932,8 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
         log.info("[sveglia] giro concluso: %d tentativi su [%s], "
                  "nessun risveglio", done, ", ".join(tried))
     else:
-        log.debug("[sveglia] nessun dormiente maturo (429>=min_age) da "
-                  "svegliare")
+        log.info("[sveglia] nessun dormiente maturo (429>=min_age) da "
+                 "svegliare")
 
 
 def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
@@ -5861,7 +5870,7 @@ async def _download_remote_image(url: str, *, timeout: float,
                     return None
                 return b"".join(chunks), ctype
     except Exception as exc:                                  # noqa: BLE001
-        log.debug("[images] mirror %s fallito: %s", url, exc)
+        log.warning("[images] mirror %s fallito: %s", url, exc, exc_info=True)
         return None
 
 

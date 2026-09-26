@@ -35,8 +35,8 @@ class WarmMixin:
         try:
             self._note_dep_session(session_id, unique)
         except Exception:                      # mai rompere la risposta
-            log.debug("[warm] note_warm_owner %s fallito", unique,
-                      exc_info=True)
+            log.warning("[warm] note_warm_owner %s fallito", unique,
+                        exc_info=True)
 
     def _warm_ttl(self) -> float:
         """Finestra di validita' del pool caldi (0 = session_dep_guard_sec)."""
@@ -250,8 +250,6 @@ class WarmMixin:
         max_n = max(0, int(getattr(self.policy, "warm_pool_max_attempts", 0) or 0))
         if max_n > 0:
             out = out[:max_n]
-        log.debug("[warm] pool=%d sid=%s: %s", len(out), sid,
-                  ",".join(d["unique"] for d in out[:6]))
         _n_own = sum(1 for d in out if d["unique"] in _own_set)
         # "propri" e' ownership (ts rinfrescato finche' la sessione e' viva),
         # NON l'ultimo uso effettivo: un proprio puo' essere gia' PRESTABILE

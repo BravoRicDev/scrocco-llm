@@ -121,7 +121,7 @@ class RepairLog:
                 with self._lock:
                     self._buf.append(entry)
         except Exception:                           # noqa: BLE001
-            log.debug("[repair] note error", exc_info=True)
+            log.error("[repair] note error", exc_info=True)
 
     # ------------------------------------------------------------- flush --
     def flush(self) -> int:
@@ -142,7 +142,7 @@ class RepairLog:
         except Exception:                           # noqa: BLE001
             with self._lock:                        # rimetti in coda
                 self._buf = rows + self._buf
-            log.debug("[repair] flush error", exc_info=True)
+            log.error("[repair] flush error", exc_info=True)
             return 0
 
     def flush_sync(self) -> int:
@@ -167,7 +167,7 @@ class RepairLog:
             os.replace(self.path, f"{self.path}.1")
             log.info("[repair] rotazione ledger")
         except Exception:                           # noqa: BLE001
-            log.debug("[repair] rotate error", exc_info=True)
+            log.error("[repair] rotate error", exc_info=True)
 
 
 REPAIRLOG = RepairLog(None)

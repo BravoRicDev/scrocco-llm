@@ -1300,11 +1300,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                 else:
                     _sc = int(getattr(pol, "cooldown_transient_sec", 15) or 15)
                 seconds = min(seconds, max(1.0, float(_sc)))
-                log.debug("[cooldown-class] %s classe=transient(%s) -> %.0fs",
-                          unique, reason or "5xx", seconds)
+                log.info("[cooldown-class] %s classe=transient(%s) -> %.0fs",
+                         unique, reason or "5xx", seconds)
             elif _cls == "quota":
-                log.debug("[cooldown-class] %s classe=quota -> %.0fs "
-                          "(retry-after)", unique, seconds)
+                log.info("[cooldown-class] %s classe=quota -> %.0fs "
+                         "(retry-after)", unique, seconds)
         # TIMEOUT: solo in modalita' storica (classi disattivate) vale il
         # moltiplicatore `timeout_cooldown_mult`; con le classi attive il
         # timeout ha gia' il suo cooldown breve dedicato (anti black-hole:
@@ -1503,7 +1503,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             kh.save()
             log.warning("[lifecycle] %s RETIRED (permanent: %s)", unique, reason)
         except Exception:  # noqa: BLE001
-            log.debug("[lifecycle] retire %s fallito", unique, exc_info=True)
+            log.warning("[lifecycle] retire %s fallito", unique, exc_info=True)
 
     def escalate_cooldown(self, base_seconds: float,
                           fail_count_24h: int) -> float:
@@ -3360,8 +3360,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                             unique, s.probe_fail_streak)
                 return True
         except Exception:                      # mai bloccare il routing
-            log.debug("[probe] auto-retirement di %s fallito", unique,
-                      exc_info=True)
+            log.warning("[probe] auto-retirement di %s fallito", unique,
+                        exc_info=True)
         return False
 
     def is_retired(self, unique: str) -> bool:
@@ -7822,8 +7822,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
             if tried and u in tried:
                 continue
             if _is_chronic(u):
-                log.debug("[ladder] %s cronico (fail_24h>=%d): saltato "
-                          "da ULTIMA SPIAGGIA", u, chronic_thr)
+                log.info("[ladder] %s cronico (fail_24h>=%d): saltato "
+                         "da ULTIMA SPIAGGIA", u, chronic_thr)
                 continue
             if not self.is_cooled_down(u):
                 continue
@@ -8184,8 +8184,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin):
                                            exclude=cur_dep["unique"],
                                            restrict_model=cur_dep.get("model"))
                 if nxt is not None:
-                    log.debug("[restrict] %s: failover same-model -> %s",
-                              cur_dep["group"], nxt["unique"])
+                    log.info("[restrict] %s: failover same-model -> %s",
+                             cur_dep["group"], nxt["unique"])
                     return nxt
                 nxt = self.pick_deployment(cur_dep["group"],
                                            exclude=cur_dep["unique"])

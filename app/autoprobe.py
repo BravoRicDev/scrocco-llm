@@ -349,8 +349,8 @@ async def _retired_pass(router, forwarder) -> None:
         log.info("[autoprobe] giro RITIRATI terminato: %d riabilitati su %d",
                  riab, len(retired))
     except Exception:  # noqa: BLE001
-        log.debug("[autoprobe] giro ritirati terminato con errore",
-                  exc_info=True)
+        log.warning("[autoprobe] giro ritirati terminato con errore",
+                    exc_info=True)
 
 
 def maybe_spawn_retired(router, forwarder) -> None:
@@ -677,7 +677,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                          unique, rem)
             await asyncio.sleep(0.2)
     except Exception:  # noqa: BLE001
-        log.debug("[autoprobe] pass terminato con errore", exc_info=True)
+        log.warning("[autoprobe] pass terminato con errore", exc_info=True)
     finally:
         _running = False
 
@@ -721,7 +721,7 @@ async def _hotreload_pass(router, forwarder, uniques) -> None:
                             unique, _cd)
             await asyncio.sleep(0.2)
     except Exception:  # noqa: BLE001
-        log.debug("[hotreload] pass terminato con errore", exc_info=True)
+        log.warning("[hotreload] pass terminato con errore", exc_info=True)
 
 
 async def _probe_one(forwarder, dep: dict,
@@ -810,8 +810,8 @@ async def nightly_pass(router, forwarder, profiles=None) -> None:
                 try:
                     await _probe_pass(router, forwarder, pname)
                 except Exception:            # noqa: BLE001
-                    log.debug("[autoprobe] nightly %s: errore nel pass",
-                              pname, exc_info=True)
+                    log.warning("[autoprobe] nightly %s: errore nel pass",
+                                pname, exc_info=True)
                 _running = True              # _probe_pass lo azzera nel finally
     finally:
         _running = False

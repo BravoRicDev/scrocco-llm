@@ -1590,8 +1590,8 @@ def note_context_limit(router, dep: dict | None, status, detail,
         router.note_discovered_max_input(dep.get("unique"), lim)
         return lim
     except Exception:                              # noqa: BLE001
-        log.debug("[max-input] note_discovered fallito per %s",
-                  dep.get("unique"), exc_info=True)
+        log.warning("[max-input] note_discovered fallito per %s",
+                    dep.get("unique"), exc_info=True)
         return None
 
 # Loop degenere rilevato in STREAMING (kill precoce): il modello produce
@@ -4975,7 +4975,8 @@ truncation_hook=None,
                             try:
                                 media_strike_hook(dep["model"], detail)
                             except Exception as exc:   # mai bloccare il fallback
-                                log.debug("[strike] hook error: %s", exc)
+                                    log.warning("[strike] hook error: %s", exc,
+                                                exc_info=True)
                         log.warning("[fallback] %s 400 provider-side "
                                     "(firma openai_error): ritento sul "
                                     "successivo", cur)
@@ -5100,7 +5101,8 @@ truncation_hook=None,
                                 try:
                                     media_strike_hook(dep["model"], detail)
                                 except Exception as exc:
-                                    log.debug("[strike] hook error: %s", exc)
+                                    log.warning("[strike] hook error: %s", exc,
+                                                exc_info=True)
                             nxt = _pick(profile, dep, need, scope,
                                                        ctx=ctx, tried=tried,
                                                        requested_group=requested_group)

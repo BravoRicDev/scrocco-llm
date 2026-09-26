@@ -76,7 +76,7 @@ class Ledger:
                 # rientrante) -> dentro il with sarebbe stato un deadlock.
                 self.flush()
         except Exception:                       # mai bloccare la risposta
-            log.debug("[ledger] record error", exc_info=True)
+            log.error("[ledger] record error", exc_info=True)
 
     # -------------------------------------------------------------- flush --
     async def flush_async(self) -> int:
@@ -86,7 +86,7 @@ class Ledger:
         try:
             return await asyncio.to_thread(self.flush)
         except Exception:                       # noqa: BLE001 - best effort
-            log.debug("[ledger] flush_async error", exc_info=True)
+            log.error("[ledger] flush_async error", exc_info=True)
             return 0
 
     def flush_sync(self) -> int:
@@ -140,7 +140,7 @@ class Ledger:
             # retention) viene compresso nel summary giornaliero, non scartato.
             self._aggregate_oldest()
         except Exception:                       # noqa: BLE001 - mai bloccare
-            log.debug("[ledger] rotate error", exc_info=True)
+            log.error("[ledger] rotate error", exc_info=True)
 
     # -------------------------------------------------------- aggregazione --
     def _aggregate_oldest(self) -> None:
