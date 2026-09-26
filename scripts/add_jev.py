@@ -3,37 +3,35 @@
 Jev non e' un LLM generativo: risponde su `POST /v1/systemone` con body/risposta
 nativi `{state, questions}` -> `{model, answers, usage}`. Va quindi instradato
 con `api_style=jev` sulla capacita' `decision` (endpoint dedicato, NON
-OpenAI-chat). OpenRouter espone lo stesso endpoint dedicato, quindi si usano le
-chiavi OpenRouter GIA' presenti nel CSV (una riga per chiave, come per gli altri
-provider).
+OpenAI-chat).
 
-  endpoint : https://openrouter.ai/api/v1/systemone
-  modelli  : $JEV_MODELS (default `typesafe/jev-1.13,~typesafe/jev-latest`)
-  caps     : decision          -> gruppi -decision / -decision-go / -decision-fallback
-  data     : fallback          -> Jev e' A PAGAMENTO (input $0.042/Mtok, output
-                                  $0): per convenzione resta SEMPRE nel bucket
-                                  `-decision-fallback`, mai come prima scelta.
-                                  Lo script CORREGGE a `fallback` anche le righe
-                                  Jev esistenti eventualmente rimaste `free`.
-  context  : 32 (k)            -> posizionamento dims
-  max_input: 32000
+Provider Jev-compatibili verificati (endpoint `/v1/systemone` nativo):
+  - **bynara**        modello `jev`            -> GRATIS (free tier 7M tok/g,
+                       15 req/min). `data=free` -> gruppo `-decision` primario.
+  - **opencode-zen**  modello `jev-1.13-free`  -> GRATIS (tier "within OpenCode",
+                       a tempo limitato; richiede UA `opencode/*`, che il
+                       gateway manda gia' per gli upstream opencode.ai).
+                       `data=free` -> `-decision` primario.
+  - **openrouter**    modelli `typesafe/jev-1.13` e `~typesafe/jev-latest`
+                       -> A PAGAMENTO (input $0.042/Mtok, output $0).
+                       `data=fallback` -> `-decision-fallback`.
 
-NB: `typesafe/jev-latest` senza `~` NON esiste (400). L'alias version-latest e'
-`~typesafe/jev-latest` (col `~`). `typesafe/jev-router` e' un router testuale,
-non il modello decisionale.
+NB modello: `typesafe/jev-latest` senza `~` NON esiste (400); l'alias e'
+`~typesafe/jev-latest`. `typesafe/jev-router` e' un router testuale, non Jev.
+
+Lo script e' idempotente: una riga per (provider, modello, endpoint, chiave),
+e riallinea il bucket `data` (free/fallback) delle righe Jev esistenti.
 
 !!!! ORDINE OBBLIGATORIO !!!!
-Va eseguito DOPO aver deployato il codice che conosce `decision` e `jev`. Sul
-codice VECCHIO `parse_caps` scarterebbe il token `decision` (caps vuoto -> la
-riga cadrebbe nel MONDO TESTO) e `normalize_style("jev")` degraderebbe a `chat`
-(build_url -> `.../systemone/chat/completions`, 404). Quindi: deploy prima, poi
-questo script.
+Le righe vanno scritte DOPO aver deployato il codice che conosce `decision` e
+`jev`. Sul codice vecchio `parse_caps` scarta `decision` (la riga cadrebbe nel
+MONDO TESTO) e `normalize_style("jev")` degrada a `chat`.
 
 Uso (su un host, fuori dal container, con la master key):
     K=$(docker exec scrocco-llm printenv GATEWAY_MASTER_KEY)
     GATEWAY_MASTER_KEY="$K" python3 scripts/add_jev.py            # dry-run
     GATEWAY_MASTER_KEY="$K" python3 scripts/add_jev.py --apply
-NON stampa chiavi. Idempotente su (provider, modello, endpoint) + data=fallback.
+NON stampa chiavi.
 """
 import csv
 import io
@@ -44,12 +42,16 @@ import urllib.request
 
 BASE = os.environ.get("NX_BASE", "http://127.0.0.1:4001")
 KEY = os.environ["GATEWAY_MASTER_KEY"]
-MODELS = [m.strip() for m in os.environ.get(
-    "JEV_MODELS", "typesafe/jev-1.13,~typesafe/jev-latest").split(",") if m.strip()]
-ENDPOINT = os.environ.get("JEV_ENDPOINT",
-                          "https://openrouter.ai/api/v1/systemone")
-PROVIDER = "openrouter"
 APPLY = "--apply" in sys.argv
+
+# (provider, endpoint nativo, bucket data, modelli)
+TARGETS = [
+    ("bynara", "https://router.bynara.id/v1/systemone", "free", ["jev"]),
+    ("opencode-zen", "https://opencode.ai/zen/v1/systemone", "free",
+     ["jev-1.13-free"]),
+    ("openrouter", "https://openrouter.ai/api/v1/systemone", "fallback",
+     ["typesafe/jev-1.13", "~typesafe/jev-latest"]),
+]
 
 
 def _req(path, method="GET", body=None):
@@ -61,82 +63,77 @@ def _req(path, method="GET", body=None):
         return resp.read().decode()
 
 
-def _col(header, name):
-    return header.index(name) if name in header else None
-
-
 raw = json.loads(_req("/admin/csv")).get("raw") or ""
 rows = list(csv.reader(io.StringIO(raw)))
 header, body = rows[0], rows[1:]
-
-pcol = _col(header, "provider")
-ecol = _col(header, "endpoint")
-mcol = _col(header, "modello")
-dcol = _col(header, "data")
-scol = _col(header, "api_style")
-if None in (pcol, ecol, mcol, dcol, scol):
-    raise SystemExit("header CSV senza provider/endpoint/modello/data/api_style")
-
-# colonna profilo locale (header "scrocco-llm-<profilo>")
+for need in ("provider", "endpoint", "modello", "data", "api_style", "caps"):
+    if need not in header:
+        raise SystemExit("header CSV senza colonna %r" % need)
 prof_cols = [h for h in header if h.startswith("scrocco-llm-")]
 if len(prof_cols) != 1:
     raise SystemExit("colonna profilo non univoca: %r" % prof_cols)
-prof_col = prof_cols[0]
-kcol = header.index(prof_col)
+kcol = header.index(prof_cols[0])
+pcol, ecol, mcol = header.index("provider"), header.index("endpoint"), header.index("modello")
+dcol, scol = header.index("data"), header.index("api_style")
 
 
 def _get(r, i):
     return r[i].strip() if i < len(r) else ""
 
 
-# 1) CORREGGI: ogni riga Jev gia' presente deve stare in `fallback` (pagamento).
+# bucket atteso per provider (per la normalizzazione delle righe esistenti)
+_bucket = {p: b for p, _e, b, _m in TARGETS}
 fixed = 0
 for r in body:
-    if _get(r, scol).lower() == "jev" and _get(r, dcol).lower() != "fallback":
+    if _get(r, scol).lower() != "jev":
+        continue
+    want = _bucket.get(_get(r, pcol).lower())
+    if want and _get(r, dcol).lower() != want:
         while len(r) <= dcol:
             r.append("")
-        r[dcol] = "fallback"
+        r[dcol] = want
         fixed += 1
-
-# 2) AGGIUNGI: una riga per (chiave, modello) mancante, sempre fallback.
-openrouter_keys: list[str] = []
-for r in body:
-    if _get(r, pcol).lower() != PROVIDER:
-        continue
-    k = _get(r, kcol)
-    if k and k not in openrouter_keys:
-        openrouter_keys.append(k)
-if not openrouter_keys:
-    raise SystemExit("nessuna chiave OpenRouter nel CSV: niente da fare")
 
 existing = {(_get(r, pcol).lower(), _get(r, mcol), _get(r, ecol).rstrip("/"),
              _get(r, kcol)) for r in body}
 
 added = []
-for model in MODELS:
-    for k in openrouter_keys:
-        if (PROVIDER, model, ENDPOINT.rstrip("/"), k) in existing:
+for provider, endpoint, bucket, models in TARGETS:
+    keys = []
+    for r in body:
+        if _get(r, pcol).lower() != provider:
             continue
-        row = [""] * len(header)
-        row[header.index("commento")] = "jev-systemone"
-        row[mcol] = model
-        row[pcol] = PROVIDER
-        row[ecol] = ENDPOINT
-        row[dcol] = "fallback"
-        row[header.index("context")] = "32"
-        row[header.index("max_input")] = "32000"
-        row[header.index("priority")] = "0"
-        row[header.index("intelligence_score")] = "8"
-        row[header.index("model_preference")] = "50"
-        row[header.index("caps")] = "decision"
-        row[scol] = "jev"
-        row[header.index("enabled")] = "true"
-        row[header.index("hold_until_finish")] = "true"
-        row[kcol] = k
-        added.append(row)
+        k = _get(r, kcol)
+        if k and k not in keys:
+            keys.append(k)
+    if not keys:
+        print("[skip] %s: nessuna chiave nel CSV" % provider)
+        continue
+    for model in models:
+        for k in keys:
+            if (provider, model, endpoint.rstrip("/"), k) in existing:
+                continue
+            row = [""] * len(header)
+            row[header.index("commento")] = "jev-systemone"
+            row[mcol] = model
+            row[pcol] = provider
+            row[ecol] = endpoint
+            row[dcol] = bucket
+            row[header.index("context")] = "32"
+            row[header.index("max_input")] = "32000"
+            row[header.index("priority")] = "0"
+            row[header.index("intelligence_score")] = "8"
+            row[header.index("model_preference")] = "50"
+            row[header.index("caps")] = "decision"
+            row[scol] = "jev"
+            row[header.index("enabled")] = "true"
+            row[header.index("hold_until_finish")] = "true"
+            row[kcol] = k
+            added.append(row)
+    print("[%s] chiavi=%d modelli=%s bucket=%s"
+          % (provider, len(keys), models, bucket))
 
-print("modelli=%s chiavi OpenRouter=%d" % (MODELS, len(openrouter_keys)))
-print("corrette a fallback=%d, da aggiungere=%d" % (fixed, len(added)))
+print("corrette a bucket=%d, da aggiungere=%d" % (fixed, len(added)))
 if fixed == 0 and not added:
     print("nessuna modifica necessaria")
     raise SystemExit(0)

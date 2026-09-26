@@ -123,6 +123,15 @@ def client_fallback(monkeypatch, tmp_path):
     _client_teardown(m, orig)
 
 
+@pytest.fixture()
+def client_mixed(monkeypatch, tmp_path):
+    """Un provider Jev GRATIS (`free`) + uno a pagamento (`fallback`)."""
+    rows = _ROW_A + _ROW_B.replace(",free,", ",fallback,")
+    m, orig = _client_env(monkeypatch, tmp_path, rows)
+    yield TestClient(m.app), m
+    _client_teardown(m, orig)
+
+
 def _pin_initial_pick(monkeypatch, m, model):
     """Fissa il primo deployment scelto da `initial_pick` a `model`."""
     dep = m.config.deployment_by_unique(
@@ -353,3 +362,16 @@ def test_decision_fallback_only_rotates(client_fallback, monkeypatch):
     r = _post(c, monkeypatch, m, fwd)
     assert r.status_code == 200, r.text
     assert len(fwd.calls) == 2
+
+
+def test_decision_prefers_free_primary_over_paid_fallback(client_mixed,
+                                                          monkeypatch):
+    """Con un Jev gratis (`free`) e uno a pagamento (`fallback`), la prima
+    scelta e' il primario gratuito; il pagato resta in rotazione."""
+    c, m = client_mixed
+    assert m.config.cap_counts["test"]["decision"]["primary"] == 1
+    assert m.config.cap_counts["test"]["decision"]["fallback"] == 1
+    r = _post(c, monkeypatch, m, _FakeFwd())
+    assert r.status_code == 200, r.text
+    dep = r.json()["nx_deployment"]
+    assert "-decision__" in dep and "-decision-fallback__" not in dep
