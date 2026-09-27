@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import csv_store, journal, metrics
 from .bgtasks import spawn
+from .jsonl_store import file_lock
 from .config import THINKING_REPLAY_HEADER
 
 log = logging.getLogger("nx.csvlearn")
@@ -49,6 +50,13 @@ def mark_twins_in_memory(config, model: str,
 
 def _persist(config, csv_path: Path, var_dir: Path, model: str,
              flag: str = THINKING_REPLAY_HEADER) -> int:
+    # lettura-modifica-scrittura sotto lock tra processi: con piu' worker due
+    # apprendimenti contemporanei non si sovrascrivono a vicenda
+    with file_lock(csv_path):
+        return _persist_locked(config, csv_path, var_dir, model, flag)
+
+
+def _persist_locked(config, csv_path: Path, var_dir: Path, model: str, flag: str) -> int:
     header, rows = csv_store.load_table(csv_path)
     if not header:
         return 0

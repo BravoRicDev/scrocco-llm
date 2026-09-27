@@ -9,8 +9,14 @@ chiamante.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+
+try:                                   # POSIX: lock tra processi (multi-worker)
+    import fcntl
+except ImportError:                    # pragma: no cover - Windows
+    fcntl = None
 
 
 def rotate_segments(path: str | os.PathLike, max_bytes: int, keep: int) -> bool:
@@ -36,3 +42,22 @@ def append_jsonl(path: str | os.PathLike, rows: list[dict]) -> None:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False, separators=(",", ":"),
                                default=str) + "\n")
+
+
+@contextlib.contextmanager
+def file_lock(path: str | os.PathLike):
+    """Lock ESCLUSIVO tra processi su `<path>.lock` (flock, bloccante).
+
+    Con piu' worker (GATEWAY_WORKERS>1) due processi possono ruotare e
+    appendere lo stesso file nello stesso istante: rotazione+append vanno
+    fatti sotto questo lock. Con un solo processo costa una open/flock.
+    Senza fcntl (non-POSIX) e' un no-op."""
+    if fcntl is None:
+        yield
+        return
+    fd = os.open(os.fspath(path) + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)                   # la close rilascia il flock

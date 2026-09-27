@@ -8,6 +8,8 @@ persistence: history lives in logs/Grafana, not in the gateway.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import threading
@@ -33,7 +35,24 @@ _latency_sum: "OrderedDict[str, float]" = OrderedDict()
 _latency_count: "OrderedDict[str, float]" = OrderedDict()
 
 
+# Replica multi-worker (app/cluster.py): un worker che RIESEGUE l'osservazione
+# di un altro non deve contarla due volte. Dentro `muted()` le scritture sono
+# ignorate (i contatori restano quelli del worker che ha servito davvero).
+_muted: contextvars.ContextVar[bool] = contextvars.ContextVar("nx_metrics_muted", default=False)
+
+
+@contextlib.contextmanager
+def muted():
+    token = _muted.set(True)
+    try:
+        yield
+    finally:
+        _muted.reset(token)
+
+
 def inc(name: str, labels: tuple[str, ...] = (), value: float = 1.0) -> None:
+    if _muted.get():
+        return
     with _lock:
         _counters[name][labels] += value
         # Auto-registrazione: una metrica CON label non dichiarata otterrebbe
@@ -47,11 +66,15 @@ def inc(name: str, labels: tuple[str, ...] = (), value: float = 1.0) -> None:
 
 
 def set_gauge(name: str, value: float) -> None:
+    if _muted.get():
+        return
     with _lock:
         _gauges[name] = value
 
 
 def observe_latency_ms(unique: str, ms: float) -> None:
+    if _muted.get():
+        return
     with _lock:
         _latency_sum[unique] = _latency_sum.get(unique, 0.0) + ms
         _latency_count[unique] = _latency_count.get(unique, 0.0) + 1

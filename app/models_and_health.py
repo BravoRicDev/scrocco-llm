@@ -13,7 +13,7 @@ from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 from starlette.requests import Request
 
-from . import capmeta
+from . import capmeta, cluster
 from . import state as gw_state
 from . import metrics
 from .http_responses import unauthorized as _unauthorized
@@ -64,7 +64,7 @@ async def healthz() -> dict:
 
 
 @router.get("/metrics")
-async def metrics_endpoint():
+async def metrics_endpoint(request: Request):
     """Formato testo Prometheus. Unica route /metrics. Loopback-only.
 
     Espone SIA le metriche HTTP di observability SIA tutti gli nx_* di
@@ -74,6 +74,11 @@ async def metrics_endpoint():
     metrics.set_gauge("nx_cooldown_active", len(gw_state.router._cooldown))
     metrics.set_gauge("nx_sticky_active", len(gw_state.router._sticky))
     body = metrics.render() + render_prometheus()
+    if cluster.enabled() and not request.scope.get("scrocco.internal"):
+        # multi-worker: serie di TUTTI i worker, con la label `worker`
+        from .affinity import cluster_metrics
+
+        body = await cluster_metrics(body)
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 

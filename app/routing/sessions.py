@@ -183,8 +183,13 @@ class SessionMixin:
         log.debug("[sticky] %s group_sticky impostato: %s", session_id, target)
         self._sticky[session_id] = (target, time.time())
 
-    def sticky_release(self, session_id: str) -> None:
-        self._sticky.pop(session_id, None)
+    def sticky_release(self, session_id: str) -> bool:
+        return self._sticky.pop(session_id, None) is not None
+
+    def sticky_release_all(self) -> list[str]:
+        released = list(self._sticky)
+        self._sticky.clear()
+        return released
 
     def dep_sticky_get(self, session_id: str) -> str | None:
         """Ritorna l'unique del deployment sticky per questa sessione."""

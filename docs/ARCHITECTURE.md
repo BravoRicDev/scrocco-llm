@@ -1,7 +1,9 @@
 # Architecture
 
-`scrocco-llm` is a single FastAPI process (`app.main:app`, default `:4001`)
-that exposes an OpenAI-compatible surface and forwards each request to one of
+`scrocco-llm` is a FastAPI app (`app.main:app`, default `:4001`) — one
+process by default, or N worker processes behind `python -m app.serve` with
+`GATEWAY_WORKERS` (session affinity + replicated routing state, see
+OPERATIONS.md *Multi-worker*) — that exposes an OpenAI-compatible surface and forwards each request to one of
 many upstream deployments, chosen at runtime by `app/router.py`.
 
 The design goal is **one endpoint, many free/paid providers, no client changes**:
@@ -32,6 +34,8 @@ cools down failing ones.
 | `app/health.py`, `autoprobe.py`, `keyhealth.py` | Proactive health, autoprobe, dead-key lifecycle |
 | `app/metrics.py`, `observability.py`, `sniff.py`, `ledger.py`, `journal.py`, `repairlog.py`, `logview.py` | Prometheus metrics, trace IDs, debug sniffing, usage ledger, CSV journal/backups, repair audit, log parsing |
 | `app/atomic_store.py`, `csv_store.py`, `csvlearn.py` | Atomic persistence; stable CSV row ids; per-deployment flag learning |
+| `app/serve.py`, `cluster.py`, `affinity.py` | Entry point (single process or supervisor + N workers), replication of global routing observations between workers, per-session routing to the owner worker |
+| `app/admission.py`, `liveness.py`, `offload.py` | Admission gate, event-loop heartbeat for the Docker healthcheck, CPU-bound work on threads |
 | `app/effort.py`, `session_ctx.py`, `constants.py`, `errors.py`, `provider_models.py`, `logboot.py` | Per-request effort, async-safe session context, shared constants/errors, provider model cache, rolling-window bootstrap |
 
 ## Request lifecycle — `POST /v1/chat/completions`

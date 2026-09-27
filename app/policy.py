@@ -810,7 +810,8 @@ class Policy:
     # Controllo di ammissione del PROCESSO (app/admission.py): richieste LLM
     # in volo (stream compresi, fino alla fine della risposta) e tetto
     # dedicato agli stream. Oltre il tetto si ASPETTA in coda; 503 retryable
-    # solo dopo admission_queue_timeout_sec. 0 = nessun tetto.
+    # solo dopo admission_queue_timeout_sec. 0 = nessun tetto. Tetti del
+    # GATEWAY: con GATEWAY_WORKERS=N ogni worker ne applica 1/N.
     admission_max_inflight: int = 128
     admission_max_streams: int = 48
     admission_queue_timeout_sec: float = 60.0

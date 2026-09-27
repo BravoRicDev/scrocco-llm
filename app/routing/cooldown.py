@@ -240,6 +240,52 @@ class CooldownMixin:
             log.warning("[probe] auto-retirement di %s fallito", unique, exc_info=True)
         return False
 
+    # --- comandi operatore/probe sullo stato cooldown -------------------
+    # Metodi dedicati (prima erano mutazioni dirette di `_cooldown`/`_stats`
+    # da admin e autoprobe): un punto d'ingresso nominato e' cio' che la
+    # modalita' multi-worker replica sugli altri processi (app/cluster.py).
+    def drop_cooldown(self, unique: str) -> bool:
+        """Toglie SOLO la scadenza del cooldown (streak/since/full intatti)."""
+        return self._cooldown.pop(unique, None) is not None
+
+    def drop_all_cooldowns(self) -> list[str]:
+        """Svuota le scadenze di tutti i cooldown; ritorna gli unique tolti."""
+        cleared = list(self._cooldown)
+        self._cooldown.clear()
+        return cleared
+
+    def reset_after_probe(self, unique: str) -> None:
+        """Probe manuale riuscito: streak a zero e cooldown tolto."""
+        st = self._stats.get(unique)
+        if st is not None:
+            st.fail_streak = 0
+        self._cooldown.pop(unique, None)
+
+    def reset_for_unretire(self, unique: str) -> None:
+        """Unretire manuale: si riparte ottimisti (streak e tasso azzerati)."""
+        s = self.stats_for(unique)
+        s.fail_streak = 0
+        s.success_ema = None
+        self._cooldown.pop(unique, None)
+
+    def reset_probe_fail_streak(self, unique: str) -> None:
+        self.stats_for(unique).probe_fail_streak = 0
+
+    def bump_probe_fail_streak(self, unique: str) -> int:
+        s = self.stats_for(unique)
+        s.probe_fail_streak += 1
+        return s.probe_fail_streak
+
+    def set_cooldown_until(self, unique: str, expiry: float, now: float) -> None:
+        """Porta la scadenza a `expiry` (backoff dell'autoprobe dopo un KO):
+        `since` resta quello del cooldown in corso, `full` ne segue la durata."""
+        since = self._cooldown_since.get(unique)
+        if since is None:
+            since = now
+            self._cooldown_since[unique] = since
+        self._cooldown[unique] = expiry
+        self._cooldown_full_map()[unique] = float(expiry - since)
+
     def is_retired(self, unique: str) -> bool:
         """Chiave RETIRED (lifecycle keyhealth): esclusa dal routing.
 

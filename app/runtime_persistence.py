@@ -27,7 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from . import autoprobe, imagestore, audiostore, metrics, repairlog, sniff
+from . import autoprobe, cluster, imagestore, audiostore, metrics, repairlog, sniff
 from . import state as gw_state
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 from .suppressed import report_suppressed
@@ -294,13 +294,21 @@ def _load_adaptive_stats() -> None:
         log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
 
+def _own_or_shared(path: Path) -> Path:
+    """File di stato per-worker (`nome.wI.ext`): al primo avvio multi-worker
+    non esiste ancora e si parte da quello del processo singolo."""
+    if path.exists() or not cluster.enabled():
+        return path
+    return path.with_name(path.name.replace(f".w{cluster.index()}", "", 1))
+
+
 def _load_thought_sigs() -> None:
     """All'avvio: ripristina le firme Gemini catturate (sopravvivono al restart)."""
 
     if not gw_state.PERSIST_STATS:
         return
     try:
-        data = _load_json(gw_state._thought_sigs_file, dict)
+        data = _load_json(_own_or_shared(gw_state._thought_sigs_file), dict)
         if data:
             from .thought_sig import THOUGHT_SIGS
 
@@ -357,9 +365,10 @@ def _maybe_save_thought_sigs(force: bool = False, *, defer: bool = False) -> lis
 
 
 def _maybe_save_adaptive_stats(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
-    """Salvataggio atomico throttled (max ogni 60s) delle stats adattive."""
+    """Salvataggio atomico throttled (max ogni 60s) delle stats adattive.
+    Multi-worker: stato GLOBALE replicato, lo scrive solo il leader."""
 
-    if not gw_state.PERSIST_STATS:
+    if not gw_state.PERSIST_STATS or not cluster.is_leader():
         return []
     now = time.time()
     if not force and now - gw_state._last_stats_save < 60:
@@ -436,7 +445,7 @@ def _load_routing_state() -> None:
     if not gw_state.PERSIST_ROUTING:
         return
     try:
-        data = _load_json(gw_state._routing_file, dict)
+        data = _load_json(_own_or_shared(gw_state._routing_file), dict)
         if data:
             rep = gw_state.router.load_routing_state(data)
             if any(rep.values()):
@@ -469,9 +478,10 @@ def _bootstrap_runtime_from_logs() -> None:
 
 
 def _maybe_save_cooldowns(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
-    """Salvataggio atomico throttled (max ogni 60s) dei cooldown attivi."""
+    """Salvataggio atomico throttled (max ogni 60s) dei cooldown attivi.
+    Multi-worker: stato GLOBALE replicato, lo scrive solo il leader."""
 
-    if not gw_state.PERSIST_STATS:
+    if not gw_state.PERSIST_STATS or not cluster.is_leader():
         return []
     now = time.time()
     if not force and now - gw_state._last_cooldown_save < 60:
@@ -502,6 +512,36 @@ def _all_deps() -> dict:
     return out
 
 
+async def _keyhealth_tick() -> None:
+    """keyhealth: osserva TUTTI i deployment con stats e aggiorna l'evidenza
+    su disco (throttled dal tick del watcher). Multi-worker: lo fa il leader
+    (lo stato osservato e' globale e replicato); gli altri worker rileggono
+    il file quando il leader lo aggiorna."""
+    if not cluster.is_leader():
+        gw_state.KEYHEALTH.reload_if_changed()
+        return
+    try:
+        now = time.time()
+        for u, s in list(gw_state.router._stats.items()):
+            cooled = gw_state.router._cooldown.get(u, 0) > now
+            gw_state.KEYHEALTH.observe(
+                u,
+                fail_streak=s.fail_streak,
+                success_ema=s.success_ema,
+                is_cooled=cooled,
+                reason=getattr(s, "last_reason", None),
+                now=now,
+            )
+        new_retired = gw_state.KEYHEALTH.apply_retirement(gw_state.policy.retire_after_days)
+        if new_retired:
+            log.warning(
+                "[keyhealth] %d chiavi passate RETIRED: %s", len(new_retired), ", ".join(new_retired[:5])
+            )
+        await gw_state.KEYHEALTH.save_async()
+    except Exception:  # analytics non deve mai mordere
+        log.warning("[keyhealth] tick error", exc_info=True)
+
+
 async def _watcher(interval: float) -> None:
     """Ogni `interval` secondi controlla mtime di CSV (credenziali) e
     gateway.yaml (policy) e ricarica ciò che è cambiato.
@@ -526,7 +566,8 @@ async def _watcher(interval: float) -> None:
             writes = _maybe_save_all(defer=True)  # F26: stats+routing, stesso istante
             # giro giornaliero sui RITIRATI: parte al primo tick dopo
             # mezzanotte e li sonda con calma (un probe riuscito riabilita)
-            if not background_cautious_enabled():  # cautela: nessun probe automatico
+            # cautela: nessun probe automatico; multi-worker: lo fa il leader
+            if not background_cautious_enabled() and cluster.is_leader():
                 autoprobe.maybe_spawn_retired(gw_state.router, gw_state.forwarder)
             writes += _maybe_save_cooldowns(defer=True)  # cooldown attivi su disco
             writes += _maybe_save_thought_sigs(defer=True)  # firme Gemini: persistite su disco
@@ -534,28 +575,7 @@ async def _watcher(interval: float) -> None:
                 await asyncio.to_thread(_run_writes, writes)
             await gw_state.LEDGER.flush_async()  # ledger usage: offload su thread
             await repairlog.flush_async()  # ledger riparazioni: idem
-            # keyhealth: osserva TUTTI i deployment con stats e aggiorna
-            # l'evidenza su disco (throttled dal tick stesso)
-            try:
-                now = time.time()
-                for u, s in list(gw_state.router._stats.items()):
-                    cooled = gw_state.router._cooldown.get(u, 0) > now
-                    gw_state.KEYHEALTH.observe(
-                        u,
-                        fail_streak=s.fail_streak,
-                        success_ema=s.success_ema,
-                        is_cooled=cooled,
-                        reason=getattr(s, "last_reason", None),
-                        now=now,
-                    )
-                new_retired = gw_state.KEYHEALTH.apply_retirement(gw_state.policy.retire_after_days)
-                if new_retired:
-                    log.warning(
-                        "[keyhealth] %d chiavi passate RETIRED: %s", len(new_retired), ", ".join(new_retired[:5])
-                    )
-                await gw_state.KEYHEALTH.save_async()
-            except Exception:  # analytics non deve mai mordere
-                log.warning("[keyhealth] tick error", exc_info=True)
+            await _keyhealth_tick()
             # purge job video scaduti (mapping in memoria, TTL 24h)
             now = time.time()
             expired = [j for j, m in gw_state._videos_jobs.items() if now - m.get("created", 0) > gw_state.VIDEO_JOB_TTL_SEC]
@@ -583,7 +603,7 @@ async def _watcher(interval: float) -> None:
                     # stato di salute PRIMA del traffico reale (vedi autoprobe).
                     _added = sorted(_all_uniques() - _prev_uniques)
                     _max_p = max(0, int(getattr(gw_state.policy, "hotreload_probe_max", 20) or 0))
-                    if _added and _max_p and not background_cautious_enabled():
+                    if _added and _max_p and not background_cautious_enabled() and cluster.is_leader():
                         autoprobe.spawn_hotreload_probe(gw_state.router, gw_state.forwarder, _added[:_max_p])
                         log.info("[hotreload] %d deployment nuovi: probe fire-and-forget", min(len(_added), _max_p))
                     # CONNECTION DRAINING: i deployment rimossi dal CSV con

@@ -36,6 +36,7 @@ import time
 from collections import deque
 
 from .bgtasks import spawn
+from . import cluster
 from . import state as gw_state
 from .forwarder import _MODEL_MISSING_RE, maybe_quarantine_ban
 from . import protocols as proto
@@ -334,7 +335,7 @@ async def _retired_pass(router, forwarder) -> None:
             if ok:
                 kh.clear(unique)
                 router.clear_cooldown(unique)
-                router.stats_for(unique).probe_fail_streak = 0
+                router.reset_probe_fail_streak(unique)
                 riab += 1
                 log.warning("[autoprobe] %s RITIRATO ma risponde (%.0fms, "
                             "chiave %s*) -> RIABILITATO", unique, lat, name)
@@ -394,8 +395,8 @@ def maybe_spawn(router, forwarder, profile: str) -> None:
         return          # NOTTE-SOLO: i probe partono SOLO dal giro di
                         # mezzanotte (main._nightly_scheduler), mai a ogni
                         # richiesta (regola utente post-ban llm7.io)
-    if _running:
-        return
+    if _running or not cluster.is_leader():
+        return          # multi-worker: budget per-chiave dei probe su UN worker
     _running = True
     try:
         loop = asyncio.get_running_loop()
@@ -667,12 +668,7 @@ async def _probe_pass(router, forwarder, profile: str) -> None:
                 log.info("[autoprobe] %s: probe KO (%s) -> cooldown "
                          "+%.0fs (x%d/24h%s)", unique, code or "timeout",
                          _add, max(1, _n), " escalation" if _esc else "")
-                since = router._cooldown_since.get(unique)
-                if since is None:
-                    since = now2
-                    router._cooldown_since[unique] = since
-                router._cooldown[unique] = new_exp
-                router._cooldown_full_map()[unique] = float(new_exp - since)
+                router.set_cooldown_until(unique, new_exp, now2)
                 rem = router.cooldown_residual(unique)
                 log.info("[autoprobe] %s: residuo %.0fs",
                          unique, rem)
@@ -779,9 +775,8 @@ def _bump_probe_streak(router, unique: str, streak_cap: int) -> float:
     escalation di cooldown: dopo `streak_cap` KO consecutivi il transitorio
     sale al livello `grow` (rotazione piu' lunga, MAI retire dall'autoprobe).
     Il reset dello streak avviene da note_result/clear_cooldown (successo)."""
-    s = router.stats_for(unique)
-    s.probe_fail_streak += 1
-    if streak_cap > 0 and s.probe_fail_streak >= streak_cap:
+    streak = router.bump_probe_fail_streak(unique)
+    if streak_cap > 0 and streak >= streak_cap:
         return 1.0     # multiplicatore: escalate il transitorio a grow
     return 0.0
 

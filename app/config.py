@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import calendar
 import csv
+import hashlib
 import logging
+import os
 import random
 import re
 import threading
@@ -438,7 +440,25 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     }
 
 
-def _shuffle_bucket(deps: list[dict]) -> list[dict]:
+# Multi-worker (app/serve.py): ogni worker carica il CSV per conto suo, ma gli
+# unique (`gruppo__modello__<indice>`) dipendono dal mescolamento e devono
+# indicare lo STESSO deployment in tutti i processi (stato replicato per
+# unique). Il supervisore passa un seme comune: il mescolamento diventa
+# funzione di (seme, contenuto del CSV), identico ovunque e diverso a ogni
+# avvio del cluster o modifica del CSV. Senza seme (processo singolo) si usa
+# il `random` globale, esattamente come prima.
+CLUSTER_SEED_ENV = "GATEWAY_CLUSTER_SEED"
+
+
+def _shuffle_rng(rows: list[list[str]]):
+    seed = os.environ.get(CLUSTER_SEED_ENV)
+    if not seed:
+        return random
+    digest = hashlib.sha256("\x1e".join("\x1f".join(r) for r in rows).encode("utf-8")).hexdigest()
+    return random.Random(f"{seed}:{digest}")
+
+
+def _shuffle_bucket(deps: list[dict], rng=random) -> list[dict]:
     """Replica _shuffle_bucket(): shuffle dentro ogni modello, modelli ordinati
     per priority massima decrescente, deployment dello stesso modello consecutivi."""
     by_model: dict[str, list[dict]] = {}
@@ -446,7 +466,7 @@ def _shuffle_bucket(deps: list[dict]) -> list[dict]:
         by_model.setdefault(d["meta"]["modello"], []).append(d)
     model_groups = []
     for _model, grp in by_model.items():
-        random.shuffle(grp)
+        rng.shuffle(grp)
         model_groups.append((max(g["meta"]["priority"] for g in grp), grp))
     model_groups.sort(key=lambda x: -x[0])
     out: list[dict] = []
@@ -455,7 +475,7 @@ def _shuffle_bucket(deps: list[dict]) -> list[dict]:
     return out
 
 
-def _shuffle_built(deps: list[dict]) -> list[dict]:
+def _shuffle_built(deps: list[dict], rng=random) -> list[dict]:
     """Come `_shuffle_bucket` ma su deployment GIA' costruiti (niente
     `meta`): shuffle dentro ogni modello, modelli ordinati per priorita'
     massima decrescente. Usato dai gruppi ALIAS, che riusano le istanze
@@ -465,7 +485,7 @@ def _shuffle_built(deps: list[dict]) -> list[dict]:
         by_model.setdefault(d.get("model", ""), []).append(d)
     model_groups = []
     for _model, grp in by_model.items():
-        random.shuffle(grp)
+        rng.shuffle(grp)
         model_groups.append((max(int(g.get("priority") or 0) for g in grp),
                              grp))
     model_groups.sort(key=lambda x: -x[0])
@@ -763,6 +783,7 @@ class GatewayConfig:
         # dopo un PUT /admin/csv sbagliato o un ripristino incompleto): NON deve
         # brickare il gateway -> stessa via del fresh install (0 deployment, il
         # playbook /bootstrap guida fino al primo bulk-insert).
+        self._rng = _shuffle_rng(reader or [])
         if not reader or not any(any(c.strip() for c in row) for row in reader):
             log.warning("[config] CSV assente/vuoto (%s): avvio con 0 "
                         "deployment (fresh install: segui GET /bootstrap)",
@@ -872,7 +893,7 @@ class GatewayConfig:
         dims_sorted = sorted(k for k in by_dim if k > 0)
         for dim in dims_sorted:
             built.append((f"{self.proxy_prefix}{pname}-{dim}k",
-                          _shuffle_bucket(by_dim[dim]), None))
+                          _shuffle_bucket(by_dim[dim], getattr(self, "_rng", random)), None))
         if go:
             built.append((f"{self.proxy_prefix}{pname}{self.go_suffix}",
                           sorted(go, key=lambda d: d["meta"]["sort_key"]), None))
@@ -898,7 +919,7 @@ class GatewayConfig:
                     c_free.append(d)
             base_g = f"{self.proxy_prefix}{pname}-{cap}"
             if c_free:
-                built.append((base_g, _shuffle_bucket(c_free), cap))
+                built.append((base_g, _shuffle_bucket(c_free, getattr(self, "_rng", random)), cap))
             if c_go:
                 built.append((f"{base_g}{self.go_suffix}",
                               sorted(c_go, key=lambda d: d["meta"]["sort_key"]),
@@ -1052,7 +1073,7 @@ class GatewayConfig:
                 base_g = (f"{self.proxy_prefix}{pname}-{alias}" if cap is None
                           else f"{self.proxy_prefix}{pname}-{alias}-{cap}")
                 if c_free:
-                    self.groups[base_g] = _shuffle_built(c_free)
+                    self.groups[base_g] = _shuffle_built(c_free, getattr(self, "_rng", random))
                     self.group_caps[base_g] = cap
                 if c_go:
                     _g = f"{base_g}{self.go_suffix}"

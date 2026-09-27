@@ -33,7 +33,7 @@ import asyncio
 log = logging.getLogger("nx.ledger")
 
 from .atomic_store import load_json as _load_json, save_json as _save_json
-from .jsonl_store import append_jsonl, rotate_segments
+from .jsonl_store import append_jsonl, file_lock, rotate_segments
 
 LEDGER_MAX_BYTES = int(
     os.environ.get("LEDGER_MAX_BYTES", str(20 * 1024 * 1024)) or
@@ -105,8 +105,9 @@ class Ledger:
             rows = self._buf
             self._buf = []
         try:
-            self._rotate_if_needed(len(rows))
-            append_jsonl(self.path, rows)
+            with file_lock(self.path):
+                self._rotate_if_needed(len(rows))
+                append_jsonl(self.path, rows)
             return len(rows)
         except Exception:                       # noqa: BLE001 - best effort
             # I4: le righe erano gia' state estratte dal buffer: senza

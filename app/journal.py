@@ -14,7 +14,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .jsonl_store import rotate_segments
+from .jsonl_store import file_lock, rotate_segments
 from .suppressed import report_suppressed
 
 # FIX: rotazione per DIMENSIONE del journal (prima cresceva senza limiti).
@@ -65,9 +65,10 @@ def record(var_dir: str | Path, op: str, details: dict | None = None) -> None:
         entry = {"ts": round(time.time(), 3), "op": op}
         if details:
             entry.update(details)
-        _rotate_if_needed(jpath)
-        with open(jpath, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with file_lock(jpath):
+            _rotate_if_needed(jpath)
+            with open(jpath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:                        # noqa: BLE001
         report_suppressed("journal.record")
 

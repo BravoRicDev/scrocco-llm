@@ -16,6 +16,12 @@ Run the gateway locally:
 uvicorn app.main:app --host 127.0.0.1 --port 4001
 ```
 
+Multi-worker locally (supervisor + N workers, see OPERATIONS.md):
+
+```bash
+GATEWAY_WORKERS=4 python -m app.serve --host 127.0.0.1 --port 4001
+```
+
 ## Tests
 
 ```bash

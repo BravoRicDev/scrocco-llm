@@ -18,6 +18,9 @@ Con i default (ampi) il normale traffico non tocca mai la coda: il
 comportamento verso il client resta quello di prima; sotto sovraccarico il
 processo resta reattivo invece di saturarsi. 0 = nessun tetto.
 
+Multi-worker (GATEWAY_WORKERS=N): la porta e' per processo, i tetti di policy
+restano quelli del GATEWAY e ogni worker ne applica 1/N (per eccesso).
+
 [EN] Process-level admission gate for LLM requests, with a dedicated cap for
 streams; excess requests wait in a queue, 503 + Retry-After only on timeout.
 """
@@ -31,7 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import metrics
+from . import cluster, metrics
 
 log = logging.getLogger("nx.admission")
 
@@ -47,12 +50,20 @@ class AdmissionLimits:
     queue_timeout_sec: float = 60.0
 
 
-def limits_from_policy(policy) -> AdmissionLimits:
+def _share(limit: int, workers: int) -> int:
+    """Quota per worker di un tetto del GATEWAY (arrotondata per eccesso)."""
+    return -(-limit // workers) if limit else 0
+
+
+def limits_from_policy(policy, workers: int | None = None) -> AdmissionLimits:
+    """I tetti di policy valgono per l'intero gateway: con N worker ciascuno
+    ne applica 1/N (per eccesso), cosi' il totale resta quello configurato."""
     d = AdmissionLimits()
+    n = max(1, cluster.size() if workers is None else workers)
     try:
         return AdmissionLimits(
-            max_inflight=max(0, int(getattr(policy, "admission_max_inflight", d.max_inflight))),
-            max_streams=max(0, int(getattr(policy, "admission_max_streams", d.max_streams))),
+            max_inflight=_share(max(0, int(getattr(policy, "admission_max_inflight", d.max_inflight))), n),
+            max_streams=_share(max(0, int(getattr(policy, "admission_max_streams", d.max_streams))), n),
             queue_timeout_sec=max(0.0, float(getattr(policy, "admission_queue_timeout_sec", d.queue_timeout_sec))),
         )
     except (TypeError, ValueError):

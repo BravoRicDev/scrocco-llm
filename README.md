@@ -29,7 +29,7 @@ The full documentation lives in [`docs/`](docs/README.md):
 | [Architecture](docs/ARCHITECTURE.md) | components, request lifecycle (stream & non-stream), persistence map, extension points |
 | [Routing](docs/ROUTING.md) | groups/dims/tiers, warm pool & borrows, canary/hedge, the resilient ladder, fallback, cooldowns, opencode zen/go gating |
 | [Configuration](docs/CONFIGURATION.md) | environment variables, `var/gateway.yaml` policy reference, `var/keys_rotation.csv` columns, compose profiles |
-| [Operations](docs/OPERATIONS.md) | deploy, admin API, observability & TUI, runbooks, troubleshooting |
+| [Operations](docs/OPERATIONS.md) | deploy, capacity & multi-worker (`GATEWAY_WORKERS`), admin API, observability & TUI, runbooks, troubleshooting |
 | [Security](docs/SECURITY.md) | auth model, `GATEWAY_ENV=production`, key generation/rotation, secret hygiene |
 | [Development](docs/DEVELOPMENT.md) | local setup, tests, CI, locked dependencies, code layout & refactors |
 
@@ -805,7 +805,7 @@ template. The ones that matter most:
 | `model_missing_cooldown_sec` / `quota_min_cooldown_sec` / `quota_max_cooldown_sec` | 86400 / 600 / 604800 | cooldown for a missing model / quota cooldown floor and ceiling |
 | `provider_transient_cooldown_sec` / `permission_denied_cooldown_sec` / `stream_loop_cooldown_sec` / `retry_body_cap_sec` / `min_output_floor` | 60 / 1800 / 300 / 300 / 4096 | transient provider fault / 401-403 / stream loop / Retry-After body cap / minimum output-token floor |
 | `probe_concurrency` / `probe_timeout_sec` / `playground_timeout_sec` / `playground_max_attempts` | 5 / 20 / 90 / 128 | admin probe concurrency & timeout; playground timeout & max attempts |
-| `admission_max_inflight` / `admission_max_streams` / `admission_queue_timeout_sec` | 128 / 48 / 60 | process-wide admission gate for `POST /v1/*`: max LLM requests in flight (streams counted until they end), dedicated cap for streams; excess requests **wait in a queue**, 503 `gateway_busy` + `Retry-After` only after the timeout. `0` = no cap |
+| `admission_max_inflight` / `admission_max_streams` / `admission_queue_timeout_sec` | 128 / 48 / 60 | gateway-wide admission gate for `POST /v1/*` (with `GATEWAY_WORKERS=N` each worker enforces 1/N): max LLM requests in flight (streams counted until they end), dedicated cap for streams; excess requests **wait in a queue**, 503 `gateway_busy` + `Retry-After` only after the timeout. `0` = no cap |
 | `scoring_weights` | `{ATTEMPT_PROVIDER:1, …}` | reputation-scoring weights (lower score = better); partial maps merge over the defaults |
 | `coalesce_cache_max` / `video_job_ttl_sec` | 64 / 86400 | in-memory coalescing cache size; async video-job snapshot TTL (s) |
 | `keyhealth_streak_dead_threshold` / `keyhealth_success_ema_floor` | 5 / 0.1 | key-health classification: min fail-streak for `dead_suspect`; success-EMA floor below which a key is suspect |

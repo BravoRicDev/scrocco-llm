@@ -50,6 +50,7 @@ from .admin import admin_api
 from .suppressed import report_suppressed
 from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
+from . import cluster
 from . import metrics
 from . import imagestore  # noqa: F401 - ri-esportato
 from . import capmeta  # noqa: F401 - ri-esportato
@@ -227,7 +228,15 @@ def _install_file_logging() -> None:
     """
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
-    from logging.handlers import RotatingFileHandler
+    from logging.handlers import RotatingFileHandler, WatchedFileHandler
+
+    def _file_handler(path: str) -> logging.Handler:
+        # Multi-worker: stessi file per tutti i processi, ma ruota SOLO il
+        # leader; gli altri appendono e riaprono il file quando e' stato
+        # ruotato (WatchedFileHandler), senza rinominarlo in parallelo.
+        if cluster.enabled() and not cluster.is_leader():
+            return WatchedFileHandler(path, encoding="utf-8")
+        return RotatingFileHandler(path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
 
     # Same format as console for consistency
     fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -236,14 +245,14 @@ def _install_file_logging() -> None:
     main_path = os.environ.get("GATEWAY_LOG_FILE", str(gw_state.VAR_DIR / "gateway.log"))
     audit_path = os.environ.get("GATEWAY_ERROR_LOG_FILE", str(gw_state.VAR_DIR / "error-audit.log"))
     try:
-        h = RotatingFileHandler(main_path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
+        h = _file_handler(main_path)
         h.setFormatter(logging.Formatter(fmt))
         h.setLevel(logging.INFO)
         logging.getLogger().addHandler(h)
     except OSError as exc:  # noqa: BLE001
         log.warning("[log] file %s non scrivibile (%s): solo stdout", main_path, exc)
     try:
-        ah = RotatingFileHandler(audit_path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
+        ah = _file_handler(audit_path)
         ah.setFormatter(logging.Formatter(fmt))
         ah.setLevel(logging.INFO)
         eaudit = logging.getLogger("nx.erroraudit")
@@ -291,7 +300,7 @@ set_estimate_defaults(gw_state.policy.estimate_divisor, getattr(gw_state.policy,
 def _note_json_fallback(_u):
     try:
         if _u:
-            gw_state.router.stats_for(_u).json_fallback += 1
+            gw_state.router.note_json_fallback(_u)
     except Exception:  # noqa: BLE001
         report_suppressed("main._note_json_fallback")
 
@@ -333,7 +342,8 @@ gw_state._last_thought_sigs_save = 0.0
 # ownership warm, demote per-sessione, pin escalation e watermark ctxcompact.
 # Senza questo, ogni deploy ripartiva freddo: ri-rotazioni, ri-escalations e
 # — per il ctxcompact — frontiera regredita che ri-invalidava le cache.
-gw_state._routing_file = gw_state.VAR_DIR / "routing_state.json"
+# Multi-worker: stato per-sessione -> un file per worker (app/cluster.py).
+gw_state._routing_file = cluster.per_worker_path(gw_state.VAR_DIR / "routing_state.json")
 gw_state._last_routing_save = 0.0
 # i TEST settano GATEWAY_PERSIST_ROUTING=0: nessuna contaminazione col live
 gw_state.PERSIST_ROUTING = os.environ.get("GATEWAY_PERSIST_ROUTING", "1") != "0"
@@ -378,7 +388,7 @@ _apply_misc_policy(gw_state.policy)
 
 
 # --- thought_signature sidecar: persistenza firme Gemini 3 (tool calling) ----
-gw_state._thought_sigs_file = gw_state.VAR_DIR / "thought_sigs.json"
+gw_state._thought_sigs_file = cluster.per_worker_path(gw_state.VAR_DIR / "thought_sigs.json")
 
 
 @asynccontextmanager
@@ -399,6 +409,9 @@ async def lifespan(_app: FastAPI):
     _bootstrap_runtime_from_logs()  # finestre 24h uso/probe dal log
     _load_thought_sigs()  # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
+    # Multi-worker: da qui le osservazioni globali si replicano sugli altri
+    # worker (dopo i load: lo stato letto da disco e' gia' comune a tutti).
+    await cluster.start(gw_state.router, gw_state.KEYHEALTH)
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
     # Battito di vita per l'HEALTHCHECK Docker (vedi app/liveness.py): prova
     # che il loop gira anche quando e' troppo carico per rispondere a /healthz.
@@ -408,9 +421,8 @@ async def lifespan(_app: FastAPI):
         log.warning(
             "[start] modalita' CAUTA generica (BACKGROUND_CAUTIOUS): probe/health/nightly automatici DISATTIVATI"
         )
-    else:
+    elif cluster.is_leader():  # multi-worker: lavori unici solo sul worker 0
         _health_task = asyncio.create_task(health_loop(gw_state.router, gw_state.policy.health_interval_sec))
-    if not _cautious:
         _nightly_task = asyncio.create_task(_nightly_scheduler())
     log.info(
         "[start] %s su %s:%d · profili=%s · deployment=%d",
@@ -431,13 +443,14 @@ async def lifespan(_app: FastAPI):
         # deadline) prima del flush finale, per non troncare risposte.
         try:
             _drain = float(getattr(gw_state.policy, "shutdown_drain_sec", 0.0) or 0.0)
-            _infl = gw_state.router.inflight_total()
+            # (multi-worker: solo le richieste servite da QUESTO processo)
+            _infl = cluster.local_inflight(gw_state.router)
             if _infl:
                 log.info("[shutdown] drain di %d richieste in volo (max %.1fs)...", _infl, _drain)
             _deadline = time.monotonic() + _drain
-            while gw_state.router.inflight_total() > 0 and time.monotonic() < _deadline:
+            while cluster.local_inflight(gw_state.router) > 0 and time.monotonic() < _deadline:
                 await asyncio.sleep(0.2)
-            _left = gw_state.router.inflight_total()
+            _left = cluster.local_inflight(gw_state.router)
             if _left:
                 log.warning("[shutdown] drain scaduto: %d richieste ancora in volo", _left)
             elif _infl:
@@ -455,6 +468,7 @@ async def lifespan(_app: FastAPI):
         except Exception:  # noqa: BLE001
             report_suppressed("main.lifespan.probe_tasks")
         await gw_state.forwarder.aclose()
+        await cluster.stop()
         _maybe_save_all(force=True)  # F26: stats+routing insieme
         _maybe_save_cooldowns(force=True)  # cooldown: salva allo shutdown
         _maybe_save_thought_sigs(force=True)  # firme Gemini: salva allo shutdown

@@ -708,11 +708,9 @@ async def clear_cooldowns(request: Request):
         return bad
     unique = (body or {}).get("unique")
     if unique:
-        removed = gw_state.router._cooldown.pop(unique, None) is not None
+        removed = gw_state.router.drop_cooldown(unique)
         return {"ok": True, "cleared": [unique] if removed else []}
-    cleared = list(gw_state.router._cooldown)
-    gw_state.router._cooldown.clear()
-    return {"ok": True, "cleared": cleared}
+    return {"ok": True, "cleared": gw_state.router.drop_all_cooldowns()}
 
 
 @admin_api.post("/reload", tags=["admin"])
@@ -775,11 +773,9 @@ async def release_sessions(request: Request):
         return bad
     sid = (body or {}).get("session_id")
     if sid:
-        removed = gw_state.router._sticky.pop(str(sid), None) is not None
+        removed = gw_state.router.sticky_release(str(sid))
         return {"ok": True, "released": [str(sid)] if removed else []}
-    released = list(gw_state.router._sticky)
-    gw_state.router._sticky.clear()
-    return {"ok": True, "released": released}
+    return {"ok": True, "released": gw_state.router.sticky_release_all()}
 
 
 # ----------------------------------------------------- runtime actions (F4)
@@ -871,7 +867,7 @@ async def drain_host(request: Request):
             "inflight", gw_state.router.stats_for(uniq).inflight)))
     except (TypeError, ValueError):
         return _err(400, "inflight non intero")
-    gw_state.router.start_draining(uniq, dep, inflight, operator=True)
+    gw_state.router.drain_by_operator(uniq, dep, inflight)
     journal.record(gw_state.VAR_DIR, "hosts_drain",
                    {"unique": uniq, "inflight": inflight})
     return {"ok": True, "unique": uniq, "draining": True, "inflight": inflight}
@@ -888,7 +884,7 @@ async def undrain_host(request: Request):
     uniq = str((body or {}).get("unique") or "").strip()
     if not uniq:
         return _err(400, "serve unique")
-    stopped = gw_state.router.stop_draining(uniq, purge_config=False)
+    stopped = gw_state.router.undrain_by_operator(uniq)
     journal.record(gw_state.VAR_DIR, "hosts_undrain",
                    {"unique": uniq, "was_draining": stopped})
     return {"ok": True, "unique": uniq, "undrained": stopped,
@@ -2034,10 +2030,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
         kh = getattr(gw_state, "KEYHEALTH", None)
         if kh:
             kh.clear(dep["unique"])
-        st = gw_state.router._stats.get(dep["unique"])
-        if st is not None:
-            st.fail_streak = 0
-        gw_state.router._cooldown.pop(dep["unique"], None)
+        gw_state.router.reset_after_probe(dep["unique"])
     return {"unique": dep["unique"], "cached": False, **entry}
 
 
@@ -2297,10 +2290,7 @@ async def deployments_unretire(request: Request):
     kh = getattr(gw_state, "KEYHEALTH", None)
     if kh:
         kh.clear(uniq)
-    s = gw_state.router.stats_for(uniq)          # riparti ottimisti
-    s.fail_streak = 0
-    s.success_ema = None
-    gw_state.router._cooldown.pop(uniq, None)
+    gw_state.router.reset_for_unretire(uniq)     # riparti ottimisti
     journal.record(gw_state.VAR_DIR, "unretire", {"unique": uniq})
     return {"ok": True, "unique": uniq, "state": "healthy"}
 

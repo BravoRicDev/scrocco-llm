@@ -40,7 +40,7 @@ from collections import defaultdict
 
 from . import metrics
 from .suppressed import report_suppressed
-from .jsonl_store import append_jsonl, rotate_segments
+from .jsonl_store import append_jsonl, file_lock, rotate_segments
 
 log = logging.getLogger("nx.repair")
 
@@ -134,8 +134,9 @@ class RepairLog:
             rows = self._buf
             self._buf = []
         try:
-            self._rotate()
-            append_jsonl(self.path, rows)
+            with file_lock(self.path):
+                self._rotate()
+                append_jsonl(self.path, rows)
             return len(rows)
         except Exception:                           # noqa: BLE001
             with self._lock:                        # rimetti in coda

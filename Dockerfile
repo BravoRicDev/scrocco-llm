@@ -36,10 +36,11 @@ EXPOSE 4001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD ["python", "-m", "app.liveness"]
 
-# UN solo processo, UN event loop, di proposito: cooldown, reputazione,
-# coalescing, finestre di uso, richieste in volo e probe vivono in memoria
-# (app/state.py). N worker = N copie indipendenti dello stato di routing (una
-# chiave in cooldown sul worker 1 ripescata dal worker 2): prima va
-# esternalizzato lo stato. La protezione dal sovraccarico e' la porta di
-# ammissione (app/admission.py).
-CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host \"${GATEWAY_HOST:-0.0.0.0}\" --port \"${GATEWAY_PORT:-4001}\""]
+# Processi: `GATEWAY_WORKERS` (default 1). Con 1 `app.serve` fa exec dello
+# STESSO comando di prima (`python -m uvicorn app.main:app --host --port`).
+# Con N>1 (o `auto`) diventa un supervisore: una porta condivisa da N worker,
+# richieste instradate per sessione al worker che ne tiene lo stato,
+# osservazioni globali di routing (cooldown, EMA, finestre, in volo)
+# replicate tra i worker, riavvio dei worker morti o bloccati. Vedi
+# app/serve.py, app/cluster.py e docs/OPERATIONS.md ("Multi-worker").
+CMD ["sh", "-c", "exec python -m app.serve --host \"${GATEWAY_HOST:-0.0.0.0}\" --port \"${GATEWAY_PORT:-4001}\""]

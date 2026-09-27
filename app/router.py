@@ -2171,6 +2171,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                 return True
         return False
 
+    def note_wake(self, unique: str, ts: float) -> None:
+        """Sveglia 429 consumata: conta nel budget-finestra del deployment."""
+        self._wake_times.setdefault(unique, deque()).append(ts)
+
+    def note_json_fallback(self, unique: str) -> None:
+        """P4: il dep ha ignorato stream:true (risposta JSON): annotato, poi
+        escluso dai canary (un non-streaming non puo' vincere la gara)."""
+        self.stats_for(unique).json_fallback += 1
+
     # --------------------------------------------------- rotazione adattiva
     def stats_for(self, unique: str) -> DepStats:
         s = self._stats.get(unique)
@@ -2439,19 +2448,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if cap and len(ent) >= cap:
             return None
         tok = "%s|%s|%d" % (key[:12], dep.get("unique"), now)
-        ent.append((tok, now, dep.get("unique")))
+        self._lease_put(dep, tok, now)
         return (key, tok)
 
     def key_lease_release(self, lease: tuple | None) -> None:
         if not lease:
             return
         key, tok = lease
-        ent = self._key_leases().get(key)
-        if not ent:
+        if not self._key_leases().get(key):
             return
-        self._key_leases()[key] = [e for e in ent if e[0] != tok] or None
-        if not self._key_leases()[key]:
-            self._key_leases().pop(key, None)
+        self._lease_drop(tok)
+
+    def _lease_put(self, dep: dict, tok: str, now: float) -> None:
+        self._key_leases().setdefault(dep.get("api_key") or "", []).append((tok, now, dep.get("unique")))
+
+    def _lease_drop(self, tok: str) -> None:
+        """Toglie la lease `tok` (il token contiene gia' chiave e unique:
+        identifica una sola chiave)."""
+        m = self._key_leases()
+        for key, ent in list(m.items()):
+            kept = [e for e in ent if e[0] != tok]
+            if len(kept) == len(ent):
+                continue
+            if kept:
+                m[key] = kept
+            else:
+                m.pop(key, None)
 
     def _lease_filter(self, deps: list[dict]) -> list[dict]:
         """Depriorizza (non elimina) i dep la cui api_key e' al cap di
@@ -3085,6 +3107,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             lst = self.config.groups.setdefault(grp, [])
             if not any(x.get("unique") == unique for x in lst):
                 lst.append(dep)
+
+    def drain_by_operator(self, unique: str, dep: dict, inflight: int) -> None:
+        """Drain voluto dall'operatore (POST /admin/hosts/drain)."""
+        self.start_draining(unique, dep, inflight, operator=True)
+
+    def undrain_by_operator(self, unique: str) -> bool:
+        """Annulla un drain (POST /admin/hosts/undrain): il dep resta in config."""
+        return self.stop_draining(unique, purge_config=False)
 
     def _drain(self) -> dict:
         """Accessor lazy di `_draining` (pattern `_esc`): protegge i Router
@@ -5995,7 +6025,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                 _wake_u = _cooled_dims[0]
                 _wake = cfg.deployment_by_unique(_wake_u)
                 if _wake is not None:
-                    self._wake_times.setdefault(_wake_u, deque()).append(_now_w)
+                    self.note_wake(_wake_u, _now_w)
                     log.info(
                         "[ladder] dims cooldown-wakeup 429 (budget %d/%ds): residuo %ds -> %s",
                         _max_wake,

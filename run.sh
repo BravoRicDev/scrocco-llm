@@ -9,5 +9,11 @@ fi
 
 set -a; [ -f .env.gateway ] && . ./.env.gateway; set +a
 
+# GATEWAY_WORKERS>1 (o auto): supervisore multi-worker (vedi app/serve.py)
+if [ "${GATEWAY_WORKERS:-1}" != "1" ]; then
+    exec .venv/bin/python -m app.serve \
+        --host "${GATEWAY_HOST:-127.0.0.1}" --port "${GATEWAY_PORT:-4001}"
+fi
+
 exec .venv/bin/python -m uvicorn app.main:app \
     --host "${GATEWAY_HOST:-127.0.0.1}" --port "${GATEWAY_PORT:-4001}" "$@"

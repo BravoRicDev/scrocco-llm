@@ -29,6 +29,7 @@ import logging
 import os
 import time
 
+from . import cluster
 from .atomic_store import freeze_json, load_json, save_json, save_json_text
 
 log = logging.getLogger("nx.keyhealth")
@@ -74,15 +75,38 @@ class KeyHealth:
     def _load(self) -> None:
         data = load_json(self.path)
         self.data = data if isinstance(data, dict) else {}
+        self._mtime_ns = self._file_mtime_ns()
 
+    def _file_mtime_ns(self) -> int | None:
+        try:
+            return os.stat(self.path).st_mtime_ns
+        except OSError:
+            return None
+
+    # Multi-worker (app/cluster.py): il file lo scrive SOLO il leader; le
+    # mutazioni degli altri worker gli arrivano replicate, e gli altri
+    # rileggono il file quando cambia. Con un processo singolo si scrive
+    # sempre, come prima.
     def save(self) -> None:
+        if not cluster.is_leader():
+            return
         save_json(self.path, self.data, indent=1)
 
     async def save_async(self) -> None:
         """Come `save`, ma solo la codifica resta sull'event loop (snapshot
         coerente): la scrittura su disco gira su un thread."""
+        if not cluster.is_leader():
+            return
         text = freeze_json(self.data, indent=1)
         await asyncio.to_thread(save_json_text, self.path, text)
+
+    def reload_if_changed(self) -> bool:
+        """Worker non-leader: riallinea la memoria al file del leader."""
+        mtime = self._file_mtime_ns()
+        if mtime is None or mtime == getattr(self, "_mtime_ns", None):
+            return False
+        self._load()
+        return True
 
     # ------------------------------------------------------------ observe --
     def observe(self, unique: str, *, fail_streak: int,
