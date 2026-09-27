@@ -1,0 +1,1259 @@
+{
+ "json:e400>ok:plain": {
+  "attempts": [
+   "m/zeta:e400",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:e401>ok:plain": {
+  "attempts": [
+   "m/zeta:e401",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:e404model>ok:plain": {
+  "attempts": [
+   "m/zeta:e404model",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:e429:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:e429",
+   "m/delta:e429",
+   "m/eta:e429"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"rate limit exceeded\\\",\\\"type\\\":\\\"rate_limit\\\"}}))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:rate_limited,scrocco-llm-gold-32k__m-gamma__2:rate_limited,scrocco-llm-gold-128k__m-delta__0:rate_limited,scrocco-llm-gold-128k__m-eta__1:rate_limited"
+  },
+  "status": 503
+ },
+ "json:e429>e500>empty>e401>enone>e503>e429>e500:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:e500",
+   "m/delta:empty",
+   "m/eta:e401"
+  ],
+  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 401
+ },
+ "json:e429>e500>empty>e401>enone>e503>ok:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:e500",
+   "m/delta:empty",
+   "m/eta:e401"
+  ],
+  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 401
+ },
+ "json:e429>ok:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:e429>ok>e429>ok>ok:plain:requests=3": [
+  {
+   "attempts": [
+    "m/zeta:e429",
+    "m/gamma:ok"
+   ],
+   "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+   "cooled": [
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:e429",
+    "m/gamma:ok",
+    "m/gamma:e429",
+    "m/delta:ok"
+   ],
+   "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/delta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-128k__m-delta__0\"}",
+   "cooled": [
+    "m-gamma",
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:e429",
+    "m/gamma:ok",
+    "m/gamma:e429",
+    "m/delta:ok",
+    "m/delta:ok"
+   ],
+   "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/delta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-128k__m-delta__0\"}",
+   "cooled": [
+    "m-gamma",
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  }
+ ],
+ "json:e500:plain": {
+  "attempts": [
+   "m/zeta:e500",
+   "m/gamma:e500",
+   "m/delta:e500",
+   "m/eta:e500"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"internal error\\\"}}))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:upstream_error,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:upstream_error,scrocco-llm-gold-128k__m-eta__1:upstream_error"
+  },
+  "status": 503
+ },
+ "json:e500>e500>ok:plain": {
+  "attempts": [
+   "m/zeta:e500",
+   "m/gamma:e500",
+   "m/delta:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/delta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-128k__m-delta__0\"}",
+  "cooled": [
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:e503>ok:plain": {
+  "attempts": [
+   "m/zeta:e503",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:empty:plain": {
+  "attempts": [
+   "m/zeta:empty",
+   "m/gamma:empty",
+   "m/delta:empty",
+   "m/eta:empty"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: empty_eof))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof,scrocco-llm-gold-32k__m-gamma__2:empty_eof,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:empty_eof"
+  },
+  "status": 503
+ },
+ "json:empty>ok:plain": {
+  "attempts": [
+   "m/zeta:empty",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:enone>ok:plain": {
+  "attempts": [
+   "m/zeta:enone",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:json_bad>json_ok:response_format": {
+  "attempts": [
+   "m/zeta:json_bad",
+   "m/zeta:json_ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"a\\\": 1}\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:json_ok:response_format": {
+  "attempts": [
+   "m/zeta:json_ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"a\\\": 1}\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:length_empty:plain": {
+  "attempts": [
+   "m/zeta:length_empty",
+   "m/gamma:length_empty",
+   "m/delta:length_empty",
+   "m/eta:length_empty"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: length_truncated (length)))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0}]}}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:length_truncated,scrocco-llm-gold-32k__m-gamma__2:length_truncated,scrocco-llm-gold-128k__m-delta__0:length_truncated,scrocco-llm-gold-128k__m-eta__1:length_truncated"
+  },
+  "status": 503
+ },
+ "json:length_empty>ok:plain": {
+  "attempts": [
+   "m/zeta:length_empty",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:none_content>ok:plain": {
+  "attempts": [
+   "m/zeta:none_content",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:ok:max_tokens+temperature": {
+  "attempts": [
+   "m/zeta:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:ok:plain": {
+  "attempts": [
+   "m/zeta:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:ok:plain:model=scrocco-llm-gold-128k": {
+  "attempts": [
+   "m/eta:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/eta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-128k__m-eta__1\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:ok>e500>ok>ok:plain:requests=3": [
+  {
+   "attempts": [
+    "m/zeta:ok"
+   ],
+   "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+   "cooled": [],
+   "headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:ok",
+    "m/zeta:e500",
+    "m/delta:ok"
+   ],
+   "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/delta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-128k__m-delta__0\"}",
+   "cooled": [
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:ok",
+    "m/zeta:e500",
+    "m/delta:ok",
+    "m/delta:ok"
+   ],
+   "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/delta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-128k__m-delta__0\"}",
+   "cooled": [
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  }
+ ],
+ "json:reasoning_only:plain": {
+  "attempts": [
+   "m/zeta:reasoning_only",
+   "m/gamma:reasoning_only",
+   "m/delta:reasoning_only",
+   "m/eta:reasoning_only"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: empty_eof (stop)))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}]}}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof,scrocco-llm-gold-32k__m-gamma__2:empty_eof,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:empty_eof"
+  },
+  "status": 503
+ },
+ "json:reasoning_only>ok:plain": {
+  "attempts": [
+   "m/zeta:reasoning_only",
+   "m/gamma:ok"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/gamma\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Ciao mondo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-gamma__2\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:think_tags:plain": {
+  "attempts": [
+   "m/zeta:think_tags"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"<think>hmm</think>Risposta\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:tool_call:plain": {
+  "attempts": [
+   "m/zeta:tool_call"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"<call-id>\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Roma\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "json:tool_call:tools": {
+  "attempts": [
+   "m/zeta:tool_call"
+  ],
+  "body": "{\"id\":\"<chatcmpl-id>\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"m/zeta\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"<call-id>\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Roma\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18},\"nx_deployment\":\"scrocco-llm-gold-32k__m-zeta__4\"}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ },
+ "stream:e400>ok:plain": {
+  "attempts": [
+   "m/zeta:e400",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e400>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:e400",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e401>ok:plain": {
+  "attempts": [
+   "m/zeta:e401",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e401>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:e401",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e404model>ok:plain": {
+  "attempts": [
+   "m/zeta:e404model",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e404model>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:e404model",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e429:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:e429",
+   "m/delta:e429",
+   "m/eta:e429"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"rate limit exceeded\\\",\\\"type\\\":\\\"rate_limit\\\"}})\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:rate_limited,scrocco-llm-gold-32k__m-gamma__2:rate_limited,scrocco-llm-gold-128k__m-delta__0:rate_limited,scrocco-llm-gold-128k__m-eta__1:rate_limited"
+  },
+  "status": 503
+ },
+ "stream:e429>e500>empty>e401>enone>e503>e429>e500:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:e500",
+   "m/delta:empty",
+   "m/eta:e401"
+  ],
+  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 401
+ },
+ "stream:e429>e500>empty>e401>enone>e503>ok:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:e500",
+   "m/delta:empty",
+   "m/eta:e401"
+  ],
+  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 401
+ },
+ "stream:e429>ok:plain": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e429>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:e429",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e429>ok>e429>ok>ok:plain:requests=3": [
+  {
+   "attempts": [
+    "m/zeta:e429",
+    "m/gamma:ok"
+   ],
+   "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+   "cooled": [
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "text/event-stream; charset=utf-8"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:e429",
+    "m/gamma:ok",
+    "m/gamma:e429",
+    "m/delta:ok"
+   ],
+   "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+   "cooled": [
+    "m-gamma",
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "text/event-stream; charset=utf-8"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:e429",
+    "m/gamma:ok",
+    "m/gamma:e429",
+    "m/delta:ok",
+    "m/delta:ok"
+   ],
+   "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+   "cooled": [
+    "m-gamma",
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "text/event-stream; charset=utf-8"
+   },
+   "status": 200
+  }
+ ],
+ "stream:e500:plain": {
+  "attempts": [
+   "m/zeta:e500",
+   "m/gamma:e500",
+   "m/delta:e500",
+   "m/eta:e500"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"internal error\\\"}})\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:upstream_error,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:upstream_error,scrocco-llm-gold-128k__m-eta__1:upstream_error"
+  },
+  "status": 503
+ },
+ "stream:e500>e500>ok:plain": {
+  "attempts": [
+   "m/zeta:e500",
+   "m/gamma:e500",
+   "m/delta:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e500>e500>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:e500",
+   "m/gamma:e500",
+   "m/delta:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e503>ok:plain": {
+  "attempts": [
+   "m/zeta:e503",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:e503>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:e503",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:empty:plain": {
+  "attempts": [
+   "m/zeta:empty",
+   "m/gamma:empty",
+   "m/delta:empty",
+   "m/eta:empty"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: empty_eof)\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof,scrocco-llm-gold-32k__m-gamma__2:empty_eof,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:empty_eof"
+  },
+  "status": 503
+ },
+ "stream:empty>ok:plain": {
+  "attempts": [
+   "m/zeta:empty",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:empty>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:empty",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:enone>ok:plain": {
+  "attempts": [
+   "m/zeta:enone",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:enone>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:enone",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:error_chunk:plain": {
+  "attempts": [
+   "m/zeta:error_chunk",
+   "m/gamma:error_chunk",
+   "m/delta:error_chunk",
+   "m/eta:error_chunk"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: error)\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"upstream_error\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"upstream_error\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"upstream_error\",\"status\":502,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:upstream_error,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:upstream_error,scrocco-llm-gold-128k__m-eta__1:upstream_error"
+  },
+  "status": 503
+ },
+ "stream:error_chunk>ok:plain": {
+  "attempts": [
+   "m/zeta:error_chunk",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:error_chunk>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:error_chunk",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:json_bad>json_ok:response_format": {
+  "attempts": [
+   "m/zeta:json_bad",
+   "m/zeta:json_ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"{\\\"a\\\": 1}\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:json_ok:response_format": {
+  "attempts": [
+   "m/zeta:json_ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"{\\\"a\\\": 1}\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:length_empty:plain": {
+  "attempts": [
+   "m/zeta:length_empty",
+   "m/gamma:length_empty",
+   "m/delta:length_empty",
+   "m/eta:length_empty"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: length_truncated (length))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0}]}}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:length_truncated,scrocco-llm-gold-32k__m-gamma__2:length_truncated,scrocco-llm-gold-128k__m-delta__0:length_truncated,scrocco-llm-gold-128k__m-eta__1:length_truncated"
+  },
+  "status": 503
+ },
+ "stream:length_empty>ok:plain": {
+  "attempts": [
+   "m/zeta:length_empty",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:length_empty>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:length_empty"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 1 tentativi (ultimo: empty_eof (length))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}]}}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof"
+  },
+  "status": 503
+ },
+ "stream:length_partial:plain": {
+  "attempts": [
+   "m/zeta:length_partial",
+   "m/gamma:length_partial",
+   "m/delta:length_partial",
+   "m/eta:length_partial"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: length_truncated (length))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"length_truncated\",\"status\":502,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:length_truncated,scrocco-llm-gold-32k__m-gamma__2:length_truncated,scrocco-llm-gold-128k__m-delta__0:length_truncated,scrocco-llm-gold-128k__m-eta__1:length_truncated"
+  },
+  "status": 503
+ },
+ "stream:length_partial>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:length_partial"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"parziale\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"length\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:many_chunks:plain": {
+  "attempts": [
+   "m/zeta:many_chunks"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t0 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t1 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t2 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t3 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t4 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t5 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t6 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t7 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t8 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t9 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t10 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t11 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t12 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t13 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t14 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t15 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t16 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t17 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t18 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t19 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t20 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t21 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t22 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t23 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t24 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t25 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t26 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t27 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t28 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t29 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t30 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t31 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t32 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t33 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t34 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t35 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t36 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t37 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t38 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t39 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:many_chunks:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:many_chunks"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t0 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t1 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t2 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t3 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t4 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t5 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t6 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t7 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t8 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t9 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t10 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t11 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t12 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t13 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t14 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t15 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t16 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t17 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t18 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t19 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t20 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t21 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t22 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t23 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t24 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t25 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t26 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t27 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t28 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t29 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t30 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t31 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t32 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t33 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t34 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t35 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t36 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t37 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t38 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"t39 \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:midstream_error:plain": {
+  "attempts": [
+   "m/zeta:midstream_error",
+   "m/gamma:midstream_error",
+   "m/delta:midstream_error",
+   "m/eta:midstream_error"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: empty_eof)\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof,scrocco-llm-gold-32k__m-gamma__2:empty_eof,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:empty_eof"
+  },
+  "status": 503
+ },
+ "stream:midstream_error:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:midstream_error",
+   "m/gamma:midstream_error",
+   "m/delta:midstream_error",
+   "m/eta:midstream_error"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: empty_eof)\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof,scrocco-llm-gold-32k__m-gamma__2:empty_eof,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:empty_eof"
+  },
+  "status": 503
+ },
+ "stream:no_done:plain": {
+  "attempts": [
+   "m/zeta:no_done"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"senza done\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:ok:max_tokens+temperature": {
+  "attempts": [
+   "m/zeta:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:ok:plain": {
+  "attempts": [
+   "m/zeta:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:ok:plain:model=scrocco-llm-gold-128k": {
+  "attempts": [
+   "m/eta:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:ok>e500>ok>ok:plain:requests=3": [
+  {
+   "attempts": [
+    "m/zeta:ok"
+   ],
+   "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+   "cooled": [],
+   "headers": {
+    "content-type": "text/event-stream; charset=utf-8"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:ok",
+    "m/zeta:e500",
+    "m/delta:ok"
+   ],
+   "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+   "cooled": [
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "text/event-stream; charset=utf-8"
+   },
+   "status": 200
+  },
+  {
+   "attempts": [
+    "m/zeta:ok",
+    "m/zeta:e500",
+    "m/delta:ok",
+    "m/delta:ok"
+   ],
+   "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+   "cooled": [
+    "m-zeta"
+   ],
+   "headers": {
+    "content-type": "text/event-stream; charset=utf-8"
+   },
+   "status": 200
+  }
+ ],
+ "stream:reasoning_only:plain": {
+  "attempts": [
+   "m/zeta:reasoning_only",
+   "m/gamma:reasoning_only",
+   "m/delta:reasoning_only",
+   "m/eta:reasoning_only"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: empty_eof (stop))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}]}}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof,scrocco-llm-gold-32k__m-gamma__2:empty_eof,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:empty_eof"
+  },
+  "status": 503
+ },
+ "stream:reasoning_only>ok:plain": {
+  "attempts": [
+   "m/zeta:reasoning_only",
+   "m/gamma:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:reasoning_only>ok:plain:variant=nohold": {
+  "attempts": [
+   "m/zeta:reasoning_only"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 1 tentativi (ultimo: empty_eof (stop))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0}]}}",
+  "cooled": [],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:empty_eof"
+  },
+  "status": 503
+ },
+ "stream:reasoning_then_answer:plain": {
+  "attempts": [
+   "m/zeta:reasoning_then_answer"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"penso\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"42\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:slow:plain:variant=deadline": {
+  "attempts": [
+   "m/zeta:slow",
+   "m/epsilon:slow",
+   "m/alpha:slow"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:slow>ok:plain:variant=deadline": {
+  "attempts": [
+   "m/zeta:slow",
+   "m/epsilon:ok",
+   "m/alpha:ok"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Ciao \"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"mondo\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:think_tags:plain": {
+  "attempts": [
+   "m/zeta:think_tags"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"<think>hmm</think>Risposta\"}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:tool_call:plain": {
+  "attempts": [
+   "m/zeta:tool_call"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"tool_calls\": [{\"index\": 0, \"id\":\"<call-id>\", \"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"arguments\": \"\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"city\\\":\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \" \\\"Roma\\\"}\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ },
+ "stream:tool_call:tools": {
+  "attempts": [
+   "m/zeta:tool_call"
+  ],
+  "body": "data: {\"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"tool_calls\": [{\"index\": 0, \"id\":\"<call-id>\", \"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"arguments\": \"\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"city\\\":\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \" \\\"Roma\\\"}\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 11, \"completion_tokens\": 7, \"total_tokens\": 18}}\n\ndata: [DONE]\n\n",
+  "cooled": [],
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "status": 200
+ }
+}
