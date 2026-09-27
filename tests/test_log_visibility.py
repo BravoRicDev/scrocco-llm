@@ -187,9 +187,9 @@ _PERSIST_ERROR = [
     ("repairlog.py", "[repair] flush error"),
     ("repairlog.py", "[repair] rotate error"),
     ("atomic_store.py", "[atomic] save %s fallito"),
-    ("main.py", "[stats] save fallito"),
-    ("main.py", "[cooldown] save fallito"),
-    ("main.py", "[warmstart] save fallito"),
+    ("runtime_persistence.py", "[stats] save fallito"),
+    ("runtime_persistence.py", "[cooldown] save fallito"),
+    ("runtime_persistence.py", "[warmstart] save fallito"),
 ]
 
 
@@ -223,9 +223,9 @@ def test_persistenza_ha_traceback(relpath, marker):
 # ================================================= 3. recuperabili = warning
 # Condizioni anomale ma recuperabili: il gateway continua a servire.
 _RECOVERABLE_WARNING = [
-    ("main.py", "[keyhealth] tick error"),
-    ("main.py", "[images] sweep error"),
-    ("main.py", "[thought_sig] save fallito"),
+    ("runtime_persistence.py", "[keyhealth] tick error"),
+    ("runtime_persistence.py", "[images] sweep error"),
+    ("runtime_persistence.py", "[thought_sig] save fallito"),
     ("image_helpers.py", "[images] mirror %s fallito: %s"),
     ("forwarder.py", "[max-input] note_discovered fallito per %s"),
     ("forwarder.py", "[strike] hook error: %s"),
