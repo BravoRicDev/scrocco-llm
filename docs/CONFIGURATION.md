@@ -19,7 +19,7 @@ Gateway (read from `.env.gateway` via compose):
 | `GATEWAY_ENV` | `development` | `production`/`prod` disables deterministic `sk-<profile>` keys and enables fail-fast startup checks |
 | `GATEWAY_HOST` / `GATEWAY_PORT` | `127.0.0.1` / `4001` | bind address/port (Docker sets host `0.0.0.0`) |
 | `GATEWAY_WORKERS` | `1` | gateway processes: `1` = single process (unchanged), `N` or `auto` (cores, max 16) = supervisor + N workers with session affinity and replicated routing state (OPERATIONS.md, *Multi-worker*) |
-| `GATEWAY_SHUTDOWN_TIMEOUT` | `60` | multi-worker: seconds the supervisor waits for workers on `SIGTERM` |
+| `GATEWAY_SHUTDOWN_TIMEOUT` | `55` | multi-worker: seconds the supervisor waits for workers on `SIGTERM` |
 | `GATEWAY_RUN_DIR` | system temp | multi-worker: parent of the private socket directory (keep the path short: unix socket limit) |
 | `GATEWAY_HEARTBEAT_FILE` / `GATEWAY_HEARTBEAT_MAX_AGE` | `/tmp/scrocco-llm.heartbeat` / `120` | liveness heartbeat for the Docker `HEALTHCHECK` (workers use `<file>.wN`) |
 | `GATEWAY_CSV` | `var/keys_rotation.csv` | deployments CSV path |

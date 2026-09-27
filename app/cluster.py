@@ -501,6 +501,20 @@ class Replicator:
             log.warning("[cluster] snapshot per %s fallito", requester, exc_info=True)
             self._send({"t": "sync", "to": requester, "empty": True})
 
+    def _restore_own(self, inflight: dict, toks: set, leases: list) -> None:
+        if inflight:
+            self._origin_inflight[self.origin] = {u: list(c) for u, c in inflight.items()}
+            for unique, (n, tokens) in inflight.items():
+                s = self.router.stats_for(unique)
+                s.inflight += n
+                s.inflight_tokens += tokens
+        if toks:
+            self._origin_leases[self.origin] = set(toks)
+            leases_map = self.router._key_leases()
+            for key, entry in leases:
+                if not any(e[0] == entry[0] for e in leases_map.get(key, ())):
+                    leases_map.setdefault(key, []).append(entry)
+
     def begin_sync(self) -> asyncio.Event:
         self._syncing = True
         self._buffer = []
@@ -514,6 +528,12 @@ class Replicator:
         if msg and not msg.get("empty"):
             try:
                 state = pickle.loads(base64.b64decode(msg["state"]))
+                # le PROPRIE richieste in volo e lease (dopo una riconnessione
+                # gli altri le hanno tolte col `down`): si rimettono sullo snapshot
+                own_inflight = self._origin_inflight.get(self.origin, {})
+                own_toks = self._origin_leases.get(self.origin, set())
+                own_leases = [(key, e) for key, ent in (getattr(self.router, "_key_leases_map", None) or {}).items()
+                              for e in ent if e[0] in own_toks]
                 for attr, value in state.items():
                     if attr in SYNC_ATTRS:
                         setattr(self.router, attr, value)
@@ -521,6 +541,7 @@ class Replicator:
                                          for o, m in (msg.get("inflight") or {}).items()}
                 self._origin_leases = {o: set(t) for o, t in (msg.get("leases") or {}).items()}
                 self._seen = {o: int(v) for o, v in (msg.get("seen") or {}).items()}
+                self._restore_own(own_inflight, own_toks, own_leases)
                 applied = True
             except Exception:  # noqa: BLE001
                 log.warning("[cluster] snapshot illeggibile: resto sullo stato da disco", exc_info=True)
@@ -553,6 +574,10 @@ class BusClient:
         self._loop_thread: int | None = None
         self._stopping = False
         self.dropped = 0
+        self.reconnects = 0
+        # chiamata dopo una riconnessione: i messaggi persi nel frattempo
+        # vanno recuperati (cluster.start la usa per chiedere uno snapshot)
+        self.on_reconnect: Callable[[], None] | None = None
 
     async def start(self, timeout: float = 15.0) -> None:
         self._loop = asyncio.get_running_loop()
@@ -602,6 +627,9 @@ class BusClient:
                 except OSError:
                     log.error("[cluster] bus irraggiungibile: replica sospesa")
                     return
+                self.reconnects += 1
+                if self.on_reconnect is not None:
+                    self.on_reconnect()
                 continue
             try:
                 msg = json.loads(line)
@@ -736,6 +764,7 @@ async def start(router, keyhealth) -> None:
     for h in logging.getLogger().handlers:
         h.addFilter(_LOG_FILTER)
     synced = rep.begin_sync()          # cio' che arriva prima dello snapshot va in coda
+    bus.on_reconnect = lambda: _resync(rep, bus)
     await bus.start()
     rep.install()
     _REPLICATOR, _BUS = rep, bus
@@ -747,6 +776,20 @@ async def start(router, keyhealth) -> None:
         rep.apply_sync(None)
         mode = "snapshot non arrivato (stato da disco)"
     log.info("[cluster] worker %d/%d collegato al bus (%s): %s", index(), size(), origin, mode)
+
+
+def _resync(rep: Replicator, bus: BusClient) -> None:
+    """Dopo una riconnessione al bus: i messaggi persi si recuperano con uno
+    snapshot, come all'ingresso (senza snapshot entro il timeout si prosegue)."""
+    waiting = rep.begin_sync()
+    bus.send({"t": "sync_req"})
+
+    def give_up() -> None:
+        if rep._syncing and rep._synced is waiting:     # proprio QUESTA attesa
+            rep.apply_sync(None)
+
+    asyncio.get_running_loop().call_later(SYNC_TIMEOUT_SEC, give_up)
+    log.warning("[cluster] bus ripristinato: richiesto riallineamento")
 
 
 async def stop() -> None:
@@ -768,9 +811,19 @@ def local_inflight(router) -> int:
 
 
 def stats() -> dict:
+    """Stato del cluster visto da questo worker (GET /admin/cluster, /metrics)."""
+    base = {"enabled": enabled(), "workers": size(), "index": index(), "leader": is_leader(),
+            "pid": os.getpid()}
     if _REPLICATOR is None:
-        return {"enabled": enabled(), "workers": size(), "index": index()}
+        return base
     r = _REPLICATOR
-    return {"enabled": True, "workers": size(), "index": index(),
+    return {**base, "origin": r.origin, "synced_from_peer": r.last_sync_applied,
             "published": r.published, "replayed": r.replayed, "skipped": r.skipped,
-            "errors": r.errors, "dropped": _BUS.dropped if _BUS else 0}
+            "errors": r.errors, "dropped": _BUS.dropped if _BUS else 0,
+            "reconnects": _BUS.reconnects if _BUS else 0,
+            "local_inflight": r.local_inflight(),
+            "peers_tracked": sorted(o for o in r._origin_inflight if o != r.origin)}
+
+
+# contatori esposti su /metrics come nx_cluster_<nome> (gauge per worker)
+METRIC_FIELDS = ("published", "replayed", "skipped", "errors", "dropped", "reconnects", "local_inflight")

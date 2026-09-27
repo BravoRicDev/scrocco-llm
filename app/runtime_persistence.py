@@ -512,6 +512,19 @@ def _all_deps() -> dict:
     return out
 
 
+# Evento del watcher in corso: UN solo listener registrato una volta (prima
+# ogni avvio del watcher ne aggiungeva uno nuovo alla lista del cluster).
+_WATCH_WAKE: asyncio.Event | None = None
+
+
+def _wake_watcher() -> None:
+    if _WATCH_WAKE is not None:
+        _WATCH_WAKE.set()
+
+
+cluster.on_config_changed(_wake_watcher)
+
+
 async def _keyhealth_tick() -> None:
     """keyhealth: osserva TUTTI i deployment con stats e aggiorna l'evidenza
     su disco (throttled dal tick del watcher). Multi-worker: lo fa il leader
@@ -560,8 +573,8 @@ async def _watcher(interval: float) -> None:
     _reload_lock = asyncio.Lock()
     # Multi-worker: un altro worker ha riscritto CSV/policy -> giro subito
     # (con un processo solo l'evento non scatta mai: stesso ritmo di prima).
-    _wake = asyncio.Event()
-    cluster.on_config_changed(_wake.set)
+    global _WATCH_WAKE
+    _wake = _WATCH_WAKE = asyncio.Event()
     while True:
         try:
             gw_state.router.purge_expired()  # igiene: sticky/cooldown scaduti

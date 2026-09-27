@@ -27,13 +27,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from urllib.parse import parse_qs
 
 import httpx
 
-from . import cluster, offload
+from . import cluster, metrics, offload
 
 log = logging.getLogger("nx.affinity")
+
+metrics.declare("nx_affinity_fallback_total", "owner")
 
 
 class _HideHopLog(logging.Filter):
@@ -107,24 +110,26 @@ async def _read_body(receive) -> tuple[bytes, dict | None]:
             return b"".join(chunks), None
 
 
-async def _body_session(scope, body: bytes, kind: str) -> str | None:
+async def _body_session(scope, body: bytes, kind: str) -> tuple[str | None, object]:
+    """(sessione, body decodificato). Il body decodificato torna utile se la
+    richiesta resta qui: l'endpoint non lo decodifica una seconda volta."""
     try:
         payload = await offload.run(json.loads, body, size=len(body))
     except ValueError:
-        return None
+        return None, None
     if not isinstance(payload, dict):
-        return None
+        return None, payload
     if kind == "admin":
         sid = payload.get("session_id")
-        return str(sid) if sid else None
+        return (str(sid) if sid else None), payload
     from starlette.requests import Request
 
     from .chat_helpers import _session_id
 
     try:
-        return _session_id(Request(scope), payload)
+        return _session_id(Request(scope), payload), payload
     except Exception:  # noqa: BLE001 - nel dubbio si serve in locale
-        return None
+        return None, payload
 
 
 def _replaying_receive(body: bytes, disconnected: dict | None, receive):
@@ -202,6 +207,7 @@ class AffinityProxy:
         self.index = cluster.index() if index is None else index
         self.workers = cluster.size() if workers is None else workers
         self.peers = peers or PEERS
+        self._unreachable: dict[int, tuple[float, int]] = {}
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -213,14 +219,14 @@ class AffinityProxy:
             await self.app(scope, receive, send)
             return
         sid = _header_session(scope)
-        body = disconnected = None
+        body = disconnected = payload = None
         if sid is None and kind == "admin" and scope.get("method") == "GET":
             vals = parse_qs((scope.get("query_string") or b"").decode("latin-1")).get("session_id")
             sid = vals[0] if vals else None
         elif sid is None and _is_json(scope):
             body, disconnected = await _read_body(receive)
             if disconnected is None:
-                sid = await _body_session(scope, body, kind)
+                sid, payload = await _body_session(scope, body, kind)
         owner = cluster.owner_of(sid, self.workers) if sid else self.index
         if owner != self.index:
             if body is None:
@@ -229,7 +235,27 @@ class AffinityProxy:
                 return
         if body is not None:
             receive = _replaying_receive(body, disconnected, receive)
+            if payload is not None and kind == "llm":
+                # decodificato una volta sola: l'endpoint lo riprende da qui
+                scope = dict(scope)
+                scope[offload.PARSED_BODY_KEY] = (body, payload)
         await self.app(scope, receive, send)
+
+    UNREACHABLE_LOG_EVERY_SEC = 10.0
+
+    def _note_unreachable(self, owner: int, exc: BaseException) -> None:
+        """Durante il riavvio di un worker OGNI sua richiesta ripiega qui:
+        una riga ogni 10s per worker (col conteggio), non una per richiesta."""
+        metrics.inc("nx_affinity_fallback_total", (str(owner),))
+        now = time.monotonic()
+        last, skipped = self._unreachable.get(owner, (0.0, 0))
+        if now - last < self.UNREACHABLE_LOG_EVERY_SEC:
+            self._unreachable[owner] = (last, skipped + 1)
+            return
+        self._unreachable[owner] = (now, 0)
+        log.warning("[affinity] worker %d irraggiungibile (%s): servo in locale%s", owner, exc,
+                    f" (+{skipped} richieste nei {self.UNREACHABLE_LOG_EVERY_SEC:.0f}s precedenti)"
+                    if skipped else "")
 
     async def _proxy(self, owner: int, scope, body: bytes, receive, send) -> bool:
         """True = risposta del proprietario consegnata (anche se interrotta);
@@ -240,7 +266,7 @@ class AffinityProxy:
         try:
             response = await client.send(request, stream=True)
         except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
-            log.warning("[affinity] worker %d irraggiungibile (%s): servo in locale", owner, exc)
+            self._note_unreachable(owner, exc)
             return False
         try:
             await send({"type": "http.response.start", "status": response.status_code,

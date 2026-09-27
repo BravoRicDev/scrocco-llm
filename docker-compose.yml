@@ -28,6 +28,12 @@ services:
     volumes:
       - ./var:/app/var
     restart: unless-stopped
+    # Stop: SIGTERM -> il gateway smette di accettare, attende le richieste in
+    # volo (policy shutdown_drain_sec, default 10s) e POI salva ledger/stato.
+    # Col default Docker (10s) il SIGKILL arrivava a drain appena finito,
+    # troncando i salvataggi finali. Con piu' worker il supervisore attende
+    # fino a GATEWAY_SHUTDOWN_TIMEOUT (55s): resta sotto questo valore.
+    stop_grace_period: 60s
     logging:
       driver: json-file
       options:

@@ -11,6 +11,7 @@ from starlette.requests import Request
 from .. import capmeta
 from .. import state as gw_state
 from ..constants import GATEWAY_VERSION
+from ..offload import request_json
 from ..http_responses import unauthorized as _unauthorized
 from ..models_and_health import _caps_and_deps
 from ..models_and_health import _model_entry
@@ -153,7 +154,7 @@ async def ollama_show(request: Request):
     if names is None:
         return _unauthorized(auth.error)
     try:
-        body = await request.json()
+        body = await request_json(request)
     except Exception:
         body = {}
     name = (body.get("name") or body.get("model") or "") if isinstance(body, dict) else ""

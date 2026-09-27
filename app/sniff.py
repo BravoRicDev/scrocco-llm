@@ -26,8 +26,9 @@ import os
 import re
 import threading
 import time
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler, WatchedFileHandler
 
+from . import cluster
 from .suppressed import report_suppressed
 
 _logger: logging.Logger | None = None
@@ -87,10 +88,15 @@ def _install(lg: logging.Logger, path: str, retention_hours: int) -> bool:
     if lg.handlers:
         return True
     try:
-        h = TimedRotatingFileHandler(
-            path, when="H", interval=1,
-            backupCount=max(1, int(retention_hours)), encoding="utf-8",
-            delay=True)
+        if cluster.enabled() and not cluster.is_leader():
+            # multi-worker: ruota solo il leader; gli altri appendono e
+            # riaprono il file dopo la rotazione (niente rinomine in parallelo)
+            h = WatchedFileHandler(path, encoding="utf-8", delay=True)
+        else:
+            h = TimedRotatingFileHandler(
+                path, when="H", interval=1,
+                backupCount=max(1, int(retention_hours)), encoding="utf-8",
+                delay=True)
         h.setFormatter(logging.Formatter("%(message)s"))
         lg.addHandler(h)
         return True

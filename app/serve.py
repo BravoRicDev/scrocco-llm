@@ -19,7 +19,8 @@
   * aggiorna il battito del container (`GATEWAY_HEARTBEAT_FILE`) finche'
     almeno un worker e' vivo: l'HEALTHCHECK Docker resta quello di prima;
   * su SIGTERM/SIGINT inoltra lo stop ai worker (ognuno fa il suo drain) e
-    attende fino a `GATEWAY_SHUTDOWN_TIMEOUT` secondi.
+    attende fino a `GATEWAY_SHUTDOWN_TIMEOUT` secondi (55, sotto lo
+    `stop_grace_period` di 60s del compose).
 
 [EN] Entry point: single process (exec of the historical uvicorn command) or
 a supervisor that shares the listening socket among N workers and restarts
@@ -125,10 +126,22 @@ async def _serve_worker(public, internal, sock: socket.socket) -> None:
     from .affinity import PEERS
 
     internal_task = asyncio.create_task(internal.serve())
+
+    async def follow_public() -> None:
+        # Allo stop il socket privato smette di accettare INSIEME a quello
+        # pubblico: le richieste gia' inoltrate finiscono (e contano nel
+        # drain), le nuove di altri worker ripiegano sul loro processo
+        # invece di arrivare a un worker che sta chiudendo il forwarder.
+        while not public.should_exit:
+            await asyncio.sleep(0.2)
+        internal.should_exit = True
+
+    follower = asyncio.create_task(follow_public())
     try:
         await public.serve(sockets=[sock])
     finally:
         internal.should_exit = True
+        follower.cancel()
         await internal_task
         await PEERS.aclose()
 
@@ -153,7 +166,7 @@ class Supervisor:
         self.heartbeat_file = heartbeat_file or liveness.heartbeat_path()
         self.max_age = max_age if max_age is not None else float(
             os.environ.get("GATEWAY_HEARTBEAT_MAX_AGE", liveness.DEFAULT_MAX_AGE_SEC))
-        self.shutdown_timeout = float(os.environ.get("GATEWAY_SHUTDOWN_TIMEOUT", "60"))
+        self.shutdown_timeout = float(os.environ.get("GATEWAY_SHUTDOWN_TIMEOUT", "55"))
         self.run_dir = ""
         self._sock: socket.socket | None = None
         self._stopping: asyncio.Event | None = None

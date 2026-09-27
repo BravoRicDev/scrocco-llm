@@ -91,14 +91,25 @@ class KeyHealth:
         if not cluster.is_leader():
             return
         save_json(self.path, self.data, indent=1)
+        self._saved_text = None           # scritto fuori da save_async: rifare il confronto
 
     async def save_async(self) -> None:
         """Come `save`, ma solo la codifica resta sull'event loop (snapshot
-        coerente): la scrittura su disco gira su un thread."""
+        coerente): la scrittura su disco gira su un thread. Il watcher la
+        chiama ogni 5s: se il contenuto non e' cambiato dall'ultima
+        scrittura, niente disco (prima: riscrittura + .bak ogni tick)."""
         if not cluster.is_leader():
             return
-        text = freeze_json(self.data, indent=1)
-        await asyncio.to_thread(save_json_text, self.path, text)
+        snap = freeze_json(self.data, indent=1)
+        try:
+            rendered = snap.text()
+        except (TypeError, ValueError):
+            rendered = None               # errore di codifica: lo gestisce la scrittura
+        if rendered is not None and rendered == getattr(self, "_saved_text", None) \
+                and os.path.exists(self.path):
+            return
+        ok = await asyncio.to_thread(save_json_text, self.path, snap)
+        self._saved_text = rendered if ok else None
 
     def reload_if_changed(self) -> bool:
         """Worker non-leader: riallinea la memoria al file del leader."""

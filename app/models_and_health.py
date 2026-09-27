@@ -73,6 +73,11 @@ async def metrics_endpoint(request: Request):
     """
     metrics.set_gauge("nx_cooldown_active", len(gw_state.router._cooldown))
     metrics.set_gauge("nx_sticky_active", len(gw_state.router._sticky))
+    if cluster.enabled():
+        snap = cluster.stats()
+        for field in cluster.METRIC_FIELDS:
+            if field in snap:
+                metrics.set_gauge(f"nx_cluster_{field}", snap[field])
     body = metrics.render() + render_prometheus()
     if cluster.enabled() and not request.scope.get("scrocco.internal"):
         # multi-worker: serie di TUTTI i worker, con la label `worker`

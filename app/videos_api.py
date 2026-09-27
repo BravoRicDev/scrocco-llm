@@ -16,6 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import metrics
+from .offload import request_json
 from . import state as gw_state
 from .http_responses import unauthorized as _unauthorized
 from .http_responses import forbidden as _forbidden
@@ -49,7 +50,7 @@ async def videos_generations(request: Request):
     """
 
     try:
-        payload = await request.json()
+        payload = await request_json(request)
     except Exception:
         return JSONResponse(
             status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}

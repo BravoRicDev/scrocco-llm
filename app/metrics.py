@@ -86,37 +86,42 @@ def observe_latency_ms(unique: str, ms: float) -> None:
 
 
 def render() -> str:
-    """Formato testo exposition Prometheus."""
+    """Formato testo exposition Prometheus.
+
+    Sotto il lock si COPIANO solo i valori (veloce); la formattazione, che
+    con centinaia di serie e' la parte costosa, avviene fuori: le inc() dei
+    thread (offload, flush) non aspettano lo scrape."""
+    with _lock:
+        counters = [(name, sorted(series.items())) for name, series in _counters.items()]
+        gauges = list(_gauges.items())
+        latencies = [(u, s, _latency_count.get(u) or 1) for u, s in _latency_sum.items()]
     lines = [
         "# TYPE nx_uptime_seconds gauge",
         f"nx_uptime_seconds {time.time() - _started:.0f}",
     ]
-    with _lock:
-        for name, series in sorted(_counters.items()):
-            lines.append(f"# TYPE {name} counter")
-            for labels, v in sorted(series.items()):
-                lbl = ""
-                if labels:
-                    names = _label_names(name)
-                    if len(names) != len(labels):
-                        # declare() assente o arity incoerente: non perdere
-                        # mai la serie (nomi placeholder deterministici).
-                        names = [f"label{i}" for i in range(len(labels))]
-                    parts = ",".join(
-                        f'{k}="{_safe_label(str(val))}"'
-                        for k, val in zip(names, labels))
-                    lbl = "{" + parts + "}"
-                lines.append(f"{name}{lbl} {v}")
-        for name, v in sorted(_gauges.items()):
-            lines.append(f"# TYPE {name} gauge")
-            lines.append(f"{name} {v}")
-        if _latency_sum:
-            lines.append("# TYPE nx_upstream_latency_ms gauge")
-            for u, s in sorted(_latency_sum.items()):
-                n = _latency_count.get(u) or 1
-                safe = _safe_label(u)
-                lines.append(f'nx_upstream_latency_ms{{unique="{safe}"}} '
-                             f"{s / n:.0f}")
+    for name, series in sorted(counters, key=lambda kv: kv[0]):
+        lines.append(f"# TYPE {name} counter")
+        for labels, v in series:
+            lbl = ""
+            if labels:
+                names = _label_names(name)
+                if len(names) != len(labels):
+                    # declare() assente o arity incoerente: non perdere
+                    # mai la serie (nomi placeholder deterministici).
+                    names = [f"label{i}" for i in range(len(labels))]
+                parts = ",".join(
+                    f'{k}="{_safe_label(str(val))}"'
+                    for k, val in zip(names, labels))
+                lbl = "{" + parts + "}"
+            lines.append(f"{name}{lbl} {v}")
+    for name, v in sorted(gauges):
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {v}")
+    if latencies:
+        lines.append("# TYPE nx_upstream_latency_ms gauge")
+        for u, s, n in sorted(latencies):
+            lines.append(f'nx_upstream_latency_ms{{unique="{_safe_label(u)}"}} '
+                         f"{s / n:.0f}")
     return "\n".join(lines) + "\n"
 
 

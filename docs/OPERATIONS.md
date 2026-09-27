@@ -58,7 +58,7 @@ container starts through `python -m app.serve`:
   `GATEWAY_HEARTBEAT_MAX_AGE`), and keeps the container heartbeat alive
   while at least one worker is. `SIGTERM` is forwarded to every worker
   (each drains its own requests); the supervisor waits up to
-  `GATEWAY_SHUTDOWN_TIMEOUT` (60s) and then kills stragglers.
+  `GATEWAY_SHUTDOWN_TIMEOUT` (55s, below the compose `stop_grace_period: 60s`) and then kills stragglers.
 
 The routing rules and the policy are the same as with one process. How the
 state stays single-process-equivalent:
@@ -74,6 +74,17 @@ state stays single-process-equivalent:
 | **Files** | `adaptive_stats.json`, `cooldown_state.json`, `key_health.json`: written by worker 0 (the others read `key_health.json` when it changes). `routing_state.wN.json` and `thought_sigs.wN.json`: one per worker (first start falls back to the single-process file). Ledger, repair ledger, journal and learned CSV flags: appended under an inter-process `flock`. `gateway.log` / `error-audit.log`: rotated by worker 0, the others reopen after rotation. |
 | **Admission gate** | `admission_max_inflight` / `admission_max_streams` stay **gateway-wide**: each worker enforces `ceil(limit / N)`. Raise them when you add workers. |
 | **`/metrics`** | the worker that receives the scrape merges every worker's series with a `worker="i"` label (sum by without `worker` for gateway totals). |
+
+Inspecting a cluster: `GET /admin/cluster` (master) shows the answering
+worker, leader flag, replication counters (`published`, `replayed`,
+`skipped`, `errors`, `dropped`, `reconnects`) and its own in-flight
+requests; `/metrics` exposes the same counters as `nx_cluster_*` gauges per
+worker, plus `nx_affinity_fallback_total{owner}` (requests served locally
+because the session owner was restarting). A worker that loses the bus and
+reconnects asks for a fresh snapshot, keeping its own in-flight requests.
+On `SIGTERM` each worker's private socket stops accepting together with
+the public one: requests already forwarded finish, new ones fall back to
+the worker that received them.
 
 Caveats: `/admin` session views (`?session_id=` or a `session_id` in the
 body) are routed to the owner; list views of per-session state show the

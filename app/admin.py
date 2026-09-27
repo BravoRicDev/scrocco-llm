@@ -536,6 +536,19 @@ async def list_profiles(request: Request):
     return {"count": len(out), "profiles": out}
 
 
+# ----------------------------------------------------------------- cluster
+@admin_api.get("/cluster")
+async def cluster_state(request: Request):
+    """Multi-worker (GATEWAY_WORKERS): worker che risponde, contatori della
+    replica, richieste in volo proprie. Con un processo: enabled=false."""
+    denied = _require_master(request)
+    if denied:
+        return denied
+    from . import cluster
+
+    return cluster.stats()
+
+
 # ------------------------------------------------------------------- state
 @admin_api.get("/state")
 async def state(request: Request):

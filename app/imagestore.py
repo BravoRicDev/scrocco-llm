@@ -18,6 +18,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import cluster
+
 _LOCK = threading.Lock()
 # id -> {"data": bytes, "mime": str, "ts": float}. L'ordine di inserimento del
 # dict (py>=3.7) e' anche l'ordine di eviction (oldest-first).
@@ -257,6 +259,8 @@ def _sweep_disk(now: float) -> int:
     l'eviction e' per chiave in memoria, il disco no."""
     if _STORAGE_DIR is None or not _TTL_SEC:
         return 0
+    if not cluster.is_leader():
+        return 0      # multi-worker: la directory e' condivisa, la scansiona il leader
     removed = 0
     try:
         metas = list(_STORAGE_DIR.glob("*.json"))

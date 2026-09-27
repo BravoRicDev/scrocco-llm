@@ -48,6 +48,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .admin import admin_api
 from .suppressed import report_suppressed
+from .offload import request_json
 from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
 from . import cluster
@@ -545,7 +546,7 @@ from .http_responses import unauthorized as _unauthorized  # noqa: E402
 async def chat_completions(request: Request, response: Response):
     _api_log = logging.getLogger("nx.api")
     try:
-        payload = await request.json()
+        payload = await request_json(request)
     except Exception as exc:
         # FIX: Log error details for debugging; previously blank exception handler
         _api_log.warning("[api] invalid JSON body: %s", exc)

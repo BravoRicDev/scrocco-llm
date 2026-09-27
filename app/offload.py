@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -31,3 +32,26 @@ async def run(fn: Callable[..., T], *args: Any, size: int = OFFLOAD_MIN_BYTES, *
 
 def b64encode_str(data: bytes) -> str:
     return base64.b64encode(data).decode()
+
+
+# Chiave di scope con cui un middleware (app/affinity.py) lascia il body gia'
+# decodificato: (bytes del body, oggetto JSON). Lo usa UNA volta l'endpoint.
+PARSED_BODY_KEY = "scrocco.json"
+
+
+async def request_json(request) -> Any:
+    """Come `await request.json()` (stesso risultato, stesse eccezioni), ma
+    un body grande (payload con immagini/audio base64: diversi MB) si
+    decodifica su un thread invece di fermare il loop; e se un middleware ha
+    gia' decodificato lo STESSO body non lo si rifa'."""
+    cached = getattr(request, "_json", None)
+    if cached is not None:
+        return cached
+    body = await request.body()
+    pre = request.scope.pop(PARSED_BODY_KEY, None)
+    if pre is not None and pre[0] == body:
+        parsed = pre[1]
+    else:
+        parsed = await run(json.loads, body, size=len(body))
+    request._json = parsed
+    return parsed
