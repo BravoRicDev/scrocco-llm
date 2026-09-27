@@ -288,7 +288,7 @@ _MUST_STAY_DEBUG = [
     # 1 riga per ogni HTTP in ingresso
     ("observability.py", "[http] ->"),
     # ~48 righe per richiesta video (poll di attesa)
-    ("main.py", "[video-wait]"),
+    ("videos_api.py", "[video-wait]"),
     # pattern pinnato: la prima volta INFO, le ripetizioni DEBUG
     # (cfr. tests/test_logging_detail.py::test_defer_info_first_then_debug)
     ("router.py", "[defer] %s: scartati %d multimodali"),
