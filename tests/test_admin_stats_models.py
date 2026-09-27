@@ -7,6 +7,7 @@ Inoltre non emetteva i costi (colonna sempre "-" nella TUI).
 """
 import os
 import time
+import app.state as gw_state
 
 os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
 
@@ -38,24 +39,24 @@ def client(monkeypatch, tmp_path):
     csv_f.write_text(CSV)
     pol_f = tmp_path / "gateway.yaml"
     pol_f.write_text("")
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-stats"
-    monkeypatch.setattr(m, "CSV_PATH", csv_f)
-    monkeypatch.setattr(m, "POLICY_PATH", pol_f)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
-    monkeypatch.setattr(m.config, "csv_path", csv_f)
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-stats"
+    monkeypatch.setattr(gw_state, "CSV_PATH", csv_f)
+    monkeypatch.setattr(gw_state, "POLICY_PATH", pol_f)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
+    monkeypatch.setattr(gw_state.config, "csv_path", csv_f)
+    gw_state.config.reload()
     yield TestClient(m.app)
-    m.authn.master_key = orig_mk
-    monkeypatch.setattr(m.config, "csv_path", m.CSV_PATH)
-    m.config.reload()
+    gw_state.authn.master_key = orig_mk
+    monkeypatch.setattr(gw_state.config, "csv_path", gw_state.CSV_PATH)
+    gw_state.config.reload()
 
 
 def test_ok_fail_dal_ledger_e_costi(client, monkeypatch):
     async def _rows():
         return list(ROWS)
 
-    monkeypatch.setattr(m.LEDGER, "iter_rows_async", _rows)
+    monkeypatch.setattr(gw_state.LEDGER, "iter_rows_async", _rows)
     r = client.get("/admin/stats/models", headers=MK)
     assert r.status_code == 200, r.text
     by = {x["model"]: x for x in r.json()["ranking"]}

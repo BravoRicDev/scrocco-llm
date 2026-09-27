@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.observability import add_replay_entry, replay_buffer
+import app.state as gw_state
 
 MKH = {"Authorization": "Bearer test-master-f5"}
 MK = "test-master-f5"
@@ -21,14 +22,14 @@ MK = "test-master-f5"
 def client(monkeypatch, tmp_path):
     os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
     import app.main as m
-    orig_mk = m.authn.master_key
-    m.authn.master_key = MK
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = MK
     replay_buffer.clear()
     try:
         yield TestClient(m.app), m
     finally:
         replay_buffer.clear()
-        m.authn.master_key = orig_mk
+        gw_state.authn.master_key = orig_mk
 
 
 def _seed():

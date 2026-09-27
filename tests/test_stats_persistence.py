@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 
 def _router():
@@ -91,10 +92,10 @@ def test_note_result_increments_ok_count():
 def test_endpoint_exposes_persisted_scores(monkeypatch):
     """L'endpoint legge i punteggi da router._stats (persistiti/live)."""
     import app.main as m
-    monkeypatch.setattr(m.authn, "master_key", "test-master-stats")
+    monkeypatch.setattr(gw_state.authn, "master_key", "test-master-stats")
     unique = "scrocco-llm-test-32k__m__0"
     try:
-        s = m.router.stats_for(unique)
+        s = gw_state.router.stats_for(unique)
         s.ok_count = 4
         s.fail_count = 1
         s.ema_latency_ms = 321.0
@@ -111,4 +112,4 @@ def test_endpoint_exposes_persisted_scores(monkeypatch):
         assert row["ema_latency_ms"] == 321.0
         assert row["last_reason"] == "http_500"
     finally:
-        m.router._stats.pop(unique, None)
+        gw_state.router._stats.pop(unique, None)

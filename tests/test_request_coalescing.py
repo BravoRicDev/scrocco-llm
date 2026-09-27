@@ -9,15 +9,16 @@ import pytest
 import app.main as M
 from app.main import _coalesce_key, _forward_coalesced
 from app.policy import Policy
+import app.state as gw_state
 
 
 @pytest.fixture(autouse=True)
 def _clear():
-    M._inflight_coalesce.clear()
-    M._coalesce_cache.clear()
+    gw_state._inflight_coalesce.clear()
+    gw_state._coalesce_cache.clear()
     yield
-    M._inflight_coalesce.clear()
-    M._coalesce_cache.clear()
+    gw_state._inflight_coalesce.clear()
+    gw_state._coalesce_cache.clear()
 
 
 def test_coalesce_key_deterministic_and_order_independent():
@@ -201,4 +202,4 @@ def test_cache_expiry_rehits_factory():
 def test_cache_caps_size():
     for i in range(80):
         M._coalesce_cache_put(f"k{i}", {"i": i}, 1e12)
-    assert len(M._coalesce_cache) <= M._COALESCE_CACHE_MAX
+    assert len(gw_state._coalesce_cache) <= gw_state._COALESCE_CACHE_MAX

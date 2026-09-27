@@ -19,6 +19,7 @@ from app import repairlog
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 _HDR = ("commento,modello,provider,endpoint,data,context,max_input,"
         "priority,scrocco-llm-test,caps\n")
@@ -99,9 +100,9 @@ class _FakeFwd:
 
 
 def _stream(monkeypatch, cfg, router, fwd, first, payload):
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
 
     async def _run():
         resp = await M._stream_with_fallback(

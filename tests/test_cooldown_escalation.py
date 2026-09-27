@@ -17,6 +17,7 @@ import time
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 CSV = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
 t@x,m/a1000,groq,https://api.groq.com/openai/v1,free,1000,8000,5,K-A,
@@ -81,8 +82,8 @@ def test_escalate_cooldown_capped_at_max():
 def test_soft_cd_uses_escalation():
     # _soft_cd(fail_24h) deve riflettere l'escalation (via router)
     import app.main as m
-    r = m.router
-    assert m._soft_cd(1) == m.router.policy.qc_json.watchdog_cooldown_sec
+    r = gw_state.router
+    assert m._soft_cd(1) == gw_state.router.policy.qc_json.watchdog_cooldown_sec
     assert m._soft_cd(5) > m._soft_cd(1)
     assert m._soft_cd(18) > m._soft_cd(5)
 

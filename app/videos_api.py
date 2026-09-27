@@ -1,13 +1,13 @@
 """Endpoint video async (submit, poll status, download content).
-Estratti verbatim da `app/main.py` (cluster C9, Round 4 Clean Code).
-Gli oggetti condivisi (`policy`, `authn`, `router`, `config`, `log`,
-`forwarder`, `_videos_jobs`: STATO runtime) sono raggiunti
-DENTRO il corpo delle funzioni tramite `import app.main as M`: a livello di
-modulo si creerebbe un ciclo di import (main include questo router a fine
-file, dopo aver definito tutto). `_videos_jobs` resta un dict MUTATO (non
-riassegnato) in main.py: `M._videos_jobs[...] = ...` qui modifica lo stesso
-oggetto che il sweep di pulizia in main.py legge come nome nudo.
+Estratti da `app/main.py` (cluster C9, Round 4 Clean Code).
+
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
+`gw_state._videos_jobs` e' il dict dei job (mutato, mai riassegnato) che il
+watcher di pulizia scorre.
 """
+import logging
 import asyncio
 import time
 import urllib.parse
@@ -16,6 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import metrics
+from . import state as gw_state
 from .http_responses import unauthorized as _unauthorized
 from .http_responses import forbidden as _forbidden
 from .suppressed import report_suppressed
@@ -33,6 +34,9 @@ from .chat_helpers import (
 from .forwarder import UpstreamError, _MODEL_MISSING_RE, media_reject_signature
 from .policy import refill_out_budget
 
+# Stesso logger di app.main: i record (nome "nx.main") restano identici.
+log = logging.getLogger("nx.main")
+
 router = APIRouter()
 
 
@@ -43,7 +47,6 @@ async def videos_generations(request: Request):
     Instrada SOLO su deployment con capacità video_gen. Il client polla
     GET /v1/videos/generations/{job_id} e scarica via .../{job_id}/content.
     """
-    import app.main as M
 
     try:
         payload = await request.json()
@@ -57,23 +60,23 @@ async def videos_generations(request: Request):
             status_code=400, content={"error": {"message": "'prompt' è obbligatorio", "type": "invalid_request_error"}}
         )
 
-    model = M.policy.canonicalize(raw_model)
-    auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
+    model = gw_state.policy.canonicalize(raw_model)
+    auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
-    if not M.authn.authorize_model(auth, model):
+    if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
-    need = frozenset({"video_gen"}) if M.router.policy.routing_active() else frozenset()
+    need = frozenset({"video_gen"}) if gw_state.router.policy.routing_active() else frozenset()
     # i2v / reference-to-video: le immagini d'input esigono il token vision
     # nell'inner-filter (solo modelli che accettano frame/reference)
     if payload.get("frame_images") or payload.get("input_references"):
         need = need | {"vision"}
-    scope = "group" if M.router.is_explicit(model) else "chain"
+    scope = "group" if gw_state.router.is_explicit(model) else "chain"
     _set_opencode_gate(request)
     session_id = _session_id(request, payload)
 
-    group_or_explicit = M.router.resolve_group_for_request(
+    group_or_explicit = gw_state.router.resolve_group_for_request(
         model,
         [],
         session_id,
@@ -98,17 +101,17 @@ async def videos_generations(request: Request):
             },
         )
 
-    explicit_req = M.router.is_explicit(model)
-    dep = M.router.config.deployment_by_unique(group_or_explicit)
+    explicit_req = gw_state.router.is_explicit(model)
+    dep = gw_state.router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
-        dep = M.router.initial_pick(
+        dep = gw_state.router.initial_pick(
             auth.profile,
             group_or_explicit,
             None if explicit_req else need,
-            out_tokens=refill_out_budget(payload, M.policy),
+            out_tokens=refill_out_budget(payload, gw_state.policy),
         )
     if dep is None and auth.profile and not explicit_req:
-        dep = M.router.fallback_after(auth.profile, None, need, out_tokens=refill_out_budget(payload, M.router.policy))
+        dep = gw_state.router.fallback_after(auth.profile, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy))
     if dep is None:
         return JSONResponse(
             status_code=503,
@@ -116,33 +119,33 @@ async def videos_generations(request: Request):
         )
 
     metrics.inc("nx_videos_total", (dep["group"], "attempt"))
-    M.log.info("[videos] %s -> %s (prompt=%d chars)", model, dep["unique"], len(str(payload.get("prompt") or "")))
+    log.info("[videos] %s -> %s (prompt=%d chars)", model, dep["unique"], len(str(payload.get("prompt") or "")))
 
     tried: set[str] = set()
     attempts: list[str] = []
     _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
-    _prof = auth.profile or M.config.profile_of_base(model.split("__")[0]) or M.config.profile_of_base(model)
+    _prof = auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
         cur = dep["unique"]
-        _was_dormant = M.router.is_cooled_down(cur)
+        _was_dormant = gw_state.router.is_cooled_down(cur)
         tried.add(cur)
         attempts.append(cur)
-        M.router.note_start(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
-            envelope = await M.forwarder.submit_video(
+            envelope = await gw_state.forwarder.submit_video(
                 dep, payload, profile=_prof or "", client_ip=_cip, session=_sess, attribution=_attr
             )
-            M.router.note_result(cur, (time.monotonic() - t0) * 1000)
+            gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
-                M.router.clear_cooldown(cur)
+                gw_state.router.clear_cooldown(cur)
             metrics.inc("nx_videos_total", (dep["group"], "ok"))
             job_id = str(envelope.get("id") or "")
-            M._videos_jobs[job_id] = {
+            gw_state._videos_jobs[job_id] = {
                 "api_base": dep["api_base"],
                 "api_key": dep["api_key"],
                 "group": dep["group"],
@@ -170,15 +173,15 @@ async def videos_generations(request: Request):
                 while time.time() < deadline:
                     await asyncio.sleep(5)
                     try:
-                        st = await M.forwarder.poll_video(
+                        st = await gw_state.forwarder.poll_video(
                             dep,
                             job_id,
-                            profile=_prof or M._videos_jobs.get(job_id, {}).get("_prof", ""),
-                            client_ip=_cip or M._videos_jobs.get(job_id, {}).get("_cip", ""),
-                            session=_sess or M._videos_jobs.get(job_id, {}).get("_sess"),
+                            profile=_prof or gw_state._videos_jobs.get(job_id, {}).get("_prof", ""),
+                            client_ip=_cip or gw_state._videos_jobs.get(job_id, {}).get("_cip", ""),
+                            session=_sess or gw_state._videos_jobs.get(job_id, {}).get("_sess"),
                             attribution=_attr,
                         )
-                        M.log.debug(
+                        log.debug(
                             "[video-wait] job=%s t=%ds status=%s",
                             job_id,
                             wait_s - int(deadline - time.time()),
@@ -214,7 +217,7 @@ async def videos_generations(request: Request):
             )
             return JSONResponse(out)
         except UpstreamError as err:
-            M.router.note_end(cur)
+            gw_state.router.note_end(cur)
             last_err = err
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
@@ -242,20 +245,20 @@ async def videos_generations(request: Request):
                 except Exception:
                     report_suppressed("videos_api.videos_generations@239")
             if _was_dormant:
-                M.router.mark_failed_double_residual(
+                gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                M.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_videos_total", (dep["group"], "retry"))
             nxt = (
-                M.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, M.router.policy)
+                gw_state.router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
                 )
                 if (
                     profile := auth.profile
-                    or M.config.profile_of_base(model.split("__")[0])
-                    or M.config.profile_of_base(model)
+                    or gw_state.config.profile_of_base(model.split("__")[0])
+                    or gw_state.config.profile_of_base(model)
                 )
                 else None
             )
@@ -283,11 +286,10 @@ def _job_deps(job_id: str, model: str | None):
     e funziona da qualsiasi replica. Senza model, si usa il mapping in
     memoria della submit (fast-path, perso su restart).
     Ritorna (deps_list | None, error_response | None)."""
-    import app.main as M
 
     if model:
-        canonical = M.policy.canonicalize(model)
-        deps = M.router.video_gen_candidates(canonical)
+        canonical = gw_state.policy.canonicalize(model)
+        deps = gw_state.router.video_gen_candidates(canonical)
         if deps:
             return deps, None
         return None, JSONResponse(
@@ -299,7 +301,7 @@ def _job_deps(job_id: str, model: str | None):
                 }
             },
         )
-    snap = M._videos_jobs.get(job_id)
+    snap = gw_state._videos_jobs.get(job_id)
     if snap is None:
         return None, JSONResponse(
             status_code=404,
@@ -317,18 +319,17 @@ def _job_deps(job_id: str, model: str | None):
 
 @router.get("/v1/videos/generations/{job_id}")
 async def videos_status(job_id: str, request: Request, model: str | None = None):
-    import app.main as M
 
-    auth = M.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
     _prof = model or request.query_params.get("model") or ""
-    _prof = M.config.profile_of_base(_prof.split("__")[0]) or ""
+    _prof = gw_state.config.profile_of_base(_prof.split("__")[0]) or ""
     try:
-        status = await M.forwarder.poll_video_any(
+        status = await gw_state.forwarder.poll_video_any(
             deps,
             job_id,
             profile=_prof,
@@ -341,9 +342,9 @@ async def videos_status(job_id: str, request: Request, model: str | None = None)
         return JSONResponse(status_code=st if st >= 400 else 502, content={"error": {"message": e.detail}})
     st_val = status.get("status") if isinstance(status, dict) else "?"
     if st_val in ("completed", "failed", "cancelled", "expired"):
-        M.log.info("[video-poll] job=%s -> %s", job_id, st_val)
+        log.info("[video-poll] job=%s -> %s", job_id, st_val)
     else:
-        M.log.debug("[video-poll] job=%s status=%s", job_id, st_val)
+        log.debug("[video-poll] job=%s status=%s", job_id, st_val)
     qm = request.query_params.get("model")
     if isinstance(status, dict):
         status.setdefault("polling_url", f"/v1/videos/generations/{job_id}" + (f"?model={qm}" if qm else ""))
@@ -354,19 +355,18 @@ async def videos_status(job_id: str, request: Request, model: str | None = None)
 
 @router.get("/v1/videos/generations/{job_id}/content")
 async def videos_content(job_id: str, request: Request, model: str | None = None):
-    import app.main as M
 
-    auth = M.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
     _prof = model or request.query_params.get("model") or ""
-    _prof = M.config.profile_of_base(_prof.split("__")[0]) or ""
+    _prof = gw_state.config.profile_of_base(_prof.split("__")[0]) or ""
     try:
         t_dl = time.monotonic()
-        content, ctype = await M.forwarder.download_video_any(
+        content, ctype = await gw_state.forwarder.download_video_any(
             deps,
             job_id,
             profile=_prof,
@@ -374,7 +374,7 @@ async def videos_content(job_id: str, request: Request, model: str | None = None
             session=_opencode_session(request),
             attribution=_client_attribution(request),
         )
-        M.log.info(
+        log.info(
             "[video-content] job=%s bytes=%d ctype=%s dur=%.1fs", job_id, len(content), ctype, time.monotonic() - t_dl
         )
     except UpstreamError as e:

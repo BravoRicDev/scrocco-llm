@@ -16,6 +16,7 @@ import pytest
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 
@@ -143,15 +144,15 @@ def test_discovered_max_input_persistenza(router_mt):
 def test_coalesce_cache_non_mette_errori():
     import app.main as M
     from starlette.responses import JSONResponse
-    M._coalesce_cache.clear()
+    gw_state._coalesce_cache.clear()
     M._coalesce_cache_put("bad-envelope",
                           ({"error": {"message": "boom"}}, {}), 9e9)
-    assert "bad-envelope" not in M._coalesce_cache
+    assert "bad-envelope" not in gw_state._coalesce_cache
     M._coalesce_cache_put("bad-http",
                           JSONResponse(status_code=502, content={}), 9e9)
-    assert "bad-http" not in M._coalesce_cache
+    assert "bad-http" not in gw_state._coalesce_cache
     M._coalesce_cache_put("good", ({"choices": []}, {}), 9e9)
-    assert "good" in M._coalesce_cache
+    assert "good" in gw_state._coalesce_cache
 
 
 def test_coalesce_hit_incrementa_metrica():
@@ -159,7 +160,7 @@ def test_coalesce_hit_incrementa_metrica():
     from app import metrics
     pol = Policy.from_dict({})
     pol.request_coalescing_cache_sec = 3.0
-    M._coalesce_cache.clear()
+    gw_state._coalesce_cache.clear()
     payload = {"model": "m", "messages": [{"role": "user", "content": "z"}],
                "stream": False}
     key = M._coalesce_key(payload, "prof")
@@ -191,8 +192,8 @@ def test_drain_probe_tasks_cancella_e_attende():
                 seen.append("cancelled")
                 raise
         t = asyncio.ensure_future(slow())
-        M._PROBE_TASKS.add(t)
-        t.add_done_callback(M._PROBE_TASKS.discard)
+        gw_state._PROBE_TASKS.add(t)
+        t.add_done_callback(gw_state._PROBE_TASKS.discard)
         await asyncio.sleep(0.01)
         n = await M._drain_probe_tasks()
         return n, seen, t.cancelled()

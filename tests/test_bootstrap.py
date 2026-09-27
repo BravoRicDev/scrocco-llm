@@ -2,6 +2,7 @@
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+import app.state as gw_state
 
 
 @pytest.fixture()
@@ -16,20 +17,20 @@ def client(monkeypatch, tmp_path):
     # Il master key e' fissato alla costruzione di AuthManager (import-time):
     # impostare solo os.environ qui e' troppo tardi e rende i test
     # order-dependent. Forziamo il valore sull'istanza usata da admin._gw().
-    monkeypatch.setattr(m.authn, "master_key", "test-master-not-default")
-    orig_csv_path = m.config.csv_path
-    orig_var_dir = getattr(m, "VAR_DIR", None)
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    m.config.csv_path = csv
-    m.config.reload()                       # ricarica dal CSV vuoto temporaneo
+    monkeypatch.setattr(gw_state.authn, "master_key", "test-master-not-default")
+    orig_csv_path = gw_state.config.csv_path
+    orig_var_dir = getattr(gw_state, "VAR_DIR", None)
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()                       # ricarica dal CSV vuoto temporaneo
     yield TestClient(m.app)
     # teardown: riporta config/router allo stato reale (nessun leak)
-    m.router._cooldown.clear()
-    m.config.csv_path = orig_csv_path
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.config.csv_path = orig_csv_path
+    gw_state.config.reload()
     if orig_var_dir is None:
-        delattr(m, "VAR_DIR")
+        delattr(gw_state, "VAR_DIR")
 
 
 def test_bootstrap_public_and_complete(client):
@@ -66,18 +67,18 @@ def test_status_masks_keys_and_never_probes(client):
     import time as _t
     import app.main as m
     # serve almeno un deployment: il blocco "suspicious" e' nel ramo != 0
-    m.config.csv_path.write_text(
+    gw_state.config.csv_path.write_text(
         "commento,modello,provider,endpoint,data,context,max_input,priority,"
         "scrocco-llm-test,caps\n"
         "t@x,m-a,groq,https://p.test/v1,free,32,8000,0,sk-KK,\n")
-    m.config.reload()
+    gw_state.config.reload()
 
     class _S:
         fail_streak = 5
-    m.router._cooldown["scrocco-llm-test-32k__m-a__0"] = _t.time() + 999
+    gw_state.router._cooldown["scrocco-llm-test-32k__m-a__0"] = _t.time() + 999
     monkey_stats = {"scrocco-llm-test-32k__m-a__0": _S()}
-    monkey_orig = m.router.stats_for
-    m.router.stats_for = lambda u: monkey_stats.get(u, monkey_orig(u))
+    monkey_orig = gw_state.router.stats_for
+    gw_state.router.stats_for = lambda u: monkey_stats.get(u, monkey_orig(u))
     try:
         j = client.get("/bootstrap/status").json()
         blob = __import__("json").dumps(j)
@@ -89,8 +90,8 @@ def test_status_masks_keys_and_never_probes(client):
         assert sus["items"][0]["key_masked"].endswith("*") \
             or "..." in sus["items"][0]["key_masked"]
     finally:
-        m.router._cooldown.clear()
-        m.router.stats_for = monkey_orig
+        gw_state.router._cooldown.clear()
+        gw_state.router.stats_for = monkey_orig
 
 
 def test_master_key_default_warning(client, monkeypatch):
@@ -116,8 +117,7 @@ def test_probe_cached_no_waste(client, monkeypatch):
     dep = {"unique": "scrocco-llm-test-32k__m-a__0",
            "group": "scrocco-llm-test-32k", "model": "m-a",
            "api_base": "https://probe.test/v1", "api_key": "sk-KK"}
-    monkeypatch.setitem(__import__("app.main", fromlist=["config"])
-                        .config.groups, dep["group"], [dep])
+    monkeypatch.setitem(gw_state.config.groups, dep["group"], [dep])
     real_cls = httpx.AsyncClient
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(adm.httpx, "AsyncClient",
@@ -150,8 +150,7 @@ def test_probe_failure_not_cached(client, monkeypatch):
     dep = {"unique": "scrocco-llm-test-32k__m-b__0",
            "group": "scrocco-llm-test-32k", "model": "m-b",
            "api_base": "https://probe2.test/v1", "api_key": "sk-KB"}
-    main_mod = __import__("app.main", fromlist=["config"])
-    monkeypatch.setitem(main_mod.config.groups, dep["group"], [dep])
+    monkeypatch.setitem(gw_state.config.groups, dep["group"], [dep])
     real_cls = httpx.AsyncClient
     real = httpx.MockTransport(handler)
     monkeypatch.setattr(adm.httpx, "AsyncClient",
@@ -169,7 +168,7 @@ def test_probe_failure_not_cached(client, monkeypatch):
 def test_probe_does_not_touch_cooldowns(client, monkeypatch):
     """Il probe e' informativo: mai mark_failed / cooldown."""
     import app.main as m
-    before = dict(m.router._cooldown)
+    before = dict(gw_state.router._cooldown)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
@@ -177,7 +176,7 @@ def test_probe_does_not_touch_cooldowns(client, monkeypatch):
     dep = {"unique": "scrocco-llm-test-32k__m-c__0",
            "group": "scrocco-llm-test-32k", "model": "m-c",
            "api_base": "https://probe3.test/v1", "api_key": "sk-KC"}
-    monkeypatch.setitem(m.config.groups, dep["group"], [dep])
+    monkeypatch.setitem(gw_state.config.groups, dep["group"], [dep])
     import app.admin as adm2
     real_cls = httpx.AsyncClient
     real = httpx.MockTransport(handler)
@@ -186,7 +185,7 @@ def test_probe_does_not_touch_cooldowns(client, monkeypatch):
     client.post("/admin/deployments/probe",
                 json={"unique": dep["unique"]},
                 headers={"Authorization": "Bearer test-master-not-default"})
-    assert dict(m.router._cooldown) == before
+    assert dict(gw_state.router._cooldown) == before
 
 
 def test_probe_stt_uses_models_get(client, monkeypatch):
@@ -207,8 +206,8 @@ def test_probe_stt_uses_models_get(client, monkeypatch):
     dep = {"unique": "scrocco-llm-test-32k-stt__m-a__0",
            "group": "scrocco-llm-test-32k-stt", "model": "m-a",
            "api_base": "https://stt.test/v1", "api_key": "sk-KS"}
-    monkeypatch.setitem(m.config.groups, dep["group"], [dep])
-    monkeypatch.setitem(m.config.group_caps, dep["group"], "stt")
+    monkeypatch.setitem(gw_state.config.groups, dep["group"], [dep])
+    monkeypatch.setitem(gw_state.config.group_caps, dep["group"], "stt")
     real_cls = httpx.AsyncClient
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(adm.httpx, "AsyncClient",
@@ -243,7 +242,7 @@ def test_probe_chat_uses_chat_completions_post(client, monkeypatch):
     dep = {"unique": "scrocco-llm-test-32k__m-b__0",
            "group": "scrocco-llm-test-32k", "model": "m-b",
            "api_base": "https://chat.test/v1", "api_key": "sk-KH"}
-    monkeypatch.setitem(m.config.groups, dep["group"], [dep])
+    monkeypatch.setitem(gw_state.config.groups, dep["group"], [dep])
     # nessun group_caps -> chat (comportamento storico invariato)
     real_cls = httpx.AsyncClient
     transport = httpx.MockTransport(handler)

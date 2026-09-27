@@ -56,6 +56,7 @@ from typing import AsyncIterator
 import httpx
 
 from . import metrics
+from . import state as gw_state
 from .suppressed import report_suppressed
 from .bgtasks import spawn
 from . import repairlog
@@ -2190,8 +2191,7 @@ def _openrouter_attribution(dep: dict,
         title = title or os.environ.get("OPENROUTER_APP_TITLE") or ""
         if not ref or not title:
             try:
-                from . import main as _gw
-                pol = getattr(_gw, "policy", None)
+                pol = getattr(gw_state, "policy", None)
                 if pol is not None:
                     ref = ref or (getattr(pol, "openrouter_app_referer",
                                           "") or "")

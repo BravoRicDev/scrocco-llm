@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.main as main
+import app.state as gw_state
 
 CONTENT = ("content", [b"d"], None, {})
 TIMEOUT = ("timeout", [], None, {})
@@ -57,8 +58,8 @@ def _fake_router(B=None):
 
 
 async def _join_probes():
-    while main._PROBE_TASKS:
-        await asyncio.gather(*list(main._PROBE_TASKS),
+    while gw_state._PROBE_TASKS:
+        await asyncio.gather(*list(gw_state._PROBE_TASKS),
                              return_exceptions=True)
 
 
@@ -79,16 +80,16 @@ def _run_peek(peek, stream_response, router, *, closed_tag="A",
             _tct_cfg=SimpleNamespace(cooldown_sec=1))
         await _join_probes()
         return out
-    old = (main._peek_stream, main.router, main.forwarder,
+    old = (main._peek_stream, gw_state.router, gw_state.forwarder,
            main.inject_identity)
     main._peek_stream = peek
-    main.router = router
-    main.forwarder = SimpleNamespace(stream_response=stream_response)
+    gw_state.router = router
+    gw_state.forwarder = SimpleNamespace(stream_response=stream_response)
     main.inject_identity = lambda p, d, router=None: None
     try:
         out = asyncio.run(go())
     finally:
-        (main._peek_stream, main.router, main.forwarder,
+        (main._peek_stream, gw_state.router, gw_state.forwarder,
          main.inject_identity) = old
     return out, closed
 

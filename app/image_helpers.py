@@ -1,16 +1,18 @@
 """Helper immagini condivisi da /v1/images/* e dall'adattamento chat->images.
-Estratti verbatim da `app/main.py` (cluster C6, Round 4 Clean Code).
-Gli oggetti creati a RUNTIME dentro main.py (`router`, `config`, `policy`,
-`log`, `forwarder`) sono raggiunti con `import app.main as M` DENTRO il corpo
-delle funzioni che li usano: a livello di modulo non esisterebbero ancora, e
-main.py importa questo modulo.
+Estratti da `app/main.py` (cluster C6, Round 4 Clean Code).
+
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
+import logging
 import base64
 import time
 import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from . import metrics
+from . import state as gw_state
 from .suppressed import report_suppressed
 from . import imagestore
 from .auth import AuthResult
@@ -42,6 +44,9 @@ from .forwarder import (
     truncate_refs,
 )
 
+# Stesso logger di app.main: i record (nome "nx.main") restano identici.
+log = logging.getLogger("nx.main")
+
 
 def _data_uri(data: bytes, content_type: str = "") -> str:
     """Bytes -> data-URI base64 (per le reference ricevute in multipart)."""
@@ -55,9 +60,8 @@ def _public_base_url(request: Request) -> str:
     Usa la policy `images.url_base` se impostata; altrimenti la deriva dalla
     request (X-Forwarded-Proto/Host, poi Host): i client raggiungono il gateway
     direttamente (LAN/VPN) o via reverse proxy che inoltra quegli header."""
-    import app.main as M
 
-    cfg = (getattr(M.router.policy, "images_url_base", "") or "").strip()
+    cfg = (getattr(gw_state.router.policy, "images_url_base", "") or "").strip()
     if cfg:
         return cfg.rstrip("/")
     proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
@@ -84,13 +88,12 @@ async def _download_remote_image(url: str, *, timeout: float, max_bytes: int) ->
     """Scarica un'immagine da un URL http(s) del provider (mirror locale).
 
     Ritorna (bytes, content_type) oppure None su errore/superamento del cap."""
-    import app.main as M
 
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cli:
             async with cli.stream("GET", url) as resp:
                 if resp.status_code >= 400:
-                    M.log.debug("[images] mirror %s: status %s", url, resp.status_code)
+                    log.debug("[images] mirror %s: status %s", url, resp.status_code)
                     return None
                 ctype = resp.headers.get("content-type") or ""
                 chunks: list[bytes] = []
@@ -98,14 +101,14 @@ async def _download_remote_image(url: str, *, timeout: float, max_bytes: int) ->
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if max_bytes and total > max_bytes:
-                        M.log.warning("[images] mirror %s: supera %d byte", url, max_bytes)
+                        log.warning("[images] mirror %s: supera %d byte", url, max_bytes)
                         return None
                     chunks.append(chunk)
                 if not chunks:
                     return None
                 return b"".join(chunks), ctype
     except Exception as exc:  # noqa: BLE001
-        M.log.warning("[images] mirror %s fallito: %s", url, exc, exc_info=True)
+        log.warning("[images] mirror %s fallito: %s", url, exc, exc_info=True)
         return None
 
 
@@ -116,16 +119,15 @@ async def _localize_images(request: Request, items):
     - url http(s) del provider -> scaricata e ri-ospitata (mirror);
     - store disabilitato o download fallito -> item invariato (url provider).
     """
-    import app.main as M
 
     if not isinstance(items, list) or not items:
         return items
-    if not bool(getattr(M.router.policy, "images_store_enabled", True)):
+    if not bool(getattr(gw_state.router.policy, "images_store_enabled", True)):
         return items
-    mirror = bool(getattr(M.router.policy, "images_mirror_remote", True))
+    mirror = bool(getattr(gw_state.router.policy, "images_mirror_remote", True))
     base = _public_base_url(request)
-    tmo = float(getattr(M.router.policy, "images_remote_timeout_sec", 60) or 60)
-    rmax = int(getattr(M.router.policy, "images_remote_max_bytes", 20971520) or 0)
+    tmo = float(getattr(gw_state.router.policy, "images_remote_timeout_sec", 60) or 60)
+    rmax = int(getattr(gw_state.router.policy, "images_remote_max_bytes", 20971520) or 0)
     out: list[dict] = []
     for it in items:
         dual = image_item_dual(it) if isinstance(it, dict) else None
@@ -144,7 +146,7 @@ async def _localize_images(request: Request, items):
         elif b64:
             data_bytes = _b64decode(b64)
         elif mirror and isinstance(url, str) and url.startswith(("http://", "https://")):
-            got = await M._download_remote_image(url, timeout=tmo, max_bytes=rmax)
+            got = await _download_remote_image(url, timeout=tmo, max_bytes=rmax)
             if got:
                 data_bytes, mime = got
         if not data_bytes:
@@ -174,16 +176,15 @@ def _images_group_for_base(prof: str, need: frozenset[str]) -> str | None:
     profilo: `{prefix}{prof}-image_gen`, con lo stesso ordine di preferenza
     del routing (free, poi -go, poi -fallback). Ritorna None se il profilo non
     ha quel gruppo."""
-    import app.main as M
 
-    base = f"{M.router.config.proxy_prefix}{prof}"
+    base = f"{gw_state.router.config.proxy_prefix}{prof}"
     for suffix in (
         "",
-        getattr(M.router.policy, "go_suffix", "-go"),
-        getattr(M.router.policy, "fallback_suffix", "-fallback"),
+        getattr(gw_state.router.policy, "go_suffix", "-go"),
+        getattr(gw_state.router.policy, "fallback_suffix", "-fallback"),
     ):
         g = f"{base}-image_gen{suffix}"
-        if g in M.router.config.groups:
+        if g in gw_state.router.config.groups:
             return g
     return None
 
@@ -203,9 +204,8 @@ def _cap_chain_pick_all(prof: str, need: frozenset[str]) -> list[dict]:
     prende al primo posto) e si pretende che il deployment soddisfi TUTTE le
     capacita' richieste. Restituisce la lista completa perche' l'intercettore
     ruoti su piu' deployment, esattamente come fanno gli endpoint /images/*."""
-    import app.main as M
 
-    chains = getattr(M.router.config, "chains_cap", {}).get(prof) or {}
+    chains = getattr(gw_state.router.config, "chains_cap", {}).get(prof) or {}
     out: list[dict] = []
     seen: set[str] = set()
     for cap in CAP_PRIORITY_ORDER:
@@ -214,7 +214,7 @@ def _cap_chain_pick_all(prof: str, need: frozenset[str]) -> list[dict]:
         for u in chains.get(cap) or ():
             if u in seen:
                 continue
-            d = M.router.config.deployment_by_unique(u)
+            d = gw_state.router.config.deployment_by_unique(u)
             if d is not None and need <= set(d.get("caps") or ()):
                 seen.add(u)
                 out.append(d)
@@ -235,10 +235,9 @@ def _images_pick_dep(
 
     Ritorna (dep, profile_effettivo, scope, error_response). `need` vuoto =
     nessun filtro capacità (routing disattivato)."""
-    import app.main as M
 
-    scope = "group" if M.router.is_explicit(model) else "chain"
-    prof = profile or M.config.profile_of_base(model.split("__")[0]) or M.config.profile_of_base(model)
+    scope = "group" if gw_state.router.is_explicit(model) else "chain"
+    prof = profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
     # Modello BASE o con suffisso DIM (`-200k`, `-262k`): il nome non porta
     # una capacita'. La risoluzione generica li manderebbe nel mondo TESTO (per
     # il sizing del contesto) e il dep scelto non genererebbe immagini. La
@@ -247,7 +246,7 @@ def _images_pick_dep(
     # non entra. Prima si prova la catena capability (che attraversa free/go/
     # fallback di tutte le righe image del profilo), e solo se non porta nulla
     # si ripiega sul gruppo image_gen.
-    dim_or_base = bool(prof) and model.rstrip("/").startswith(f"{M.router.config.proxy_prefix}{prof}")
+    dim_or_base = bool(prof) and model.rstrip("/").startswith(f"{gw_state.router.config.proxy_prefix}{prof}")
     if dim_or_base and need:
         dep_cap = _cap_chain_pick(prof, need)
         if dep_cap is not None:
@@ -255,14 +254,14 @@ def _images_pick_dep(
         _cap_g = _images_group_for_base(prof, need)
         group_or_explicit = _cap_g if _cap_g else None
     else:
-        group_or_explicit = M.router.resolve_group_for_request(model, [], session_id, need, profile=prof)
+        group_or_explicit = gw_state.router.resolve_group_for_request(model, [], session_id, need, profile=prof)
     if group_or_explicit is None:
         # Due cause diverse, due messaggi diversi:
         #  a) il MODELLO ESPLICITO esiste ma non dichiara la capacita' ->
         #     nomino modello e capacita' mancante, l'agente sceglie da solo;
         #  b) il PROFILO non ha deployment con quella capacita' -> il rimando
         #     alla configurazione e' corretto.
-        _missing = M.router._missing_media_caps(model, need)
+        _missing = gw_state.router._missing_media_caps(model, need)
         if _missing:
             return (
                 None,
@@ -297,18 +296,18 @@ def _images_pick_dep(
                             f"{'+'.join(sorted(need)) or 'image_gen'}: configura "
                             "capability_routing.model_capabilities in gateway.yaml"
                             if need
-                            else f"model '{model}' not managed by {M.policy.service_name}"
+                            else f"model '{model}' not managed by {gw_state.policy.service_name}"
                         ),
                         "type": "invalid_request_error",
                     }
                 },
             ),
         )
-    dep = M.router.config.deployment_by_unique(group_or_explicit)
+    dep = gw_state.router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
-        dep = M.router.pick_deployment(group_or_explicit, need)
+        dep = gw_state.router.pick_deployment(group_or_explicit, need)
     if dep is None and prof:
-        dep = M.router.fallback_after(prof, None, need, out_tokens=refill_out_budget(payload, M.router.policy))
+        dep = gw_state.router.fallback_after(prof, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy))
     if dep is None:
         return (
             None,
@@ -352,11 +351,10 @@ async def _chat_via_images(
     """Chiamata nativa /images/* per un deployment image-native; ritorna il
     body chat.completion con le immagini dentro `choices[0].message.images`
     (None se l'upstream non ha restituito immagini)."""
-    import app.main as M
 
     endpoint = "edits" if refs else "generations"
     body = images_payload_from_chat(payload, refs=refs)
-    data = await M.forwarder.call_images(
+    data = await gw_state.forwarder.call_images(
         dep,
         body,
         profile=profile or "",
@@ -377,21 +375,20 @@ def _profile_of_request(model: str, auth_profile: str | None) -> str | None:
     `-go`: il profilo va allora tolto dal suffisso, come fa il routing. Senza
     questo la richiesta di immagine su un nome con suffisso non trovava la
     catena capability e rispondeva "nessun deployment dichiara image_gen"."""
-    import app.main as M
 
     if auth_profile:
         return auth_profile
     for cand in (model.split("__")[0], model):
-        p = M.config.profile_of_base(cand)
+        p = gw_state.config.profile_of_base(cand)
         if p:
             return p
     # ultima risorsa: il nome richiesto puo' gia' essere un suffissato ->
     # prova a toglierli uno a uno (dim, -go, -fallback, -C).
     base = model.split("__")[0]
-    if base.startswith(M.config.proxy_prefix):
-        for suf in sorted(M.config.known_suffixes(), key=len, reverse=True) + [""]:
+    if base.startswith(gw_state.config.proxy_prefix):
+        for suf in sorted(gw_state.config.known_suffixes(), key=len, reverse=True) + [""]:
             stem = base[: -len(suf)] if suf and base.endswith(suf) else base
-            p = M.config.profile_of_base(stem)
+            p = gw_state.config.profile_of_base(stem)
             if p:
                 return p
     return None
@@ -405,11 +402,10 @@ async def _image_chat_intercept(
     Ritorna una Response JSON (chat.completion con immagini) se il deployment
     scelto richiede l'adattamento chat->/images; `None` per lasciare proseguire
     il motore chat normale (deployment chat-native o `both` senza certezza)."""
-    import app.main as M
 
     if not wants_image_output(payload):
         return None
-    if not M.router.policy.routing_active():
+    if not gw_state.router.policy.routing_active():
         return None
     need = frozenset({"image_gen"})
     if payload.get("messages"):
@@ -430,7 +426,7 @@ async def _image_chat_intercept(
     # -fallback: lo stesso "camaleontismo" con cui il routing sale di dim
     # quando il contesto non entra. Un modello ESPLICITO di immagine
     # (`gemini31-image`) resta invece sul suo gruppo-alias.
-    forced = bool(prof) and model.rstrip("/").startswith(f"{M.router.config.proxy_prefix}{prof}")
+    forced = bool(prof) and model.rstrip("/").startswith(f"{gw_state.router.config.proxy_prefix}{prof}")
 
     async def _serve(dep: dict, profile: str | None):
         """Serve UNA richiesta immagine sul deployment `dep`; ritorna il body
@@ -451,7 +447,7 @@ async def _image_chat_intercept(
         # si chiama la chat multimodale e, se il provider rimanda che il
         # modello sta solo su /images/*, si adatta al nativo.
         chat_payload = image_chat_payload(payload, raw_model, refs=refs)
-        data = await M.forwarder.call(
+        data = await gw_state.forwarder.call(
             dep,
             chat_payload,
             session=_opencode_session(request) or session_id,
@@ -487,25 +483,25 @@ async def _image_chat_intercept(
         if cur in tried:
             continue
         tried.add(cur)
-        custom_key = M.router.resolve_alias_key(raw_model, model)
+        custom_key = gw_state.router.resolve_alias_key(raw_model, model)
         d_use = {**dep, "api_key": custom_key} if custom_key else dep
         via = dep_image_via(d_use)
         if via == "chat" and not forced:
             return None
         metrics.inc("nx_images_total", (d_use["group"], "attempt_chat_adapt"))
-        M.router.note_start(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
             out = await _serve(d_use, prof)
             if not out:
                 raise UpstreamError(502, "risposta senza immagini")
         except UpstreamError as err_:
-            M.router.note_end(cur)
+            gw_state.router.note_end(cur)
             last_err = err_
             # errore di DEPLOYMENT (quota, endpoint, provider assente...): si
             # segna e si prova il successivo, che e' esattamente la catena
             # capability. Non si risponde al client finche' non e' finita.
-            M.router.mark_failed(cur, seconds=err_.retry_after, status=abs(err_.status) if err_.status else None)
+            gw_state.router.mark_failed(cur, seconds=err_.retry_after, status=abs(err_.status) if err_.status else None)
             metrics.inc("nx_images_total", (d_use["group"], "chat_adapt_error"))
             continue
         imgs = await _localize_images(request, images_dual(out.get("data") or []))
@@ -518,7 +514,7 @@ async def _image_chat_intercept(
             msg["content"] = "\n".join(str(it.get("url") or "") for it in imgs if it.get("url")) or None
         out["nx_deployment"] = cur
         out.setdefault("via", "images")
-        M.router.note_result(cur, (time.monotonic() - t0) * 1000)
+        gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
         metrics.inc("nx_images_total", (d_use["group"], "ok_chat_adapt"))
         _emit_summary(
             ses=session_id or "-",
@@ -559,10 +555,9 @@ async def _try_native_image_edit(
     "campo/endpoint non riconosciuto" o 404/405/415) cosi' il chiamante puo'
     ritentare via chat multimodale. Errori non-schema (auth/crediti/quota)
     diventano un UpstreamError propagato al loop per la rotazione normale."""
-    import app.main as M
 
     try:
-        data = await M.forwarder.call_images(
+        data = await gw_state.forwarder.call_images(
             dep,
             payload,
             profile=profile or "",
@@ -576,7 +571,7 @@ async def _try_native_image_edit(
         detail = err.detail or ""
         status = err.status if err.status is not None else 0
         if image_chat_fallback_signature(err.status, detail) or -status in (404, 405, 415):
-            M.log.info(
+            log.info(
                 "[images] %s: /images/edits non disponibile (status=%s): ritento via chat",
                 dep["unique"],
                 -status or "?",
@@ -604,7 +599,7 @@ async def _try_native_image_edit(
         kind=kind,
         via="images_edits",
     )
-    M.router.note_result(dep["unique"], 0.0)
+    gw_state.router.note_result(dep["unique"], 0.0)
     return JSONResponse(data)
 
 
@@ -628,14 +623,13 @@ async def _images_chat_loop(
     Usata sia da /v1/images/edits sia da /v1/images/generations quando il body
     porta immagini di riferimento. Le reference sono troncate per-deployment
     (modelli single-ref: solo la prima) e inviate come parti `image_url`."""
-    import app.main as M
 
     _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
-    hard_max = int(getattr(M.router.policy, "image_refs_hard_max", 16) or 16)
+    hard_max = int(getattr(gw_state.router.policy, "image_refs_hard_max", 16) or 16)
     metrics.inc("nx_images_total", (dep["group"], "attempt"))
-    M.log.info(
+    log.info(
         "[images] %s -> %s (%s, prompt=%d chars, refs=%d)",
         model,
         dep["unique"],
@@ -652,13 +646,13 @@ async def _images_chat_loop(
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 64:
         cur = dep["unique"]
-        _was_dormant = M.router.is_cooled_down(cur)
+        _was_dormant = gw_state.router.is_cooled_down(cur)
         tried.add(cur)
         attempts.append(cur)
-        M.router.note_start(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
-            declared = M.router.policy.caps_for(dep.get("model", "")) | (dep.get("caps") or frozenset())
+            declared = gw_state.router.policy.caps_for(dep.get("model", "")) | (dep.get("caps") or frozenset())
             use_refs = truncate_refs(refs, refs_max_for(declared, hard_max))
             # PROVIDER-AGNOSTICO: l'ordine dei tentativi dipende da COME il
             # provider espone i modelli immagine (colonna `image_via`):
@@ -688,7 +682,7 @@ async def _images_chat_loop(
                 )
                 if _nres is not None:
                     return _nres
-            data = await M.forwarder.call(dep, chat_payload, session=_sess, client_ip=_cip, attribution=_attr)
+            data = await gw_state.forwarder.call(dep, chat_payload, session=_sess, client_ip=_cip, attribution=_attr)
             imgs = (
                 await _localize_images(request, images_dual(extract_chat_images(data)))
                 if isinstance(data, dict)
@@ -696,9 +690,9 @@ async def _images_chat_loop(
             )
             if not imgs:
                 raise UpstreamError(502, "risposta chat senza immagini")
-            M.router.note_result(cur, (time.monotonic() - t0) * 1000)
+            gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
-                M.router.clear_cooldown(cur)
+                gw_state.router.clear_cooldown(cur)
             out = {"created": int(time.time()), "data": imgs, "via": "chat", "nx_deployment": cur}
             metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
             _emit_summary(
@@ -718,7 +712,7 @@ async def _images_chat_loop(
             )
             return JSONResponse(out)
         except UpstreamError as err:
-            M.router.note_end(cur)
+            gw_state.router.note_end(cur)
             last_err = err
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
@@ -752,15 +746,15 @@ async def _images_chat_loop(
                 except Exception:
                     report_suppressed("image_helpers._images_chat_loop@751")
             if _was_dormant:
-                M.router.mark_failed_double_residual(
+                gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                M.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_images_total", (dep["group"], "retry"))
             nxt = (
-                M.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, M.router.policy)
+                gw_state.router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
                 )
                 if profile
                 else None
@@ -770,7 +764,7 @@ async def _images_chat_loop(
             dep = nxt
         finally:
             if cur in tried:
-                M.router.note_end(cur)
+                gw_state.router.note_end(cur)
     status = abs(last_err.status) if last_err and last_err.status else 502
     return JSONResponse(
         status_code=status if status >= 400 else 502,

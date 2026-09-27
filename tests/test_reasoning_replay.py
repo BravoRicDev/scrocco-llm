@@ -18,6 +18,7 @@ from app.forwarder import (UpstreamError, repair_reasoning_replay,
                            _REASONING_REPLAY_RE)
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 
@@ -128,13 +129,13 @@ def SM(tmp_path):
     import app.main as M
     csv = tmp_path / "k.csv"
     csv.write_text(CSV)
-    orig = M.config.csv_path
-    qj = M.router.policy.qc_json
-    pol = M.router.policy
+    orig = gw_state.config.csv_path
+    qj = gw_state.router.policy.qc_json
+    pol = gw_state.router.policy
     snap = (qj.stream_hedge_delay_ms, qj.stream_hold_until_finish,
             pol.warm_refill_enabled)
-    M.config.csv_path = csv
-    M.config.reload()
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
     qj.stream_hedge_delay_ms = 0
     qj.stream_hold_until_finish = False
     pol.warm_refill_enabled = False        # isola: solo il percorso in prova
@@ -143,13 +144,13 @@ def SM(tmp_path):
     finally:
         (qj.stream_hedge_delay_ms, qj.stream_hold_until_finish,
          pol.warm_refill_enabled) = snap
-        M.config.csv_path = orig
-        M.config.reload()
+        gw_state.config.csv_path = orig
+        gw_state.config.reload()
 
 
 def test_streaming_ripara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
-    a = SM.config.groups[f"{BASE}-32k"][0]
-    b = SM.config.groups[f"{BASE}-200k"][0]
+    a = gw_state.config.groups[f"{BASE}-32k"][0]
+    b = gw_state.config.groups[f"{BASE}-200k"][0]
     calls = []
 
     async def sr(dep, payload, **kw):
@@ -163,7 +164,7 @@ def test_streaming_ripara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
                    b'"finish_reason":"stop"}]}\n\n')
             yield b"data: [DONE]\n\n"
         return gen()
-    monkeypatch.setattr(SM.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
     payload = _payload()
     payload["stream"] = True
 
@@ -179,7 +180,7 @@ def test_streaming_ripara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
     resp, body = asyncio.run(go())
     assert calls == [a["unique"], a["unique"]]   # riparato e ritentato
     assert b"RIPARATO" in body
-    assert a["unique"] not in SM.router._cooldown
+    assert a["unique"] not in gw_state.router._cooldown
     assert b["unique"] not in calls
 
 
@@ -296,8 +297,8 @@ def test_nonstream_errore_CHIARO_non_ripristina(FW, monkeypatch):
 
 
 def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
-    a = SM.config.groups[f"{BASE}-32k"][0]
-    b = SM.config.groups[f"{BASE}-200k"][0]
+    a = gw_state.config.groups[f"{BASE}-32k"][0]
+    b = gw_state.config.groups[f"{BASE}-200k"][0]
     calls = []
 
     async def sr(dep, payload, **kw):
@@ -311,7 +312,7 @@ def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
                    b'"finish_reason":"stop"}]}\n\n')
             yield b"data: [DONE]\n\n"
         return gen()
-    monkeypatch.setattr(SM.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
     payload = _trimmed_payload()
     payload["stream"] = True
 
@@ -327,7 +328,7 @@ def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
     resp, body = asyncio.run(go())
     assert calls == [(a["unique"], False), (a["unique"], True)]
     assert b"RIPRISTINATO" in body
-    assert a["unique"] not in SM.router._cooldown
+    assert a["unique"] not in gw_state.router._cooldown
     assert b["unique"] not in [c[0] for c in calls]
 
 
@@ -335,7 +336,7 @@ def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
 def test_streaming_proattivo_flag_prima_del_primo_invio(SM, monkeypatch):
     """Con `thinking_replay` attivo il reasoning vero viene rimesso PRIMA del
     primo invio: un solo tentativo, nessun 400."""
-    a = SM.config.groups[f"{BASE}-32k"][0]
+    a = gw_state.config.groups[f"{BASE}-32k"][0]
     a["thinking_replay"] = True
     seen = []
 
@@ -350,7 +351,7 @@ def test_streaming_proattivo_flag_prima_del_primo_invio(SM, monkeypatch):
                    b'"finish_reason":"stop"}]}\n\n')
             yield b"data: [DONE]\n\n"
         return gen()
-    monkeypatch.setattr(SM.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
     payload = _payload()
     payload["stream"] = True
 

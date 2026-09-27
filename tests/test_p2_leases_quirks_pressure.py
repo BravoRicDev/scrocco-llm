@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 
@@ -181,24 +182,24 @@ def client(monkeypatch, tmp_path):
     csv = tmp_path / "k2.csv"
     csv.write_text(CSV_HTTP)
     import app.main as m
-    orig_mk = m.authn.master_key
-    orig_csv = m.config.csv_path
-    m.authn.master_key = "test-master-p2"
-    m.config.csv_path = csv
-    m.config.reload()
-    m.router._cooldown.clear()
+    orig_mk = gw_state.authn.master_key
+    orig_csv = gw_state.config.csv_path
+    gw_state.authn.master_key = "test-master-p2"
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
+    gw_state.router._cooldown.clear()
     yield TestClient(m.app), m
-    m.config.csv_path = orig_csv
-    m.config.reload()
-    m.authn.master_key = orig_mk
-    m.router._cooldown.clear()
-    m.router._key_leases().clear()
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
+    gw_state.authn.master_key = orig_mk
+    gw_state.router._cooldown.clear()
+    gw_state.router._key_leases().clear()
 
 
 def test_admin_pressure_clear_e_state(client):
     c, m = client
-    uid = m.config.groups[f"{BASE}-500k"][0]["unique"]
-    m.router.mark_failed(uid, seconds=600, reason="http_429")
+    uid = gw_state.config.groups[f"{BASE}-500k"][0]["unique"]
+    gw_state.router.mark_failed(uid, seconds=600, reason="http_429")
     st = c.get("/admin/state", headers=MKH).json()
     ad = st["adaptive"]
     assert ad["pressure"]["cooldowns_total"] >= 1

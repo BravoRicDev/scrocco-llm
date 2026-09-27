@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from app.capabilities import (count_image_parts, required_caps,
                               wants_image_output)
 from app.main import _trim_chat_images
+import app.state as gw_state
 
 _PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
         "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
@@ -128,26 +129,26 @@ def _make_client(monkeypatch, tmp_path, csv_text):
     csv = tmp_path / "k.csv"
     csv.write_text(csv_text)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path,
-            m.router.policy.cap_groups_enabled)
-    m.authn.master_key = "test-master-vision"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path,
+            gw_state.router.policy.cap_groups_enabled)
+    gw_state.authn.master_key = "test-master-vision"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
-    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
-    m.router.policy.cap_groups_enabled = True
+    monkeypatch.setattr(gw_state, "LEDGER", Ledger(tmp_path))
+    gw_state.router.policy.cap_groups_enabled = True
     return TestClient(m.app), m, orig
 
 
 def _teardown(m, orig):
-    m.router.policy.cap_groups_enabled = orig[2]
-    m.router._cooldown.clear()
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router.policy.cap_groups_enabled = orig[2]
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 MK = {"Authorization": "Bearer test-master-vision"}
@@ -161,7 +162,7 @@ _CSV_MIX = (_CSV_HEADER
 def _unique(c, provider):
     """Nome unique del deployment del provider indicato."""
     import app.main as m
-    for g, deps in m.config.groups.items():
+    for g, deps in gw_state.config.groups.items():
         for d in deps:
             if (d.get("provider") or "") == provider:
                 return d["unique"]
@@ -213,7 +214,7 @@ class _FakeForwarder:
 
 def _patch_forwarder(monkeypatch, m):
     fwd = _FakeForwarder()
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     return fwd
 
 
@@ -283,7 +284,7 @@ def test_f2_cooldown_non_produce_400(monkeypatch, tmp_path):
     c, m2, orig = _make_client(monkeypatch, tmp_path, _CSV_MIX)
     try:
         u = _unique(c, "openai")
-        m2.router._cooldown[u] = 9999999999.0
+        gw_state.router._cooldown[u] = 9999999999.0
         r = c.post("/v1/chat/completions", headers=MK, json={
             "model": u, "messages": [{"role": "user", "content": [
                 {"type": "text", "text": "cosa c'e'?"},

@@ -14,33 +14,34 @@ import asyncio
 
 import pytest
 from fastapi.responses import JSONResponse, StreamingResponse
+import app.state as gw_state
 
 
 @pytest.fixture()
 def M():
     import app.main as _M
-    qj = _M.router.policy.qc_json
-    snap = (qj.stream_hold_until_finish, _M.router.policy.nonstream_hold_redirect)
-    groups_keys = set(_M.config.groups)
-    cooldown_keys = set(_M.router._cooldown)
-    orig_fb = _M.router.fallback_next
+    qj = gw_state.router.policy.qc_json
+    snap = (qj.stream_hold_until_finish, gw_state.router.policy.nonstream_hold_redirect)
+    groups_keys = set(gw_state.config.groups)
+    cooldown_keys = set(gw_state.router._cooldown)
+    orig_fb = gw_state.router.fallback_next
     yield _M
     (qj.stream_hold_until_finish,
-     _M.router.policy.nonstream_hold_redirect) = snap
-    _M.router.fallback_next = orig_fb
-    for k in list(_M.config.groups):
+     gw_state.router.policy.nonstream_hold_redirect) = snap
+    gw_state.router.fallback_next = orig_fb
+    for k in list(gw_state.config.groups):
         if k not in groups_keys:
-            _M.config.groups.pop(k, None)
-    for k in list(_M.router._cooldown):
+            gw_state.config.groups.pop(k, None)
+    for k in list(gw_state.router._cooldown):
         if k not in cooldown_keys:
-            _M.router._cooldown.pop(k, None)
+            gw_state.router._cooldown.pop(k, None)
 
 
 def _dep(M, name, idx=0):
     dep = {"unique": "%s__fake__%d" % (name, idx), "group": name,
            "model": "fake-model", "api_key": "sk-fake-%d" % idx,
            "api_base": "https://fake.test/v1"}
-    M.config.groups.setdefault(name, []).append(dep)
+    gw_state.config.groups.setdefault(name, []).append(dep)
     return dep
 
 
@@ -69,8 +70,8 @@ async def _drain(resp):
 
 # --------------------------------------------------- decisione redirect
 def test_redirect_decision_cases(M):
-    qj = M.router.policy.qc_json
-    pol = M.router.policy
+    qj = gw_state.router.policy.qc_json
+    pol = gw_state.router.policy
     dep = {"hold_until_finish": False}
     # stream -> mai redirect
     assert M._nonstream_hold_redirect(True, dep, qj, pol) is False
@@ -94,7 +95,7 @@ def test_redirect_decision_cases(M):
 # --------------------------------------------------- composizione stream->json
 def test_stream_composition_clean_body(M, monkeypatch):
     dep = _dep(M, "scrocco-llm-test-redirect")
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream(CLEAN))
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream(CLEAN))
     meta: dict = {}
 
     async def _run():
@@ -119,7 +120,7 @@ def test_stream_composition_truncated_is_503(M, monkeypatch):
         b'data: {"choices":[{"index":0,"delta":{"content":"moncone"}}]}\n\n',
         # niente finish_reason, niente [DONE]: troncato
     ]
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream(trunc))
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream(trunc))
     meta: dict = {}
 
     async def _run():
@@ -151,8 +152,8 @@ def test_hold_qc_invalid_json_rotates(M, monkeypatch):
             yield b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
             yield b"data: [DONE]\n\n"
         return _gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream_response)
-    M.router.fallback_next = lambda *a, **k: d1
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream_response)
+    gw_state.router.fallback_next = lambda *a, **k: d1
     meta: dict = {}
 
     async def _run():
@@ -176,23 +177,23 @@ def test_endpoint_nonstream_hold_redirect_e2e(M, monkeypatch):
     from starlette.requests import Request
     from starlette.responses import Response
     dep = _dep(M, "scrocco-llm-test-ep")
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream(CLEAN))
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream(CLEAN))
 
     class _A:
         ok = True
         profile = "test"
         error = None
-    monkeypatch.setattr(M.authn, "authenticate", lambda h: _A())
-    monkeypatch.setattr(M.authn, "authorize_model", lambda a, m: True)
-    monkeypatch.setattr(M.router, "resolve_group_for_request",
+    monkeypatch.setattr(gw_state.authn, "authenticate", lambda h: _A())
+    monkeypatch.setattr(gw_state.authn, "authorize_model", lambda a, m: True)
+    monkeypatch.setattr(gw_state.router, "resolve_group_for_request",
                         lambda *a, **k: dep["group"])
     seen: dict = {}
 
     def _pick(*a, **k):
         seen.update(k)
         return dep
-    monkeypatch.setattr(M.router, "initial_pick", _pick)
-    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+    monkeypatch.setattr(gw_state.router, "initial_pick", _pick)
+    monkeypatch.setattr(gw_state.router, "fallback_next", lambda *a, **k: None)
 
     payload = {"model": dep["model"], "stream": False,
                "messages": [{"role": "user", "content": "ciao"}]}
@@ -238,18 +239,18 @@ def test_endpoint_nonstream_hold_repairs_toolcall(M, monkeypatch):
         b'"finish_reason":"tool_calls"}]}\n\n',
         b"data: [DONE]\n\n",
     ]
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream(chunks))
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream(chunks))
 
     class _A:
         ok = True
         profile = "test"
         error = None
-    monkeypatch.setattr(M.authn, "authenticate", lambda h: _A())
-    monkeypatch.setattr(M.authn, "authorize_model", lambda a, m: True)
-    monkeypatch.setattr(M.router, "resolve_group_for_request",
+    monkeypatch.setattr(gw_state.authn, "authenticate", lambda h: _A())
+    monkeypatch.setattr(gw_state.authn, "authorize_model", lambda a, m: True)
+    monkeypatch.setattr(gw_state.router, "resolve_group_for_request",
                         lambda *a, **k: dep["group"])
-    monkeypatch.setattr(M.router, "initial_pick", lambda *a, **k: dep)
-    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+    monkeypatch.setattr(gw_state.router, "initial_pick", lambda *a, **k: dep)
+    monkeypatch.setattr(gw_state.router, "fallback_next", lambda *a, **k: None)
 
     payload = {"model": dep["model"], "stream": False,
                "messages": [{"role": "user", "content": "cerca"}],
@@ -283,12 +284,12 @@ def test_immediate_upstream_error_no_unboundlocal(M, monkeypatch):
     andare in UnboundLocalError('qcp') -> 500, ma restituire una risposta
     d'errore JSON (503 o status azionabile)."""
     dep = _dep(M, "scrocco-llm-test-redirect-early")
-    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+    monkeypatch.setattr(gw_state.router, "fallback_next", lambda *a, **k: None)
     from app.forwarder import UpstreamError
 
     async def _boom(dep, payload, **kwargs):
         raise UpstreamError(429, "rate limit exceeded")
-    monkeypatch.setattr(M.forwarder, "stream_response", _boom)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _boom)
     meta: dict = {}
 
     async def _run():
@@ -315,8 +316,8 @@ def test_nonstream_hold_redirect_single_summary(M, monkeypatch):
     from starlette.responses import Response
 
     # hold redirect ON
-    M.router.policy.qc_json.stream_hold_until_finish = True
-    M.router.policy.nonstream_hold_redirect = True
+    gw_state.router.policy.qc_json.stream_hold_until_finish = True
+    gw_state.router.policy.nonstream_hold_redirect = True
 
     dep = _dep(M, "scrocco-llm-test-single-summary")
     CLEAN = [
@@ -329,16 +330,16 @@ def test_nonstream_hold_redirect_single_summary(M, monkeypatch):
             for c in CLEAN:
                 yield c
         return _gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream_response)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream_response)
 
     class _A:
         ok = True; profile = "test"; error = None
-    monkeypatch.setattr(M.authn, "authenticate", lambda h: _A())
-    monkeypatch.setattr(M.authn, "authorize_model", lambda a, m: True)
-    monkeypatch.setattr(M.router, "resolve_group_for_request",
+    monkeypatch.setattr(gw_state.authn, "authenticate", lambda h: _A())
+    monkeypatch.setattr(gw_state.authn, "authorize_model", lambda a, m: True)
+    monkeypatch.setattr(gw_state.router, "resolve_group_for_request",
                         lambda *a, **k: dep["group"])
-    monkeypatch.setattr(M.router, "initial_pick", lambda *a, **k: dep)
-    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+    monkeypatch.setattr(gw_state.router, "initial_pick", lambda *a, **k: dep)
+    monkeypatch.setattr(gw_state.router, "fallback_next", lambda *a, **k: None)
 
     # count _emit_summary calls
     calls = []

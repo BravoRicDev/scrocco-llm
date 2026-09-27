@@ -4,6 +4,7 @@ Fixture sul modello di tests/test_admin_policy_raw.py: POLICY_PATH e VAR_DIR
 su tmp (mai il gateway.yaml di produzione) + master key di test.
 """
 import os
+import app.state as gw_state
 
 os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
 
@@ -32,22 +33,22 @@ def client(monkeypatch, tmp_path):
     pol.write_text(BASE_YAML)
     (tmp_path / "backups").mkdir()
 
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-policy-schema"
-    monkeypatch.setattr(m, "POLICY_PATH", pol)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
-    m.router.policy = m.Policy.load(pol)
-    globals_pol = m.policy
-    m.policy = m.router.policy
-    assert str(m.POLICY_PATH).startswith(str(tmp_path))
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-policy-schema"
+    monkeypatch.setattr(gw_state, "POLICY_PATH", pol)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
+    gw_state.router.policy = m.Policy.load(pol)
+    globals_pol = gw_state.policy
+    gw_state.policy = gw_state.router.policy
+    assert str(gw_state.POLICY_PATH).startswith(str(tmp_path))
     yield TestClient(m.app)
-    m.authn.master_key = orig_mk
-    m.policy = globals_pol
-    m.router.policy = globals_pol
+    gw_state.authn.master_key = orig_mk
+    gw_state.policy = globals_pol
+    gw_state.router.policy = globals_pol
 
 
 def _raw() -> dict:
-    return yaml.safe_load(m.POLICY_PATH.read_text()) or {}
+    return yaml.safe_load(gw_state.POLICY_PATH.read_text()) or {}
 
 
 def test_schema_endpoint(client):
@@ -99,14 +100,14 @@ def test_patch_deep_merge_preserves_siblings(client):
     assert raw["warm_pool"]["enabled"] is True
     assert raw["warm_pool"]["refill_enabled"] is True
     assert raw["warm_pool"]["slow_race_after_ms"] == 1234
-    assert m.router.policy.stream_slow_race_after_ms == 1234
+    assert gw_state.router.policy.stream_slow_race_after_ms == 1234
 
 
 def test_patch_flat_dual_key_ok(client):
     r = client.patch("/admin/policy", json={"warm_borrow_enabled": False},
                      headers=MK)
     assert r.status_code == 200, r.text
-    assert m.router.policy.warm_borrow_enabled is False
+    assert gw_state.router.policy.warm_borrow_enabled is False
 
 
 def test_patch_unknown_key_400(client):
@@ -125,11 +126,11 @@ def test_patch_unknown_allowed_query(client):
 
 
 def test_put_unknown_key_400(client):
-    before = m.POLICY_PATH.read_text()
+    before = gw_state.POLICY_PATH.read_text()
     r = client.put("/admin/policy/raw",
                    json={"raw": "step_up_pct: 25\nbogus_key: 1\n"}, headers=MK)
     assert r.status_code == 400
-    assert m.POLICY_PATH.read_text() == before
+    assert gw_state.POLICY_PATH.read_text() == before
 
 
 def test_put_unknown_allowed(client):

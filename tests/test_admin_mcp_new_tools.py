@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app import metrics
 from app.admin import _mcp_known_names, _mcp_tool_specs
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 GROUP = f"{BASE}-500k"
@@ -49,27 +50,27 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(admin_mod, "_probe_one", fake_probe)
 
-    orig_mk = m.authn.master_key
-    orig_csv = m.config.csv_path
-    orig_var = m.VAR_DIR
-    m.authn.master_key = MK
-    m.config.csv_path = csv
-    m.VAR_DIR = tmp_path
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    orig_csv = gw_state.config.csv_path
+    orig_var = gw_state.VAR_DIR
+    gw_state.authn.master_key = MK
+    gw_state.config.csv_path = csv
+    gw_state.VAR_DIR = tmp_path
+    gw_state.config.reload()
     try:
         yield TestClient(m.app), m
     finally:
-        m.router._drain().clear()
-        m.router._cooldown.clear()
+        gw_state.router._drain().clear()
+        gw_state.router._cooldown.clear()
         metrics.reset()
-        m.config.csv_path = orig_csv
-        m.VAR_DIR = orig_var
-        m.config.reload()
-        m.authn.master_key = orig_mk
+        gw_state.config.csv_path = orig_csv
+        gw_state.VAR_DIR = orig_var
+        gw_state.config.reload()
+        gw_state.authn.master_key = orig_mk
 
 
 def _uid(m, key):
-    for lst in m.config.groups.values():
+    for lst in gw_state.config.groups.values():
         for d in lst:
             if d.get("api_key") == key:
                 return d["unique"]

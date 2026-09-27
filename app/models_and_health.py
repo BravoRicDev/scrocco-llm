@@ -1,10 +1,10 @@
 """Endpoint di health, metrics e /v1/models.
 
-Estratti da `app/main.py` (C2, Round 4 Clean Code). Gli oggetti condivisi
-(`config`, `policy`, `router`, `authn`: STATO runtime) sono raggiunti
-DENTRO il corpo delle funzioni tramite `import app.main as M`: a livello di
-modulo si creerebbe un ciclo di import (main include questo router a fine
-file, dopo aver definito tutto).
+Estratti da `app/main.py` (C2, Round 4 Clean Code).
+
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
 
 import time
@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 from starlette.requests import Request
 
 from . import capmeta
+from . import state as gw_state
 from . import metrics
 from .http_responses import unauthorized as _unauthorized
 from .observability import render_prometheus
@@ -28,33 +29,32 @@ async def liveliness() -> PlainTextResponse:
 
 @router.get("/healthz")
 async def healthz() -> dict:
-    import app.main as M
     # Conti delle capacità tra tutti i deployment
     cap_counts = {cap: 0 for cap in frozenset({"text", "vision", "video", "audio", "image_gen", "tools"})}
-    for deps in M.config.groups.values():
+    for deps in gw_state.config.groups.values():
         for dep in deps:
             model = dep.get("model", "")
-            caps = M.policy.caps_for(model)
+            caps = gw_state.policy.caps_for(model)
             for c in caps:
                 cap_counts[c] = cap_counts.get(c, 0) + 1
 
     return {
         "status": "ok",
-        "profiles": M.config.profiles,
-        "groups": len(M.config.groups),
-        "deployments": sum(len(v) for v in M.config.groups.values()),
-        "cooldowns": len(M.router._cooldown),
-        "sticky_sessions": len(M.router._sticky),
-        "port": M.PORT,
+        "profiles": gw_state.config.profiles,
+        "groups": len(gw_state.config.groups),
+        "deployments": sum(len(v) for v in gw_state.config.groups.values()),
+        "cooldowns": len(gw_state.router._cooldown),
+        "sticky_sessions": len(gw_state.router._sticky),
+        "port": gw_state.PORT,
         "policy": {
-            "file": M.POLICY_PATH.name,
-            "step_up_pct": M.policy.step_up_pct,
-            "step_up_per_profile": {k: f"{v}%" for k, v in M.policy.profile_step_up_pct.items()},
-            "speed_hotwords": len(M.policy.speed_hotwords),
-            "speed_min_dim_k": M.policy.speed_min_dim_k,
-            "aliases": len(M.policy.aliases),
-            "capability_routing_enabled": M.policy.routing_active(),
-            "capabilities_configured": len(M.policy.model_capabilities),
+            "file": gw_state.POLICY_PATH.name,
+            "step_up_pct": gw_state.policy.step_up_pct,
+            "step_up_per_profile": {k: f"{v}%" for k, v in gw_state.policy.profile_step_up_pct.items()},
+            "speed_hotwords": len(gw_state.policy.speed_hotwords),
+            "speed_min_dim_k": gw_state.policy.speed_min_dim_k,
+            "aliases": len(gw_state.policy.aliases),
+            "capability_routing_enabled": gw_state.policy.routing_active(),
+            "capabilities_configured": len(gw_state.policy.model_capabilities),
         },
         "capabilities_summary": {
             "total_deployments": sum(cap_counts.values()),
@@ -71,9 +71,8 @@ async def metrics_endpoint():
     app.metrics. I gauge di stato router sono aggiornati ad ogni scrape (prima
     erano settati in una route shadowed -> mai emessi).
     """
-    import app.main as M
-    metrics.set_gauge("nx_cooldown_active", len(M.router._cooldown))
-    metrics.set_gauge("nx_sticky_active", len(M.router._sticky))
+    metrics.set_gauge("nx_cooldown_active", len(gw_state.router._cooldown))
+    metrics.set_gauge("nx_sticky_active", len(gw_state.router._sticky))
     body = metrics.render() + render_prometheus()
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
@@ -107,8 +106,7 @@ def _stable_names(cfg, pname: str) -> list[str]:
 
 def _names_for_auth(auth, view: str) -> list[str]:
     """Nomi visibili per `auth` nella vista `view` (de-dup, ordine stabile)."""
-    import app.main as M
-    cfg = M.config
+    cfg = gw_state.config
     master = auth.mode == "master"
     profs = list(cfg.profiles) if master else [auth.profile or ""]
     out: list[str] = []
@@ -126,7 +124,7 @@ def _names_for_auth(auth, view: str) -> list[str]:
                 out.extend(_stable_names(cfg, p))
         # alias di policy: pubblici, ma solo se il target è utilizzabile
         allowed = None if master else set(out)
-        for a, t in M.policy.aliases.items():
+        for a, t in gw_state.policy.aliases.items():
             if allowed is None or t in allowed:
                 out.append(a)
         # alias della colonna CSV `alias` (definiti nei dati)
@@ -153,8 +151,7 @@ def _view_for(request: Request, auth) -> str:
 
 def _deps_for_name(name: str) -> list[dict]:
     """Deployment che compongono un nome: unique, gruppo, alias o nome base."""
-    import app.main as M
-    cfg = M.config
+    cfg = gw_state.config
     dep = cfg.deployment_by_unique(name)
     if dep is not None:
         return [dep]
@@ -188,13 +185,12 @@ def _caps_and_deps(name: str) -> tuple[set[str], list[dict]]:
 
     Fonte di verità: MEMBERSHIP (`dep["caps"]`) quando presente; altrimenti la
     mappa advisory `capability_routing.model_capabilities`."""
-    import app.main as M
-    target = M.policy.aliases.get(name, name)
+    target = gw_state.policy.aliases.get(name, name)
     deps = _deps_for_name(target)
     caps: set[str] = set()
     for d in deps:
         member = d.get("caps") or frozenset()
-        caps |= member if member else M.policy.caps_for(d["model"])
+        caps |= member if member else gw_state.policy.caps_for(d["model"])
     return caps, deps
 
 
@@ -206,12 +202,11 @@ def _model_entry(name: str, *, rich: bool = True) -> dict:
     solo `capabilities` + `architecture`: i campi più grandi sono ridondanti
     per un deployment singolo e gonfierebbero la risposta di diverse volte.
     """
-    import app.main as M
     entry = {
         "id": name,
         "object": "model",
         "created": int(time.time()),
-        "owned_by": M.policy.service_name,
+        "owned_by": gw_state.policy.service_name,
         "reasoning_effort": ["default", "low", "medium", "high"],
         "reasoning_effort_default": "default",
     }
@@ -238,8 +233,7 @@ def _model_entry(name: str, *, rich: bool = True) -> dict:
 
 @router.get("/v1/models")
 async def list_models(request: Request):
-    import app.main as M
-    auth = M.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     view = _view_for(request, auth)
@@ -251,8 +245,7 @@ async def list_models(request: Request):
 # ------------------------------------------------ compat endpoints (404 fixes)
 def _visible_model_names(request: Request):
     """(names, auth). Stessa logica di visibilità di /v1/models ma solo i nomi."""
-    import app.main as M
-    auth = M.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return None, auth
     if auth.mode == "master":
@@ -260,23 +253,23 @@ def _visible_model_names(request: Request):
         # OGNI profilo (non solo gli univoci, cosi' `scrocco-llm-<profilo>` e i
         # gruppi -Nk/-go/... sono riconosciuti da /v1/models/{id} e /api/show)
         names = []
-        for p in M.config.profiles:
-            names.extend(M.config.whitelist_for(p))
+        for p in gw_state.config.profiles:
+            names.extend(gw_state.config.whitelist_for(p))
         allowed = None
     else:
-        names = list(M.config.whitelist_for(auth.profile or ""))
+        names = list(gw_state.config.whitelist_for(auth.profile or ""))
         allowed = set(names)
-    for a, t in M.policy.aliases.items():
+    for a, t in gw_state.policy.aliases.items():
         if allowed is None or t in allowed:
             names.append(a)
     # Alias della colonna `alias` (nomi richiamabili per modello/gruppo):
     # visibili come i `policy.aliases`, ma definiti nei dati (CSV) e
     # limitati al profilo dell'autenticazione (master: tutti).
     if auth.mode == "master":
-        for p in M.config.profiles:
-            names.extend(M.config.alias_names_for(p))
+        for p in gw_state.config.profiles:
+            names.extend(gw_state.config.alias_names_for(p))
     else:
-        names.extend(M.config.alias_names_for(auth.profile or ""))
+        names.extend(gw_state.config.alias_names_for(auth.profile or ""))
     # de-dup preservando l'ordine
     seen = set()
     out = []

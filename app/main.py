@@ -190,13 +190,16 @@ console_handler = setup_colored_logging()
 logging.basicConfig(level=logging.INFO, handlers=[console_handler], force=True)  # Override any existing basicConfig
 log = logging.getLogger("nx.main")
 
+from .constants import GATEWAY_VERSION  # noqa: E402
+from . import state as gw_state  # noqa: E402 - stato runtime condiviso (vedi app/state.py)
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 # I DATI (credenziali + policy) vivono in var/: directory bind-montata nel
 # container Docker, così l'admin API scrive i file VERO dell'host.
-VAR_DIR = BASE_DIR / "var"
-CSV_PATH = Path(os.environ.get("GATEWAY_CSV", VAR_DIR / "keys_rotation.csv"))
-POLICY_PATH = Path(os.environ.get("GATEWAY_POLICY", VAR_DIR / "gateway.yaml"))
-PORT = int(os.environ.get("GATEWAY_PORT", "4001"))
+gw_state.VAR_DIR = BASE_DIR / "var"
+gw_state.CSV_PATH = Path(os.environ.get("GATEWAY_CSV", gw_state.VAR_DIR / "keys_rotation.csv"))
+gw_state.POLICY_PATH = Path(os.environ.get("GATEWAY_POLICY", gw_state.VAR_DIR / "gateway.yaml"))
+gw_state.PORT = int(os.environ.get("GATEWAY_PORT", "4001"))
 # 127.0.0.1 di default (loopback-only); nel container vale 0.0.0.0
 HOST = os.environ.get("GATEWAY_HOST", "127.0.0.1")
 WATCH_SECONDS = float(os.environ.get("GATEWAY_WATCH_SECONDS", "5"))
@@ -221,8 +224,8 @@ def _install_file_logging() -> None:
     fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
     mb = int(os.environ.get("GATEWAY_LOG_MAX_MB", "20"))
     bk = int(os.environ.get("GATEWAY_LOG_BACKUPS", "5"))
-    main_path = os.environ.get("GATEWAY_LOG_FILE", str(VAR_DIR / "gateway.log"))
-    audit_path = os.environ.get("GATEWAY_ERROR_LOG_FILE", str(VAR_DIR / "error-audit.log"))
+    main_path = os.environ.get("GATEWAY_LOG_FILE", str(gw_state.VAR_DIR / "gateway.log"))
+    audit_path = os.environ.get("GATEWAY_ERROR_LOG_FILE", str(gw_state.VAR_DIR / "error-audit.log"))
     try:
         h = RotatingFileHandler(main_path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
         h.setFormatter(logging.Formatter(fmt))
@@ -246,32 +249,32 @@ _install_file_logging()
 # La POLITICA (gateway.yaml) è separata dalle CREDENZIALI (keys_rotation.csv):
 # file assente/corrotto -> default, il servizio parte comunque.
 # I nomi pubblici usano policy.proxy_prefix: nessun nome è hardcodato qui.
-policy = Policy.load_or_default(POLICY_PATH)
+gw_state.policy = Policy.load_or_default(gw_state.POLICY_PATH)
 # Debug SNIFF: handler con rotazione oraria, default OFF. Registrato anche se
 # disattivato (l'abilitazione e' live via policy/env) — nessun costo se spento.
-sniff.configure(str(VAR_DIR / "debug-sniff.log"), policy.debug_sniff_retention_hours)
+sniff.configure(str(gw_state.VAR_DIR / "debug-sniff.log"), gw_state.policy.debug_sniff_retention_hours)
 # Ledger persistente delle riparazioni tool-call (log a schermo + JSONL).
-repairlog.configure(str(VAR_DIR))
-config = GatewayConfig(
-    CSV_PATH,
-    proxy_prefix=policy.proxy_prefix,
-    go_suffix=policy.go_suffix,
-    fallback_suffix=policy.fallback_suffix,
-    extra_prefixes=policy.legacy_prefixes,
+repairlog.configure(str(gw_state.VAR_DIR))
+gw_state.config = GatewayConfig(
+    gw_state.CSV_PATH,
+    proxy_prefix=gw_state.policy.proxy_prefix,
+    go_suffix=gw_state.policy.go_suffix,
+    fallback_suffix=gw_state.policy.fallback_suffix,
+    extra_prefixes=gw_state.policy.legacy_prefixes,
 )
-router = Router(config, policy)
+gw_state.router = Router(gw_state.config, gw_state.policy)
 # provider callable: l'hot-reload della policy aggiorna anche le chiavi client
-authn = AuthManager(config, client_keys_provider=lambda: policy.client_keys)
-forwarder = Forwarder(keepalive_pool=policy.http_keepalive_pool)
-set_retry_after_floors(policy.retry_after_min_sec, policy.retry_after_floor_by_provider)
-set_stream_stall_sec(policy.stream_stall_sec)
-set_strip_client_fields(policy.strip_client_fields)
-set_latency_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx))
+gw_state.authn = AuthManager(gw_state.config, client_keys_provider=lambda: gw_state.policy.client_keys)
+gw_state.forwarder = Forwarder(keepalive_pool=gw_state.policy.http_keepalive_pool)
+set_retry_after_floors(gw_state.policy.retry_after_min_sec, gw_state.policy.retry_after_floor_by_provider)
+set_stream_stall_sec(gw_state.policy.stream_stall_sec)
+set_strip_client_fields(gw_state.policy.strip_client_fields)
+set_latency_lookup(lambda u, ctx=None: gw_state.router.bucket_latency_ms(u, ctx))
 # F21: lo stall guard si calibra sul TTFT per bucket e sul moltiplicatore/
 # tetto di policy; F20: divisore+immagini condivisi per le stime "senza router".
-set_ttft_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx, "ttft"))
-set_stall_bucket(multiplier=policy.stream_stall_ttft_mult, max_sec=policy.stream_stall_max_sec)
-set_estimate_defaults(policy.estimate_divisor, getattr(policy, "image_token_estimate", 0) or 0)
+set_ttft_lookup(lambda u, ctx=None: gw_state.router.bucket_latency_ms(u, ctx, "ttft"))
+set_stall_bucket(multiplier=gw_state.policy.stream_stall_ttft_mult, max_sec=gw_state.policy.stream_stall_max_sec)
+set_estimate_defaults(gw_state.policy.estimate_divisor, getattr(gw_state.policy, "image_token_estimate", 0) or 0)
 
 
 # P4: i dep che IGNORANO stream:true vengono annotati (json_fallback++) e poi
@@ -279,94 +282,94 @@ set_estimate_defaults(policy.estimate_divisor, getattr(policy, "image_token_esti
 def _note_json_fallback(_u):
     try:
         if _u:
-            router.stats_for(_u).json_fallback += 1
+            gw_state.router.stats_for(_u).json_fallback += 1
     except Exception:  # noqa: BLE001
         report_suppressed("main._note_json_fallback")
 
 
 set_nonstream_hook(_note_json_fallback)
 set_adaptive_timeout(
-    enabled=policy.adaptive_timeout_enabled,
-    floor_sec=policy.adaptive_timeout_floor_sec,
-    multiplier=policy.adaptive_timeout_multiplier,
-    max_sec=policy.adaptive_timeout_max_sec,
+    enabled=gw_state.policy.adaptive_timeout_enabled,
+    floor_sec=gw_state.policy.adaptive_timeout_floor_sec,
+    multiplier=gw_state.policy.adaptive_timeout_multiplier,
+    max_sec=gw_state.policy.adaptive_timeout_max_sec,
 )
-set_reasoning_reserve(1.0 - float(getattr(policy, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
-apply_cooldown_policy(policy)
+set_reasoning_reserve(1.0 - float(getattr(gw_state.policy, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
+apply_cooldown_policy(gw_state.policy)
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 
-set_schemaout_config(_so_cfg_from_policy(policy))
+set_schemaout_config(_so_cfg_from_policy(gw_state.policy))
 configure_estimate(
-    adaptive=policy.estimate_adaptive_enabled,
-    shadow=policy.estimate_adaptive_shadow,
-    auto_enable=policy.estimate_adaptive_auto_enable,
-    auto_min_n=policy.estimate_adaptive_auto_min_n,
-    auto_max_delta_pct=policy.estimate_adaptive_auto_max_delta_pct,
+    adaptive=gw_state.policy.estimate_adaptive_enabled,
+    shadow=gw_state.policy.estimate_adaptive_shadow,
+    auto_enable=gw_state.policy.estimate_adaptive_auto_enable,
+    auto_min_n=gw_state.policy.estimate_adaptive_auto_min_n,
+    auto_max_delta_pct=gw_state.policy.estimate_adaptive_auto_max_delta_pct,
 )
 
 _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
 _nightly_task: asyncio.Task | None = None
-_stats_file = VAR_DIR / "adaptive_stats.json"
-_last_stats_save = 0.0
+gw_state._stats_file = gw_state.VAR_DIR / "adaptive_stats.json"
+gw_state._last_stats_save = 0.0
 # Persistenza DEDICATA dei cooldown (var/cooldown_state.json): a differenza
 # di adaptive_stats salva anche `since`/`full`, cosi' dopo un restart il
 # probe/decay ripartono con l'eta' reale e la durata totale.
-_cooldown_file = VAR_DIR / "cooldown_state.json"
-_last_cooldown_save = 0.0
+gw_state._cooldown_file = gw_state.VAR_DIR / "cooldown_state.json"
+gw_state._last_cooldown_save = 0.0
 # Throttle DEDICATO delle firme Gemini: condividere _last_stats_save (appena
 # aggiornato dallo stesso tick del watcher) le faceva salvare solo allo shutdown.
-_last_thought_sigs_save = 0.0
+gw_state._last_thought_sigs_save = 0.0
 # WARM-START DI ROUTING (var/routing_state.json): holder cache, sticky,
 # ownership warm, demote per-sessione, pin escalation e watermark ctxcompact.
 # Senza questo, ogni deploy ripartiva freddo: ri-rotazioni, ri-escalations e
 # — per il ctxcompact — frontiera regredita che ri-invalidava le cache.
-_routing_file = VAR_DIR / "routing_state.json"
-_last_routing_save = 0.0
+gw_state._routing_file = gw_state.VAR_DIR / "routing_state.json"
+gw_state._last_routing_save = 0.0
 # i TEST settano GATEWAY_PERSIST_ROUTING=0: nessuna contaminazione col live
-PERSIST_ROUTING = os.environ.get("GATEWAY_PERSIST_ROUTING", "1") != "0"
+gw_state.PERSIST_ROUTING = os.environ.get("GATEWAY_PERSIST_ROUTING", "1") != "0"
 # job video asincroni (OR-style): job_id -> snapshot deployment per poll/content.
 # MAPPING IN MEMORIA con TTL: al restart i job in corso si perdono -> 404 con hint.
-_videos_jobs: dict[str, dict] = {}
-VIDEO_JOB_TTL_SEC = 24 * 3600
+gw_state._videos_jobs = {}
+gw_state.VIDEO_JOB_TTL_SEC = 24 * 3600
 
 
 # i TEST settano GATEWAY_PERSIST_STATS=0: nessuna contaminazione col live
-PERSIST_STATS = os.environ.get("GATEWAY_PERSIST_STATS", "1") != "0"
+gw_state.PERSIST_STATS = os.environ.get("GATEWAY_PERSIST_STATS", "1") != "0"
 
 # Ledger usage/costi (Feature: /admin/insights). Stessa env dei test per non
 # sporcare var/ reale durante la suite.
 from .ledger import Ledger as _Ledger
 
-LEDGER = _Ledger(VAR_DIR)
+gw_state.LEDGER = _Ledger(gw_state.VAR_DIR)
 
 # Evidenza persistente salute chiavi (lifecycle dead/retired, no-delete).
 from .keyhealth import KeyHealth as _KeyHealth
 
-KEYHEALTH = _KeyHealth(VAR_DIR)
+gw_state.KEYHEALTH = _KeyHealth(gw_state.VAR_DIR)
 
 # --- Inflight request coalescing (payload identico, solo non-streaming) ---
 # Se due richieste identiche (stesso payload + stesso profilo) sono in volo,
 # solo la prima interroga l'upstream; le altre attendono e ricevono la stessa
 # risposta (deepcopy). Un retry automatico identico al 100% non spreca quota.
-_inflight_coalesce: dict[str, dict] = {}
-_inflight_lock = asyncio.Lock()
+gw_state._inflight_coalesce = {}
+gw_state._inflight_lock = asyncio.Lock()
 # Finestra POST-risposta (request_coalescing_cache_sec): lo stesso payload
 # arrivato entro N secondi riceve la risposta gia' prodotta, senza ripetere
 # la chiamata upstream. Cache SOLO successi non-stream, cap 64 entry.
-_coalesce_cache: dict[str, dict] = {}
-_COALESCE_CACHE_MAX = 64
+gw_state._coalesce_cache = {}
+gw_state._COALESCE_CACHE_MAX = 64
 
 
 # Import statico (non late/break-cycle): _apply_misc_policy e' chiamata QUI
 # a livello di modulo, prima che `app` esista.
 from .runtime_persistence import _apply_misc_policy  # noqa: E402
 
-_apply_misc_policy(policy)
+_apply_misc_policy(gw_state.policy)
 
 
 # --- thought_signature sidecar: persistenza firme Gemini 3 (tool calling) ----
-_thought_sigs_file = VAR_DIR / "thought_sigs.json"
+gw_state._thought_sigs_file = gw_state.VAR_DIR / "thought_sigs.json"
 
 
 @asynccontextmanager
@@ -379,8 +382,8 @@ async def lifespan(_app: FastAPI):
     _watch_task = _health_task = _nightly_task = None
     # Fail-fast in produzione: master key reale + client_keys esplicite.
     # In development (default) e' un no-op.
-    authn.enforce_startup()
-    log.info("[start] env=%s production=%s", gateway_env(), authn.production)
+    gw_state.authn.enforce_startup()
+    log.info("[start] env=%s production=%s", gateway_env(), gw_state.authn.production)
     _load_adaptive_stats()  # F4: ripristino EMA/cooldown
     _load_cooldowns()  # cooldown NON scaduti (since/full)
     _load_routing_state()  # warm-start: holder/sticky/warm/pin/frontiere
@@ -394,16 +397,16 @@ async def lifespan(_app: FastAPI):
             "[start] modalita' CAUTA generica (BACKGROUND_CAUTIOUS): probe/health/nightly automatici DISATTIVATI"
         )
     else:
-        _health_task = asyncio.create_task(health_loop(router, policy.health_interval_sec))
+        _health_task = asyncio.create_task(health_loop(gw_state.router, gw_state.policy.health_interval_sec))
     if not _cautious:
         _nightly_task = asyncio.create_task(_nightly_scheduler())
     log.info(
         "[start] %s su %s:%d · profili=%s · deployment=%d",
-        policy.service_name,
+        gw_state.policy.service_name,
         HOST,
-        PORT,
-        ",".join(config.profiles),
-        sum(len(v) for v in config.groups.values()),
+        gw_state.PORT,
+        ",".join(gw_state.config.profiles),
+        sum(len(v) for v in gw_state.config.groups.values()),
     )
     try:
         yield
@@ -415,14 +418,14 @@ async def lifespan(_app: FastAPI):
         # richieste; attendiamo il drain di quelle in volo (best-effort, con
         # deadline) prima del flush finale, per non troncare risposte.
         try:
-            _drain = float(getattr(policy, "shutdown_drain_sec", 0.0) or 0.0)
-            _infl = router.inflight_total()
+            _drain = float(getattr(gw_state.policy, "shutdown_drain_sec", 0.0) or 0.0)
+            _infl = gw_state.router.inflight_total()
             if _infl:
                 log.info("[shutdown] drain di %d richieste in volo (max %.1fs)...", _infl, _drain)
             _deadline = time.monotonic() + _drain
-            while router.inflight_total() > 0 and time.monotonic() < _deadline:
+            while gw_state.router.inflight_total() > 0 and time.monotonic() < _deadline:
                 await asyncio.sleep(0.2)
-            _left = router.inflight_total()
+            _left = gw_state.router.inflight_total()
             if _left:
                 log.warning("[shutdown] drain scaduto: %d richieste ancora in volo", _left)
             elif _infl:
@@ -439,18 +442,18 @@ async def lifespan(_app: FastAPI):
                 log.info("[shutdown] cancel di %d probe/sveglie in volo", _np)
         except Exception:  # noqa: BLE001
             report_suppressed("main.lifespan.probe_tasks")
-        await forwarder.aclose()
+        await gw_state.forwarder.aclose()
         _maybe_save_all(force=True)  # F26: stats+routing insieme
         _maybe_save_cooldowns(force=True)  # cooldown: salva allo shutdown
         _maybe_save_thought_sigs(force=True)  # firme Gemini: salva allo shutdown
-        _rows = LEDGER.flush_sync()  # ledger: nessuna riga persa
+        _rows = gw_state.LEDGER.flush_sync()  # ledger: nessuna riga persa
         log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
         _rrows = repairlog.flush_sync()  # ledger riparazioni
         if _rrows:
             log.info("[shutdown] repair flush_sync: %d righe salvate", _rrows)
 
 
-app = FastAPI(title=policy.service_name, version="0.2.0", lifespan=lifespan)
+app = FastAPI(title=gw_state.policy.service_name, version=GATEWAY_VERSION, lifespan=lifespan)
 app.include_router(admin_api)
 app.include_router(bootstrap_api)
 
@@ -522,8 +525,8 @@ async def chat_completions(request: Request, response: Response):
     # iniettare/rimuovere reasoning_effort e per l'override di temperatura.
     set_effort(
         effort_from_request(payload, request.headers),
-        temp_enabled=policy.enable_effort_temperature_override,
-        temp_overrides=policy.effort_temperature_overrides,
+        temp_enabled=gw_state.policy.enable_effort_temperature_override,
+        temp_overrides=gw_state.policy.effort_temperature_overrides,
     )
 
     raw_model = payload.get("model") or ""
@@ -546,21 +549,21 @@ async def chat_completions(request: Request, response: Response):
     # turno corrente: Gemini resta quindi eleggibile come qualunque provider.
     # Solo con la dummy-fill DISATTIVATA lo escludiamo A MONTE dalla selezione
     # (come un cap mancante, senza salti o tentativi finti).
-    set_avoid_gemini(has_unsigned_tool_calls(messages) and not policy.thought_sig_dummy_fill)
-    set_dummy_fill(policy.thought_sig_dummy_fill, policy.thought_sig_dummy_value)
+    set_avoid_gemini(has_unsigned_tool_calls(messages) and not gw_state.policy.thought_sig_dummy_fill)
+    set_dummy_fill(gw_state.policy.thought_sig_dummy_fill, gw_state.policy.thought_sig_dummy_value)
 
     # --- normalizzazione del nome richiesto:
     #     1) prefisso STORICO -> prefisso corrente (compatibilità client)
     #     2) alias (gateway.yaml) -> nome canonico
-    model = policy.canonicalize(raw_model)
+    model = gw_state.policy.canonicalize(raw_model)
 
     # --- auth ---
-    auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
+    auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
 
     # --- autorizzazione modello (whitelist tre livelli, sul nome canonico) ---
-    if not authn.authorize_model(auth, model):
+    if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
     # --- routing ---
@@ -581,7 +584,7 @@ async def chat_completions(request: Request, response: Response):
     # capacità richieste dal payload; OGNI chat produce testo -> "text" è sempre
     # implicita: i modelli solo-tts/stt/image_gen escono dal pool chat automatico
     # (gli espliciti passano comunque; kill-switch: capability_routing.enabled=false)
-    if router.policy.routing_active():
+    if gw_state.router.policy.routing_active():
         need = required_caps(payload) | {"text"}
     else:
         need = frozenset()
@@ -595,9 +598,9 @@ async def chat_completions(request: Request, response: Response):
     # SESSION-DEP GUARD: la sessione ha USATO il servizio -> rinnova
     # l'ownership di tutti i suoi deployment (restano suoi finché e' viva;
     # 15 min di silenzio e l'intero set torna libero).
-    router.note_session_activity(session_id)
+    gw_state.router.note_session_activity(session_id)
     # RATE per-sessione (SOLO chat): alimenta warm_ready_min adattivo.
-    router.note_session_request(session_id)
+    gw_state.router.note_session_request(session_id)
 
     # --- ADATTAMENTO chat -> /images/* ---
     # Il client ha chiesto immagini in output (modalities:["image"]): se il
@@ -617,7 +620,7 @@ async def chat_completions(request: Request, response: Response):
         body_size=len(request._body) if hasattr(request, "_body") else 0,
         session_id=session_id,
     )
-    _img_est = getattr(router.policy, "image_token_estimate", 0) or 0
+    _img_est = getattr(gw_state.router.policy, "image_token_estimate", 0) or 0
     # Base di stima = payload con la sola histnorm (preview deterministica,
     # PRIMA di ctxcompact): la STESSA base su cui si apprende e si applica il
     # rapporto per-sessione, cosi' i char contati coincidono tra hook usage e
@@ -627,39 +630,39 @@ async def chat_completions(request: Request, response: Response):
         from .histnorm import hist_config_from_policy, normalize_messages
 
         _est_msgs, _ = normalize_messages(
-            messages, hist_config_from_policy(router.policy), tail_floor=router.ctx_boundary_floor(session_id)
+            messages, hist_config_from_policy(gw_state.router.policy), tail_floor=gw_state.router.ctx_boundary_floor(session_id)
         )
     except Exception:  # noqa: BLE001
         _est_msgs = messages
     _est_chars_pre = _prompt_chars(_est_msgs, payload.get("tools"))
-    _cpt = router.session_chars_per_token(session_id)
+    _cpt = gw_state.router.session_chars_per_token(session_id)
     if _cpt:
         # Dal 2o turno, DUE stime dalla stessa base pre-compressione:
         #  ctx_dim = token POST-compressione previsti -> scelta della dim;
         #  ctx_est = token PRE-compressione -> sicurezza (ctxcompact/overflow).
-        ctx_dim, _ = router.estimate_for_session(
-            session_id, _est_msgs, router.policy.estimate_divisor, _img_est, tools=payload.get("tools"), pre=True
+        ctx_dim, _ = gw_state.router.estimate_for_session(
+            session_id, _est_msgs, gw_state.router.policy.estimate_divisor, _img_est, tools=payload.get("tools"), pre=True
         )
-        ctx_est, _ = router.estimate_for_session(
-            session_id, _est_msgs, router.policy.estimate_divisor, _img_est, tools=payload.get("tools")
+        ctx_est, _ = gw_state.router.estimate_for_session(
+            session_id, _est_msgs, gw_state.router.policy.estimate_divisor, _img_est, tools=payload.get("tools")
         )
         metrics.inc("nx_sess_est_used_total")
         log.info(
             "[estimate] sess cpt_pre=%.2f cpt_post=%.2f -> ctx_dim≈%d ctx_pre≈%d (chars_pre=%d, +%.0f%%)",
-            router.session_chars_per_token(session_id, pre=True),
+            gw_state.router.session_chars_per_token(session_id, pre=True),
             _cpt,
             ctx_dim,
             ctx_est,
             _est_chars_pre,
-            (float(getattr(router.policy, "session_estimate_margin", 1.05)) - 1.0) * 100.0,
+            (float(getattr(gw_state.router.policy, "session_estimate_margin", 1.05)) - 1.0) * 100.0,
         )
     else:
         # 1o turno della sessione: stima euristica basata sui soli char.
-        ctx_est = estimate_tokens(messages, router.policy.estimate_divisor, _img_est, tools=payload.get("tools"))
+        ctx_est = estimate_tokens(messages, gw_state.router.policy.estimate_divisor, _img_est, tools=payload.get("tools"))
         ctx_dim = ctx_est
         metrics.inc("nx_sess_est_fallback_total")
 
-    group_or_explicit = router.resolve_group_for_request(
+    group_or_explicit = gw_state.router.resolve_group_for_request(
         model, messages, session_id, need, ctx_dim, profile=auth.profile
     )
     if group_or_explicit is None:
@@ -673,7 +676,7 @@ async def chat_completions(request: Request, response: Response):
             # sua scheda a non avere la capacita'. Meglio un messaggio che
             # nomini modello e capacita' mancante: l'agente puo' scegliere da
             # solo al turno dopo invece di fare un giro di scoperta.
-            _missing = router._missing_media_caps(model, need)
+            _missing = gw_state.router._missing_media_caps(model, need)
             if _missing:
                 return JSONResponse(
                     status_code=400,
@@ -706,7 +709,7 @@ async def chat_completions(request: Request, response: Response):
             status_code=404,
             content={
                 "error": {
-                    "message": f"model '{model}' not managed by {policy.service_name}",
+                    "message": f"model '{model}' not managed by {gw_state.policy.service_name}",
                     "type": "invalid_request_error",
                 }
             },
@@ -720,35 +723,35 @@ async def chat_completions(request: Request, response: Response):
     _turn_go = False
     if session_id:
         try:
-            _turn_go = router.note_session_turn(session_id)
+            _turn_go = gw_state.router.note_session_turn(session_id)
         except Exception:  # noqa: BLE001
             _turn_go = False
-    group_or_explicit, _refund_go = _apply_go_refund(router, group_or_explicit, auth.profile, _turn_go, session_id)
+    group_or_explicit, _refund_go = _apply_go_refund(gw_state.router, group_or_explicit, auth.profile, _turn_go, session_id)
 
-    explicit_req = router.is_explicit(model)
+    explicit_req = gw_state.router.is_explicit(model)
     # Se il client chiama esplicitamente un gruppo diverso (es. -200k -> -1000k
     # o -go), rilascia lo sticky per-deployment cosi' la richiesta esplicita
     # atterra sul nuovo gruppo/key scelta dal routing, non resta incollata al
     # vecchio deployment dello sticky precedente.
     if (explicit_req or _refund_go) and session_id:
-        cur = router.dep_sticky_get(session_id)
-        sd = router.config.deployment_by_unique(cur) if cur else None
+        cur = gw_state.router.dep_sticky_get(session_id)
+        sd = gw_state.router.config.deployment_by_unique(cur) if cur else None
         # Rilascia dep-sticky SOLO se il gruppo è cambiato o non c'è sticky:
         # se la richiesta esplicita punta allo stesso gruppo dello sticky,
         # lo preserviamo per la cache-preserving (misma key per sessione).
         if sd is None or sd.get("group") != group_or_explicit:
-            router.dep_sticky_release(session_id)
+            gw_state.router.dep_sticky_release(session_id)
         # Per richieste esplicite su un dim (-Nk): riàncora lo sticky di
         # gruppo cosi' le successive NON-esplicite continuano nel contesto
         # scelto dall'utente (crescita cache-preserving). Per -go/-fallback/
         # unique: libera lo sticky di gruppo, altrimenti il traffico
         # automatico verrebbe parcheggiato in un bucket a pagamento.
         if re.search(r"-\d+k$", group_or_explicit):
-            router.sticky_set(session_id, group_or_explicit)
+            gw_state.router.sticky_set(session_id, group_or_explicit)
         else:
-            router.sticky_release(session_id)
+            gw_state.router.sticky_release(session_id)
 
-    dep = router.config.deployment_by_unique(group_or_explicit)
+    dep = gw_state.router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
         # F31 fail-fast ingresso: se il ctx non entra nel gruppo (max_input di
         # tutti i dep < ctx) si compatta FORZANDO il gate min_saved e si
@@ -757,21 +760,21 @@ async def chat_completions(request: Request, response: Response):
         _max_grp = 0
         try:
             _max_grp = max(
-                (int(d.get("max_input_tokens") or 0) for d in (router.config.groups.get(group_or_explicit) or [])),
+                (int(d.get("max_input_tokens") or 0) for d in (gw_state.router.config.groups.get(group_or_explicit) or [])),
                 default=0,
             )
         except Exception:
             _max_grp = 0
         _zen_first = False
         try:
-            _zen_first = router._zen_first_active()
+            _zen_first = gw_state.router._zen_first_active()
         except Exception:  # noqa: BLE001
             _zen_first = False
         # Zen-first: si tiene conto anche della RISERVA DI OUTPUT (il picker
         # richiede ctx+out <= max_input) e si compatta per rientrare nel tier
         # zen. Per i non-nativi resta lo storico 5% di margine sull'input.
         try:
-            _out_res = int(refill_out_budget(payload, router.policy) or 0)
+            _out_res = int(refill_out_budget(payload, gw_state.router.policy) or 0)
         except Exception:  # noqa: BLE001
             _out_res = 0
         if _zen_first:
@@ -789,15 +792,15 @@ async def chat_completions(request: Request, response: Response):
                 # free; solo se il payload resta troppo grande si sale di dim.
                 from .ctxcompact import compact_tool_outputs, ctxcompact_config_from_policy
 
-                _ccf = ctxcompact_config_from_policy(router.policy)
+                _ccf = ctxcompact_config_from_policy(gw_state.router.policy)
                 _ccf.min_saved_tokens = 0
-                _img = getattr(router.policy, "image_token_estimate", 0) or 0
+                _img = getattr(gw_state.router.policy, "image_token_estimate", 0) or 0
                 _forced, _frep = compact_tool_outputs(
                     payload.get("messages") or [],
                     _ccf,
                     max_in=_budget,
-                    estimator=lambda ms: router.estimate_for_session(
-                        session_id, ms, router.policy.estimate_divisor, _img
+                    estimator=lambda ms: gw_state.router.estimate_for_session(
+                        session_id, ms, gw_state.router.policy.estimate_divisor, _img
                     )[0],
                 )
                 if _frep.get("changed"):
@@ -808,10 +811,10 @@ async def chat_completions(request: Request, response: Response):
                         group_or_explicit,
                         {k: _frep.get(k) for k in ("stubbed", "deduped", "args_trimmed", "saved_chars")},
                     )
-                ctx_est = router.estimate_for_session(
+                ctx_est = gw_state.router.estimate_for_session(
                     session_id,
                     payload.get("messages") or [],
-                    router.policy.estimate_divisor,
+                    gw_state.router.policy.estimate_divisor,
                     _img,
                     tools=payload.get("tools"),
                 )[0]
@@ -830,29 +833,29 @@ async def chat_completions(request: Request, response: Response):
                 if _climb:
                     # SALITA DI DIM (regola dell'utente): la dim PIU' PICCOLA
                     # che contiene il payload (+ riserva output per lo zen).
-                    _up = router.climb_dim_group(group_or_explicit, ctx_est + (_out_res if _zen_first else 0))
+                    _up = gw_state.router.climb_dim_group(group_or_explicit, ctx_est + (_out_res if _zen_first else 0))
                 if _up:
                     log.info(
                         "[dim] ctx≈%d non entra in %s (max %d): salgo a %s", ctx_est, group_or_explicit, _max_grp, _up
                     )
                     group_or_explicit = _up
                     if explicit_req and session_id:
-                        router.sticky_set(session_id, _up)
+                        gw_state.router.sticky_set(session_id, _up)
                 else:
                     from .ctxcompact import compact_tool_outputs, ctxcompact_config_from_policy
 
                     # NB: CtxCompactConfig NON e' un dataclass -> niente
                     # `dataclasses.replace` (TypeError a runtime: era il bug di
                     # produzione). E' un'istanza fresca per chiamata: si muta il campo.
-                    _ccf = ctxcompact_config_from_policy(router.policy)
+                    _ccf = ctxcompact_config_from_policy(gw_state.router.policy)
                     _ccf.min_saved_tokens = 0
-                    _img = getattr(router.policy, "image_token_estimate", 0) or 0
+                    _img = getattr(gw_state.router.policy, "image_token_estimate", 0) or 0
                     _forced, _frep = compact_tool_outputs(
                         payload.get("messages") or [],
                         _ccf,
                         max_in=_max_grp,
-                        estimator=lambda ms: router.estimate_for_session(
-                            session_id, ms, router.policy.estimate_divisor, _img
+                        estimator=lambda ms: gw_state.router.estimate_for_session(
+                            session_id, ms, gw_state.router.policy.estimate_divisor, _img
                         )[0],
                     )
                     if _frep.get("changed"):
@@ -863,10 +866,10 @@ async def chat_completions(request: Request, response: Response):
                             group_or_explicit,
                             {k: _frep.get(k) for k in ("stubbed", "deduped", "args_trimmed", "saved_chars")},
                         )
-                    ctx_est = router.estimate_for_session(
+                    ctx_est = gw_state.router.estimate_for_session(
                         session_id,
                         payload.get("messages") or [],
-                        router.policy.estimate_divisor,
+                        gw_state.router.policy.estimate_divisor,
                         _img,
                         tools=payload.get("tools"),
                     )[0]
@@ -894,7 +897,7 @@ async def chat_completions(request: Request, response: Response):
         # "qwen-32k" matcha per caso). Verita' canonica = config.group_caps:
         # se il gruppo NON e' una capacita' ed e' un bucket -dim/apice, il warm
         # resta valido anche esplicito.
-        _grp_is_dim = router.config.group_caps.get(group_or_explicit) is None and not router._is_renewal_bucket(
+        _grp_is_dim = gw_state.router.config.group_caps.get(group_or_explicit) is None and not gw_state.router._is_renewal_bucket(
             group_or_explicit
         )
         _warm = (not explicit_req) or _grp_is_dim
@@ -903,16 +906,16 @@ async def chat_completions(request: Request, response: Response):
         # su un tier di rinnovo peggiore; al 429 il holder si esclude da solo
         # e la rotazione prosegue nell'ordine normale (crediti "sommati" un
         # account alla volta). Auto-routing ed escalation interne non lo usano.
-        _go_suf = router.config.go_suffix or "-go"
-        _fb_suf = router.config.fallback_suffix or "-fallback"
+        _go_suf = gw_state.router.config.go_suffix or "-go"
+        _fb_suf = gw_state.router.config.fallback_suffix or "-fallback"
         _paid_holder = explicit_req and (group_or_explicit.endswith(_go_suf) or group_or_explicit.endswith(_fb_suf))
         # PARITA' stream/non-stream sotto HOLD: se questa richiesta non-stream
         # sara' servita dal MOTORE STREAM (redirect hold, vedi _redirect sotto),
         # anche il pick iniziale deve ordinare il warm come lo stream
         # (prefer_fast=False). Qui `dep` non esiste ancora: l'intento si ricava
         # dalla policy (il flag per-deployment resta gestito dal ramo a valle).
-        _pre_redirect = _nonstream_hold_redirect(stream, None, router.policy.qc_json, router.policy)
-        dep = router.initial_pick(
+        _pre_redirect = _nonstream_hold_redirect(stream, None, gw_state.router.policy.qc_json, gw_state.router.policy)
+        dep = gw_state.router.initial_pick(
             auth.profile,
             group_or_explicit,
             None if explicit_req else need,
@@ -921,7 +924,7 @@ async def chat_completions(request: Request, response: Response):
             warm=_warm,
             prefer_holder=_paid_holder,
             prefer_fast=(not stream) and not _pre_redirect,
-            out_tokens=refill_out_budget(payload, router.policy),
+            out_tokens=refill_out_budget(payload, gw_state.router.policy),
         )
     if dep is None:
         # F31: se il motivo e' l'overflow (tutti i dep del gruppo hanno
@@ -929,7 +932,7 @@ async def chat_completions(request: Request, response: Response):
         # 400 context_length_exceeded invece del 503 "nessun deployment".
         try:
             _mx = max(
-                (int(d.get("max_input_tokens") or 0) for d in (router.config.groups.get(group_or_explicit) or [])),
+                (int(d.get("max_input_tokens") or 0) for d in (gw_state.router.config.groups.get(group_or_explicit) or [])),
                 default=0,
             )
         except Exception:
@@ -961,11 +964,11 @@ async def chat_completions(request: Request, response: Response):
     # sostituisce SOLO dep["api_key"]. Vale solo per il PRIMO tentativo —
     # i fallback successivi tornano al pool normale del profilo, così una
     # chiave rotta non blocca mai il servizio.
-    custom_key = router.resolve_alias_key(raw_model, model)
+    custom_key = gw_state.router.resolve_alias_key(raw_model, model)
     if custom_key:
         dep = {**dep, "api_key": custom_key}
 
-    profile = auth.profile or config.profile_of_base(model.split("__")[0]) or config.profile_of_base(model)
+    profile = auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
 
     if model != raw_model:
         log.info("[route] alias %r -> %r", raw_model, model)
@@ -985,30 +988,30 @@ async def chat_completions(request: Request, response: Response):
     )
 
     # autoprobe cooldown (fire-and-forget: non entra nella risposta)
-    autoprobe.maybe_spawn(router, forwarder, profile)
+    autoprobe.maybe_spawn(gw_state.router, gw_state.forwarder, profile)
 
     # sticky session SOLO dal routing automatico (nome base): le richieste
     # esplicite (-Nk/-go/-fallback/__univoco) non leggono né scrivono sticky.
     # I bucket renewal (-go/-fallback) NON vengono mai salvati: -go si
     # raggiunge solo esplicitamente o a fine scala (free -> zen -> -go).
-    if session_id and not router.is_explicit(model) and not router._is_renewal_bucket(group_or_explicit):
-        router.sticky_set(session_id, group_or_explicit)
+    if session_id and not gw_state.router.is_explicit(model) and not gw_state.router._is_renewal_bucket(group_or_explicit):
+        gw_state.router.sticky_set(session_id, group_or_explicit)
 
     # iniezione identità + modello univoco nel payload upstream
-    inject_identity(payload, dep, router=router)
+    inject_identity(payload, dep, router=gw_state.router)
 
     # ---- L1/L2 preprocessing (cache-safe: solo la coda) ----
     from .histnorm import hist_config_from_policy, normalize_messages
     from .sampling import sampling_config_from_policy, apply_sampling_defaults
     from .schemaout import schemaout_config_from_policy, maybe_inject_response_format
 
-    _hn = hist_config_from_policy(router.policy)
-    _sm = sampling_config_from_policy(router.policy)
-    _so = schemaout_config_from_policy(router.policy)
+    _hn = hist_config_from_policy(gw_state.router.policy)
+    _sm = sampling_config_from_policy(gw_state.router.policy)
+    _so = schemaout_config_from_policy(gw_state.router.policy)
     _orig_msgs = payload.get("messages")  # pre-normalizzazione
     _orig_for_retry = None
     if _hn.enabled:
-        _nm, _nr = normalize_messages(payload.get("messages"), _hn, tail_floor=router.ctx_boundary_floor(session_id))
+        _nm, _nr = normalize_messages(payload.get("messages"), _hn, tail_floor=gw_state.router.ctx_boundary_floor(session_id))
         if _nr.get("changed"):
             payload["messages"] = _nm
             metrics.inc("nx_histnorm_total", ("changed",))
@@ -1025,19 +1028,19 @@ async def chat_completions(request: Request, response: Response):
     # ---- cache-aware: detentore sessione + troncamento contesto ----
     from .ctxcompact import ctxcompact_config_from_policy, compact_tool_outputs, should_compact, frontier_boundary
 
-    _cc = ctxcompact_config_from_policy(router.policy)
-    _holder = router.session_holder(session_id)
+    _cc = ctxcompact_config_from_policy(gw_state.router.policy)
+    _holder = gw_state.router.session_holder(session_id)
     _max_in = int(dep.get("max_input_tokens") or 0)
     _same_family = False
     if _holder:
-        _hd = router.config.deployment_by_unique(_holder)
+        _hd = gw_state.router.config.deployment_by_unique(_holder)
         if _hd and _hd.get("family") and _hd.get("family") == dep.get("family"):
             _same_family = True
     # F14: correzione per-deployment appresa dal VERO prompt_tokens upstream
     # (tokenizer diverso da chars/4): la decisione di compattazione non deve
     # lavorare su stime sballate.
     try:
-        _corr = router.estimate_correction(dep.get("unique", ""))
+        _corr = gw_state.router.estimate_correction(dep.get("unique", ""))
         if _corr != 1.0:
             _ctx_corr = max(1, int(ctx_est * _corr))
         else:
@@ -1047,41 +1050,41 @@ async def chat_completions(request: Request, response: Response):
     # H2: divisore chars/token CALIBRATO (F14) da usare per il budget della
     # frontiera: il 4 fisso sottostima i token sui tokenizer non-OpenAI.
     try:
-        _div_eff = router.effective_divisor(dep.get("unique", ""))
+        _div_eff = gw_state.router.effective_divisor(dep.get("unique", ""))
     except Exception:
-        _div_eff = float(getattr(router.policy, "estimate_divisor", 4) or 4)
+        _div_eff = float(getattr(gw_state.router.policy, "estimate_divisor", 4) or 4)
     _dec = should_compact(
         _cc,
         _ctx_corr,
         _max_in,
         _holder,
         dep.get("unique"),
-        bool(session_id and router.is_session_compact(session_id)),
+        bool(session_id and gw_state.router.is_session_compact(session_id)),
         same_family=_same_family,
         reasoning=bool(dep.get("effort_capable")),
     )
     _do_compact = _dec["compact"]
     if _do_compact and session_id:
-        router.mark_session_compact(session_id)
+        gw_state.router.mark_session_compact(session_id)
     _ctx_saved_hdr = 0
     if _do_compact:
         _cmsgs, _crep = compact_tool_outputs(
             payload.get("messages"),
             _cc,
             max_in=_max_in,
-            estimator=lambda ms: router.estimate_for_session(
+            estimator=lambda ms: gw_state.router.estimate_for_session(
                 session_id,
                 ms,
                 _div_eff,
-                getattr(router.policy, "image_token_estimate", 0) or 0,
+                getattr(gw_state.router.policy, "image_token_estimate", 0) or 0,
                 unique=dep.get("unique"),
             )[0],
-            boundary_floor=router.ctx_boundary_floor(session_id),
+            boundary_floor=gw_state.router.ctx_boundary_floor(session_id),
             divisor=_div_eff,
         )
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
-            router.note_compact_boundary(session_id, _crep.get("boundary"))
+            gw_state.router.note_compact_boundary(session_id, _crep.get("boundary"))
             metrics.inc("nx_ctxcompact_total", ("stubbed",))
             for _tn, _tcnt in (_crep.get("tools") or {}).items():
                 metrics.inc("nx_ctxcompact_tool_total", (_tn,))
@@ -1101,16 +1104,16 @@ async def chat_completions(request: Request, response: Response):
     # histnorm o riscrittura del client. Osservabilita': nessun effetto sulla
     # scelta del deployment, ma F10 lo usa come breadcrumb sui 503.
     _aud = None
-    if getattr(router.policy, "cache_prefix_audit", True) and session_id:
+    if getattr(gw_state.router.policy, "cache_prefix_audit", True) and session_id:
         _bnd = _crep.get("boundary") if (_do_compact and _crep.get("changed")) else None
         if _bnd is None:
             try:
                 _bnd = frontier_boundary(
-                    payload.get("messages") or [], _cc, _max_in, router.ctx_boundary_floor(session_id), _div_eff
+                    payload.get("messages") or [], _cc, _max_in, gw_state.router.ctx_boundary_floor(session_id), _div_eff
                 )
             except Exception:  # noqa: BLE001
                 _bnd = None
-        _aud = router.audit_prefix(session_id, payload.get("messages") or [], _bnd)
+        _aud = gw_state.router.audit_prefix(session_id, payload.get("messages") or [], _bnd)
         metrics.inc("nx_cache_audit_total", (_aud,))
         if _aud in ("identity", "prefix"):
             log.info(
@@ -1151,7 +1154,7 @@ async def chat_completions(request: Request, response: Response):
 
     if stream:
         _sniffer = None
-        if sniff.enabled(router.policy):
+        if sniff.enabled(gw_state.router.policy):
             _sniffer = sniff.begin(
                 _rid,
                 {
@@ -1192,13 +1195,13 @@ async def chat_completions(request: Request, response: Response):
             _sresp.headers["X-Ctxcompact-Saved"] = str(_ctx_saved_hdr)
         return _sresp
 
-    qc_pol = router.policy.qc_json
+    qc_pol = gw_state.router.policy.qc_json
     attempts_box: list[str] = []
     # HOLD-UNTIL-FINISH + richiesta non-stream: esegui il MOTORE STREAM (sotto
     # hold bufferizza l'intera risposta) e restituisci non-stream. Un solo
     # motore per entrambi -> comportamento identico. Kill-switch:
     # policy.nonstream_hold_redirect.
-    _redirect = _nonstream_hold_redirect(stream, dep, qc_pol, router.policy)
+    _redirect = _nonstream_hold_redirect(stream, dep, qc_pol, gw_state.router.policy)
 
     async def _redirect_once():
         from .protocols import sse_to_chat_obj
@@ -1261,16 +1264,16 @@ async def chat_completions(request: Request, response: Response):
 
     try:
         if _redirect:
-            res = await _forward_coalesced(router.policy, payload, profile, _redirect_once)
+            res = await _forward_coalesced(gw_state.router.policy, payload, profile, _redirect_once)
         else:
 
             async def _fwd_once():
-                return await forwarder.call_with_fallback(
-                    router,
+                return await gw_state.forwarder.call_with_fallback(
+                    gw_state.router,
                     profile,
                     dep,
                     payload,
-                    collect_qc_failures=bool(qc_pol.enabled or router.policy.qc_sanity.enabled),
+                    collect_qc_failures=bool(qc_pol.enabled or gw_state.router.policy.qc_sanity.enabled),
                     media_strike_hook=_strike_hook(explicit_req, need),
                     need=need,
                     scope="group" if explicit_req else "chain",
@@ -1284,7 +1287,7 @@ async def chat_completions(request: Request, response: Response):
                     requested_group=group_or_explicit,
                 )
 
-            res = await _forward_coalesced(router.policy, payload, profile, _fwd_once)
+            res = await _forward_coalesced(gw_state.router.policy, payload, profile, _fwd_once)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
@@ -1297,7 +1300,7 @@ async def chat_completions(request: Request, response: Response):
         # grp/dep coerenti: l'ULTIMO deployment tentato (dopo un'eventuale
         # escalation di gruppo), non quello iniziale.
         _last_u = attempts_box[-1] if attempts_box else dep.get("unique")
-        _last_d = (router.config.deployment_by_unique(_last_u) if _last_u else None) or dep
+        _last_d = (gw_state.router.config.deployment_by_unique(_last_u) if _last_u else None) or dep
         _emit_summary(
             ses=session_id or "-",
             req=raw_model,
@@ -1313,7 +1316,7 @@ async def chat_completions(request: Request, response: Response):
         )
         _trail = getattr(err, "trail", None)
         return _exhausted(
-            len(attempts_box), err.detail, prefix_reason=_aud, trail=_trail, retry_at_ms=_retry_at_ms(router, _trail)
+            len(attempts_box), err.detail, prefix_reason=_aud, trail=_trail, retry_at_ms=_retry_at_ms(gw_state.router, _trail)
         )
     data, used = res[0], res[1]
     qc_failed = res[2] if len(res) > 2 else []
@@ -1322,7 +1325,7 @@ async def chat_completions(request: Request, response: Response):
     # (policy.response_model, vedi app/policy.py): nx_deployment è SEMPRE
     # presente con il deployment univoco realmente usato.
     if isinstance(data, dict):
-        disc = router.policy.response_model
+        disc = gw_state.router.policy.response_model
         if disc == "upstream":
             # nome ESATTO scritto dal provider nella sua risposta
             # (es. groq ritorna "meta-llama/llama-3.3-70b-instruct");
@@ -1345,10 +1348,10 @@ async def chat_completions(request: Request, response: Response):
     if not _redirect:
         try:
             if _u_f14 and _u_f14.get("prompt_tokens"):
-                router.note_estimate_error(used["unique"], ctx_est, _u_f14["prompt_tokens"])
+                gw_state.router.note_estimate_error(used["unique"], ctx_est, _u_f14["prompt_tokens"])
                 # Stima per-sessione: char REALI del payload inviato a monte
                 # (post inject_identity/histnorm/ctxcompact) / prompt_tokens.
-                router.note_session_estimate(
+                gw_state.router.note_session_estimate(
                     session_id,
                     _est_chars_pre,
                     _prompt_chars(payload.get("messages"), payload.get("tools")),
@@ -1374,8 +1377,8 @@ async def chat_completions(request: Request, response: Response):
     # direttamente (con hold ON il motore stream ha gia' regalato: la richiesta
     # non-stream vi viene rediretta e il suo summary farebbe doppio regalo).
     if not _redirect:
-        _note_fb_refund(router, session_id, max(0, len(attempts_box) - 1))
-    if sniff.enabled(router.policy):
+        _note_fb_refund(gw_state.router, session_id, max(0, len(attempts_box) - 1))
+    if sniff.enabled(gw_state.router.policy):
         sniff.begin(
             _rid,
             {
@@ -1505,11 +1508,11 @@ async def _hedge_peek(
     _W = None
     try:
         if refill:
-            _wk = router.warm_api_keys(session, profile, requested_group or dep.get("group"))
+            _wk = gw_state.router.warm_api_keys(session, profile, requested_group or dep.get("group"))
             _xk = set((raced or {}).get("keys") or ()) | _wk
             _xk.add(str(dep.get("api_key") or ""))
             _ex_uniq = (raced or {}).get("uniq")
-            _B = router.warm_fill_canary(
+            _B = gw_state.router.warm_fill_canary(
                 profile,
                 dep,
                 need,
@@ -1543,10 +1546,10 @@ async def _hedge_peek(
                     _exu2.add(_B["unique"])
                     _xk2.add(str(_B.get("api_key") or ""))
                 try:
-                    _age = float(getattr(router.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
+                    _age = float(getattr(gw_state.router.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
                 except Exception:
                     _age = 3600.0
-                _W = router.warm_wake_canary(
+                _W = gw_state.router.warm_wake_canary(
                     profile,
                     dep,
                     need,
@@ -1575,7 +1578,7 @@ async def _hedge_peek(
                         _exu3.add(_c["unique"])
                         _xk3.add(str(_c.get("api_key") or ""))
                 try:
-                    _Z = router.warm_fill_canary(
+                    _Z = gw_state.router.warm_fill_canary(
                         profile,
                         dep,
                         need,
@@ -1592,12 +1595,12 @@ async def _hedge_peek(
                 if _Z is None:
                     try:
                         _age_z = float(
-                            getattr(router.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0
+                            getattr(gw_state.router.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0
                         )
                     except Exception:  # noqa: BLE001
                         _age_z = 3600.0
                     try:
-                        _Z = router.warm_wake_canary(
+                        _Z = gw_state.router.warm_wake_canary(
                             profile,
                             dep,
                             need,
@@ -1618,8 +1621,8 @@ async def _hedge_peek(
                     log.info("[refill] %s: nessun canary zen consegnabile (ctx=%s)", dep.get("unique"), ctx)
             cands = [c for c in (_Z, _B, _W) if c is not None]
         else:
-            _excl = set(router._sess_deps().get(session, ())) if fresh_only else None
-            cands = router.hedge_canaries(
+            _excl = set(gw_state.router._sess_deps().get(session, ())) if fresh_only else None
+            cands = gw_state.router.hedge_canaries(
                 profile,
                 dep,
                 need,
@@ -1640,11 +1643,11 @@ async def _hedge_peek(
     # in-volo contano tutti: refill, legacy, A/loser staccati come probe).
     if refill and cands:
         try:
-            _mx = int(getattr(router.policy, "warm_refill_max_inflight", 6) or 6)
+            _mx = int(getattr(gw_state.router.policy, "warm_refill_max_inflight", 6) or 6)
         except Exception:
             _mx = 6
         try:
-            _free = max(0, _mx - int(router.probes_in_flight(session)))
+            _free = max(0, _mx - int(gw_state.router.probes_in_flight(session)))
         except Exception:
             _free = _mx
         cands = cands[:_free] if _free > 0 else []
@@ -1662,7 +1665,7 @@ async def _hedge_peek(
         _bu = B["unique"]
         tB = time.monotonic()
         p2 = dict(payload)
-        inject_identity(p2, B, router=router)
+        inject_identity(p2, B, router=gw_state.router)
 
         def _hookB(_salvaged, _u=_bu, _m=B.get("model", "")):
             metrics.inc("nx_truncated_toolcall_total", (_u, "salvaged" if _salvaged else "dropped"))
@@ -1674,15 +1677,15 @@ async def _hedge_peek(
                 model=_m,
                 detail="tag tool-call rotto (canary)",
             )
-            router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec, reason="truncated_toolcall")
+            gw_state.router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec, reason="truncated_toolcall")
 
-        router.note_start(_bu, ctx)
+        gw_state.router.note_start(_bu, ctx)
         if refill and raced is not None:
             raced.setdefault("uniq", set()).add(_bu)
             raced.setdefault("keys", set()).add(str(B.get("api_key") or ""))
         genB = None
         try:
-            genB = await forwarder.stream_response(
+            genB = await gw_state.forwarder.stream_response(
                 B,
                 p2,
                 profile=profile or "",
@@ -1693,25 +1696,25 @@ async def _hedge_peek(
                 tool_repair_config=_tr_cfg,
                 truncation_config=_tct_cfg,
                 truncation_hook=_hookB,
-                rate_hook=lambda u, rl: router.note_rate_limit(u, rl),
+                rate_hook=lambda u, rl: gw_state.router.note_rate_limit(u, rl),
             )
-            if router.is_cooled_down(_bu):
-                router.clear_cooldown(_bu)
-            futB = asyncio.ensure_future(_peek(genB, router.first_content_deadline_ms(_bu, ctx)))
+            if gw_state.router.is_cooled_down(_bu):
+                gw_state.router.clear_cooldown(_bu)
+            futB = asyncio.ensure_future(_peek(genB, gw_state.router.first_content_deadline_ms(_bu, ctx)))
             with contextlib.suppress(Exception):
-                router.note_probe_started(session, _bu)
+                gw_state.router.note_probe_started(session, _bu)
             return {"dep": B, "gen": genB, "t0": tB, "fut": futB, "wake": bool(wake)}
         except asyncio.CancelledError:
             if genB is not None:
                 await _discard_stream(genB, None)
             with contextlib.suppress(Exception):
-                router.note_end(_bu, ctx)
+                gw_state.router.note_end(_bu, ctx)
             raise
         except BaseException as exc:
             if genB is not None:
                 await _discard_stream(genB, None)
             with contextlib.suppress(Exception):
-                router.note_end(_bu, ctx)
+                gw_state.router.note_end(_bu, ctx)
             # REGE (utente): un errore durante il canary va in cooldown
             # COME AL SOLITO: 429/5xx transitori -> soft cooldown calibrato
             # sui fallimenti 24h (retry_after numerico ha priorita').
@@ -1721,7 +1724,7 @@ async def _hedge_peek(
             _rk = reasoning_err_kind(str(exc))
             _qacct = 0
             with contextlib.suppress(Exception):
-                _qacct = maybe_account_quota_cooldown(router, B, getattr(exc, "status", None), str(exc))
+                _qacct = maybe_account_quota_cooldown(gw_state.router, B, getattr(exc, "status", None), str(exc))
             if _qacct:
                 log.info(
                     "[hedge] canary %s: quota dell'account esaurita -> %d chiavi dell'account in pausa fino al reset",
@@ -1734,21 +1737,21 @@ async def _hedge_peek(
                 )
                 with contextlib.suppress(Exception):
                     if _rk == "needs":
-                        learn_thinking_replay(router, B.get("model"))
+                        learn_thinking_replay(gw_state.router, B.get("model"))
                     elif _rk == "rejects":
-                        learn_strip_reasoning(router, B.get("model"))
+                        learn_strip_reasoning(gw_state.router, B.get("model"))
                     elif _rk == "history":
-                        learn_no_thinking(router, B.get("model"))
+                        learn_no_thinking(gw_state.router, B.get("model"))
             else:
                 try:
                     _sec = getattr(exc, "retry_after", None)
                     if not (isinstance(_sec, (int, float)) and _sec > 0):
                         try:
-                            _f24 = router.stats_for(_bu).fail_count_24h
+                            _f24 = gw_state.router.stats_for(_bu).fail_count_24h
                         except Exception:
                             _f24 = 0
                         _sec = _soft_cd(_f24)
-                    router.mark_failed(_bu, seconds=_sec, reason="canary_error")
+                    gw_state.router.mark_failed(_bu, seconds=_sec, reason="canary_error")
                 except Exception:
                     report_suppressed("main._open_canary@1765")
             log.info("[hedge] canary %s non disponibile (%s) -> cooldown", _bu, type(exc).__name__)
@@ -1831,7 +1834,7 @@ async def _hedge_peek(
             # sessione, indipendentemente dall'esito della gara (anche se poi
             # vince). Auto-pulito al primo successo rapido.
             with contextlib.suppress(Exception):
-                router.mark_session_slow(session, dep.get("unique"))
+                gw_state.router.mark_session_slow(session, dep.get("unique"))
         # ---- CANARY LENTO: timer proprio scaduto -> UN canario in piu' ----
         # INDIPENDENTE dal tetto per-sessione e dall'hedge classico: il
         # "lento" non prende nessuna penale (resta probe reale).
@@ -1850,7 +1853,7 @@ async def _hedge_peek(
             _allow = True
             try:
                 _allow = bool(
-                    router.slow_race_allowed(session, profile, requested_group, need, ctx, out_tokens, tried_set)
+                    gw_state.router.slow_race_allowed(session, profile, requested_group, need, ctx, out_tokens, tried_set)
                 )
             except Exception:  # noqa: BLE001
                 _allow = True
@@ -1859,13 +1862,13 @@ async def _hedge_peek(
                 log.info(
                     "[slow-race] %s: warm gia' pieno (>=%s), niente canario",
                     dep.get("unique"),
-                    getattr(router.policy, "slow_race_max_warm", 6),
+                    getattr(gw_state.router.policy, "slow_race_max_warm", 6),
                 )
             else:
                 metrics.inc("nx_slow_race_total", ("open",))
                 _lc: list[dict] = []
                 with contextlib.suppress(Exception):
-                    _lc = router.hedge_canaries(
+                    _lc = gw_state.router.hedge_canaries(
                         profile,
                         dep,
                         need,
@@ -1926,8 +1929,8 @@ async def _hedge_peek(
         for _t in list(_tasks):
             _tasks.pop(_t, None)
             _pt = asyncio.ensure_future(_probe_late_open(_t, session, ctx, hold, race))
-            _PROBE_TASKS.add(_pt)
-            _pt.add_done_callback(_PROBE_TASKS.discard)
+            gw_state._PROBE_TASKS.add(_pt)
+            _pt.add_done_callback(gw_state._PROBE_TASKS.discard)
 
     # ---------------------------------------------------------- A vince ----
     if winner is futA:
@@ -1960,10 +1963,10 @@ async def _hedge_peek(
     metrics.inc("nx_hedge_total", ("won_b",))
     w = futs[winner]
     with contextlib.suppress(Exception):
-        router.note_probe_done(session, w["dep"]["unique"])
+        gw_state.router.note_probe_done(session, w["dep"]["unique"])
     if w.get("wake"):
         with contextlib.suppress(Exception):
-            router.clear_cooldown(w["dep"]["unique"])  # sveglia riuscita
+            gw_state.router.clear_cooldown(w["dep"]["unique"])  # sveglia riuscita
         log.info("[refill] sveglia riuscita: %s torna caldo (consegna la risposta)", w["dep"]["unique"])
     # A NON viene annullata: finisce la sua risposta in background come probe
     # reale (se consegna pulita entra in warm, altrimenti si scarta).
@@ -2004,7 +2007,7 @@ async def _hedge_peek(
 # -> corto), mentre il vuoto-pulito/length da budget resta senza penale come
 # per il tentativo servito. Costo doppio accettato: la cascata pesca SOLO nei
 # free-dims.
-_PROBE_TASKS: set = set()
+gw_state._PROBE_TASKS = set()
 
 
 def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
@@ -2091,15 +2094,15 @@ async def _stt_bridge_transcribe(
     def _tier(d: dict) -> int:
         """0=free, 1=-go, 2=-fallback (dal nome del gruppo)."""
         g = str(d.get("group") or "")
-        if g.endswith(config.fallback_suffix or "-fallback"):
+        if g.endswith(gw_state.config.fallback_suffix or "-fallback"):
             return 2
-        if g.endswith(router.policy.go_suffix or "-go"):
+        if g.endswith(gw_state.router.policy.go_suffix or "-go"):
             return 1
         return 0
 
     # --- candidati: la CATENA CAPABILITY del profilo, che e' la lista
     #     completa dei deployment con cap `stt` (free + -go + -fallback).
-    chains = getattr(router.config, "chains_cap", {}).get(profile or "") or {}
+    chains = getattr(gw_state.router.config, "chains_cap", {}).get(profile or "") or {}
     uniques = list(chains.get("stt") or ())
     cands: list[dict] = []
     seen_u: set[str] = set()
@@ -2107,7 +2110,7 @@ async def _stt_bridge_transcribe(
         if u in seen_u:
             continue
         seen_u.add(u)
-        d = router.config.deployment_by_unique(u)
+        d = gw_state.router.config.deployment_by_unique(u)
         if d is not None:
             cands.append(d)
     if not cands:
@@ -2115,13 +2118,13 @@ async def _stt_bridge_transcribe(
         # gruppo -stt direttamente, se esiste.
         grp = None
         if profile:
-            for cand in (f"{config.proxy_prefix}{profile}-stt", f"{config.proxy_prefix}{profile}-stt-fallback"):
-                if cand in router.config.groups:
+            for cand in (f"{gw_state.config.proxy_prefix}{profile}-stt", f"{gw_state.config.proxy_prefix}{profile}-stt-fallback"):
+                if cand in gw_state.router.config.groups:
                     grp = cand
                     break
         if grp is None:
             return ""
-        d = router.config.deployment_by_unique(grp) or router.pick_deployment(grp, need)
+        d = gw_state.router.config.deployment_by_unique(grp) or gw_state.router.pick_deployment(grp, need)
         if d is None:
             return ""
         cands = [d]
@@ -2129,7 +2132,7 @@ async def _stt_bridge_transcribe(
     # --- ordine: tier, poi i VIVI prima dei raffreddati, poi i liberi prima
     #     di quelli gia' presi da un altro chunk.
     def _key(d: dict):
-        return (_tier(d), 1 if router.is_cooled_down(d["unique"]) else 0, 1 if d["unique"] in used else 0)
+        return (_tier(d), 1 if gw_state.router.is_cooled_down(d["unique"]) else 0, 1 if d["unique"] in used else 0)
 
     cands.sort(key=_key)
 
@@ -2145,11 +2148,11 @@ async def _stt_bridge_transcribe(
             continue
         tried.add(cur)
         used.add(cur)
-        _was_dormant = router.is_cooled_down(cur)
-        router.note_start(cur)
+        _was_dormant = gw_state.router.is_cooled_down(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
-            res = await forwarder.transcribe(
+            res = await gw_state.forwarder.transcribe(
                 dep,
                 {},
                 chunk,
@@ -2161,9 +2164,9 @@ async def _stt_bridge_transcribe(
                 session=_sess,
                 attribution=_attr,
             )
-            router.note_result(cur, (time.monotonic() - t0) * 1000)
+            gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
-                router.clear_cooldown(cur)
+                gw_state.router.clear_cooldown(cur)
             metrics.inc("nx_stt_total", (dep["group"], "ok"))
             res, _scrubbed = sttscrub.scrub_payload(res)
             if _scrubbed:
@@ -2189,7 +2192,7 @@ async def _stt_bridge_transcribe(
         except UpstreamError as err:
             last_err = err
             detail = str(err.detail or "")
-            router.note_end(cur)
+            gw_state.router.note_end(cur)
             st = abs(err.status) if err.status else 0
             if -err.status in (400, 403) and media_reject_signature(detail):
                 try:
@@ -2197,9 +2200,9 @@ async def _stt_bridge_transcribe(
                 except Exception:  # noqa: BLE001
                     report_suppressed("main._stt_bridge_transcribe@2210")
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=detail[:80], status=st or None)
+                gw_state.router.mark_failed_double_residual(cur, reason=detail[:80], status=st or None)
             else:
-                router.mark_failed(cur, seconds=err.retry_after, status=st or None)
+                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=st or None)
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
             # NON si esce: si prosegue col candidato successivo. Solo a lista
             # esaurita si dichiara il fallimento (ritorno "").
@@ -2232,7 +2235,7 @@ async def _stt_bridge(
     try:
         from .ctxcompact import ctxcompact_config_from_policy, frontier_boundary  # noqa: PLC0415
 
-        _cc = ctxcompact_config_from_policy(router.policy)
+        _cc = ctxcompact_config_from_policy(gw_state.router.policy)
         _b = frontier_boundary(payload.get("messages") or [], _cc, max_in=0, boundary_floor=0)
         boundary = _b
     except Exception:  # noqa: BLE001
@@ -2245,7 +2248,7 @@ async def _stt_bridge(
 
     try:
         out = await sttchat.resolve_audio_in_payload(
-            payload, boundary=boundary, transcript_one=_one, policy=router.policy
+            payload, boundary=boundary, transcript_one=_one, policy=gw_state.router.policy
         )
     except Exception as e:  # noqa: BLE001
         log.warning("[stt-bridge] errore inatteso: %s", e)
@@ -2295,7 +2298,7 @@ async def _stream_with_fallback(
     # copia per tentativo). L'originale resta intatto: i rimedi che
     # ripristinano la history (reasoning replay) continuano a vedere tutto.
     try:
-        _imax = int(getattr(router.policy, "chat_images_max", 0) or 0)
+        _imax = int(getattr(gw_state.router.policy, "chat_images_max", 0) or 0)
     except Exception:  # noqa: BLE001
         _imax = 0
     if _imax > 0 and count_image_parts(payload.get("messages") or []) > _imax:
@@ -2317,7 +2320,7 @@ async def _stream_with_fallback(
     _cstr_steps: dict[str, set] = {}  # rimedi content-string per dep
     _rsn_restored = False  # history originale gia' riprovata
     _max_tries = int(
-        getattr(router.policy, "max_fallback_tries", os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128")) or 128
+        getattr(gw_state.router.policy, "max_fallback_tries", os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128")) or 128
     )
     # Tool repair config per streaming
     from .toolrepair import create_tool_repair_config
@@ -2326,14 +2329,14 @@ async def _stream_with_fallback(
     _tr_cfg = create_tool_repair_config(
         {
             "tool_repair": {
-                "enabled": router.policy.tool_repair_enabled,
-                "default_level": router.policy.tool_repair_default_level,
-                "disable_for_google": router.policy.tool_repair_disable_for_google,
-                "max_args_size": router.policy.tool_repair_max_args_size,
+                "enabled": gw_state.router.policy.tool_repair_enabled,
+                "default_level": gw_state.router.policy.tool_repair_default_level,
+                "disable_for_google": gw_state.router.policy.tool_repair_disable_for_google,
+                "max_args_size": gw_state.router.policy.tool_repair_max_args_size,
             },
         }
     )
-    _fc = fake_config_from_policy(router.policy)
+    _fc = fake_config_from_policy(gw_state.router.policy)
     from .texttoolparse import (
         text_config_from_policy,
         parse_text_toolcalls,
@@ -2341,18 +2344,18 @@ async def _stream_with_fallback(
         truncation_config_from_policy,
     )
 
-    _tt = text_config_from_policy(router.policy)
-    _tct_cfg = truncation_config_from_policy(router.policy)
+    _tt = text_config_from_policy(gw_state.router.policy)
+    _tct_cfg = truncation_config_from_policy(gw_state.router.policy)
     from .sampling import sampling_config_from_policy
 
-    _sm = sampling_config_from_policy(router.policy)
+    _sm = sampling_config_from_policy(gw_state.router.policy)
     from .schemaout import enforce_response, schemaout_config_from_policy
     from .forwarder import _corrective_note, _corrective_kind
 
-    _so = schemaout_config_from_policy(router.policy)
+    _so = schemaout_config_from_policy(gw_state.router.policy)
     # QC di contenuto (parita' col non-stream): attivi anche in hold.
-    qc = router.policy.qc_json
-    san = router.policy.qc_sanity
+    qc = gw_state.router.policy.qc_json
+    san = gw_state.router.policy.qc_sanity
     _synth: list[bytes] = []
     # OUTPUT STRUTTURATO in HOLD: la risposta bufferizzata viene trattata come
     # non-streaming -> pulizia/riparazione JSON prima di inviare i byte.
@@ -2361,7 +2364,7 @@ async def _stream_with_fallback(
     _so_text = ""  # content sanificato da inviare
     t_req = time.monotonic()
     try:
-        _hedge_ms = int(getattr(router.policy.qc_json, "stream_hedge_delay_ms", 0) or 0)
+        _hedge_ms = int(getattr(gw_state.router.policy.qc_json, "stream_hedge_delay_ms", 0) or 0)
     except Exception:
         _hedge_ms = 0
     attempts: list[str] = []
@@ -2390,14 +2393,14 @@ async def _stream_with_fallback(
         """fallback_next + P1-5: salta gli host che hanno gia' fallito a
         livello provider in QUESTA richiesta; se non ne restano, torna al
         candidato saltato (mai lasciare la richiesta senza risposta)."""
-        k.setdefault("out_tokens", refill_out_budget(payload, router.policy))
-        _n = router.fallback_next(*a, **k)
+        k.setdefault("out_tokens", refill_out_budget(payload, gw_state.router.policy))
+        _n = gw_state.router.fallback_next(*a, **k)
         if _n is None or dep_host(_n) not in skip_hosts:
             return _n
         _saved = _n
         for _ in range(8):
             tried_set.add(_saved["unique"])
-            _c = router.fallback_next(*a, **k)
+            _c = gw_state.router.fallback_next(*a, **k)
             if _c is None:
                 return _saved
             if dep_host(_c) not in skip_hosts:
@@ -2429,28 +2432,28 @@ async def _stream_with_fallback(
         _so_text = ""
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])
-        _was_dormant = router.is_cooled_down(dep["unique"])
+        _was_dormant = gw_state.router.is_cooled_down(dep["unique"])
 
         def _fail(u, *, seconds=None, reason=None, status=None, provenance=None, kind=None):
             if kind is not None:
                 # errore che IMPONE una strategia (es. PERMANENT_DEAD ->
                 # retirement): nessun cooldown, la decisione e' del lifecycle.
-                return router.mark_failed(u, reason=reason, status=status, kind=kind)
+                return gw_state.router.mark_failed(u, reason=reason, status=status, kind=kind)
             if _was_dormant:
-                _r = router.mark_failed_double_residual(u, reason=reason, status=status)
+                _r = gw_state.router.mark_failed_double_residual(u, reason=reason, status=status)
             else:
-                _r = router.mark_failed(u, seconds=seconds, reason=reason, status=status, provenance=provenance)
+                _r = gw_state.router.mark_failed(u, seconds=seconds, reason=reason, status=status, provenance=provenance)
             # P1-4: 3 KO dello stesso MODELLO (anche su chiavi diverse) entro
             # la finestra -> bench del modello su tutte le sue chiavi.
             with contextlib.suppress(Exception):
-                router.note_model_failure(dep)
+                gw_state.router.note_model_failure(dep)
             return _r
 
-        router.note_start(dep["unique"], ctx)
+        gw_state.router.note_start(dep["unique"], ctx)
         # qcp PRIMA del try: lo usano anche gli handler `except` (es.
         # stream_total_deadline_ms), quindi deve essere sempre definito anche se
         # `stream_response` solleva UpstreamError al primo invio (429/402 subito).
-        qcp = router.policy.qc_json
+        qcp = gw_state.router.policy.qc_json
         try:
             t_att = time.monotonic()
             # hook: a fine stream, se il guard ha trovato un tag tool-call
@@ -2476,9 +2479,9 @@ async def _stream_with_fallback(
                     _tct_cfg.cooldown_sec,
                 )
                 if _was:
-                    router.mark_failed_double_residual(_u, reason="truncated_toolcall")
+                    gw_state.router.mark_failed_double_residual(_u, reason="truncated_toolcall")
                 else:
-                    router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec, reason="truncated_toolcall")
+                    gw_state.router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec, reason="truncated_toolcall")
 
             if dep.get("thinking_replay") and orig_messages:
                 _tpr = restore_reasoning(payload, orig_messages)
@@ -2489,15 +2492,15 @@ async def _stream_with_fallback(
                         dep["unique"],
                         _tpr,
                     )
-            _lease = router.key_lease_acquire(dep)  # P2-8 (opt-in)
+            _lease = gw_state.router.key_lease_acquire(dep)  # P2-8 (opt-in)
             # HOLD (parita' col non-stream): se la risposta sara' interamente
             # bufferizzata, la riparazione tool-call NON si fa nel filtro SSE
             # incrementale ma ALLA FINE sull'output GREZZO totale (stessa
             # riparazione del percorso non-streaming). Vedi blocco HOLD sotto.
             _defer_tr = bool(dep.get("hold_until_finish")) or bool(
-                getattr(router.policy.qc_json, "stream_hold_until_finish", False)
+                getattr(gw_state.router.policy.qc_json, "stream_hold_until_finish", False)
             )
-            gen = await forwarder.stream_response(
+            gen = await gw_state.forwarder.stream_response(
                 dep,
                 payload,
                 profile=profile or "",
@@ -2509,7 +2512,7 @@ async def _stream_with_fallback(
                 truncation_config=_tct_cfg,
                 truncation_hook=_trunc_hook,
                 maxtok_hook=lambda old, new: _maxtok.update(cap=new, old=old),
-                rate_hook=lambda u, rl: router.note_rate_limit(u, rl),
+                rate_hook=lambda u, rl: gw_state.router.note_rate_limit(u, rl),
                 defer_tool_repair=_defer_tr,
             )
             # la TTFB vera e' il tempo fino agli HEADER upstream
@@ -2519,17 +2522,17 @@ async def _stream_with_fallback(
             ttfb_ms = int((time.monotonic() - t_att) * 1000)
             _quality = 1.0
             if _was_dormant:
-                router.clear_cooldown(dep["unique"])
+                gw_state.router.clear_cooldown(dep["unique"])
             # ANTI-STALLO (1): lo stream verso il client NON parte finche' non
             # arriva CONTENUTO DI RISPOSTA reale. Entro stream_first_content_ms
             # un upstream vuoto/errore/lento viene ruotato in modo TRASPARENTE
             # (nessun byte inviato). Esaurita la catena -> risposta "notice".
-            qcp = router.policy.qc_json
+            qcp = gw_state.router.policy.qc_json
             # ADATTIVO: deadline proporzionale alla latenza storica (EMA) del
             # dep scelto, con pavimento e tetto. Un dep normalmente veloce che
             # stalla non trattiene la richiesta per il cap; un dep lento ha un
             # margine proporzionato (mai oltre il cap). EMA ignota -> cap.
-            fc_ms = router.first_content_deadline_ms(dep["unique"], ctx)
+            fc_ms = gw_state.router.first_content_deadline_ms(dep["unique"], ctx)
             incl_reason = bool(getattr(qcp, "stream_commit_include_reasoning", False))
             min_ch = int(getattr(qcp, "stream_commit_min_chars", 40) or 0)
             # HOLD-UNTIL-FINISH: attesa della chiusura PULITA dello stream
@@ -2552,7 +2555,7 @@ async def _stream_with_fallback(
             _legacy = False
             _refill = False
             _zen_hunt = False  # caccia canary zen-only (nativo)
-            _pol = router.policy
+            _pol = gw_state.router.policy
             # Budget di output della richiesta: serve SEMPRE (non solo in
             # refill) — e' il criterio di "capace" per il gruppo warm (gate
             # della gara lenta e conteggi di prontezza). Senza questo il gate
@@ -2562,7 +2565,7 @@ async def _stream_with_fallback(
             # (cascata refill, hedge canary, sveglia) si sospende: spreca
             # rate-limit e chiavi. Resta la rotazione della ladder.
             try:
-                _degraded = router.degraded_active()
+                _degraded = gw_state.router.degraded_active()
             except Exception:
                 _degraded = False
             if _degraded and not _wake_spawned:
@@ -2575,7 +2578,7 @@ async def _stream_with_fallback(
             # si arriva via FALLBACK dal dim, la speculativa resta attiva per
             # tornare al caldo appena possibile.
             _esc_grp = is_escalation_group(
-                str(requested_group or ""), router.config.go_suffix, router.config.fallback_suffix
+                str(requested_group or ""), gw_state.router.config.go_suffix, gw_state.router.config.fallback_suffix
             )
             if (
                 session
@@ -2586,15 +2589,15 @@ async def _stream_with_fallback(
                 and bool(getattr(_pol, "warm_refill_enabled", True))
                 and bool(getattr(_pol, "warm_pool_enabled", True))
             ):
-                _ready = router.warm_ready_effective(session, _pol)
+                _ready = gw_state.router.warm_ready_effective(session, _pol)
                 _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight", 6) or 0))
                 try:
-                    _fly = router.probes_in_flight(session)
+                    _fly = gw_state.router.probes_in_flight(session)
                 except Exception:
                     _fly = 0
                 if _ready and _refill_rounds < _maxif and _fly < _maxif:
                     try:
-                        _pool = router.warm_valid_for(
+                        _pool = gw_state.router.warm_valid_for(
                             session,
                             profile,
                             requested_group or dep.get("group"),
@@ -2610,18 +2613,18 @@ async def _stream_with_fallback(
                     # Nativo opencode SENZA zen nel warm: caccia un canary
                     # zen-only anche se il conteggio MISTO basta (basta 1 zen).
                     _zen_hunt = (
-                        router._zen_first_active()
+                        gw_state.router._zen_first_active()
                         and not any(is_opencode_zen_dep(d) for d in _pool)
-                        and router.hunt_allowed(session, ctx)
+                        and gw_state.router.hunt_allowed(session, ctx)
                     )
                     _refill = (_nv < _ready) or _zen_hunt
                     if _zen_hunt:
-                        router.note_hunt(session, ctx, gained=False)
+                        gw_state.router.note_hunt(session, ctx, gained=False)
                         log.info(
                             "[refill] %s: 0 zen nel warm per client nativo -> caccia canary zen-only", dep.get("unique")
                         )
                     if _refill:
-                        _rpm = router.session_rpm(session)
+                        _rpm = gw_state.router.session_rpm(session)
                         log.info(
                             "[refill] %s: warm validi %d/%d, in volo "
                             "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
@@ -2652,17 +2655,17 @@ async def _stream_with_fallback(
             _slow_canary_ms = 0
             if not _degraded and not _esc_grp:
                 try:
-                    _slow_ms = int(getattr(router.policy, "stream_slow_race_after_ms", 0) or 0)
+                    _slow_ms = int(getattr(gw_state.router.policy, "stream_slow_race_after_ms", 0) or 0)
                 except Exception:
                     _slow_ms = 0
                 try:
-                    _slow_canary_ms = int(getattr(router.policy, "slow_canary_after_ms", 0) or 0)
+                    _slow_canary_ms = int(getattr(gw_state.router.policy, "slow_canary_after_ms", 0) or 0)
                 except Exception:
                     _slow_canary_ms = 0
             _slow_only = bool((_slow_ms > 0 or _slow_canary_ms > 0) and not _refill)
             if not _degraded and not _esc_grp and (_hedge_ms > 0 or _refill or _slow_only):
                 try:
-                    _h_dep = router.cache_holder(need=need, ctx=ctx)
+                    _h_dep = gw_state.router.cache_holder(need=need, ctx=ctx)
                     _h_u = _h_dep["unique"] if _h_dep else None
                 except Exception:
                     _h_u = None
@@ -2671,7 +2674,7 @@ async def _stream_with_fallback(
                 _legacy = (
                     not _warm_useful
                     and (_races_max == 0 or _races_done < _races_max)
-                    and router.hunt_allowed(session, ctx)
+                    and gw_state.router.hunt_allowed(session, ctx)
                 )
                 if _legacy or _refill or _slow_only:
                     if _refill:
@@ -2683,7 +2686,7 @@ async def _stream_with_fallback(
                         # bucket, TTFT fisiologico). La gara lenta NON lo
                         # sostituisce: e' un timer separato dentro _hedge_peek.
                         try:
-                            _h_ms = router.hedge_delay_ms(dep["unique"], ctx)
+                            _h_ms = gw_state.router.hedge_delay_ms(dep["unique"], ctx)
                         except Exception:
                             _h_ms = _hedge_ms
                     if _h_ms <= 0 and _slow_only:
@@ -2742,7 +2745,7 @@ async def _stream_with_fallback(
                 if _legacy:
                     # backoff "il buono non esiste": solo la gara legacy
                     # consuma il budget caccia; il refill ha il suo (round).
-                    router.note_hunt(session, ctx, gained=(dep["unique"] != _dep_before))
+                    gw_state.router.note_hunt(session, ctx, gained=(dep["unique"] != _dep_before))
             else:
                 verdict, prebuf, pending, meta = await _peek_stream(
                     gen,
@@ -2760,7 +2763,7 @@ async def _stream_with_fallback(
             # stream_parachute_no_timeout, default True). Sotto HOLD la
             # consegna e' SEMPRE bufferizzata (mai byte live): si scarta la
             # coda in volo cosi' il tool repair hold gira sul buffer parziale.
-            _pv = _parachute_verdict(verdict, qcp, dep, router.policy, hold=hold, has_buffer=bool(prebuf))
+            _pv = _parachute_verdict(verdict, qcp, dep, gw_state.router.policy, hold=hold, has_buffer=bool(prebuf))
             if hold and verdict == "timeout" and _pv == "content":
                 await _discard_stream(gen, pending)
                 pending = None
@@ -2807,7 +2810,7 @@ async def _stream_with_fallback(
                 _pat = looks_like_fake_tool_call(_buffered_answer_text(prebuf), _fc)
                 if _pat:
                     metrics.inc("nx_fake_toolcall_total", (dep["unique"], "detected"))
-                    _esc = is_escalation_group(dep.get("group"), router.config.go_suffix, router.config.fallback_suffix)
+                    _esc = is_escalation_group(dep.get("group"), gw_state.router.config.go_suffix, gw_state.router.config.fallback_suffix)
                     if _esc:
                         # sul bucket di escalation non c'e' dove ruotare senza
                         # loop: si logga e si lascia al sanitizzatore (strip dei
@@ -2902,7 +2905,7 @@ async def _stream_with_fallback(
                     )
                 elif _so_st == "invalid":
                     _r5 = _so_rep.get("reason") or "schema"
-                    if getattr(router.policy, "corrective_retry_enabled", True) and dep["unique"] not in _so_corrected:
+                    if getattr(gw_state.router.policy, "corrective_retry_enabled", True) and dep["unique"] not in _so_corrected:
                         _so_corrected.add(dep["unique"])
                         payload.setdefault("messages", []).append(
                             {"role": "system", "content": _corrective_note("schema")}
@@ -2956,7 +2959,7 @@ async def _stream_with_fallback(
                         _qc_reason = check_sanity(_qc_obj, payload, san)
                 if _qc_reason:
                     _ck = _corrective_kind(_qc_reason)
-                    if getattr(router.policy, "corrective_retry_enabled", True) and dep["unique"] not in _so_corrected:
+                    if getattr(gw_state.router.policy, "corrective_retry_enabled", True) and dep["unique"] not in _so_corrected:
                         _so_corrected.add(dep["unique"])
                         payload.setdefault("messages", []).append({"role": "system", "content": _corrective_note(_ck)})
                         metrics.inc("nx_corrective_retry_total", (dep["unique"], _ck))
@@ -2995,22 +2998,22 @@ async def _stream_with_fallback(
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
                 # scorciatoia per le prossime richieste di QUEL bucket.
-                router.note_result(
+                gw_state.router.note_result(
                     dep["unique"], (time.monotonic() - t_att) * 1000, quality=_quality, ctx_est=ctx, kind="ttft"
                 )
-                router.record_escalation_win(requested_group, dep)
-                router.note_session_success(
+                gw_state.router.record_escalation_win(requested_group, dep)
+                gw_state.router.note_session_success(
                     ses, dep["unique"], (time.monotonic() - t_att) * 1000, ctx_est=ctx, kind="ttft"
                 )
                 # P2-8: la gara e' decisa; la lease si libera qui (il cap
                 # serve a non FAR PARTIRE nuovi tentativi su chiave satura).
-                router.key_lease_release(_lease)
+                gw_state.router.key_lease_release(_lease)
                 _lease = None
                 break  # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)
-            router.note_end(dep["unique"], ctx)
-            router.key_lease_release(_lease)  # P2-8
+            gw_state.router.note_end(dep["unique"], ctx)
+            gw_state.router.key_lease_release(_lease)  # P2-8
             _lease = None
             # ATTEMPT TRAIL anche per i VERDETTI: senza questo hop un 503 con
             # catena esaurita per verdetti (empty_eof/length_truncated/
@@ -3050,7 +3053,7 @@ async def _stream_with_fallback(
             except Exception:  # noqa: BLE001
                 report_suppressed("main._stream_with_fallback@3063")
             fr = meta.get("finish_reason")
-            rot_len = getattr(router.policy.qc_sanity, "rotate_on_length_empty", False)
+            rot_len = getattr(gw_state.router.policy.qc_sanity, "rotate_on_length_empty", False)
             # NON ruotare (e non punire) se il modello HA prodotto reasoning o
             # ha esaurito max_tokens: non e' rotto, ruotare non cambia nulla
             # (tutto il gruppo si comporterebbe uguale) -> 503 retryable diretto.
@@ -3100,7 +3103,7 @@ async def _stream_with_fallback(
                     # ritenta lo stesso dep (corrective) o si ruota.
                     log.info("[struct-out] %s: %s senza cooldown", dep["unique"], verdict)
                 else:
-                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                    _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
             over_deadline = (time.monotonic() - t_req) * 1000 > int(
                 getattr(qcp, "stream_total_deadline_ms", 90000) or 90000
             )
@@ -3110,15 +3113,15 @@ async def _stream_with_fallback(
                 nxt = dep
             elif verdict == "fake_tool_call":
                 nxt = (
-                    router.force_escalation(
-                        dep, need, ctx, tried=tried_set, out_tokens=refill_out_budget(payload, router.policy)
+                    gw_state.router.force_escalation(
+                        dep, need, ctx, tried=tried_set, out_tokens=refill_out_budget(payload, gw_state.router.policy)
                     )
                     if profile
                     else None
                 )
-                if nxt is None and profile and router._is_renewal_bucket(str(dep.get("group") or "")):
-                    nxt = router._free_last_resort(
-                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                if nxt is None and profile and gw_state.router._is_renewal_bucket(str(dep.get("group") or "")):
+                    nxt = gw_state.router._free_last_resort(
+                        dep, need, ctx, tried_set, refill_out_budget(payload, gw_state.router.policy), requested_group
                     )
             else:
                 # Su troncatura/risposta-vuota preferiamo un candidato PIU'
@@ -3131,7 +3134,7 @@ async def _stream_with_fallback(
                     None
                     if (no_rotate or over_deadline)
                     else (
-                        router.fallback_next(
+                        gw_state.router.fallback_next(
                             profile,
                             dep,
                             need,
@@ -3139,7 +3142,7 @@ async def _stream_with_fallback(
                             ctx=ctx,
                             tried=tried_set,
                             requested_group=requested_group,
-                            out_tokens=refill_out_budget(payload, router.policy),
+                            out_tokens=refill_out_budget(payload, gw_state.router.policy),
                             prefer_capable=_cap_pref,
                         )
                         if profile
@@ -3163,10 +3166,10 @@ async def _stream_with_fallback(
                     nxt is None
                     and profile
                     and not over_deadline
-                    and router._is_renewal_bucket(str(dep.get("group") or ""))
+                    and gw_state.router._is_renewal_bucket(str(dep.get("group") or ""))
                 ):
-                    _flr = router._free_last_resort(
-                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                    _flr = gw_state.router._free_last_resort(
+                        dep, need, ctx, tried_set, refill_out_budget(payload, gw_state.router.policy), requested_group
                     )
                 if _flr is not None:
                     nxt = _flr
@@ -3192,15 +3195,15 @@ async def _stream_with_fallback(
                             "%s (%s)" % (verdict, fr) if fr else verdict,
                             prefix_reason=prefix_reason,
                             trail=trail,
-                            retry_at_ms=_retry_at_ms(router, trail),
+                            retry_at_ms=_retry_at_ms(gw_state.router, trail),
                         )
                     )
             dep = nxt
-            inject_identity(payload, dep, router=router)
+            inject_identity(payload, dep, router=gw_state.router)
             continue  # ri-entra nel while col nuovo dep
         except UpstreamError as err:
-            router.note_end(dep["unique"], ctx)  # tentativo chiuso senza stream
-            router.key_lease_release(_lease)  # P2-8
+            gw_state.router.note_end(dep["unique"], ctx)  # tentativo chiuso senza stream
+            gw_state.router.key_lease_release(_lease)  # P2-8
             _lease = None
             detail = err.detail or ""
             # ATTEMPT TRAIL: registra l'hop fallito con la sua classe onesta
@@ -3250,8 +3253,8 @@ async def _stream_with_fallback(
             # (Anthropic/Gemini). Ruotare non aiuta: tutte le chiavi dello
             # stesso provider rifiutano lo stesso payload.
             _steps = _rsn_steps.setdefault(dep["unique"], set())
-            _replim = int(getattr(router.policy, "repair_exempt_streak_limit", 3) or 0)
-            _rexb = router.repair_exempt_blocked(dep["unique"], _replim)
+            _replim = int(getattr(gw_state.router.policy, "repair_exempt_streak_limit", 3) or 0)
+            _rexb = gw_state.router.repair_exempt_blocked(dep["unique"], _replim)
             _rr = (
                 None
                 if _rexb
@@ -3267,8 +3270,8 @@ async def _stream_with_fallback(
                 # prevedono cooldown, quindi lo applichiamo qui (altrimenti
                 # il dep verrebbe ritentato all'infinito su ogni richiesta).
                 with contextlib.suppress(Exception):
-                    _f24 = router.stats_for(dep["unique"]).fail_count_24h
-                    router.mark_failed(
+                    _f24 = gw_state.router.stats_for(dep["unique"]).fail_count_24h
+                    gw_state.router.mark_failed(
                         dep["unique"],
                         seconds=_soft_cd(_f24),
                         reason="repair_exempt_exhausted",
@@ -3279,18 +3282,18 @@ async def _stream_with_fallback(
                 dep["_no_thinking"] = True  # copia locale, non il CSV
             if _rr:
                 with contextlib.suppress(Exception):
-                    router.note_repair_exempt(dep["unique"])
+                    gw_state.router.note_repair_exempt(dep["unique"])
                 metrics.inc("nx_reasoning_replay_total", (_rr,))
                 log.warning("[reasoning-%s] %s: rimedio applicato -> ritento lo stesso deployment", _rr, dep["unique"])
                 # IMPARA il flag corrispondente: d'ora in poi il CSV lo porta
                 # per questo modello (tutti i gemelli) e parte corretto.
                 with contextlib.suppress(Exception):
                     if _rr == "repaired":
-                        learn_thinking_replay(router, dep.get("model"))
+                        learn_thinking_replay(gw_state.router, dep.get("model"))
                     elif _rr == "stripped":
-                        learn_strip_reasoning(router, dep.get("model"))
+                        learn_strip_reasoning(gw_state.router, dep.get("model"))
                     elif _rr == "downgraded":
-                        learn_no_thinking(router, dep.get("model"))
+                        learn_no_thinking(gw_state.router, dep.get("model"))
                 continue
             # CONTENT ARRAY -> STRING (provider schema stretto, es.
             # Cloudflare Workers AI): 400 "'array' not in 'string'" /
@@ -3315,7 +3318,7 @@ async def _stream_with_fallback(
                         _fn,
                     )
                     with contextlib.suppress(Exception):
-                        learn_content_string(router, dep.get("model"))
+                        learn_content_string(gw_state.router, dep.get("model"))
                     dep = dict(dep)
                     dep["content_string"] = True  # copia locale (retry)
                     continue
@@ -3341,19 +3344,19 @@ async def _stream_with_fallback(
             # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
             # Service): quarantena dell'HOST 24h, cosi' la rotazione non
             # brucia una chiave dietro l'altra dello stesso provider.
-            maybe_quarantine_ban(router, dep, err.status, detail)
+            maybe_quarantine_ban(gw_state.router, dep, err.status, detail)
             # 502/503 mid-stream di un aggregatore: e' l'HOST a essere
             # malato -> pausa BREVE dell'host invece di bruciare le chiavi
             # sorelle (elasticita' per un problema transitorio).
-            maybe_host_transient_cooldown(router, dep, err.status, detail)
+            maybe_host_transient_cooldown(gw_state.router, dep, err.status, detail)
             # 413/400 "context length": il provider ha rivelato il VERO
             # limite di input -> ridimensiona il deployment (regola utente).
-            note_context_limit(router, dep, err.status, detail, ctx)
+            note_context_limit(gw_state.router, dep, err.status, detail, ctx)
             # QUOTA DI ACCOUNT (Cloudflare & co.): la quota e' dell'account,
             # non della chiave -> metti in pausa TUTTE le chiavi sorelle fino
             # al reset invece di ruotarle a vuoto una per una.
             with contextlib.suppress(Exception):
-                maybe_account_quota_cooldown(router, dep, err.status, detail)
+                maybe_account_quota_cooldown(gw_state.router, dep, err.status, detail)
             # D5 anche in STREAMING: 4xx deployment-side (firma provider-side,
             # modello inesistente oppure 404) -> fallback pre-byte invece di
             # pass-through. Gli altri 4xx restano errori del client.
@@ -3434,7 +3437,7 @@ async def _stream_with_fallback(
                 reason = "provider_transient"
             elif _MODEL_MISSING_RE.search(detail):
                 reason = "model_missing"
-            elif router.policy.qc_json.retry_provider_4xx and openai_sig:
+            elif gw_state.router.policy.qc_json.retry_provider_4xx and openai_sig:
                 reason = "openai_error"
             elif err.status == -402:
                 reason = "http_402"
@@ -3460,7 +3463,7 @@ async def _stream_with_fallback(
                 reason = "http_%s" % err.status if err.status else "network"
             if err.status is not None and err.status < 0:
                 provider_side = (
-                    (router.policy.qc_json.retry_provider_4xx and openai_sig)
+                    (gw_state.router.policy.qc_json.retry_provider_4xx and openai_sig)
                     or _MODEL_MISSING_RE.search(detail)
                     or thought_sig
                     or prov_err
@@ -3502,7 +3505,7 @@ async def _stream_with_fallback(
                     # ruotano (e per i dim espliciti la ladder sale di dim).
                     _actual = extract_requested_tokens(detail)
                     try:
-                        router.note_session_overflow(ses, _actual or 0)
+                        gw_state.router.note_session_overflow(ses, _actual or 0)
                     except Exception:  # noqa: BLE001
                         report_suppressed("main._stream_with_fallback@3519")
                     log.warning(
@@ -3531,12 +3534,12 @@ async def _stream_with_fallback(
                     # Rilascia dep-sticky: questa key NON tornerà prima del
                     # reset; la sessione deve ripartire su un'altra chiave.
                     if ses:
-                        cur = router.dep_sticky_get(ses)
+                        cur = gw_state.router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
-                            router.dep_sticky_release(ses)
+                            gw_state.router.dep_sticky_release(ses)
                 elif reason in ("provider_transient", "empty_error_body"):
-                    _cd = router.escalate_cooldown(
-                        fwd.PROVIDER_TRANSIENT_COOLDOWN_S, router.stats_for(dep["unique"]).fail_count_24h
+                    _cd = gw_state.router.escalate_cooldown(
+                        fwd.PROVIDER_TRANSIENT_COOLDOWN_S, gw_state.router.stats_for(dep["unique"]).fail_count_24h
                     )
                 elif reason == "model_missing":
                     _cd = fwd.MODEL_MISSING_COOLDOWN_S
@@ -3545,17 +3548,17 @@ async def _stream_with_fallback(
                     # rilascia lo sticky, la sessione riparte su un'altra key.
                     _cd = fwd.PERMISSION_DENIED_COOLDOWN_S
                     if ses:
-                        cur = router.dep_sticky_get(ses)
+                        cur = gw_state.router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
-                            router.dep_sticky_release(ses)
+                            gw_state.router.dep_sticky_release(ses)
                 elif reason == "upstream_401":
                     # Chiave assente/invalidata/revocata: stessa gestione del
                     # 403 (cooldown lungo + rilascio sticky).
                     _cd = fwd.PERMISSION_DENIED_COOLDOWN_S
                     if ses:
-                        cur = router.dep_sticky_get(ses)
+                        cur = gw_state.router.dep_sticky_get(ses)
                         if cur and cur == dep["unique"]:
-                            router.dep_sticky_release(ses)
+                            gw_state.router.dep_sticky_release(ses)
                 elif reason == "loop_detected":
                     # Loop degenere in streaming: cooldown medio, si ruota
                     # subito (un'altra chiave/modello puo' rispondere).
@@ -3571,9 +3574,9 @@ async def _stream_with_fallback(
                 if fwd.is_insufficient_balance(detail):
                     # BILANCIO ESAURITO: ritira il DEPLOYMENT (sblocco manuale).
                     if ses:
-                        _cur = router.dep_sticky_get(ses)
+                        _cur = gw_state.router.dep_sticky_get(ses)
                         if _cur and _cur == dep["unique"]:
-                            router.dep_sticky_release(ses)
+                            gw_state.router.dep_sticky_release(ses)
                     _fail(dep["unique"], reason="insufficient_balance", status=402, kind=fwd.ErrorKind.PERMANENT_DEAD)
                     log.warning(
                         "[fallback] stream %s 402 'insufficient balance': DEPLOYMENT RITIRATO (sblocco manuale)",
@@ -3608,9 +3611,9 @@ async def _stream_with_fallback(
                     getattr(qcp, "stream_total_deadline_ms", 90000) or 90000
                 )
                 _flr = None
-                if nxt is None and profile and not _over_dl and router._is_renewal_bucket(str(dep.get("group") or "")):
-                    _flr = router._free_last_resort(
-                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                if nxt is None and profile and not _over_dl and gw_state.router._is_renewal_bucket(str(dep.get("group") or "")):
+                    _flr = gw_state.router._free_last_resort(
+                        dep, need, ctx, tried_set, refill_out_budget(payload, gw_state.router.policy), requested_group
                     )
                 if _flr is not None:
                     nxt = _flr
@@ -3644,13 +3647,13 @@ async def _stream_with_fallback(
                             err.detail,
                             prefix_reason=prefix_reason,
                             trail=trail,
-                            retry_at_ms=_retry_at_ms(router, trail),
+                            retry_at_ms=_retry_at_ms(gw_state.router, trail),
                         )
                     )
             if ses:
-                router.sticky_handoff(ses, nxt)
+                gw_state.router.sticky_handoff(ses, nxt)
             dep = nxt
-            inject_identity(payload, dep, router=router)
+            inject_identity(payload, dep, router=gw_state.router)
         except (GeneratorExit, asyncio.CancelledError):
             raise
         except Exception as exc:
@@ -3659,10 +3662,10 @@ async def _stream_with_fallback(
             # deve 500-are la richiesta: cooldown corto + rotazione, 503 solo
             # se non resta nulla.
             try:
-                router.note_end(dep["unique"], ctx)
+                gw_state.router.note_end(dep["unique"], ctx)
             except Exception:
                 report_suppressed("main._stream_with_fallback@3676")
-            _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+            _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
             nxt = (
                 _next_filtered(profile, dep, need, scope, ctx=ctx, tried=tried_set, requested_group=requested_group)
                 if profile
@@ -3676,9 +3679,9 @@ async def _stream_with_fallback(
                     getattr(qcp, "stream_total_deadline_ms", 90000) or 90000
                 )
                 _flr = None
-                if nxt is None and profile and not _over_dl and router._is_renewal_bucket(str(dep.get("group") or "")):
-                    _flr = router._free_last_resort(
-                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                if nxt is None and profile and not _over_dl and gw_state.router._is_renewal_bucket(str(dep.get("group") or "")):
+                    _flr = gw_state.router._free_last_resort(
+                        dep, need, ctx, tried_set, refill_out_budget(payload, gw_state.router.policy), requested_group
                     )
                 if _flr is not None:
                     nxt = _flr
@@ -3703,13 +3706,13 @@ async def _stream_with_fallback(
                             repr(exc)[:160],
                             prefix_reason=prefix_reason,
                             trail=trail,
-                            retry_at_ms=_retry_at_ms(router, trail),
+                            retry_at_ms=_retry_at_ms(gw_state.router, trail),
                         )
                     )
             if ses:
-                router.sticky_handoff(ses, nxt)
+                gw_state.router.sticky_handoff(ses, nxt)
             dep = nxt
-            inject_identity(payload, dep, router=router)
+            inject_identity(payload, dep, router=gw_state.router)
 
     async def sse():
         # Watchdog PASSIVO (D4): conta chunk, rileva [DONE] ed eventi error.
@@ -3734,7 +3737,7 @@ async def _stream_with_fallback(
                 ttfb_ms=ttfb_ms,
                 usage=None,
             )
-            _note_fb_refund(router, ses, max(0, len(attempts) - 1))
+            _note_fb_refund(gw_state.router, ses, max(0, len(attempts) - 1))
             return
         sent_first = False
         chunks = 0
@@ -3772,7 +3775,7 @@ async def _stream_with_fallback(
                 fr=last_finish_reason,
                 usage=usage_final,
             )
-            _note_fb_refund(router, ses, max(0, len(attempts) - 1))
+            _note_fb_refund(gw_state.router, ses, max(0, len(attempts) - 1))
 
         # corpo del loop fattorizzato: aggiorna lo stato watchdog ed emette
         # il chunk invariato. Condiviso da prebuffer e dal flusso residuo.
@@ -3815,9 +3818,9 @@ async def _stream_with_fallback(
             # reale del provider (stream: arriva nel chunk finale di usage).
             try:
                 if isinstance(usage_final, dict) and usage_final.get("prompt_tokens"):
-                    router.note_estimate_error(dep["unique"], ctx, usage_final["prompt_tokens"])
+                    gw_state.router.note_estimate_error(dep["unique"], ctx, usage_final["prompt_tokens"])
                     # Stima per-sessione (stream): char REALI inviati a monte.
-                    router.note_session_estimate(
+                    gw_state.router.note_session_estimate(
                         ses,
                         est_chars,
                         _prompt_chars(payload.get("messages"), payload.get("tools")),
@@ -3927,11 +3930,11 @@ async def _stream_with_fallback(
             if monitor is not None:
                 monitor.cancel()
             dur_ms = int((time.monotonic() - t_req) * 1000)
-            router.note_end(dep["unique"], ctx)
+            gw_state.router.note_end(dep["unique"], ctx)
             if not aborted:
                 # F1: durata TOTALE del tentativo vincente nel bucket di
                 # contesto (il commit ha gia' registrato il TTFT).
-                router.note_stream_end(
+                gw_state.router.note_stream_end(
                     dep["unique"],
                     (time.monotonic() - t_att) * 1000,
                     ctx,
@@ -3952,12 +3955,12 @@ async def _stream_with_fallback(
                     wd = "tier1-empty"
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "empty"))
                     log.warning("[watchdog] tier1 stream VUOTO da %s (chunks=0): cooldown", dep["unique"])
-                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                    _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
                 elif seen_error:
                     wd = "tier1-error"
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "error"))
                     log.warning("[watchdog] tier1 evento error esplicito da %s (chunks=%d)", dep["unique"], chunks)
-                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                    _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
                 elif gen_loop:
                     # loop degenere: il modello streammava output ripetitivo,
                     # il detector l'ha killato -> cooldown medio e riparti.
@@ -3982,7 +3985,7 @@ async def _stream_with_fallback(
                             "[watchdog] tier2 stream in STALLO da %s (chunk=%d, stall=%.0fs): cooldown",
                             dep["unique"],
                             chunks,
-                            float(getattr(router.policy, "stream_stall_sec", 0) or 0),
+                            float(getattr(gw_state.router.policy, "stream_stall_sec", 0) or 0),
                         )
                         _fail(dep["unique"], reason="timeout")
                     else:
@@ -3994,7 +3997,7 @@ async def _stream_with_fallback(
                             chunks,
                             saw_finish_reason,
                         )
-                        _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                        _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
                 elif not seen_done:
                     # c'e' un finish_reason ma manca [DONE]: risposta di fatto
                     # completa, il provider omette solo il sentinel. Solo log.
@@ -4030,7 +4033,7 @@ async def _stream_with_fallback(
                     answer_total,
                     req_max_tokens,
                     (usage_final or {}).get("completion_tokens"),
-                    router.policy.qc_sanity.rotate_on_length_truncated,
+                    gw_state.router.policy.qc_sanity.rotate_on_length_truncated,
                 ):
                     # risposta TRONCATA dal modello (finish_reason=length) ma
                     # con contenuto: come un errore -> cooldown del dep, cosi'
@@ -4049,12 +4052,12 @@ async def _stream_with_fallback(
                         (usage_final or {}).get("completion_tokens"),
                         req_max_tokens,
                     )
-                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                    _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
                 elif (
                     answer_total == 0
                     and req_has_input
                     and not had_tool_calls
-                    and not (finish_len and not router.policy.qc_sanity.rotate_on_length_empty)
+                    and not (finish_len and not gw_state.router.policy.qc_sanity.rotate_on_length_empty)
                 ):
                     # stream "completo" ma 0 testo di risposta con input reale:
                     # fallimento silenzioso -> cooldown (nessun artefatto verso
@@ -4066,7 +4069,7 @@ async def _stream_with_fallback(
                         dep["unique"],
                         finish_len,
                     )
-                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                    _fail(dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(dep["unique"]).fail_count_24h))
             _summary(dur_ms)
             if sniffer is not None:
                 sniffer.finish_stream(
@@ -4115,18 +4118,6 @@ from .runtime_persistence import (  # noqa: E402 (re-export per lifespan + test)
     seconds_to_midnight,  # noqa: F401 - ri-esportato
 )
 
-# Re-export: `app/compat/ollama.py` chiama questi helper via
-# `import app.main as M` (M._caps_and_deps, M._model_entry,
-# M._visible_model_names). Senza questi nomi qui, quelle rotte
-# (/v1/models/{id}, /api/tags, /api/show) prenderebbero un AttributeError.
-from .models_and_health import (  # noqa: E402 (re-export per app/compat/ollama.py)
-    _caps_and_deps,  # noqa: F401 - ri-esportato
-    _model_entry,  # noqa: F401 - ri-esportato
-    _names_for_auth,  # noqa: F401 - ri-esportato
-    _view_for,  # noqa: F401 - ri-esportato
-    _visible_model_names,  # noqa: F401 - ri-esportato
-)
-
 app.include_router(_ollama_router)
 app.include_router(_models_and_health_router)
 app.include_router(_images_api_router)
@@ -4137,7 +4128,7 @@ app.include_router(_videos_api_router)
 def main() -> None:  # pragma: no cover
     import uvicorn
 
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
+    uvicorn.run("app.main:app", host=HOST, port=gw_state.PORT, log_level="info")
 
 
 if __name__ == "__main__":  # pragma: no cover

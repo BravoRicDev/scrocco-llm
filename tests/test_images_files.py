@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from app.forwarder import UpstreamError
 from app import imagestore
+import app.state as gw_state
 
 
 _PNG = b"\x89PNG\r\n\x1a\n0123456789"
@@ -223,27 +224,27 @@ def _make_client(monkeypatch, tmp_path, csv_text):
     csv = tmp_path / "k.csv"
     csv.write_text(csv_text)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path,
-            m.router.policy.cap_groups_enabled)
-    m.authn.master_key = "test-master-img"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path,
+            gw_state.router.policy.cap_groups_enabled)
+    gw_state.authn.master_key = "test-master-img"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
-    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
-    m.router.policy.cap_groups_enabled = True
+    monkeypatch.setattr(gw_state, "LEDGER", Ledger(tmp_path))
+    gw_state.router.policy.cap_groups_enabled = True
     return TestClient(m.app), m, orig
 
 
 def _teardown(m, orig):
     m.imagestore.clear()
-    m.router._cooldown.clear()
-    m.router.policy.cap_groups_enabled = orig[2]
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.router.policy.cap_groups_enabled = orig[2]
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 @pytest.fixture()
@@ -259,7 +260,7 @@ MK = {"Authorization": "Bearer test-master-img"}
 def _fun(monkeypatch, m, native=lambda d, p: (404, "not found"),
          chat=_CHAT_DATA_URI):
     fwd = _FakeForwarder(native, chat)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     return fwd
 
 
@@ -294,8 +295,9 @@ def test_mirror_url_provider(client, monkeypatch):
         assert url == "https://provider.example/x.png"
         return _PNG, "image/png"
 
-    monkeypatch.setattr(m, "_download_remote_image", fake_download)
-    monkeypatch.setattr(m.router.policy, "images_mirror_remote", True)
+    import app.image_helpers as _ih
+    monkeypatch.setattr(_ih, "_download_remote_image", fake_download)
+    monkeypatch.setattr(gw_state.router.policy, "images_mirror_remote", True)
     _fun(monkeypatch, m, native=lambda d, p: (200, {
         "created": 1, "data": [{"url": "https://provider.example/x.png"}]}),
         chat=_CHAT_DATA_URI)
@@ -310,7 +312,7 @@ def test_mirror_url_provider(client, monkeypatch):
 
 def test_url_base_policy_override(client, monkeypatch):
     c, m = client
-    monkeypatch.setattr(m.router.policy, "images_url_base",
+    monkeypatch.setattr(gw_state.router.policy, "images_url_base",
                         "https://cdn.example.com/base")
     _fun(monkeypatch, m)
     r = c.post("/v1/images/edits", headers=MK,
@@ -362,7 +364,7 @@ def test_files_200_dopo_restart_processo(client, tmp_path):
 
 def test_store_disabilitato_url_provider_intatto(client, monkeypatch):
     c, m = client
-    monkeypatch.setattr(m.router.policy, "images_store_enabled", False)
+    monkeypatch.setattr(gw_state.router.policy, "images_store_enabled", False)
     _fun(monkeypatch, m, chat=_CHAT_HTTP)
     r = c.post("/v1/images/edits", headers=MK,
                data={"model": "scrocco-llm-test", "prompt": "x"},

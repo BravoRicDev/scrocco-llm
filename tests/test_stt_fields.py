@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.forwarder import Forwarder, _stt_extras_supported
+import app.state as gw_state
 
 _CSV_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
                "priority,scrocco-llm-test,caps\n")
@@ -41,25 +42,25 @@ def client(monkeypatch, tmp_path):
     csv = tmp_path / "k.csv"
     csv.write_text(_CSV_HEADER + _ROW)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path)
-    m.authn.master_key = "test-master-stt"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
-    m.router.policy.cap_groups_enabled = True
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path)
+    gw_state.authn.master_key = "test-master-stt"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
+    gw_state.router.policy.cap_groups_enabled = True
     yield TestClient(m.app), m
-    m.router._cooldown.clear()
-    m.router.policy.cap_groups_enabled = False
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.router.policy.cap_groups_enabled = False
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 def _post(c, monkeypatch, m, **fields):
     fwd = _FakeFwd()
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     data = {"model": "scrocco-llm-test"}
     data.update(fields)
     r = c.post("/v1/audio/transcriptions", headers=MK, data=data,
@@ -117,7 +118,7 @@ class _FakeFwdText(_FakeFwd):
 
 
 def _post_text(c, m, monkeypatch, payload):
-    monkeypatch.setattr(m, "forwarder", _FakeFwdText(payload))
+    monkeypatch.setattr(gw_state, "forwarder", _FakeFwdText(payload))
     return c.post("/v1/audio/transcriptions", headers=MK,
                   data={"model": "scrocco-llm-test"},
                   files={"file": ("a.wav", b"RIFF0000", "audio/wav")})

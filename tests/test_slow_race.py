@@ -19,6 +19,7 @@ import pytest
 
 import app.main as main
 from app import forwarder as fwd_mod
+import app.state as gw_state
 
 CONTENT = ("content", [b"d"], None, {})
 TIMEOUT = ("timeout", [], None, {})
@@ -98,8 +99,8 @@ def _fake_router(B=None, holder_u=WINNER):
 
 
 async def _join_probes():
-    while main._PROBE_TASKS:
-        await asyncio.gather(*list(main._PROBE_TASKS), return_exceptions=True)
+    while gw_state._PROBE_TASKS:
+        await asyncio.gather(*list(gw_state._PROBE_TASKS), return_exceptions=True)
 
 
 async def _join_ns():
@@ -112,8 +113,8 @@ def _no_stream(*a, **k):
 
 
 def _run_probe(dep, gen, res, router, *, t0=None, race=None, ctx=100):
-    old = main.router
-    main.router = router
+    old = gw_state.router
+    gw_state.router = router
 
     async def go():
         main._spawn_probe(dep, gen, None, res, SESSION, ctx, t0=t0, race=race)
@@ -121,7 +122,7 @@ def _run_probe(dep, gen, res, router, *, t0=None, race=None, ctx=100):
     try:
         asyncio.run(go())
     finally:
-        main.router = old
+        gw_state.router = old
 
 
 def _run_peek(peek, stream_response, router, *, slow_race_ms=0,
@@ -129,7 +130,7 @@ def _run_peek(peek, stream_response, router, *, slow_race_ms=0,
               t_att_offset=0.0, session=SESSION, hold=False, refill=False):
     closed = []
     genA = FakeGen(WINNER)
-    old = (main._peek_stream, main.router, main.forwarder, main.inject_identity)
+    old = (main._peek_stream, gw_state.router, gw_state.forwarder, main.inject_identity)
 
     async def go():
         out = await main._hedge_peek(
@@ -145,13 +146,13 @@ def _run_peek(peek, stream_response, router, *, slow_race_ms=0,
         return out, closed
 
     main._peek_stream = peek
-    main.router = router
-    main.forwarder = SimpleNamespace(stream_response=stream_response)
+    gw_state.router = router
+    gw_state.forwarder = SimpleNamespace(stream_response=stream_response)
     main.inject_identity = lambda p, d, router=None: None
     try:
         return asyncio.run(go())
     finally:
-        main._peek_stream, main.router, main.forwarder, main.inject_identity = old
+        main._peek_stream, gw_state.router, gw_state.forwarder, main.inject_identity = old
 
 
 # ------------------------------------------------------------------ trigger

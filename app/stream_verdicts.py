@@ -1,19 +1,25 @@
 """Verdetti di streaming: errori azionabili, cooldown soft, scarico stream
 abbandonati, esaurimento catena, retry-at, payload vuoto, verdetto paracadute.
-Estratti verbatim da `app/main.py` (cluster C4, Round 4 Clean Code).
-Gli oggetti creati a RUNTIME dentro main.py (`log`, `router`) sono raggiunti
-con `import app.main as M` DENTRO il corpo delle funzioni che li usano: a
-livello di modulo non esisterebbero ancora, e main.py importa questo modulo.
+Estratti da `app/main.py` (cluster C4, Round 4 Clean Code).
+
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
+import logging
 import time
 from fastapi.responses import JSONResponse
 from . import metrics
+from . import state as gw_state
 from .suppressed import report_suppressed
 from .forwarder import (
     _MODEL_MISSING_RE,
     _PAYLOAD_SCHEMA_RE,
     _THOUGHT_SIG_RE,
 )
+
+# Stesso logger di app.main: i record (nome "nx.main") restano identici.
+log = logging.getLogger("nx.main")
 
 
 def _actionable_upstream_error(err) -> bool:
@@ -46,10 +52,9 @@ def _soft_cd(fail_24h: int = 0) -> int:
     riparte dal cooldown base; e su successo (clear_cooldown) torna subito
     disponibile.
     """
-    import app.main as M
 
-    base = int(getattr(M.router.policy.qc_json, "watchdog_cooldown_sec", 90) or 90)
-    return int(M.router.escalate_cooldown(base, fail_24h))
+    base = int(getattr(gw_state.router.policy.qc_json, "watchdog_cooldown_sec", 90) or 90)
+    return int(gw_state.router.escalate_cooldown(base, fail_24h))
 
 
 async def _discard_stream(gen, pending=None) -> None:
@@ -90,7 +95,6 @@ def _exhausted(
     (classe d'errore onesta, mai testo del provider) cosi' l'operatore non
     deve leggere i log. `retry_at_ms` = prima scadenza utile fra i cooldown
     dei deployment provati (quando ritentare ha senso)."""
-    import app.main as M
 
     lab = prefix_reason if prefix_reason in ("identity", "prefix") else "clean"
     try:
@@ -98,7 +102,7 @@ def _exhausted(
     except Exception:  # noqa: BLE001
         report_suppressed("stream_verdicts._exhausted")
     if lab != "clean":
-        M.log.warning(
+        log.warning(
             "[cache-audit] 503 catena esaurita dopo prefisso MUTATO "
             "(%s): possibile cache-miss percepito come provider morto",
             lab,

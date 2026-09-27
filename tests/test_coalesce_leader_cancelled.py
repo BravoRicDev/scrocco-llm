@@ -24,6 +24,7 @@ import pytest
 import app.main as M
 from app.main import _forward_coalesced
 from app.policy import Policy
+import app.state as gw_state
 
 POL = Policy.from_dict({})
 PAYLOAD = {"stream": False, "messages": [{"role": "user", "content": "hi"}]}
@@ -31,9 +32,9 @@ PAYLOAD = {"stream": False, "messages": [{"role": "user", "content": "hi"}]}
 
 @pytest.fixture(autouse=True)
 def _clear():
-    M._inflight_coalesce.clear()
+    gw_state._inflight_coalesce.clear()
     yield
-    M._inflight_coalesce.clear()
+    gw_state._inflight_coalesce.clear()
 
 
 def test_leader_cancelled_waiter_survives_and_retries():
@@ -71,7 +72,7 @@ def test_leader_cancelled_waiter_survives_and_retries():
     assert out == {"answer": "waiter ha risposto"}
     assert calls == ["leader", "waiter"]
     # nessuna entry pendente lasciata nel registro degli in-flight
-    assert not M._inflight_coalesce
+    assert not gw_state._inflight_coalesce
 
 
 def test_waiter_properly_cancelled_does_not_retry():

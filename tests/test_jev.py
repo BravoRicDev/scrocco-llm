@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from app import protocols as P
 from app.forwarder import UpstreamError
+import app.state as gw_state
 
 _HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
            "priority,scrocco-llm-test,caps,api_style\n")
@@ -94,23 +95,23 @@ def _client_env(monkeypatch, tmp_path, rows, header=_HEADER):
     csv = tmp_path / "k.csv"
     csv.write_text(header + rows)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path)
-    m.authn.master_key = "test-master-jev"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
-    m.router.policy.cap_groups_enabled = True
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path)
+    gw_state.authn.master_key = "test-master-jev"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
+    gw_state.router.policy.cap_groups_enabled = True
     return m, orig
 
 
 def _client_teardown(m, orig):
-    m.router._cooldown.clear()
-    m.router.policy.cap_groups_enabled = False
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.router.policy.cap_groups_enabled = False
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 @pytest.fixture()
@@ -134,33 +135,33 @@ def client_mixed(monkeypatch, tmp_path):
 
 def _pin_initial_pick(monkeypatch, m, model):
     """Fissa il primo deployment scelto da `initial_pick` a `model`."""
-    dep = m.config.deployment_by_unique(
-        next(u for u in m.config.chains_cap["test"]["decision"]
-             if m.config.deployment_by_unique(u)["model"] == model))
-    monkeypatch.setattr(m.router, "initial_pick", lambda *a, **k: dep)
+    dep = gw_state.config.deployment_by_unique(
+        next(u for u in gw_state.config.chains_cap["test"]["decision"]
+             if gw_state.config.deployment_by_unique(u)["model"] == model))
+    monkeypatch.setattr(gw_state.router, "initial_pick", lambda *a, **k: dep)
 
 
 def _post(c, monkeypatch, m, fwd, body=None, headers=MK):
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     return c.post(_URL, headers=headers, json=body or _systemone_body())
 
 
 # ------------------------------------------------------------- capacita'
 def test_decision_capability_groups(client):
     _c, m = client
-    assert "decision" in m.config.profile_caps["test"]
-    assert m.config.group_caps.get("scrocco-llm-test-decision") == "decision"
-    chain = m.config.chains_cap["test"].get("decision") or []
+    assert "decision" in gw_state.config.profile_caps["test"]
+    assert gw_state.config.group_caps.get("scrocco-llm-test-decision") == "decision"
+    chain = gw_state.config.chains_cap["test"].get("decision") or []
     assert len(chain) == 2
     assert all("scrocco-llm-test-decision" in u for u in chain)
     # il gruppo e' richiamabile in whitelist (come -stt/-tts/-image_gen)
-    assert "scrocco-llm-test-decision" in m.config.whitelist_for("test")
+    assert "scrocco-llm-test-decision" in gw_state.config.whitelist_for("test")
 
 
 def test_decision_rows_excluded_from_text_dims(client):
     """Una riga solo `decision` NON compare nei gruppi testo/dims."""
     _c, m = client
-    assert "scrocco-llm-test-24k" not in (m.config.chains.get("test") or [])
+    assert "scrocco-llm-test-24k" not in (gw_state.config.chains.get("test") or [])
 
 
 # ------------------------------------------------------------- protocollo
@@ -234,7 +235,7 @@ def test_systemone_payload_forwarded_native(client, monkeypatch):
 
 def test_systemone_invalid_json_400(client, monkeypatch):
     c, m = client
-    monkeypatch.setattr(m, "forwarder", _FakeFwd())
+    monkeypatch.setattr(gw_state, "forwarder", _FakeFwd())
     r = c.post(_URL, content=b"not-json",
                headers={**MK, "content-type": "application/json"})
     assert r.status_code == 400
@@ -323,10 +324,10 @@ def test_systemone_all_fail_503_with_trail(client, monkeypatch):
 # ------------------------------------------------------------- ledger
 def test_systemone_summary_kind_and_usage(client, monkeypatch):
     c, m = client
-    m.LEDGER.flush()
+    gw_state.LEDGER.flush()
     r = _post(c, monkeypatch, m, _FakeFwd())
     assert r.status_code == 200
-    entries = [e for e in m.LEDGER._buf if e.get("kind") == "systemone"]
+    entries = [e for e in gw_state.LEDGER._buf if e.get("kind") == "systemone"]
     assert entries, "nessuna entry systemone nel ledger"
     e = entries[-1]
     assert e["usage"]["prompt_tokens"] == 312
@@ -339,7 +340,7 @@ def test_systemone_note_end_no_inflight_leak(client, monkeypatch):
     r = _post(c, monkeypatch, m, _FakeFwd())
     assert r.status_code == 200
     cur = r.json()["nx_deployment"]
-    assert m.router.stats_for(cur).inflight == 0
+    assert gw_state.router.stats_for(cur).inflight == 0
 
 
 # ------------------------------------------------------- pagamento (fallback)
@@ -347,8 +348,8 @@ def test_decision_fallback_only_group_still_routes(client_fallback, monkeypatch)
     """Righe Jev a pagamento tutte `fallback` -> esiste solo -decision-fallback:
     l'endpoint deve comunque trovarle (catena capability free->go->fallback)."""
     c, m = client_fallback
-    assert m.config.cap_counts["test"]["decision"]["primary"] == 0
-    assert m.config.cap_counts["test"]["decision"]["fallback"] == 2
+    assert gw_state.config.cap_counts["test"]["decision"]["primary"] == 0
+    assert gw_state.config.cap_counts["test"]["decision"]["fallback"] == 2
     r = _post(c, monkeypatch, m, _FakeFwd())
     assert r.status_code == 200, r.text
     assert "department" in r.json()["answers"]
@@ -369,8 +370,8 @@ def test_decision_prefers_free_primary_over_paid_fallback(client_mixed,
     """Con un Jev gratis (`free`) e uno a pagamento (`fallback`), la prima
     scelta e' il primario gratuito; il pagato resta in rotazione."""
     c, m = client_mixed
-    assert m.config.cap_counts["test"]["decision"]["primary"] == 1
-    assert m.config.cap_counts["test"]["decision"]["fallback"] == 1
+    assert gw_state.config.cap_counts["test"]["decision"]["primary"] == 1
+    assert gw_state.config.cap_counts["test"]["decision"]["fallback"] == 1
     r = _post(c, monkeypatch, m, _FakeFwd())
     assert r.status_code == 200, r.text
     dep = r.json()["nx_deployment"]

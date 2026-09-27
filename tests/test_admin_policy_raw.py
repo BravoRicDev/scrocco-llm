@@ -5,6 +5,7 @@ modulo). La fixture DEVE patchare ENTRAMBI su tmp, altrimenti un PUT nel test
 sovrascrive il gateway.yaml di produzione.
 """
 import os
+import app.state as gw_state
 
 os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
 
@@ -31,19 +32,19 @@ def client(monkeypatch, tmp_path):
     pol.write_text(VALID_YAML)
     (tmp_path / "backups").mkdir()
 
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-policy-raw"
-    monkeypatch.setattr(m, "POLICY_PATH", pol)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-policy-raw"
+    monkeypatch.setattr(gw_state, "POLICY_PATH", pol)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
     # riallinea la policy runtime al file tmp
-    m.router.policy = m.Policy.load(pol)
-    globals_pol = m.policy
-    m.policy = m.router.policy
-    assert str(m.POLICY_PATH).startswith(str(tmp_path))
+    gw_state.router.policy = m.Policy.load(pol)
+    globals_pol = gw_state.policy
+    gw_state.policy = gw_state.router.policy
+    assert str(gw_state.POLICY_PATH).startswith(str(tmp_path))
     yield TestClient(m.app)
-    m.authn.master_key = orig_mk
-    m.policy = globals_pol
-    m.router.policy = globals_pol
+    gw_state.authn.master_key = orig_mk
+    gw_state.policy = globals_pol
+    gw_state.router.policy = globals_pol
 
 
 def test_get_raw(client):
@@ -55,7 +56,7 @@ def test_get_raw(client):
 
 
 def test_get_raw_missing_file(client):
-    m.POLICY_PATH.unlink()
+    gw_state.POLICY_PATH.unlink()
     r = client.get("/admin/policy/raw", headers=MK)
     assert r.status_code == 200 and r.json()["raw"] == ""
 
@@ -71,10 +72,10 @@ def test_put_raw_valid_replaces_and_reloads(client):
     assert j["ok"] and j["validated"] and j["reloaded"]
     assert j["effective"]["step_up_pct"] == 40
     # file sostituito + runtime aggiornato
-    assert m.POLICY_PATH.read_text() == VALID_YAML_2
-    assert m.router.policy.step_up_pct == 40
+    assert gw_state.POLICY_PATH.read_text() == VALID_YAML_2
+    assert gw_state.router.policy.step_up_pct == 40
     # backup del vecchio contenuto
-    bks = list((m.VAR_DIR / "backups").glob("gateway.yaml-*.yaml"))
+    bks = list((gw_state.VAR_DIR / "backups").glob("gateway.yaml-*.yaml"))
     assert bks and any("step_up_pct: 25" in b.read_text() for b in bks)
     # GET riflette il nuovo valore
     assert "step_up_pct: 40" in client.get("/admin/policy/raw", headers=MK).json()["raw"]
@@ -83,16 +84,16 @@ def test_put_raw_valid_replaces_and_reloads(client):
 def test_put_raw_full_replace_not_merge(client):
     # VALID_YAML ha 2 alias; VALID_YAML_2 ne ha 1 -> il replace NON fonde
     client.put("/admin/policy/raw", json={"raw": VALID_YAML_2}, headers=MK)
-    assert m.router.policy.aliases == {"solo": "groq/x"}
+    assert gw_state.router.policy.aliases == {"solo": "groq/x"}
 
 
 def test_put_raw_invalid_keeps_file(client):
-    before = m.POLICY_PATH.read_text()
+    before = gw_state.POLICY_PATH.read_text()
     r = client.put("/admin/policy/raw", json={"raw": INVALID_YAML}, headers=MK)
     assert r.status_code == 400
     assert "error" in r.json()
-    assert m.POLICY_PATH.read_text() == before          # file INTATTO
-    assert m.router.policy.step_up_pct == 25            # runtime INTATTO
+    assert gw_state.POLICY_PATH.read_text() == before          # file INTATTO
+    assert gw_state.router.policy.step_up_pct == 25            # runtime INTATTO
 
 
 def test_put_raw_missing_raw(client):

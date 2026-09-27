@@ -21,6 +21,7 @@ import app.main as M
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 _HDR = ("commento,modello,provider,endpoint,data,context,max_input,"
         "priority,scrocco-llm-test,caps\n")
@@ -111,9 +112,9 @@ class _Fwd:
 
 
 def _stream(monkeypatch, cfg, router, fwd, first, payload):
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
 
     async def _run():
         resp = await M._stream_with_fallback(
@@ -272,9 +273,9 @@ def test_stream_canary_in_volo_non_viene_cancellato(monkeypatch, caplog):
                         lambda sid, u: warmed.append(u))
     fwd = _FwdDelay(a["unique"], r["unique"], first_content=0.3,
                     close_after=0.1, open_delay=0.5)
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
 
     async def _run():
         with caplog.at_level(logging.INFO, logger="nx.main"):
@@ -284,7 +285,7 @@ def test_stream_canary_in_volo_non_viene_cancellato(monkeypatch, caplog):
             async for chunk in resp.body_iterator:
                 out += chunk if isinstance(chunk, bytes) else chunk.encode()
         t0 = time.monotonic()          # attende l'handover dei canary in volo
-        while M._PROBE_TASKS and time.monotonic() - t0 < 3.0:
+        while gw_state._PROBE_TASKS and time.monotonic() - t0 < 3.0:
             await asyncio.sleep(0.02)
         return out
 

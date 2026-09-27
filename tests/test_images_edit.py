@@ -26,6 +26,7 @@ from app.config import parse_caps
 from app.forwarder import (Forwarder, UpstreamError, extract_chat_images,
                            image_chat_payload, image_item_dual,
                            image_refs_from_payload, images_dual, truncate_refs)
+import app.state as gw_state
 
 
 # ------------------------------------------------------- unit: dual url+b64
@@ -151,27 +152,27 @@ def _make_client(monkeypatch, tmp_path, csv_text):
     csv = tmp_path / "k.csv"
     csv.write_text(csv_text)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path,
-            m.router.policy.cap_groups_enabled)
-    m.authn.master_key = "test-master-img"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path,
+            gw_state.router.policy.cap_groups_enabled)
+    gw_state.authn.master_key = "test-master-img"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
-    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
-    m.router.policy.cap_groups_enabled = True
+    monkeypatch.setattr(gw_state, "LEDGER", Ledger(tmp_path))
+    gw_state.router.policy.cap_groups_enabled = True
     return TestClient(m.app), m, orig
 
 
 def _teardown(m, orig):
     m.imagestore.clear()
-    m.router.policy.cap_groups_enabled = orig[2]
-    m.router._cooldown.clear()
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router.policy.cap_groups_enabled = orig[2]
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 def _row(caps: str, model: str = "models/gemini-2.5-flash-image",
@@ -211,7 +212,7 @@ MK = {"Authorization": "Bearer test-master-img"}
 
 def _fun(monkeypatch, m, native=lambda d, p: (404, "not found"), chat=_IMG_ONLY):
     fwd = _FakeForwarder(native, chat)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     return fwd
 
 
@@ -313,7 +314,7 @@ def test_generations_con_refs_usa_chat(client_single, monkeypatch):
 
 def test_generations_senza_refs_usa_nativo(client_single, monkeypatch):
     c, m = client_single
-    monkeypatch.setattr(m.router.policy, "images_mirror_remote",
+    monkeypatch.setattr(gw_state.router.policy, "images_mirror_remote",
                         False)                  # no rete: url provider intatto
     fwd = _fun(monkeypatch, m,
                native=lambda d, p: (200, {"created": 1,

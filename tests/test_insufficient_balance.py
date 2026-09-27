@@ -12,6 +12,7 @@ from app.config import GatewayConfig
 from app.forwarder import is_insufficient_balance, _QUOTA_EXHAUSTED_RE
 from app.policy import Policy
 from app.router import ErrorKind, Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 BODY = ('{"error":{"message":"Insufficient balance.",'
@@ -57,7 +58,7 @@ def test_mark_failed_insufficient_balance_ritira_subito(r):
 
 def test_ritiro_solo_sblocco_manuale():
     from app import main as M
-    kh = M.KEYHEALTH
+    kh = gw_state.KEYHEALTH
     kh.set_state("X__m__0", "retired", reason="insufficient_balance")
     assert kh.is_permanently_retired("X__m__0") is True
     # un successo NON lo riabilita (serve unretire manuale)

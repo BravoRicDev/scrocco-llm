@@ -6,6 +6,7 @@ non `config.csv_path`). La fixture DEVE patchare ENTRAMBI su tmp, altrimenti un
 PUT nel test sovrascrive il CSV di produzione reale.
 """
 import os
+import app.state as gw_state
 
 # app.main e' importato qui: replico l'env che test_bootstrap si aspetta al
 # primo import (ordine alfabetico dei file di test).
@@ -32,19 +33,19 @@ def client(monkeypatch, tmp_path):
     csv_file.write_text(CSV_TEXT)
     (tmp_path / "backups").mkdir()
 
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-admin-csv"
-    monkeypatch.setattr(m, "CSV_PATH", csv_file)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
-    monkeypatch.setattr(m.config, "csv_path", csv_file)
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-admin-csv"
+    monkeypatch.setattr(gw_state, "CSV_PATH", csv_file)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
+    monkeypatch.setattr(gw_state.config, "csv_path", csv_file)
+    gw_state.config.reload()
     # rete di sicurezza: mai toccare un path fuori dalla tmp del test
-    assert str(m.CSV_PATH).startswith(str(tmp_path))
+    assert str(gw_state.CSV_PATH).startswith(str(tmp_path))
     yield TestClient(m.app)
-    m.authn.master_key = orig_mk
-    monkeypatch.setattr(m.config, "csv_path", m.CSV_PATH)  # ripristino coerente
-    m.config.reload()
-    m.router._cooldown.clear()
+    gw_state.authn.master_key = orig_mk
+    monkeypatch.setattr(gw_state.config, "csv_path", gw_state.CSV_PATH)  # ripristino coerente
+    gw_state.config.reload()
+    gw_state.router._cooldown.clear()
 
 
 def test_get_csv_raw_and_masked(client):
@@ -68,7 +69,7 @@ def test_get_csv_requires_master(client):
 
 
 def test_get_csv_empty_file(client, monkeypatch):
-    m.CSV_PATH.write_text("")
+    gw_state.CSV_PATH.write_text("")
     r = client.get("/admin/csv", headers=MK)
     assert r.status_code == 200
     j = r.json()
@@ -77,7 +78,7 @@ def test_get_csv_empty_file(client, monkeypatch):
 
 
 def test_get_csv_missing_file(client):
-    m.CSV_PATH.unlink()
+    gw_state.CSV_PATH.unlink()
     r = client.get("/admin/csv", headers=MK)
     assert r.status_code == 200
     assert r.json()["raw"] == "" and r.json()["count"] == 0
@@ -85,29 +86,29 @@ def test_get_csv_missing_file(client):
 
 def test_put_csv_valid_writes_and_backups(client):
     # parto da un CSV diverso, poi scrivo CSV_TEXT
-    m.CSV_PATH.write_text(HEADER + "\nx,old,groq,https://o/v1,free,10,80,0,K,\n")
+    gw_state.CSV_PATH.write_text(HEADER + "\nx,old,groq,https://o/v1,free,10,80,0,K,\n")
     r = client.put("/admin/csv", json={"raw": CSV_TEXT}, headers=MK)
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["ok"] is True and j["rows"] == 2
     assert j["backup"] and j["backup"].startswith("keys_rotation-")
-    assert m.CSV_PATH.read_text().strip() != ""
+    assert gw_state.CSV_PATH.read_text().strip() != ""
     # il backup del vecchio contenuto e' finito in tmp/backups/
-    bks = list((m.VAR_DIR / "backups").glob("keys_rotation-*.csv"))
+    bks = list((gw_state.VAR_DIR / "backups").glob("keys_rotation-*.csv"))
     assert bks and any("old" in b.read_text() for b in bks)
     # reload effettivo: il nuovo modello e' instradabile
-    assert "model-a" in m.CSV_PATH.read_text()
+    assert "model-a" in gw_state.CSV_PATH.read_text()
 
 
 def test_put_csv_invalid_keeps_file(client):
-    before = m.CSV_PATH.read_text()
+    before = gw_state.CSV_PATH.read_text()
     r = client.put("/admin/csv", json={"raw": "questo non e' un csv valido\n\x00"},
                    headers=MK)
     # o 400 per validazione, o comunque il file non cambia
     assert r.status_code in (200, 400)
     if r.status_code == 400:
         assert "error" in r.json()
-        assert m.CSV_PATH.read_text() == before
+        assert gw_state.CSV_PATH.read_text() == before
 
 
 def test_put_csv_missing_raw(client):

@@ -9,6 +9,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+import app.state as gw_state
 
 
 @pytest.fixture()
@@ -20,23 +21,23 @@ def client(monkeypatch, tmp_path):
     # NOTA ordine-test: app.main puo' essere gia' importato da altri file
     # con altra GATEWAY_MASTER_KEY in env -> patch DETERMINISTICA dell'
     # attributo invece dell'ambiente.
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-insights"
-    orig_csv = m.config.csv_path
-    m.LEDGER.flush()                        # scarica buffer pregressi
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-insights"
+    orig_csv = gw_state.config.csv_path
+    gw_state.LEDGER.flush()                        # scarica buffer pregressi
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     # LEDGER isolato nella tmp (monkeypatch dell'istanza globale)
     from app.ledger import Ledger
     led = Ledger(tmp_path)
-    monkeypatch.setattr(m, "LEDGER", led)
+    monkeypatch.setattr(gw_state, "LEDGER", led)
     yield TestClient(m.app), m, led
-    m.router._cooldown.clear()
-    m.authn.master_key = orig_mk
-    m.config.csv_path = orig_csv
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig_mk
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
 
 
 MK = {"Authorization": "Bearer test-master-insights"}

@@ -43,3 +43,6 @@ SCORING_WEIGHTS = {
     "SUCCESS_PROVIDER": -2,     # -2 per successo del provider/modello (tutti i deployment)
     "SUCCESS_KEY": -2,          # -2 per successo della chiave (tutti i deployment)
 }
+
+# Versione esposta dall'app FastAPI e dagli endpoint di compatibilita' Ollama.
+GATEWAY_VERSION = "0.2.0"

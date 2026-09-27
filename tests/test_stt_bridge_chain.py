@@ -21,6 +21,7 @@ import math
 import struct
 
 import pytest
+import app.state as gw_state
 
 SR = 16000
 _CSV_HEADER = ("commento,modello,provider,endpoint,data,context,max_input,"
@@ -97,29 +98,29 @@ def env(monkeypatch, tmp_path):
                    + _row("goa", data="go")         # -go
                    + _row("fba", data="fallback"))  # -fallback
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path,
-            m.router.policy.cap_groups_enabled)
-    m.authn.master_key = "test-master-sttchain"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path,
+            gw_state.router.policy.cap_groups_enabled)
+    gw_state.authn.master_key = "test-master-sttchain"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
-    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
-    m.router.policy.cap_groups_enabled = True
+    monkeypatch.setattr(gw_state, "LEDGER", Ledger(tmp_path))
+    gw_state.router.policy.cap_groups_enabled = True
     import app.audiostore as store
     store.clear()
     yield m
-    m.router._cooldown.clear()
-    m.router.policy.cap_groups_enabled = orig[2]
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.router.policy.cap_groups_enabled = orig[2]
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 def _providers(m, group):
-    return [d["provider"] for d in m.config.groups.get(group, [])]
+    return [d["provider"] for d in gw_state.config.groups.get(group, [])]
 
 
 def _call(m, fwd, used=None):
@@ -136,7 +137,7 @@ def test_ordine_free_go_fallback(monkeypatch, env):
     m = env
     every = {"freea", "freeb", "goa", "fba"}
     fwd = _Fwd(fail=every)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     res = _call(m, fwd)
     assert res == "", res
     assert set(fwd.calls) == every, fwd.calls       # TUTTI provati
@@ -151,12 +152,12 @@ def test_free_in_cooldown_dopo_i_free_vivi(monkeypatch, env):
     """Un free in cooldown si prova DOPO i free vivi, non viene saltato."""
     m = env
     fwd = _Fwd()
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     # metto freea in cooldown pieno (l'unique non contiene il provider: si
     # cerca per provider, non per stringa nel nome)
-    target = next(d["unique"] for d in m.config.groups["scrocco-llm-test-stt"]
+    target = next(d["unique"] for d in gw_state.config.groups["scrocco-llm-test-stt"]
                   if d.get("provider") == "freea")
-    m.router._cooldown[target] = 9999999999.0
+    gw_state.router._cooldown[target] = 9999999999.0
     res = _call(m, fwd)
     assert res, "deve comunque riuscire"
     # freeB (vivo) viene prima di goA e fbA; freeA non e' stato scartato in
@@ -173,7 +174,7 @@ def test_fallimento_solo_dopo_tutti(monkeypatch, env):
     deve essere il -fallback (che e' l'ultima risorsa della flotta)."""
     m = env
     fwd = _Fwd(fail={"freea", "freeb", "goa", "fba"})
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     res = _call(m, fwd)
     assert res == ""
     assert len(fwd.calls) == 4, fwd.calls
@@ -185,7 +186,7 @@ def test_ruota_dopo_un_fallimento(monkeypatch, env):
     """Il primo che risponde vince, ma dopo un fallimento si ruota."""
     m = env
     fwd = _Fwd()
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     first = _call(m, fwd)
     assert first and fwd.calls
     used_prov = fwd.calls[0]
@@ -201,7 +202,7 @@ def test_non_prova_un_deployment_gia_tentato(monkeypatch, env):
     """Nessun deployment viene provato due volte nello stesso chunk."""
     m = env
     fwd = _Fwd(fail={"freea", "freeb", "goa", "fba"})
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     _call(m, fwd)
     assert len(fwd.calls) == len(set(fwd.calls)), fwd.calls
 
@@ -212,8 +213,8 @@ def test_used_non_fa_perdere_il_chunk(monkeypatch, env):
     comunque essere trascritto, non perso."""
     m = env
     fwd = _Fwd()
-    monkeypatch.setattr(m, "forwarder", fwd)
-    used = set(m.config.chains_cap["test"]["stt"])
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
+    used = set(gw_state.config.chains_cap["test"]["stt"])
     res = _call(m, fwd, used=used)
     assert res, "con tutto in `used` deve comunque riuscire"
     assert fwd.calls
@@ -224,12 +225,12 @@ def test_used_preferisce_i_liberi(monkeypatch, env):
     libero prima di condividerlo."""
     m = env
     fwd = _Fwd()
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     first = _call(m, fwd)
     taken = fwd.calls[0]
     fwd.calls.clear()
     # `taken` occupato da un altro chunk; gli altri liberi
-    used = {u for u in m.config.chains_cap["test"]["stt"]
+    used = {u for u in gw_state.config.chains_cap["test"]["stt"]
             if taken in u} or set()
     res = _call(m, fwd, used=used)
     assert res
@@ -239,7 +240,7 @@ def test_used_preferisce_i_liberi(monkeypatch, env):
 def test_chunk_paralleli_non_collidono(monkeypatch, env):
     m = env
     fwd = _Fwd()
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     import app.main as sm
 
     async def _go():

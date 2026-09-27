@@ -1,10 +1,7 @@
 """Endpoint di compatibilita' Ollama / llama.cpp.
 
-Estratti da `app/main.py` (M2). Gli helper e gli oggetti condivisi
-(`config`, `policy`, `authn`, `app`: STATO runtime) sono raggiunti DENTRO il corpo
-delle funzioni tramite `import app.main as M`: a livello di modulo si
-creerebbe un ciclo di import (main include questo router a fine file, dopo
-aver definito tutto).
+Estratti da `app/main.py` (M2). Lo stato runtime condiviso (config, policy,
+authn) si legge da `app.state` (`gw_state.<nome>`), popolato da `app/main.py`.
 """
 
 from fastapi import APIRouter
@@ -12,6 +9,8 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 from .. import capmeta
+from .. import state as gw_state
+from ..constants import GATEWAY_VERSION
 from ..http_responses import unauthorized as _unauthorized
 from ..models_and_health import _caps_and_deps
 from ..models_and_health import _model_entry
@@ -57,19 +56,18 @@ async def retrieve_model(model_id: str, request: Request):
     nome singolo deve vedere le stesse cose che vede in lista. Nota che sono
     accettati anche gli `uniques` (deployment): non sono stabili, ma restano
     chiamabili per non rompere chi li ha pinnati."""
-    import app.main as M
 
     names, auth = _visible_model_names(request)
     if names is None:
         return _unauthorized(auth.error)
-    canon = M.policy.canonicalize(model_id)
+    canon = gw_state.policy.canonicalize(model_id)
     known = (
         model_id in names
         or canon in names
-        or canon in M.config.groups
-        or canon in M.config.alias_groups
-        or M.config.deployment_by_unique(canon) is not None
-        or any(canon == a or canon == M.policy.aliases.get(a) for a in M.policy.aliases)
+        or canon in gw_state.config.groups
+        or canon in gw_state.config.alias_groups
+        or gw_state.config.deployment_by_unique(canon) is not None
+        or any(canon == a or canon == gw_state.policy.aliases.get(a) for a in gw_state.policy.aliases)
     )
     if not known:
         return JSONResponse(
@@ -98,9 +96,8 @@ async def ollama_tags(request: Request):
 @router.get("/api/v1/models")
 async def api_v1_models(request: Request):
     """Alias non-standard di /v1/models usato da alcuni client."""
-    import app.main as M
 
-    auth = M.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     view = _view_for(request, auth)
@@ -117,9 +114,8 @@ async def model_info(request: Request):
     ricca in circolazione e aggiungerla allo standard OpenAI lo inquinerebbe.
     Stessa segregazione di /v1/models: `?view=uniques|stable`, e una chiave di
     profilo vede solo i nomi stabili del proprio profilo."""
-    import app.main as M
 
-    auth = M.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     view = _view_for(request, auth)
@@ -152,7 +148,6 @@ async def ollama_show(request: Request):
     (`/v1/systemone`). `model_info` (il posto che Ollama riserva ai metadati
     arbitrari del modello) riporta capability, endpoint e un esempio d'uso.
     """
-    import app.main as M
 
     names, auth = _visible_model_names(request)
     if names is None:
@@ -162,16 +157,16 @@ async def ollama_show(request: Request):
     except Exception:
         body = {}
     name = (body.get("name") or body.get("model") or "") if isinstance(body, dict) else ""
-    canon = M.policy.canonicalize(name) if name else ""
+    canon = gw_state.policy.canonicalize(name) if name else ""
     known = bool(name) and (
-        name in names or canon in names or canon in M.config.groups or M.config.deployment_by_unique(canon) is not None
+        name in names or canon in names or canon in gw_state.config.groups or gw_state.config.deployment_by_unique(canon) is not None
     )
     if name and not known:
         return JSONResponse(
             status_code=404,
             content={"error": {"message": f"model '{name}' not found", "type": "invalid_request_error"}},
         )
-    target = name or M.policy.service_name
+    target = name or gw_state.policy.service_name
     caps, deps = _caps_and_deps(target)
     ctx_max, ctx_min = capmeta.context_lengths(deps)
     model_info: dict = {}
@@ -203,41 +198,37 @@ async def ollama_show(request: Request):
 
 @router.get("/api/version")
 async def ollama_version():
-    import app.main as M
 
-    return {"version": M.app.version}
+    return {"version": GATEWAY_VERSION}
 
 
 @router.get("/version")
 async def llamacpp_version():
-    import app.main as M
 
-    return {"version": M.app.version}
+    return {"version": GATEWAY_VERSION}
 
 
 @router.get("/props")
 async def llamacpp_props():
     """llama.cpp server props: stub minimo ma valido."""
-    import app.main as M
 
     return {
         "default_generation_settings": {"n_ctx": 0},
         "total_slots": 1,
         "chat_template": "",
-        "model_path": M.policy.service_name,
-        "build_info": f"nx {M.app.version}",
+        "model_path": gw_state.policy.service_name,
+        "build_info": f"nx {GATEWAY_VERSION}",
     }
 
 
 @router.get("/v1/props")
 async def llamacpp_props_v1():
     """llama.cpp server props (prefisso /v1): stesso stub di /props."""
-    import app.main as M
 
     return {
         "default_generation_settings": {"n_ctx": 0},
         "total_slots": 1,
         "chat_template": "",
-        "model_path": M.policy.service_name,
-        "build_info": f"nx {M.app.version}",
+        "model_path": gw_state.policy.service_name,
+        "build_info": f"nx {GATEWAY_VERSION}",
     }

@@ -3,6 +3,7 @@
 senza header di sessione."""
 from app import main as M
 from app.policy import Policy
+import app.state as gw_state
 
 
 class _Req:
@@ -63,7 +64,7 @@ def test_metadata_session_wins():
 
 
 def test_disabled_via_policy(monkeypatch):
-    monkeypatch.setattr(M.policy, "anon_session_fingerprint", False)
+    monkeypatch.setattr(gw_state.policy, "anon_session_fingerprint", False)
     assert M._session_id(_Req(), _payload()) is None
 
 

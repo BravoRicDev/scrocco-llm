@@ -10,6 +10,7 @@ from app.config import GatewayConfig
 from app.forwarder import classify_error
 from app.policy import Policy
 from app.router import ErrorKind, Router
+import app.state as gw_state
 
 CSV_ROWS = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
 t@x.com,m-a,groq,https://api.groq.com/openai/v1,free,32,8000,0,K-A,text
@@ -67,7 +68,7 @@ def test_classify_error_mapping():
 
 def test_permanent_dead_retires_without_cooldown(router, monkeypatch):
     kh = _KH()
-    monkeypatch.setattr(M, "KEYHEALTH", kh)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", kh)
     u = _dep(router)["unique"]
     secs = router.mark_failed(u, reason="not_found", status=-404,
                               kind=ErrorKind.PERMANENT_DEAD)

@@ -16,6 +16,7 @@ from app.config import GatewayConfig
 from app.forwarder import UpstreamError, apply_content_string
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 
@@ -146,13 +147,13 @@ def SM(tmp_path):
     import app.main as M
     csv = tmp_path / "k.csv"
     csv.write_text(CSV)
-    orig = M.config.csv_path
-    qj = M.router.policy.qc_json
-    pol = M.router.policy
+    orig = gw_state.config.csv_path
+    qj = gw_state.router.policy.qc_json
+    pol = gw_state.router.policy
     snap = (qj.stream_hedge_delay_ms, qj.stream_hold_until_finish,
             pol.warm_refill_enabled)
-    M.config.csv_path = csv
-    M.config.reload()
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
     qj.stream_hedge_delay_ms = 0
     qj.stream_hold_until_finish = False
     pol.warm_refill_enabled = False
@@ -161,13 +162,13 @@ def SM(tmp_path):
     finally:
         (qj.stream_hedge_delay_ms, qj.stream_hold_until_finish,
          pol.warm_refill_enabled) = snap
-        M.config.csv_path = orig
-        M.config.reload()
+        gw_state.config.csv_path = orig
+        gw_state.config.reload()
 
 
 def test_streaming_impara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
-    a = SM.config.groups[f"{BASE}-32k"][0]
-    b = SM.config.groups[f"{BASE}-200k"][0]
+    a = gw_state.config.groups[f"{BASE}-32k"][0]
+    b = gw_state.config.groups[f"{BASE}-200k"][0]
     calls = []
 
     async def sr(dep, payload, **kw):
@@ -183,7 +184,7 @@ def test_streaming_impara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
                    b'"finish_reason":"stop"}]}\n\n')
             yield b"data: [DONE]\n\n"
         return gen()
-    monkeypatch.setattr(SM.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
     payload = _payload()
     payload["stream"] = True
 
@@ -199,5 +200,5 @@ def test_streaming_impara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
     resp, body = asyncio.run(go())
     assert calls == [a["unique"], a["unique"]]      # bonificato e ritentato
     assert b"BONIFICATO" in body
-    assert a["unique"] not in SM.router._cooldown
+    assert a["unique"] not in gw_state.router._cooldown
     assert b["unique"] not in calls

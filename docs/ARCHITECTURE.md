@@ -15,6 +15,7 @@ cools down failing ones.
 | Module | Responsibility |
 |---|---|
 | `app/main.py` | FastAPI app, HTTP routes, request lifecycle, streaming pipeline, lifespan tasks, persistence writers |
+| `app/state.py` | Process-wide runtime state (config, policy, router, forwarder, auth, ledger, keyhealth, state-file paths, coalescing/video/probe registries). Created by `app/main.py` at import; every other module reads it as `gw_state.<name>` and tests patch it there |
 | `app/router.py` | Core routing engine: `initial_pick`, `pick_deployment`, `_walk_ladder_resilient`, `_walk_chain`, cooldowns, sticky sessions, reputation, `fallback_after` |
 | `app/routing/warm.py`, `canary.py`, `sessions.py` | Mixins extracted from `router.py` (Phase 4 refactor): warm pool/borrows, canary/hedge, sticky sessions |
 | `app/forwarder.py` | Upstream HTTP: `call`, `stream_response`, `call_with_fallback`, token clamping, session/opencode headers, cooldown classification |

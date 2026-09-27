@@ -37,6 +37,7 @@ import logging
 import time
 
 from .estimate import ErrorKind, _is_quota_evidence
+from .. import state as gw_state
 from ..policy import policy_float, policy_int
 
 log = logging.getLogger("nx.router")
@@ -361,9 +362,8 @@ class FailureMixin:
         """Ritira un deployment permanentemente rotto (chiave morta, modello
         rimosso). NON tocca il CSV: usa il lifecycle keyhealth (retired)."""
         try:
-            from .. import main as _gw_mod  # lazy: evita cicli import
 
-            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            kh = getattr(gw_state, "KEYHEALTH", None)
             if kh is None:
                 return
             kh.set_state(unique, "retired", reason=reason)

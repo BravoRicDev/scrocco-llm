@@ -8,6 +8,7 @@ molti client le chiamano prima di avere configurato la chiave.
 """
 import pytest
 from fastapi.testclient import TestClient
+import app.state as gw_state
 
 
 @pytest.fixture()
@@ -22,29 +23,29 @@ def client(monkeypatch, tmp_path):
     import app.main as m
     # Patch DETERMINISTICA dell'attributo (come test_insights): app.main puo'
     # essere gia' importato da altri test con altra GATEWAY_MASTER_KEY.
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-compat"
-    orig_csv = m.config.csv_path
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-compat"
+    orig_csv = gw_state.config.csv_path
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
     led = Ledger(tmp_path)
-    monkeypatch.setattr(m, "LEDGER", led)
+    monkeypatch.setattr(gw_state, "LEDGER", led)
     yield TestClient(m.app), m, led
-    m.router._cooldown.clear()
-    m.authn.master_key = orig_mk
-    m.config.csv_path = orig_csv
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig_mk
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
 
 
 MK = {"Authorization": "Bearer test-master-compat"}
 
 
 def _real_unique(m) -> str:
-    return next(d["unique"] for deps in m.config.groups.values() for d in deps)
+    return next(d["unique"] for deps in gw_state.config.groups.values() for d in deps)
 
 
 def test_api_tags_with_auth(client):
@@ -73,12 +74,12 @@ def test_retrieve_base_and_group_names(client):
     che il client usa davvero nelle chat devono risolvere 200, non solo gli
     univoci grp__model__idx."""
     c, m, _ = client
-    prefix = m.config.proxy_prefix
-    prof = m.config.profiles[0]
+    prefix = gw_state.config.proxy_prefix
+    prof = gw_state.config.profiles[0]
     r = c.get(f"/v1/models/{prefix}{prof}", headers=MK)
     assert r.status_code == 200 and r.json()["id"] == f"{prefix}{prof}"
     # un gruppo reale del profilo (se esiste un -Nk/-go/...)
-    grp = next((g for g in m.config.groups if g.startswith(f"{prefix}{prof}-")),
+    grp = next((g for g in gw_state.config.groups if g.startswith(f"{prefix}{prof}-")),
                None)
     if grp:
         r2 = c.get(f"/v1/models/{grp}", headers=MK)
@@ -118,7 +119,7 @@ def test_master_default_sees_only_uniques(client):
     ids = [x["id"] for x in c.get("/v1/models", headers=MK).json()["data"]]
     assert ids, "il master non vede nessun deployment"
     assert all("__" in i for i in ids), "un nome non-unique nel default master"
-    base = m.config.proxy_prefix + m.config.profiles[0]
+    base = gw_state.config.proxy_prefix + gw_state.config.profiles[0]
     assert base not in ids
 
 
@@ -127,7 +128,7 @@ def test_master_view_stable_sees_names_not_uniques(client):
     c, m, _ = client
     data = c.get("/v1/models?view=stable", headers=MK).json()["data"]
     ids = [x["id"] for x in data]
-    base = m.config.proxy_prefix + m.config.profiles[0]
+    base = gw_state.config.proxy_prefix + gw_state.config.profiles[0]
     assert base in ids
     assert not any("__" in i for i in ids), "un unique nella vista stable"
     # la vista ricca porta i campi capability
@@ -141,7 +142,7 @@ def test_profile_key_never_sees_uniques(client):
     produzione) vede i nomi STABILI del proprio profilo e non i deployment:
     `?view=uniques` non la fa uscire dalla vista stable."""
     c, m, _ = client
-    prof = m.config.profiles[0]
+    prof = gw_state.config.profiles[0]
     h = {"Authorization": f"Bearer sk-{prof}"}
     r = c.get("/v1/models", headers=h)
     assert r.status_code == 200, r.text
@@ -153,7 +154,7 @@ def test_profile_key_never_sees_uniques(client):
 
 
 def base_name(m) -> str:
-    return m.config.proxy_prefix + m.config.profiles[0]
+    return gw_state.config.proxy_prefix + gw_state.config.profiles[0]
 
 
 def test_uniques_not_in_stable_but_still_callable(client):

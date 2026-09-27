@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 from app.forwarder import (Forwarder, UpstreamError, extract_chat_images,
                            image_chat_fallback_signature, image_chat_payload)
+import app.state as gw_state
 
 GEMINI_400 = ('{"error":{"code":400,"message":"Invalid JSON payload '
               'received. Unknown name \\"prompt\\": Cannot find field.",'
@@ -198,27 +199,27 @@ def _make_client(monkeypatch, tmp_path, csv_text):
     csv = tmp_path / "k.csv"
     csv.write_text(csv_text)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path,
-            m.router.policy.cap_groups_enabled)
-    m.authn.master_key = "test-master-img"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path,
+            gw_state.router.policy.cap_groups_enabled)
+    gw_state.authn.master_key = "test-master-img"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
-    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
-    m.router.policy.cap_groups_enabled = True
+    monkeypatch.setattr(gw_state, "LEDGER", Ledger(tmp_path))
+    gw_state.router.policy.cap_groups_enabled = True
     return TestClient(m.app), m, orig
 
 
 def _teardown(m, orig):
     m.imagestore.clear()
-    m.router.policy.cap_groups_enabled = orig[2]
-    m.router._cooldown.clear()
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router.policy.cap_groups_enabled = orig[2]
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 @pytest.fixture()
@@ -240,7 +241,7 @@ MK = {"Authorization": "Bearer test-master-img"}
 
 def _fun(monkeypatch, m, native, chat) -> _FakeForwarder:
     fwd = _FakeForwarder(native, chat)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     return fwd
 
 
@@ -347,7 +348,7 @@ def test_e2e_chain_raggiunge_fallback_openrouter(client, monkeypatch):
 
 def test_e2e_nativo_ok_passthrough(client, monkeypatch):
     c, m = client
-    monkeypatch.setattr(m.router.policy, "images_mirror_remote",
+    monkeypatch.setattr(gw_state.router.policy, "images_mirror_remote",
                         False)   # no rete: url provider intatto
     fwd = _fun(monkeypatch, m, native=_NATIVE_URL, chat=_IMG_ONLY)
     r = c.post("/v1/images/generations", headers=MK,
@@ -438,7 +439,7 @@ def test_e2e_401_chiave_rifiutata_ruota_su_tts(monkeypatch, tmp_path):
                 calls.append(dep.get("provider") or dep["unique"])
                 raise UpstreamError(-401, UPSTREAM_401)
 
-        monkeypatch.setattr(m, "forwarder", _F())
+        monkeypatch.setattr(gw_state, "forwarder", _F())
         # chiave CLIENTE sk-<profile>: con la master la rotazione dei path
         # audio non parte (profile assente -> nessun fallback_next).
         r = c.post("/v1/audio/speech", headers={"Authorization": "Bearer sk-test"},
@@ -470,7 +471,7 @@ def test_e2e_401_chiave_rifiutata_ruota_su_stt(monkeypatch, tmp_path):
                 calls.append(dep.get("provider") or dep["unique"])
                 raise UpstreamError(-401, UPSTREAM_401)
 
-        monkeypatch.setattr(m, "forwarder", _F())
+        monkeypatch.setattr(gw_state, "forwarder", _F())
         r = c.post("/v1/audio/transcriptions",
                    headers={"Authorization": "Bearer sk-test"},
                    files={"file": ("a.wav", b"RIFF0000WAVE", "audio/wav")},

@@ -4,6 +4,7 @@ e della euristica free/zen, oltre ai missing_models gia' esistenti.
 GET /models e' zero-token: qui il client httpx e' FAKE, nessuna rete reale.
 """
 import os
+import app.state as gw_state
 
 os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
 
@@ -62,17 +63,17 @@ def client(monkeypatch, tmp_path):
     (tmp_path / "backups").mkdir()
     provider_models.clear_cache()
 
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-audit"
-    monkeypatch.setattr(m, "CSV_PATH", csv_file)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
-    monkeypatch.setattr(m.config, "csv_path", csv_file)
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-audit"
+    monkeypatch.setattr(gw_state, "CSV_PATH", csv_file)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
+    monkeypatch.setattr(gw_state.config, "csv_path", csv_file)
+    gw_state.config.reload()
     monkeypatch.setattr(admin_mod.httpx, "AsyncClient", _FakeClient)
-    assert str(m.CSV_PATH).startswith(str(tmp_path))
+    assert str(gw_state.CSV_PATH).startswith(str(tmp_path))
     yield TestClient(m.app)
-    m.authn.master_key = orig_mk
-    m.config.reload()
+    gw_state.authn.master_key = orig_mk
+    gw_state.config.reload()
 
 
 def test_free_guess_heuristics():

@@ -9,6 +9,7 @@ import pytest
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 CSV_ROWS = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-test,caps
 t@x.com,m-a,groq,https://api.groq.com/openai/v1,free,32,8000,0,K-A,text
@@ -92,7 +93,7 @@ def test_mark_failed_jitter(router):
 def test_probe_cap_retires(router, monkeypatch):
     import app.main as M
     fake = _FakeKH()
-    monkeypatch.setattr(M, "KEYHEALTH", fake, raising=False)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", fake, raising=False)
     u = _dep(router, "K-A")["unique"]
     s = router.stats_for(u)
     router._cooldown[u] = time.time() + 100
@@ -109,7 +110,7 @@ def test_probe_cap_retires(router, monkeypatch):
 def test_probe_cap_disabled(router, monkeypatch):
     import app.main as M
     fake = _FakeKH()
-    monkeypatch.setattr(M, "KEYHEALTH", fake, raising=False)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", fake, raising=False)
     router.policy.probe_retire_after = 0
     u = _dep(router, "K-A")["unique"]
     s = router.stats_for(u)

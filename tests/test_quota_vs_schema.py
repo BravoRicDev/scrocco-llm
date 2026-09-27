@@ -29,6 +29,7 @@ from app.forwarder import (Forwarder, UpstreamError, QUOTA_MIN_COOLDOWN_S,
                            classify_error_class, parse_quota_reset_seconds)
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 CF_QUOTA = ('{"errors":[{"message":"AiError: AiError: you have used up your '
             'daily free allocation of 10,000 neurons, please upgrade to '
@@ -120,9 +121,9 @@ def test_streaming_quota_cf_va_in_cooldown_lungo(monkeypatch, status):
                 yield b"data: [DONE]\n\n"
             return _g()
 
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", _Fwd())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", _Fwd())
 
     async def _run():
         payload = {"model": broken["model"],

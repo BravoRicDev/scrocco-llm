@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 CONTENT = b'data: {"choices":[{"delta":{"content":"ciao mondo"}}]}\n\n'
 STOP = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
@@ -188,23 +189,23 @@ def ML(tmp_path, monkeypatch):
     import app.main as _M
     csv = tmp_path / "k.csv"
     csv.write_text(CSV_LOOP)
-    orig_csv = _M.config.csv_path
-    qj = _M.router.policy.qc_json
+    orig_csv = gw_state.config.csv_path
+    qj = gw_state.router.policy.qc_json
     snap = (qj.stream_hedge_delay_ms, qj.stream_first_content_ms,
             qj.stream_hold_until_finish)
-    cooled = set(_M.router._cooldown)
-    _M.config.csv_path = csv
-    _M.config.reload()
+    cooled = set(gw_state.router._cooldown)
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
     qj.stream_hedge_delay_ms = 0
     qj.stream_first_content_ms = 5000
     yield _M
     qj.stream_hedge_delay_ms, qj.stream_first_content_ms, \
         qj.stream_hold_until_finish = snap
-    _M.config.csv_path = orig_csv
-    _M.config.reload()
-    for k in list(_M.router._cooldown):
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
+    for k in list(gw_state.router._cooldown):
         if k not in cooled:
-            _M.router._cooldown.pop(k, None)
+            gw_state.router._cooldown.pop(k, None)
 
 
 def _fake_stream(M, monkeypatch, chunks):
@@ -217,7 +218,7 @@ def _fake_stream(M, monkeypatch, chunks):
             for c in chunks:
                 yield c
         return gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", stream_response)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", stream_response)
     return calls
 
 
@@ -235,15 +236,15 @@ def test_length_vuoto_ruota_senza_cooldown_e_cerca_il_piu_capace(ML, monkeypatch
     consegnare il moncone e senza mettere in cooldown il free-troncatore."""
     calls = _fake_stream(ML, monkeypatch, [LENGTH])
     seen = {}
-    orig = ML.router.fallback_next
+    orig = gw_state.router.fallback_next
 
     def wrap(*a, **k):
         seen.setdefault("flags", []).append(k.get("prefer_capable"))
         return orig(*a, **k)
-    monkeypatch.setattr(ML.router, "fallback_next", wrap)
+    monkeypatch.setattr(gw_state.router, "fallback_next", wrap)
 
-    small = ML.config.groups[f"{BASE}-32k"][0]
-    big = ML.config.groups[f"{BASE}-1000k"][0]
+    small = gw_state.config.groups[f"{BASE}-32k"][0]
+    big = gw_state.config.groups[f"{BASE}-1000k"][0]
 
     async def go():
         payload = {"model": small["model"],
@@ -256,13 +257,13 @@ def test_length_vuoto_ruota_senza_cooldown_e_cerca_il_piu_capace(ML, monkeypatch
     assert calls == [small["unique"], big["unique"]]   # tentato il piu' capace
     assert seen["flags"] and all(seen["flags"])        # richiesta capace
     # NESSUNA penale: il troncamento da budget non e' colpa del deployment
-    assert small["unique"] not in ML.router._cooldown
-    assert big["unique"] not in ML.router._cooldown
+    assert small["unique"] not in gw_state.router._cooldown
+    assert big["unique"] not in gw_state.router._cooldown
 
 
 def test_clean_stop_vuoto_ruota_senza_cooldown(ML, monkeypatch):
     calls = _fake_stream(ML, monkeypatch, [STOP])
-    small = ML.config.groups[f"{BASE}-32k"][0]
+    small = gw_state.config.groups[f"{BASE}-32k"][0]
 
     async def go():
         payload = {"model": small["model"],
@@ -273,13 +274,13 @@ def test_clean_stop_vuoto_ruota_senza_cooldown(ML, monkeypatch):
     asyncio.run(_drain(resp))
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert calls == [small["unique"],
-                     ML.config.groups[f"{BASE}-1000k"][0]["unique"]]
-    assert small["unique"] not in ML.router._cooldown
+                     gw_state.config.groups[f"{BASE}-1000k"][0]["unique"]]
+    assert small["unique"] not in gw_state.router._cooldown
 
 
 def test_contenuto_completa_passa_normalmente(ML, monkeypatch):
     calls = _fake_stream(ML, monkeypatch, [CONTENT, STOP, DONE])
-    small = ML.config.groups[f"{BASE}-32k"][0]
+    small = gw_state.config.groups[f"{BASE}-32k"][0]
 
     async def go():
         payload = {"model": small["model"],
@@ -322,8 +323,8 @@ def _fake_router(B=None):
 
 
 async def _join_probes(M):
-    while M._PROBE_TASKS:
-        await asyncio.gather(*list(M._PROBE_TASKS), return_exceptions=True)
+    while gw_state._PROBE_TASKS:
+        await asyncio.gather(*list(gw_state._PROBE_TASKS), return_exceptions=True)
 
 
 def _drive_hedge(M, monkeypatch, genA, stream_response, router, *,
@@ -340,8 +341,8 @@ def _drive_hedge(M, monkeypatch, genA, stream_response, router, *,
             _tct_cfg=None, hold=hold)
         await _join_probes(M)
         return out
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "forwarder",
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "forwarder",
                         __import__("types").SimpleNamespace(
                             stream_response=stream_response))
     monkeypatch.setattr(M, "inject_identity", lambda p, d, router=None: None)

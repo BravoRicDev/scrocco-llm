@@ -1,11 +1,11 @@
 """Helper puri della chat: parsing del contenuto, fingerprint di sessione,
 usage/token, riepilogo per-request e auto-learn.
 
-Estratti da `app/main.py` (C3, Round 4 Clean Code). I simboli condivisi di
-main.py (`config`, `policy`, `router`, `log`, `LEDGER`, `VAR_DIR`) sono
-importati DENTRO il corpo delle funzioni con `import app.main as M`:
-a livello di modulo si creerebbe un ciclo di import, perche' main.py
-importa questo modulo.
+Estratti da `app/main.py` (C3, Round 4 Clean Code).
+
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
 
 import hashlib
@@ -17,6 +17,7 @@ import re
 from starlette.requests import Request
 
 from . import journal, metrics
+from . import state as gw_state
 from .suppressed import report_suppressed
 from .forwarder import _client_attribution
 from .opencode_gate import (
@@ -27,6 +28,9 @@ from .opencode_gate import (
     set_zen_first,
     spoof_enabled,
 )
+
+# Stesso logger di app.main: i record (nome "nx.main") restano identici.
+log = logging.getLogger("nx.main")
 
 
 def _text_of(content) -> str:
@@ -56,8 +60,7 @@ def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
     Gated da `policy.anon_session_fingerprint`.
     """
 
-    import app.main as M
-    if not getattr(M.policy, "anon_session_fingerprint", True):
+    if not getattr(gw_state.policy, "anon_session_fingerprint", True):
         return None
     if not isinstance(payload, dict):
         return None
@@ -77,7 +80,7 @@ def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
             break
     # Tronchiamo il system prompt ai primi N char: molti agenti accodano
     # timestamp/contesto variabile che cambierebbe l'hash ad ogni turno.
-    _sys_cap = int(getattr(M.policy, "anon_session_fp_system_chars", 768) or 0)
+    _sys_cap = int(getattr(gw_state.policy, "anon_session_fp_system_chars", 768) or 0)
     sys_part = sys_txt.strip()
     if _sys_cap > 0:
         sys_part = sys_part[:_sys_cap]
@@ -220,32 +223,31 @@ def _emit_summary(**f) -> None:
     (gruppi cap senza dims) si prova il campo esplicito "profile".
     """
 
-    import app.main as M
     try:
         if "via" not in f and f.get("dep"):
-            d = M.router.config.deployment_by_unique(f["dep"])
+            d = gw_state.router.config.deployment_by_unique(f["dep"])
             if d:
                 base = d.get("api_base", "")
                 if "://" in base:
                     base = base.split("://", 1)[1].split("/", 1)[0]
                 f["via"] = base
-        M.log.info("[summary] %s", json.dumps(f, ensure_ascii=False, separators=(",", ":"), default=str))
+        log.info("[summary] %s", json.dumps(f, ensure_ascii=False, separators=(",", ":"), default=str))
     except Exception:  # mai bloccare la risposta per un log
         report_suppressed("chat_helpers._emit_summary.log")
     try:
         grp = str(f.get("grp") or "")
         prof = f.get("profile")
         if not prof:
-            for p in M.config.profiles:  # match esatto sul segmento
-                if grp.startswith(M.config.proxy_prefix + p + "-"):
+            for p in gw_state.config.profiles:  # match esatto sul segmento
+                if grp.startswith(gw_state.config.proxy_prefix + p + "-"):
                     prof = p
                     break
         dep_unique = str(f.get("dep") or "")
         model = ""
-        d = M.config.deployment_by_unique(dep_unique)
+        d = gw_state.config.deployment_by_unique(dep_unique)
         if d:
             model = d["model"]
-        M.LEDGER.record(
+        gw_state.LEDGER.record(
             {
                 "ses": f.get("ses"),
                 "profile": prof,
@@ -265,7 +267,7 @@ def _emit_summary(**f) -> None:
                 "status": f.get("status"),
                 "usage": f.get("usage") if isinstance(f.get("usage"), dict) else None,
             },
-            pricing=M.policy.pricing,
+            pricing=gw_state.policy.pricing,
             upstream_model=model,
         )
     except Exception:  # analytics non deve mai mordere
@@ -320,8 +322,7 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
     """Registra il SUGGERIMENTO (mode=suggest, default) o applica la rimozione
     della membership (mode=auto) per il (modello, capà) colpito."""
 
-    import app.main as M
-    mode = M.router.policy.cap_auto_learn
+    mode = gw_state.router.policy.cap_auto_learn
     if mode == "off":
         return
     if mode == "suggest":
@@ -333,7 +334,7 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
         except Exception:
             candidates = []
         journal.record(
-            M.VAR_DIR,
+            gw_state.VAR_DIR,
             "cap_learn_suggest",
             {
                 "model": model,
@@ -347,7 +348,7 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
                 ],
             },
         )
-        M.log.warning(
+        log.warning(
             "[caps][suggest] %s rifiuta '%s' (%d strike): %d righe "
             "candidate alla rimozione del token (GET /admin/history)",
             model,
@@ -361,7 +362,7 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
 
         remove_cap_for_model(model=model, cap=cap, evidence=evidence, count=count)
     except Exception as exc:  # noqa: BLE001
-        M.log.error("[caps][auto-learn] applicazione fallita %s/%s: %s", model, cap, exc)
+        log.error("[caps][auto-learn] applicazione fallita %s/%s: %s", model, cap, exc)
 
 
 def _strike_hook(explicit: bool, need=frozenset()):
@@ -369,10 +370,9 @@ def _strike_hook(explicit: bool, need=frozenset()):
     modello upstream. MAI su richieste esplicite (il client le ha volute), mai
     con routing disattivato; conta solo cap dichiarate dal modello colpito."""
 
-    import app.main as M
 
     def hook(model: str, detail: str) -> None:
-        pol = M.router.policy
+        pol = gw_state.router.policy
         if explicit or not pol.routing_active() or pol.cap_auto_learn == "off":
             return
         from .forwarder import media_reject_signature
@@ -383,9 +383,9 @@ def _strike_hook(explicit: bool, need=frozenset()):
         active = {c for c in need if c != "text" and c != "tools" and c in declared}
         if not active:
             return
-        hits = M.router.note_cap_strike(model, active, detail)
+        hits = gw_state.router.note_cap_strike(model, active, detail)
         for cap in hits:
-            cnt = next((s["count"] for s in M.router.cap_strikes_view() if s["model"] == model and s["cap"] == cap), 0)
+            cnt = next((s["count"] for s in gw_state.router.cap_strikes_view() if s["model"] == model and s["cap"] == cap), 0)
             _auto_learn_apply(model, cap, detail, cnt)
 
     return hook

@@ -25,6 +25,7 @@ import app.main as M
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 
@@ -352,9 +353,9 @@ _PAYLOAD = {"model": "x", "messages": [{"role": "user", "content": "ciao"}]}
 
 
 def _stream(monkeypatch, cfg, router, fwd, first, payload):
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
 
     async def _run():
         resp = await M._stream_with_fallback(

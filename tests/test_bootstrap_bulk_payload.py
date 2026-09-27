@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.admin import _required_create
+import app.state as gw_state
 
 BOOTSTRAP_MD = (Path(__file__).resolve().parents[1]
                 / "docs" / "BOOTSTRAP.md")
@@ -64,17 +65,17 @@ def client(monkeypatch, tmp_path):
     csv = tmp_path / "k.csv"
     csv.write_text("commento,modello,provider,endpoint,data,context,"
                    "max_input,priority,scrocco-llm-test,caps\n")
-    orig_csv_path = m.config.csv_path
-    monkeypatch.setattr(m.authn, "master_key", "test-master-bootstrap-md")
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    m.config.csv_path = csv
-    m.config.reload()
+    orig_csv_path = gw_state.config.csv_path
+    monkeypatch.setattr(gw_state.authn, "master_key", "test-master-bootstrap-md")
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
     yield TestClient(m.app)
     # teardown: nessun leak verso la config reale
-    m.router._cooldown.clear()
-    m.config.csv_path = orig_csv_path
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.config.csv_path = orig_csv_path
+    gw_state.config.reload()
 
 
 def _live_insert_op(j: dict) -> dict:
@@ -134,18 +135,18 @@ def fresh_client(monkeypatch, tmp_path):
     import app.main as m
     csv_file = tmp_path / "nuova" / "dir" / "keys_rotation.csv"
     assert not csv_file.exists()
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-bootstrap-fresh"
-    monkeypatch.setattr(m, "CSV_PATH", str(csv_file))
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m.config, "csv_path", csv_file)
-    m.config.reload()
-    assert str(m.CSV_PATH).startswith(str(tmp_path))
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-bootstrap-fresh"
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv_file))
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv_file)
+    gw_state.config.reload()
+    assert str(gw_state.CSV_PATH).startswith(str(tmp_path))
     yield TestClient(m.app), csv_file
-    m.authn.master_key = orig_mk
-    m.router._cooldown.clear()
-    m.config.csv_path = m.CSV_PATH
-    m.config.reload()
+    gw_state.authn.master_key = orig_mk
+    gw_state.router._cooldown.clear()
+    gw_state.config.csv_path = gw_state.CSV_PATH
+    gw_state.config.reload()
 
 
 def _create_op(**over):

@@ -20,6 +20,7 @@ from app.forwarder import (Forwarder, UpstreamError,
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 # Body del 401 realmente osservato (Bynara).
 BYNARA_401 = ('{"error":{"type":"unauthorized","message":'
@@ -92,11 +93,11 @@ def test_streaming_401_rotates_never_passthrough(monkeypatch):
     import app.main as M
     from fastapi.responses import JSONResponse, StreamingResponse
 
-    dep = next(iter(next(deps for deps in M.config.groups.values() if deps)))
-    M.router._cooldown.pop(dep["unique"], None)
+    dep = next(iter(next(deps for deps in gw_state.config.groups.values() if deps)))
+    gw_state.router._cooldown.pop(dep["unique"], None)
     first = dep["unique"]
     seen = []
-    cooldown_before = set(M.router._cooldown)
+    cooldown_before = set(gw_state.router._cooldown)
 
     async def _resp(d, payload, **kwargs):
         seen.append(d["unique"])
@@ -110,7 +111,7 @@ def test_streaming_401_rotates_never_passthrough(monkeypatch):
             yield b"data: [DONE]\n\n"
         return _g()
 
-    monkeypatch.setattr(M.forwarder, "stream_response", _resp)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _resp)
 
     async def _run():
         payload = {"model": dep["model"],
@@ -125,9 +126,9 @@ def test_streaming_401_rotates_never_passthrough(monkeypatch):
             assert b"ok" in asyncio.run(_drain(resp))
         else:
             assert resp.status_code == 503
-        assert first in M.router._cooldown
+        assert first in gw_state.router._cooldown
         assert first in seen
     finally:
-        for k in list(M.router._cooldown):
+        for k in list(gw_state.router._cooldown):
             if k not in cooldown_before:
-                M.router._cooldown.pop(k, None)
+                gw_state.router._cooldown.pop(k, None)

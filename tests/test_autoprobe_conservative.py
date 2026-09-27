@@ -10,6 +10,7 @@ from app import autoprobe as AP
 from app.ctxcompact import CtxCompactConfig  # noqa: F401  (import sanity)
 from app.policy import Policy
 from app.router import Router, _is_quota_evidence
+import app.state as gw_state
 
 
 # --------------------------------------------------------------- _is_quota
@@ -77,7 +78,7 @@ def _policy():
 def test_retire_non_scatta_per_quota(monkeypatch):
     import app.main as M
     kh = _KhFake()
-    monkeypatch.setattr(M, "KEYHEALTH", kh, raising=False)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", kh, raising=False)
     r = Router.__new__(Router)
     r.policy = _policy()
     r.policy.probe_retire_after = 5
@@ -93,7 +94,7 @@ def test_retire_non_scatta_per_quota(monkeypatch):
 def test_retire_scatta_su_guasto_vero(monkeypatch):
     import app.main as M
     kh = _KhFake()
-    monkeypatch.setattr(M, "KEYHEALTH", kh, raising=False)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", kh, raising=False)
     r = Router.__new__(Router)
     r.policy = _policy()
     r.policy.probe_retire_after = 5
@@ -202,7 +203,7 @@ def test_retired_permanent_vs_usable(monkeypatch):
             return str(self.state.get(u, "")).startswith("permanent")
 
     kh = Kh2()
-    monkeypatch.setattr(M, "KEYHEALTH", kh, raising=False)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", kh, raising=False)
     r = Router.__new__(Router)
     r.policy = _policy()
 

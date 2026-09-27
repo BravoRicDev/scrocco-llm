@@ -2,6 +2,7 @@
 solo la testa (primi N char), cosi' timestamp/contesto accodato ad ogni turno
 non invalida sticky e prompt-cache."""
 from app import main as M
+import app.state as gw_state
 
 _SYS_HEAD = "Istruzioni strutturali stabili e ripetute. " * 60  # > 768 char
 
@@ -31,7 +32,7 @@ def test_head_change_changes_fingerprint():
 
 
 def test_knob_zero_uses_whole_system(monkeypatch):
-    monkeypatch.setattr(M.policy, "anon_session_fp_system_chars", 0)
+    monkeypatch.setattr(gw_state.policy, "anon_session_fp_system_chars", 0)
     a = M._session_id(_Req(), _pay(_SYS_HEAD))
     b = M._session_id(_Req(), _pay(_SYS_HEAD + " tail"))
     assert a != b

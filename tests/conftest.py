@@ -14,6 +14,7 @@ inquinare gli altri ne' il repository.
 from __future__ import annotations
 
 import pytest
+import app.state as gw_state
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +26,7 @@ def _isolate_gateway_state(tmp_path, monkeypatch):
 
     try:
         from app.keyhealth import KeyHealth
-        monkeypatch.setattr(M, "KEYHEALTH", KeyHealth(str(tmp_path)),
+        monkeypatch.setattr(gw_state, "KEYHEALTH", KeyHealth(str(tmp_path)),
                             raising=False)
     except Exception:                                  # pragma: no cover
         pass
@@ -34,5 +35,5 @@ def _isolate_gateway_state(tmp_path, monkeypatch):
                        ("_cooldown_file", "cooldown_state.json"),
                        ("_routing_file", "routing_state.json"),
                        ("_thought_sigs_file", "thought_sigs.json")):
-        if hasattr(M, attr):
-            monkeypatch.setattr(M, attr, tmp_path / name, raising=False)
+        if hasattr(gw_state, attr):
+            monkeypatch.setattr(gw_state, attr, tmp_path / name, raising=False)

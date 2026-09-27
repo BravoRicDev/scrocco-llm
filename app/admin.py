@@ -33,6 +33,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import csv_store, journal, logview, metrics
+from . import state as gw_state
 from .suppressed import report_suppressed
 from . import protocols as proto
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
@@ -47,17 +48,11 @@ log = logging.getLogger("nx.admin")
 admin_api = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def _gw():
-    """Accesso ai globali del servizio a runtime (evita import circolari)."""
-    from . import main as mod
-    return mod
-
-
-def _tune(gw, name: str, default):
+def _tune(name: str, default):
     """Legge un parametro di tuning dalla policy, con fallback al default
     (che coincide col valore storico hardcoded). Mai eccezioni."""
     try:
-        return getattr(gw.policy, name, default)
+        return getattr(gw_state.policy, name, default)
     except Exception:                            # noqa: BLE001
         return default
 
@@ -89,8 +84,7 @@ def _session_of(request: Request) -> str | None:
 
 
 def _require_master(request: Request) -> JSONResponse | None:
-    gw = _gw()
-    auth = gw.authn.authenticate(request.headers.get("authorization"))
+    auth = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok or auth.mode != "master":
         return JSONResponse(status_code=401, content={
             "error": {"message": "admin only: master key richiesta",
@@ -122,8 +116,7 @@ def _deployment_view(header: list[str], row: dict, prefix: str) -> dict:
     key = (row.get(prefix + profile) or "").strip() if profile else ""
     modello = (row.get(MODEL_HEADER) or "").strip()
     # Risolve capacità tramite policy runtime
-    gw = _gw()
-    caps = gw.policy.caps_for(modello) if modello else frozenset({"text"})
+    caps = gw_state.policy.caps_for(modello) if modello else frozenset({"text"})
     # membership strutturale dalla colonna caps + gruppi derivati
     from .csv_store import CAPS_TOKENS
     row_caps = sorted({t.strip().lower() for t in
@@ -140,7 +133,7 @@ def _deployment_view(header: list[str], row: dict, prefix: str) -> dict:
             elif meta["category"] == "future":
                 cap_groups.append(f"{base_g}-go")
             elif meta["category"] == "fallback":
-                fb_sfx = getattr(gw.policy, "fallback_suffix", "-fallback")
+                fb_sfx = getattr(gw_state.policy, "fallback_suffix", "-fallback")
                 cap_groups.append(f"{base_g}{fb_sfx}")
     return {
         "id": csv_store.row_id(row, endpoint),
@@ -191,21 +184,20 @@ def _load_table_or_create(csv_path: str) -> tuple[list[str], list[dict]]:
 def _commit_csv(header: list[str], rows: list[dict]) -> None:
     """Scrittura atomica+validata del CSV e reload sincrono della config.
     PRIMA della riscrittura: backup rotato (undo possibile)."""
-    gw = _gw()
     from .journal import backup_csv
-    backup_csv(gw.CSV_PATH, gw.VAR_DIR)
-    csv_store.save_table(gw.CSV_PATH, header, rows, like=gw.config)
+    backup_csv(gw_state.CSV_PATH, gw_state.VAR_DIR)
+    csv_store.save_table(gw_state.CSV_PATH, header, rows, like=gw_state.config)
     try:
-        gw.config.reload()              # già validato dal save
+        gw_state.config.reload()              # già validato dal save
         # I flag dei quirk (P2-9) vivono solo in memoria: il reload ricostruisce
         # i dep dict, quindi vanno riapplicati subito.
         try:
-            gw.router.apply_quirks()
+            gw_state.router.apply_quirks()
         except Exception:
             report_suppressed("admin._commit_csv")
         log.info("[config] CSV aggiornato via admin: profili=%s deployment=%d",
-                 ",".join(gw.config.profiles),
-                 sum(len(v) for v in gw.config.groups.values()))
+                 ",".join(gw_state.config.profiles),
+                 sum(len(v) for v in gw_state.config.groups.values()))
     except Exception as exc:            # non dovrebbe accadere post-validazione
         log.error("[config] reload post-admin FALLITO: %s", exc)
 
@@ -242,9 +234,8 @@ async def list_deployments(request: Request, profile: str | None = None):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    header, rows = csv_store.load_table(gw.CSV_PATH)
-    out = [_deployment_view(header, r, gw.config.proxy_prefix) for r in rows]
+    header, rows = csv_store.load_table(gw_state.CSV_PATH)
+    out = [_deployment_view(header, r, gw_state.config.proxy_prefix) for r in rows]
     if profile:
         out = [d for d in out if d["profile"] == profile.strip()]
     return {"count": len(out), "deployments": out}
@@ -255,16 +246,15 @@ async def create_deployment(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     payload, bad = await _json_body(request)
     if bad:
         return bad
     try:
         _required_create(payload)
-        prefix = gw.config.proxy_prefix
+        prefix = gw_state.config.proxy_prefix
         # FIX bootstrap: fresh install SENZA file -> header minimale di
         # partenza (il create lo estende con profilo/caps e salva).
-        header, rows = _load_table_or_create(gw.CSV_PATH)
+        header, rows = _load_table_or_create(gw_state.CSV_PATH)
         profile = str(payload["profile"]).strip()
         header = csv_store.ensure_profile_column(header, profile, prefix)
         if "caps" in payload:
@@ -284,13 +274,13 @@ async def create_deployment(request: Request):
         return _err(400, str(exc))
     except Exception as exc:
         return _err(400, f"CSV non valido dopo la modifica: {exc}")
-    journal.record(gw.VAR_DIR, "create", {
+    journal.record(gw_state.VAR_DIR, "create", {
         "profile": profile, "modello": payload.get("modello", ""),
         "id": new_id,
         "key_rotated": bool(payload.get("key"))})
     return {"ok": True, "id": new_id, "created": profile,
             "deployments_total": sum(
-                len(v) for v in gw.config.groups.values())}
+                len(v) for v in gw_state.config.groups.values())}
 
 
 @admin_api.put("/deployments/{row_hash}")
@@ -298,17 +288,16 @@ async def update_deployment(row_hash: str, request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     payload, bad = await _json_body(request)
     if bad:
         return bad
     try:
-        header, rows = csv_store.load_table(gw.CSV_PATH)
+        header, rows = csv_store.load_table(gw_state.CSV_PATH)
         idx, row = csv_store.find_row(header, rows, row_hash)
         if idx is None:
             return _err(404, f"deployment '{row_hash}' non esiste "
                              "(ri-leggi GET /admin/deployments)")
-        prefix = gw.config.proxy_prefix
+        prefix = gw_state.config.proxy_prefix
         old_profile = _deployment_view(header, row, prefix)["profile"]
         if "caps" in payload:
             header = csv_store.ensure_caps_column(header)
@@ -327,7 +316,7 @@ async def update_deployment(row_hash: str, request: Request):
         return _err(400, str(exc))
     except Exception as exc:
         return _err(400, f"CSV non valido dopo la modifica: {exc}")
-    journal.record(gw.VAR_DIR, "update", {
+    journal.record(gw_state.VAR_DIR, "update", {
         "previous_id": row_hash, "new_id": new_id,
         "fields": sorted(k for k in payload if k != "key"),
         "key_rotated": "key" in payload})
@@ -339,18 +328,17 @@ async def delete_deployment(row_hash: str, request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     try:
-        header, rows = csv_store.load_table(gw.CSV_PATH)
+        header, rows = csv_store.load_table(gw_state.CSV_PATH)
         idx, row = csv_store.find_row(header, rows, row_hash)
         if idx is None:
             return _err(404, f"deployment '{row_hash}' non esiste")
-        view = _deployment_view(header, row, gw.config.proxy_prefix)
+        view = _deployment_view(header, row, gw_state.config.proxy_prefix)
         del rows[idx]
         _commit_csv(header, rows)
     except Exception as exc:
         return _err(400, f"CSV non valido dopo la modifica: {exc}")
-    journal.record(gw.VAR_DIR, "delete", {"id": row_hash,
+    journal.record(gw_state.VAR_DIR, "delete", {"id": row_hash,
                                           "modello": view["modello"],
                                           "profile": view["profile"]})
     return {"ok": True, "deleted": view["modello"],
@@ -364,7 +352,6 @@ async def bulk_deployments(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
@@ -377,8 +364,8 @@ async def bulk_deployments(request: Request):
         # FIX bootstrap: stesso trattamento di create_deployment. Su fresh
         # install il FileNotFoundError finiva nel `except Exception` qui
         # sotto -> 400 e batch atomico senza applicare NULLA.
-        header, rows = _load_table_or_create(gw.CSV_PATH)
-        prefix = gw.config.proxy_prefix
+        header, rows = _load_table_or_create(gw_state.CSV_PATH)
+        prefix = gw_state.config.proxy_prefix
         for n, op in enumerate(ops):
             action = op.get("action") if isinstance(op, dict) else None
             # i campi di controllo non entrano mai nel payload dati
@@ -448,7 +435,7 @@ async def bulk_deployments(request: Request):
     actions: dict[str, int] = {}
     for r_ in results:
         actions[r_.get("action", "?")] = actions.get(r_.get("action", "?"), 0) + 1
-    journal.record(gw.VAR_DIR, "bulk", {"count": len(ops), "actions": actions})
+    journal.record(gw_state.VAR_DIR, "bulk", {"count": len(ops), "actions": actions})
     return {"ok": True, "applied": len(ops), "results": results}
 
 
@@ -457,8 +444,7 @@ async def deployments_expiring(request: Request, days: int = 7):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    header, rows = csv_store.load_table(gw.CSV_PATH)
+    header, rows = csv_store.load_table(gw_state.CSV_PATH)
     return {"days": days,
             "expiring": csv_store.expiring(rows, header, days)}
 @admin_api.get("/history")
@@ -467,8 +453,7 @@ async def admin_history(request: Request, limit: int = 50):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    return journal.history(gw.VAR_DIR, limit)
+    return journal.history(gw_state.VAR_DIR, limit)
 
 
 @admin_api.get("/repairs")
@@ -489,7 +474,6 @@ async def purge_profile(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
@@ -497,8 +481,8 @@ async def purge_profile(request: Request):
     if not profile:
         return _err(400, "'profile' obbligatorio")
     try:
-        header, rows = csv_store.load_table(gw.CSV_PATH)
-        col = gw.config.proxy_prefix + profile
+        header, rows = csv_store.load_table(gw_state.CSV_PATH)
+        col = gw_state.config.proxy_prefix + profile
         if col not in header:
             return _err(404, f"colonna '{col}' non esiste nel CSV")
         used = sum(1 for r in rows if (r.get(col) or "").strip())
@@ -512,7 +496,7 @@ async def purge_profile(request: Request):
         return _err(400, str(exc))
     except Exception as exc:
         return _err(400, f"CSV non valido dopo la modifica: {exc}")
-    journal.record(gw.VAR_DIR, "profiles_purge", {"profile": profile})
+    journal.record(gw_state.VAR_DIR, "profiles_purge", {"profile": profile})
     return {"ok": True, "purged": profile,
             "columns": [before, len(new_header)]}
 
@@ -523,18 +507,17 @@ async def list_profiles(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    pol = gw.router.policy
+    pol = gw_state.router.policy
     out = []
-    for p in gw.config.profiles:
+    for p in gw_state.config.profiles:
         groups = sorted(
-            g for g in gw.config.groups
-            if g.startswith(gw.config.proxy_prefix + p + "-"))
-        deps = sum(len(gw.config.groups[g]) for g in groups)
+            g for g in gw_state.config.groups
+            if g.startswith(gw_state.config.proxy_prefix + p + "-"))
+        deps = sum(len(gw_state.config.groups[g]) for g in groups)
         out.append({
             "name": p,
-            "base_model": gw.config.proxy_prefix + p,
-            "dims_k": gw.config.profile_dims.get(p, []),
+            "base_model": gw_state.config.proxy_prefix + p,
+            "dims_k": gw_state.config.profile_dims.get(p, []),
             "groups": len(groups),
             "deployments": deps,
             "step_up_pct": pol.step_up_for(p),
@@ -550,34 +533,33 @@ async def state(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     now = time.time()
     cooldowns = [{"unique": u, "remaining_sec": round(e - now),
-                  "attempts": gw.router.stats_for(u).fail_streak}
-                 for u, e in gw.router._cooldown.items() if e > now]
+                  "attempts": gw_state.router.stats_for(u).fail_streak}
+                 for u, e in gw_state.router._cooldown.items() if e > now]
     sticky = [{"session_id": s, "group": t}
-              for s, (t, _ts) in gw.router._sticky.items()]
-    pol = gw.router.policy
+              for s, (t, _ts) in gw_state.router._sticky.items()]
+    pol = gw_state.router.policy
     # conteggio deployment per capacità risolta + contatori audio/caps
     cap_counts: dict[str, int] = {}
-    for deps in gw.config.groups.values():
+    for deps in gw_state.config.groups.values():
         for d in deps:
-            for c in gw.policy.caps_for(d["model"]):
+            for c in gw_state.policy.caps_for(d["model"]):
                 cap_counts[c] = cap_counts.get(c, 0) + 1
     from . import metrics as _mx
     counters = _mx.snapshot(("nx_caps_requests_total", "nx_caps_unroutable_total",
                              "nx_tts_total", "nx_stt_total", "nx_images_total"))
     counters_json = {n: {",".join(k): v for k, v in series.items()}
                      for n, series in counters.items()}
-    health = getattr(gw.router, "last_health", None) or {
+    health = getattr(gw_state.router, "last_health", None) or {
         "last_cycle_at": None, "marked": 0, "accounts": 0,
         "enabled": pol.proactive_health}
     return {
         "service": pol.service_name,
-        "prefix": gw.config.proxy_prefix,
-        "profiles": gw.config.profiles,
-        "groups": len(gw.config.groups),
-        "deployments": sum(len(v) for v in gw.config.groups.values()),
+        "prefix": gw_state.config.proxy_prefix,
+        "profiles": gw_state.config.profiles,
+        "groups": len(gw_state.config.groups),
+        "deployments": sum(len(v) for v in gw_state.config.groups.values()),
         "cooldowns_active": cooldowns,
         "sticky_sessions": sticky,
         # budget guard (Feature no-spreco): finestre + cap appresi dai 429
@@ -587,8 +569,8 @@ async def state(request: Request):
                 u: {"minute_calls": s.minute_calls, "day_calls": s.day_calls,
                     "min_cap_learned": s.min_cap_learned or None,
                     "day_cap_learned": s.day_cap_learned or None}
-                for u in gw.router._stats
-                if (s := gw.router._stats[u])
+                for u in gw_state.router._stats
+                if (s := gw_state.router._stats[u])
                 and (s.minute_calls or s.day_calls
                      or s.min_cap_learned or s.day_cap_learned)}},
         "capabilities": {
@@ -596,32 +578,32 @@ async def state(request: Request):
             "patterns": len(pol.model_capabilities),
             "auto_learn": {"mode": pol.cap_auto_learn,
                            "threshold": pol.cap_auto_learn_threshold,
-                           "strikes": gw.router.cap_strikes_view()},
+                           "strikes": gw_state.router.cap_strikes_view()},
             "per_capability": dict(sorted(cap_counts.items())),
-            "fallback": {p: (gw.router.capability_chains(p)
-                             if hasattr(gw.router, "capability_chains")
+            "fallback": {p: (gw_state.router.capability_chains(p)
+                             if hasattr(gw_state.router, "capability_chains")
                              else {})
-                         for p in gw.config.profiles},
-            "groups": {p: (gw.router.capability_groups_counts(p)
-                           if hasattr(gw.router,
+                         for p in gw_state.config.profiles},
+            "groups": {p: (gw_state.router.capability_groups_counts(p)
+                           if hasattr(gw_state.router,
                                       "capability_groups_counts") else {})
-                       for p in gw.config.profiles},
+                       for p in gw_state.config.profiles},
             "multimodal_last_resort": {
                 "enabled": bool(getattr(pol, "multimodal_last_resort", True)),
-                "deferred": dict(getattr(gw.router, "media_deferred", {}) or {}),
+                "deferred": dict(getattr(gw_state.router, "media_deferred", {}) or {}),
             },
             "same_model_failover": {
                 "enabled": bool(getattr(pol, "gen_same_model_failover", True)),
-                "crossed": dict(getattr(gw.router, "gen_cross_model", {}) or {}),
+                "crossed": dict(getattr(gw_state.router, "gen_cross_model", {}) or {}),
                 "sticky": {g: m for g, m in
-                           getattr(gw.router, "_gen_last_model", {}).items()},
+                           getattr(gw_state.router, "_gen_last_model", {}).items()},
             },
             "counters": counters_json,
         },
         "health": health,
         "adaptive": {
             "enabled": pol.adaptive_pick,
-            "tracked": len(gw.router._stats),
+            "tracked": len(gw_state.router._stats),
             "recency_halflife_sec": pol.recency_halflife_sec,
             "latency_ref_ms": pol.latency_ref_ms,
             "escalation_pin": {
@@ -633,44 +615,44 @@ async def state(request: Request):
                 # bucket_chiesto -> {winner, eta_sec, modello, gruppo_reale}
                 "pins": {g: {"winner": u,
                              "eta_sec": round(max(0.0, time.time() - ts), 1),
-                             "model": (gw.config.deployment_by_unique(u) or {}).get("model"),
-                             "served_group": (gw.config.deployment_by_unique(u) or {}).get("group")}
-                         for g, (u, ts) in getattr(gw.router, "_esc_win", {}).items()},
+                             "model": (gw_state.config.deployment_by_unique(u) or {}).get("model"),
+                             "served_group": (gw_state.config.deployment_by_unique(u) or {}).get("group")}
+                         for g, (u, ts) in getattr(gw_state.router, "_esc_win", {}).items()},
             },
             "session_dep_guard": {
                 "enabled": bool(getattr(pol, "session_dep_guard_enabled", True)),
                 "sec": int(getattr(pol, "session_dep_guard_sec", 900)),
-                "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
-                "entries": gw.router.session_dep_guard_view(),
+                "tracked": len(getattr(gw_state.router, "_dep_last_session", {}) or {}),
+                "entries": gw_state.router.session_dep_guard_view(),
             },
-            "provider_alternation": gw.router.provider_alternation_view(),
-            "probes_in_flight": gw.router.probes_in_flight_view(),
+            "provider_alternation": gw_state.router.provider_alternation_view(),
+            "probes_in_flight": gw_state.router.probes_in_flight_view(),
             "warm_pool": {
                 "enabled": bool(getattr(pol, "warm_pool_enabled", True)),
                 "ttl_sec": int(getattr(pol, "warm_pool_ttl_sec", 0) or 0),
                 "max_attempts": int(getattr(pol, "warm_pool_max_attempts", 0) or 0),
-                "tracked": len(getattr(gw.router, "_dep_last_session", {}) or {}),
+                "tracked": len(getattr(gw_state.router, "_dep_last_session", {}) or {}),
                 "borrow_enabled": bool(getattr(pol, "warm_borrow_enabled", True)),
                 "borrow_idle_sec": float(
                     getattr(pol, "warm_borrow_idle_sec", 240.0) or 0.0),
                 "borrow_selectable": bool(
                     getattr(pol, "warm_borrow_selectable", True)),
-                "borrowable_now": len(gw.router._lendable_set()),
+                "borrowable_now": len(gw_state.router._lendable_set()),
                 "slow_canary_after_ms": int(
                     getattr(pol, "slow_canary_after_ms", 0) or 0),
             },
-            "endpoint_quarantine": gw.router.endpoint_quarantine_view(),
-            "degraded": gw.router.degraded_view(),
-            "key_leases": gw.router.key_leases_view(),
-            "quirks": gw.router.quirks_view(),
+            "endpoint_quarantine": gw_state.router.endpoint_quarantine_view(),
+            "degraded": gw_state.router.degraded_view(),
+            "key_leases": gw_state.router.key_leases_view(),
+            "quirks": gw_state.router.quirks_view(),
             "pressure": {
                 "cooldowns_total":
-                    gw.router.pressure_view(limit=0)["cooldowns_total"],
+                    gw_state.router.pressure_view(limit=0)["cooldowns_total"],
             },
             "cold_spread": {
                 "pct": float(getattr(pol, "cold_spread_pct", 0.20) or 0.0),
                 "min_pool": int(getattr(pol, "ladder_skip_after", 0) or 0),
-                "tracked": len(getattr(gw.router, "_usage_times", {}) or {}),
+                "tracked": len(getattr(gw_state.router, "_usage_times", {}) or {}),
             },
         },
         "policy": {
@@ -692,7 +674,7 @@ async def warm_state(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    return _gw().router.warm_pool_view()
+    return gw_state.router.warm_pool_view()
 
 
 @admin_api.get("/keys/soft", tags=["admin"])
@@ -702,7 +684,7 @@ async def keys_soft(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    return _gw().router.key_soft_view()
+    return gw_state.router.key_soft_view()
 
 
 @admin_api.get("/circuits", tags=["admin"])
@@ -711,7 +693,7 @@ async def circuits(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    router = _gw().router
+    router = gw_state.router
     return {"models": router.model_circuits_view(),
             **router.circuit_breakers_view()}
 
@@ -721,18 +703,16 @@ async def clear_cooldowns(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     unique = (body or {}).get("unique")
     if unique:
-        removed = gw.router._cooldown.pop(unique, None) is not None
+        removed = gw_state.router._cooldown.pop(unique, None) is not None
         return {"ok": True, "cleared": [unique] if removed else []}
-    cleared = list(gw.router._cooldown)
-    gw.router._cooldown.clear()
+    cleared = list(gw_state.router._cooldown)
+    gw_state.router._cooldown.clear()
     return {"ok": True, "cleared": cleared}
-
 
 
 @admin_api.post("/reload", tags=["admin"])
@@ -741,11 +721,10 @@ async def reload_gateway(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     try:
-        gw.config.reload()
+        gw_state.config.reload()
         try:
-            gw.router.apply_quirks()
+            gw_state.router.apply_quirks()
         except Exception:
             report_suppressed("admin.reload_gateway")
         return {"ok": True, "message": "configurazione ricaricata"}
@@ -762,12 +741,11 @@ async def clear_pressure(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     body = body or {}
-    return gw.router.clear_pressure(model=body.get("model"),
+    return gw_state.router.clear_pressure(model=body.get("model"),
                                     unique=body.get("unique"))
 
 
@@ -777,7 +755,6 @@ async def inspect_pressure(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
@@ -785,7 +762,7 @@ async def inspect_pressure(request: Request):
         limit = int((body or {}).get("limit", 40))
     except (TypeError, ValueError):
         limit = 40
-    return gw.router.pressure_view(limit=max(0, limit))
+    return gw_state.router.pressure_view(limit=max(0, limit))
 
 
 @admin_api.post("/sessions/release")
@@ -793,16 +770,15 @@ async def release_sessions(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     sid = (body or {}).get("session_id")
     if sid:
-        removed = gw.router._sticky.pop(str(sid), None) is not None
+        removed = gw_state.router._sticky.pop(str(sid), None) is not None
         return {"ok": True, "released": [str(sid)] if removed else []}
-    released = list(gw.router._sticky)
-    gw.router._sticky.clear()
+    released = list(gw_state.router._sticky)
+    gw_state.router._sticky.clear()
     return {"ok": True, "released": released}
 
 
@@ -814,7 +790,6 @@ async def warm_wake(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
@@ -829,9 +804,9 @@ async def warm_wake(request: Request):
         limit = int(body.get("limit", 1))
     except (TypeError, ValueError):
         return _err(400, "limit non intero")
-    limit = max(1, min(limit, _tune(gw, "warm_refill_wake_max_attempts", 10)))
+    limit = max(1, min(limit, _tune("warm_refill_wake_max_attempts", 10)))
     if unique:
-        dep = gw.config.deployment_by_unique(unique)
+        dep = gw_state.config.deployment_by_unique(unique)
         if dep is None:
             return _err(404, f"deployment non trovato: {unique}")
         targets = [dep]
@@ -845,7 +820,7 @@ async def warm_wake(request: Request):
                 min_age = float(min_age)
             except (TypeError, ValueError):
                 return _err(400, "min_age_sec non numerico")
-        targets = gw.router.warm_wake_targets(
+        targets = gw_state.router.warm_wake_targets(
             group=group, session_id=sid, only_zen=only_zen, limit=limit,
             min_age_sec=min_age)
         mode = "group" if group else "session"
@@ -861,14 +836,14 @@ async def warm_wake(request: Request):
                 out = await _probe_one(http, dep, True, client_ip=cip,
                                        session=sess, attribution=attr)
                 if out.get("ok"):
-                    gw.router.clear_cooldown(dep["unique"])
+                    gw_state.router.clear_cooldown(dep["unique"])
             except Exception as exc:               # noqa: BLE001
                 out = {"unique": dep.get("unique"), "ok": False,
                        "error_class": type(exc).__name__}
             woken.append({k: out.get(k) for k in
                           ("unique", "ok", "latency_ms", "status",
                            "error_class")})
-    journal.record(gw.VAR_DIR, "warm_wake", {
+    journal.record(gw_state.VAR_DIR, "warm_wake", {
         "mode": mode, "count": len(woken),
         "ok": sum(1 for w in woken if w.get("ok")),
         "targets": [w.get("unique") for w in woken]})
@@ -880,25 +855,24 @@ async def drain_host(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     uniq = str((body or {}).get("unique") or "").strip()
     if not uniq:
         return _err(400, "serve unique")
-    dep = gw.config.deployment_by_unique(uniq)
+    dep = gw_state.config.deployment_by_unique(uniq)
     if dep is None:
         return _err(404, f"deployment non trovato: {uniq}")
-    if gw.router.is_draining(uniq):
+    if gw_state.router.is_draining(uniq):
         return {"ok": True, "unique": uniq, "draining": True, "already": True}
     try:
         inflight = max(0, int((body or {}).get(
-            "inflight", gw.router.stats_for(uniq).inflight)))
+            "inflight", gw_state.router.stats_for(uniq).inflight)))
     except (TypeError, ValueError):
         return _err(400, "inflight non intero")
-    gw.router.start_draining(uniq, dep, inflight, operator=True)
-    journal.record(gw.VAR_DIR, "hosts_drain",
+    gw_state.router.start_draining(uniq, dep, inflight, operator=True)
+    journal.record(gw_state.VAR_DIR, "hosts_drain",
                    {"unique": uniq, "inflight": inflight})
     return {"ok": True, "unique": uniq, "draining": True, "inflight": inflight}
 
@@ -908,15 +882,14 @@ async def undrain_host(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     uniq = str((body or {}).get("unique") or "").strip()
     if not uniq:
         return _err(400, "serve unique")
-    stopped = gw.router.stop_draining(uniq, purge_config=False)
-    journal.record(gw.VAR_DIR, "hosts_undrain",
+    stopped = gw_state.router.stop_draining(uniq, purge_config=False)
+    journal.record(gw_state.VAR_DIR, "hosts_undrain",
                    {"unique": uniq, "was_draining": stopped})
     return {"ok": True, "unique": uniq, "undrained": stopped,
             "already": not stopped}
@@ -927,9 +900,8 @@ async def reset_metrics(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     metrics.reset()
-    journal.record(gw.VAR_DIR, "metrics_reset", {})
+    journal.record(gw_state.VAR_DIR, "metrics_reset", {})
     return {"ok": True, "reset": True}
 
 
@@ -938,15 +910,14 @@ async def reset_scores(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     body = body or {}
     unique = str(body.get("unique") or "").strip() or None
     model = str(body.get("model") or "").strip() or None
-    out = gw.router.reset_scores(unique=unique, model=model)
-    journal.record(gw.VAR_DIR, "scores_reset",
+    out = gw_state.router.reset_scores(unique=unique, model=model)
+    journal.record(gw_state.VAR_DIR, "scores_reset",
                    {"unique": unique, "model": model,
                     "base": out.get("base"), "provider": out.get("provider"),
                     "key": out.get("key")})
@@ -958,13 +929,12 @@ async def purge_sessions(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     sid = str((body or {}).get("session_id") or "").strip() or None
-    out = gw.router.purge_sessions(sid)
-    journal.record(gw.VAR_DIR, "sessions_purge", {
+    out = gw_state.router.purge_sessions(sid)
+    journal.record(gw_state.VAR_DIR, "sessions_purge", {
         "session_id": sid,
         "purged": {k: v for k, v in out["purged"].items() if v}})
     return out
@@ -975,17 +945,16 @@ async def clear_key_leases(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     uniq = str((body or {}).get("unique") or "").strip() or None
     # Coerente con drain/warm_wake: unique inesistente -> 404. Un unique
     # valido senza lease -> 200 con keys=0. La api_key non entra mai in output.
-    if uniq and gw.config.deployment_by_unique(uniq) is None:
+    if uniq and gw_state.config.deployment_by_unique(uniq) is None:
         return _err(404, f"deployment non trovato: {uniq}")
-    out = gw.router.clear_key_leases(uniq)
-    journal.record(gw.VAR_DIR, "keys_leases_clear",
+    out = gw_state.router.clear_key_leases(uniq)
+    journal.record(gw_state.VAR_DIR, "keys_leases_clear",
                    {"unique": uniq, "keys": out.get("keys"),
                     "leases": out.get("leases")})
     return out
@@ -1008,12 +977,11 @@ async def get_policy(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     raw: dict = {}
-    if Path(gw.POLICY_PATH).exists():
-        with open(gw.POLICY_PATH, encoding="utf-8") as f:
+    if Path(gw_state.POLICY_PATH).exists():
+        with open(gw_state.POLICY_PATH, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-    pol = gw.router.policy
+    pol = gw_state.router.policy
     effective = {
                 "service_name": pol.service_name,
                 "proxy_prefix": pol.proxy_prefix,
@@ -1123,7 +1091,7 @@ async def get_policy(request: Request):
                                       for k, v in pol.alias_keys.items()}
     effective["client_keys_masked"] = {k: csv_store.mask_key(v)
                                        for k, v in pol.client_keys.items()}
-    return {"file": str(gw.POLICY_PATH),
+    return {"file": str(gw_state.POLICY_PATH),
             "configured": _mask_configured(raw),
             "effective": effective}
 
@@ -1135,7 +1103,7 @@ async def get_policy_schema(request: Request):
     if err := _require_master(request):
         return err
     from .policy import policy_schema
-    return policy_schema(_gw().router.policy)
+    return policy_schema(gw_state.router.policy)
 
 
 _POLICY_REPLACE_KEYS = frozenset({
@@ -1205,10 +1173,10 @@ def _apply_policy_patch(current: dict, patch: dict) -> dict:
     return merged
 
 
-def _persist_policy_merged(gw, merged: dict) -> Policy | None:
+def _persist_policy_merged(merged: dict) -> Policy | None:
     """Scrittura atomica+validata del yaml unito e swap dei riferimenti runtime.
     Ritorna la Policy fresca o None se invalida (file intatto)."""
-    policy_path = Path(gw.POLICY_PATH)
+    policy_path = Path(gw_state.POLICY_PATH)
     fd, tmp_name = tempfile.mkstemp(dir=str(policy_path.parent),
                                     suffix=".tmp.yaml")
     try:
@@ -1220,9 +1188,9 @@ def _persist_policy_merged(gw, merged: dict) -> Policy | None:
         Path(tmp_name).unlink(missing_ok=True)
         return None
     # swap immediato dei riferimenti (stessa manovra del watcher)
-    gw.router.policy = fresh
+    gw_state.router.policy = fresh
     globals()["policy"] = fresh
-    gw.policy = fresh
+    gw_state.policy = fresh
     return fresh
 
 
@@ -1259,20 +1227,19 @@ def remove_cap_for_model(model: str, cap: str, evidence: str = "",
                          count: int = 0) -> dict | None:
     """AUTO-LEARN (mode=auto): rimuove `cap` da `model` nella mappa con
     scrittura atomica validata + journal. Ritorna il report o None su errore."""
-    gw = _gw()
     try:
         current: dict = {}
-        if Path(gw.POLICY_PATH).exists():
-            with open(gw.POLICY_PATH, encoding="utf-8") as f:
+        if Path(gw_state.POLICY_PATH).exists():
+            with open(gw_state.POLICY_PATH, encoding="utf-8") as f:
                 current = yaml.safe_load(f) or {}
         cr = dict(current.get("capability_routing") or {})
         mc = dict(cr.get("model_capabilities") or {})
-        before = sorted(gw.policy.caps_for(model))
+        before = sorted(gw_state.policy.caps_for(model))
         mc2 = strip_cap_from_map(mc, model, cap)
         cr["model_capabilities"] = mc2
         nxt = dict(current)
         nxt["capability_routing"] = cr
-        fresh = _persist_policy_merged(gw, nxt)
+        fresh = _persist_policy_merged(nxt)
         if fresh is None:
             log.error("[caps][auto-learn] persist fallita per %s/%s", model, cap)
             return None
@@ -1281,7 +1248,7 @@ def remove_cap_for_model(model: str, cap: str, evidence: str = "",
                   "evidence": (evidence or "")[:200],
                   "before": before, "after": after,
                   "pattern_edited": model}
-        journal.record(gw.VAR_DIR, "cap_auto_learn", report)
+        journal.record(gw_state.VAR_DIR, "cap_auto_learn", report)
         log.warning("[caps][auto-learn] rimossa '%s' da %s dopo %d strike "
                     "(%s -> %s). Revert: PATCH capability_routing."
                     "model_capabilities", cap, model, count,
@@ -1299,7 +1266,6 @@ async def patch_policy(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     patch, bad = await _json_body(request)
     if bad:
         return bad
@@ -1315,13 +1281,13 @@ async def patch_policy(request: Request):
         return _err(400, "body deve essere un oggetto non vuoto")
 
     current: dict = {}
-    if Path(gw.POLICY_PATH).exists():
-        with open(gw.POLICY_PATH, encoding="utf-8") as f:
+    if Path(gw_state.POLICY_PATH).exists():
+        with open(gw_state.POLICY_PATH, encoding="utf-8") as f:
             current = yaml.safe_load(f) or {}
 
     merged = _apply_policy_patch(current, patch)
 
-    fresh = _persist_policy_merged(gw, merged)
+    fresh = _persist_policy_merged(merged)
     if fresh is None:
         return _err(400, "policy non valida: yaml rifiutato (file intatto)")
 
@@ -1395,16 +1361,15 @@ async def admin_csv_get(request: Request):
     """
     if err := _require_master(request):
         return err
-    gw = _gw()
     raw = ""
     try:
-        raw = Path(gw.CSV_PATH).read_text(encoding="utf-8-sig")
+        raw = Path(gw_state.CSV_PATH).read_text(encoding="utf-8-sig")
     except (FileNotFoundError, OSError):
         raw = ""
-    header, rows, count = _csv_parsed_masked(raw, gw.config.proxy_prefix)
-    return {"path": str(gw.CSV_PATH), "raw": raw,
+    header, rows, count = _csv_parsed_masked(raw, gw_state.config.proxy_prefix)
+    return {"path": str(gw_state.CSV_PATH), "raw": raw,
             "parsed": {"header": header, "rows": rows},
-            "count": count, "backups": _csv_backups(gw.VAR_DIR)}
+            "count": count, "backups": _csv_backups(gw_state.VAR_DIR)}
 
 
 @admin_api.put("/csv")
@@ -1444,8 +1409,8 @@ async def admin_csv_put(request: Request):
         # save_table valida sul tmp PRIMA di os.replace: il CSV live resta intatto.
         return _err(400, f"CSV non valido: {exc}")
 
-    backups = _csv_backups(_gw().VAR_DIR)
-    journal.record(_gw().VAR_DIR, "csv_put", {"rows": len(rows)})
+    backups = _csv_backups(gw_state.VAR_DIR)
+    journal.record(gw_state.VAR_DIR, "csv_put", {"rows": len(rows)})
     return {"ok": True,
             "backup": backups[0]["filename"] if backups else None,
             "rows": len(rows)}
@@ -1471,14 +1436,14 @@ def _policy_effective_compact(pol) -> dict:
     }
 
 
-def _persist_policy_raw(gw, raw_text: str):
+def _persist_policy_raw(raw_text: str):
     """Sostituisce l'INTERO gateway.yaml col testo fornito (nessun merge).
     Valida su tmp con Policy.load; su OK: backup best-effort del file corrente
     in var/backups/gateway.yaml-<ts>.yaml, os.replace atomico, swap dei
     riferimenti runtime. Ritorna la Policy fresca, o None se invalida
     (file live INTATTO)."""
     from .policy import Policy as _Policy
-    policy_path = Path(gw.POLICY_PATH)
+    policy_path = Path(gw_state.POLICY_PATH)
     fd, tmp_name = tempfile.mkstemp(dir=str(policy_path.parent),
                                     suffix=".tmp.yaml")
     try:
@@ -1491,7 +1456,7 @@ def _persist_policy_raw(gw, raw_text: str):
     # backup del file corrente (best-effort, non blocca)
     try:
         if policy_path.exists():
-            bdir = Path(gw.VAR_DIR) / "backups"
+            bdir = Path(gw_state.VAR_DIR) / "backups"
             bdir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S")
             (bdir / f"gateway.yaml-{ts}.yaml").write_text(
@@ -1503,9 +1468,9 @@ def _persist_policy_raw(gw, raw_text: str):
     except OSError:
         Path(tmp_name).unlink(missing_ok=True)
         return None
-    gw.router.policy = fresh
+    gw_state.router.policy = fresh
     globals()["policy"] = fresh
-    gw.policy = fresh
+    gw_state.policy = fresh
     return fresh
 
 
@@ -1515,13 +1480,12 @@ async def get_policy_raw(request: Request):
     (master-only). File assente -> raw ""."""
     if err := _require_master(request):
         return err
-    gw = _gw()
     raw = ""
     try:
-        raw = Path(gw.POLICY_PATH).read_text(encoding="utf-8")
+        raw = Path(gw_state.POLICY_PATH).read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
         raw = ""
-    return {"path": str(gw.POLICY_PATH), "raw": raw}
+    return {"path": str(gw_state.POLICY_PATH), "raw": raw}
 
 
 @admin_api.put("/policy/raw")
@@ -1546,13 +1510,12 @@ async def put_policy_raw(request: Request):
         return _err(400, "il YAML di root deve essere una mappa")
     if (denied := _validate_policy_keys(parsed, allow_unknown=allow_unknown)):
         return denied
-    gw = _gw()
-    fresh = _persist_policy_raw(gw, body["raw"])
+    fresh = _persist_policy_raw(body["raw"])
     if fresh is None:
         return _err(400, "policy non valida: yaml rifiutato (file intatto)")
     log.info("[policy] gateway.yaml sostituito via admin (raw): "
              "step_up=%s%% aliases=%d", fresh.step_up_pct, len(fresh.aliases))
-    journal.record(gw.VAR_DIR, "policy_raw", {"aliases": len(fresh.aliases)})
+    journal.record(gw_state.VAR_DIR, "policy_raw", {"aliases": len(fresh.aliases)})
     return {"ok": True, "validated": True, "reloaded": True,
             "effective": _policy_effective_compact(fresh)}
 
@@ -1561,12 +1524,12 @@ async def put_policy_raw(request: Request):
 _BACKUP_NAME_RE = re.compile(r"^(keys_rotation-|gateway\.yaml-)[A-Za-z0-9._-]+$")
 
 
-def _backups_dir(gw) -> Path:
-    return Path(gw.VAR_DIR) / "backups"
+def _backups_dir() -> Path:
+    return Path(gw_state.VAR_DIR) / "backups"
 
 
-def _list_backups(gw, pattern: str) -> list[dict]:
-    bdir = _backups_dir(gw)
+def _list_backups(pattern: str) -> list[dict]:
+    bdir = _backups_dir()
     out = []
     if bdir.exists():
         for f in bdir.glob(pattern):
@@ -1585,10 +1548,9 @@ async def list_backups(request: Request):
     """GET /admin/backups (master): {dir, csv:[...], yaml:[...]}."""
     if err := _require_master(request):
         return err
-    gw = _gw()
-    return {"dir": str(_backups_dir(gw)),
-            "csv": _list_backups(gw, "keys_rotation-*.csv"),
-            "yaml": _list_backups(gw, "gateway.yaml-*.yaml")}
+    return {"dir": str(_backups_dir()),
+            "csv": _list_backups("keys_rotation-*.csv"),
+            "yaml": _list_backups("gateway.yaml-*.yaml")}
 
 
 @admin_api.post("/backups/restore")
@@ -1608,10 +1570,9 @@ async def restore_backup(request: Request):
     fname = os.path.basename(str(body.get("filename") or ""))
     if not fname or not _BACKUP_NAME_RE.match(fname):
         return _err(404, "backup non trovato")
-    gw = _gw()
-    src = _backups_dir(gw) / fname
+    src = _backups_dir() / fname
     try:
-        if not src.is_file() or src.resolve().parent != _backups_dir(gw).resolve():
+        if not src.is_file() or src.resolve().parent != _backups_dir().resolve():
             return _err(404, "backup non trovato")
     except OSError:
         return _err(404, "backup non trovato")
@@ -1622,17 +1583,17 @@ async def restore_backup(request: Request):
             _commit_csv(header, rows)          # backup dell'attuale + save + reload
         except (csv_store.CsvStoreError, ValueError) as exc:
             return _err(400, f"backup CSV non valido: {exc}")
-        journal.record(gw.VAR_DIR, "restore",
+        journal.record(gw_state.VAR_DIR, "restore",
                        {"filename": fname, "kind": "csv", "rows": len(rows)})
         return {"ok": True, "restored": fname, "rows": len(rows),
                 "note": "ripristino = sostituzione completa; l'attuale e' "
                         "stato messo in backup prima."}
 
     # gateway.yaml-*
-    fresh = _persist_policy_raw(gw, src.read_text(encoding="utf-8"))
+    fresh = _persist_policy_raw(src.read_text(encoding="utf-8"))
     if fresh is None:
         return _err(400, "backup policy non valido (file live intatto)")
-    journal.record(gw.VAR_DIR, "restore", {"filename": fname, "kind": "yaml"})
+    journal.record(gw_state.VAR_DIR, "restore", {"filename": fname, "kind": "yaml"})
     return {"ok": True, "restored": fname,
             "effective": _policy_effective_compact(fresh),
             "note": "ripristino = sostituzione completa; l'attuale e' stato "
@@ -1655,25 +1616,24 @@ async def capabilities_seed_from_map(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     body, bad = await _json_body(request)
     if bad:
         return bad
     dry_run = bool((body or {}).get("dry_run", False))
 
-    header, rows = csv_store.load_table(gw.CSV_PATH)
+    header, rows = csv_store.load_table(gw_state.CSV_PATH)
     proposals: list[dict] = []
     for row in rows:
         endpoint = csv_store.endpoint_of(header, row)
         modello = (row.get(MODEL_HEADER) or "").strip()
         profile = ""
         for h in header:
-            if h.startswith(gw.config.proxy_prefix) \
+            if h.startswith(gw_state.config.proxy_prefix) \
                     and (row.get(h) or "").strip():
-                profile = h[len(gw.config.proxy_prefix):]
+                profile = h[len(gw_state.config.proxy_prefix):]
                 break
         proposed = sorted(
-            gw.policy.caps_for(modello) - {"text", "tools"})
+            gw_state.policy.caps_for(modello) - {"text", "tools"})
         current = _row_caps_of(row)
         if not profile:
             continue
@@ -1697,13 +1657,13 @@ async def capabilities_seed_from_map(request: Request):
     errors: list[str] = []
     if operations:
         try:
-            header2, rows2 = csv_store.load_table(gw.CSV_PATH)
+            header2, rows2 = csv_store.load_table(gw_state.CSV_PATH)
             header2 = csv_store.ensure_caps_column(header2)
             by_id = {}
             for i, r in enumerate(rows2):
                 rid = csv_store.row_id(r, csv_store.endpoint_of(header2, r))
                 by_id[rid] = i
-            prefix = gw.config.proxy_prefix
+            prefix = gw_state.config.proxy_prefix
             for op in operations:
                 idx = by_id.get(op["id"])
                 if idx is None:
@@ -1721,7 +1681,7 @@ async def capabilities_seed_from_map(request: Request):
             _commit_csv(header2, rows2)
         except Exception as exc:             # noqa: BLE001
             return _err(400, f"seed fallito: {exc}")
-    journal.record(gw.VAR_DIR, "caps_seed",
+    journal.record(gw_state.VAR_DIR, "caps_seed",
                    {"applied": applied, "skipped": len(proposals) - applied})
     return {"ok": True, "applied": applied,
             "skipped": len(proposals) - applied, "errors": errors}
@@ -1730,13 +1690,12 @@ async def capabilities_seed_from_map(request: Request):
 def membership_removal_candidates(modello: str, cap: str) -> list[dict]:
     """AUTO-LEARN suggest: righe candidate alla rimozione del token `cap`
     (modello combacia e cap presente nella colonna caps). Solo lettura."""
-    gw = _gw()
     try:
-        header, rows = csv_store.load_table(gw.CSV_PATH)
+        header, rows = csv_store.load_table(gw_state.CSV_PATH)
     except Exception:
         return []
     out: list[dict] = []
-    prefix = gw.config.proxy_prefix
+    prefix = gw_state.config.proxy_prefix
     for row in rows:
         if (row.get(MODEL_HEADER) or "").strip().lower() != modello.lower():
             continue
@@ -1795,14 +1754,13 @@ async def capabilities_audit(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     # Raggruppa per ENDPOINT: la lista /models e' identica per tutte le chiavi
     # dello stesso provider. Una GET per endpoint (prima chiave valida, con
     # fallback sulle successive), cache TTL condivisa (provider_models).
     keys_by: dict[str, list[str]] = {}
     models_by: dict[str, set[str]] = {}
     _seen_keys: dict[str, set[str]] = {}
-    for deps in gw.config.groups.values():
+    for deps in gw_state.config.groups.values():
         for d in deps:
             base = (d["api_base"] or "").rstrip("/")
             models_by.setdefault(base, set()).add(d["model"])
@@ -1817,7 +1775,7 @@ async def capabilities_audit(request: Request):
     suggestions: dict[str, list[str]] = {}
     checked = 0
     errors: list[str] = []
-    ttl = int(getattr(gw.router.policy, "provider_models_ttl_sec",
+    ttl = int(getattr(gw_state.router.policy, "provider_models_ttl_sec",
                       DEFAULT_TTL_SEC) or 0)
 
     async def _one(base: str, keys: list[str], models: set[str]):
@@ -1925,8 +1883,7 @@ _NON_CHAT_CAPS = frozenset({"stt", "tts", "image_gen", "video_gen"})
 
 
 def _probe_path() -> Path:
-    from . import main as gw
-    return Path(gw.VAR_DIR) / PROBE_PATH_NAME
+    return Path(gw_state.VAR_DIR) / PROBE_PATH_NAME
 
 
 def _load_probe_results() -> dict:
@@ -1975,8 +1932,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
     t0 = time.monotonic()
     # Capacita' del deployment dal gruppo: i gruppi cap (stt/tts/image_gen/
     # video_gen) sono non-chat e NON espongono /chat/completions.
-    from . import main as _gwmod
-    cap = _gwmod.config.group_caps.get(dep["group"])
+    cap = gw_state.config.group_caps.get(dep["group"])
     non_chat = cap in _NON_CHAT_CAPS
     probe_kind = ("systemone" if cap == "decision"
                   else "models" if non_chat else "chat")
@@ -1995,7 +1951,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                     **_session_headers(dep, client_ip=client_ip,
                                        session=session,
                                        attribution=attribution)}),
-                timeout=_tune(_gwmod, "probe_timeout_sec", _PROBE_TIMEOUT_S))
+                timeout=_tune("probe_timeout_sec", _PROBE_TIMEOUT_S))
             ok = False
             try:
                 _data = resp.json() or {}
@@ -2013,7 +1969,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                          **_session_headers(dep, client_ip=client_ip,
                                             session=session,
                                             attribution=attribution)},
-                timeout=_tune(_gwmod, "probe_timeout_sec", _PROBE_TIMEOUT_S))
+                timeout=_tune("probe_timeout_sec", _PROBE_TIMEOUT_S))
             ok = resp.status_code == 200
         else:
             _style = proto.style_of(dep)
@@ -2031,7 +1987,7 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
                     **_session_headers(dep, client_ip=client_ip,
                                        session=session,
                                        attribution=attribution)}),
-                timeout=_tune(_gwmod, "probe_timeout_sec", _PROBE_TIMEOUT_S))
+                timeout=_tune("probe_timeout_sec", _PROBE_TIMEOUT_S))
             ok = False
             try:
                 _data = resp.json() or {}
@@ -2072,13 +2028,13 @@ async def _probe_one(http: "httpx.AsyncClient", dep: dict,
         _save_probe_results(res_store)
         # SBLOCCO LIFECYCLE: un probe riuscito e' la prova che la chiave
         # funziona -> pulisce dead/retired e lo streak locale.
-        kh = getattr(_gwmod, "KEYHEALTH", None)
+        kh = getattr(gw_state, "KEYHEALTH", None)
         if kh:
             kh.clear(dep["unique"])
-        st = _gwmod.router._stats.get(dep["unique"])
+        st = gw_state.router._stats.get(dep["unique"])
         if st is not None:
             st.fail_streak = 0
-        _gwmod.router._cooldown.pop(dep["unique"], None)
+        gw_state.router._cooldown.pop(dep["unique"], None)
     return {"unique": dep["unique"], "cached": False, **entry}
 
 
@@ -2089,7 +2045,6 @@ async def deployments_probe(request: Request):
     force=true ripete la chiamata anche se esiste gia' un risultato OK
     cachato (default: nessuna chiamata sprecata).
     """
-    gw = _gw()
     if err := _require_master(request):
         return err
     try:
@@ -2100,16 +2055,16 @@ async def deployments_probe(request: Request):
     dep = None
     uniq = str(payload.get("unique") or "")
     if uniq:
-        dep = gw.config.deployment_by_unique(uniq)
+        dep = gw_state.config.deployment_by_unique(uniq)
     else:
         did = str(payload.get("id") or "")
         if did:
             try:
-                header, rows = csv_store.load_table(gw.CSV_PATH)
+                header, rows = csv_store.load_table(gw_state.CSV_PATH)
                 _idx, row = csv_store.find_row(header, rows, did)
                 modello = (row.get(csv_store.MODEL_HEADER) or "").strip()
                 valori = {str(v).strip() for v in row.values()}
-                for deps in gw.config.groups.values():
+                for deps in gw_state.config.groups.values():
                     for d in deps:
                         if d["model"] == modello and \
                                 d["api_key"] in valori:
@@ -2129,7 +2084,7 @@ async def deployments_probe(request: Request):
                                client_ip=_client_ip_of(request),
                                session=_session_of(request),
                                attribution=_client_attribution(request))
-    journal.record(gw.VAR_DIR, "probe", {"target": out.get("unique"),
+    journal.record(gw_state.VAR_DIR, "probe", {"target": out.get("unique"),
                                          "ok": out.get("ok")})
     return out
 
@@ -2142,7 +2097,6 @@ async def deployments_probe_bulk(request: Request):
     I risultati OK sono permanenti su disco: rilanciare il bulk NON ri-chiama
     le chiavi sane (solo force=true le ritesta).
     """
-    gw = _gw()
     if err := _require_master(request):
         return err
     try:
@@ -2152,14 +2106,14 @@ async def deployments_probe_bulk(request: Request):
     filt = str(payload.get("filter") or "all")
     force = bool(payload.get("force"))
     targets: list[dict] = []
-    for gname, deps in gw.config.groups.items():
-        if filt.startswith("cap:") and gw.config.group_caps.get(gname) != \
+    for gname, deps in gw_state.config.groups.items():
+        if filt.startswith("cap:") and gw_state.config.group_caps.get(gname) != \
                 filt[4:]:
             continue
         targets.extend(deps)
     if filt not in ("all", "*") and not filt.startswith("cap:"):
-        prof_base = gw.config.profile_of_base(filt) or filt
-        prefix = getattr(gw.config, "proxy_prefix", "")
+        prof_base = gw_state.config.profile_of_base(filt) or filt
+        prefix = getattr(gw_state.config, "proxy_prefix", "")
         # match ESATTO del profilo con trattino terminale —
         # startswith("scrocco-llm-test") matcherebbe anche il profilo "test2".
         targets = [d for d in targets
@@ -2171,14 +2125,14 @@ async def deployments_probe_bulk(request: Request):
     _attr = _client_attribution(request)
 
     async def _run(dep):
-        async with _aio.Semaphore(_tune(gw, "probe_concurrency", _PROBE_CONCURRENCY)):
+        async with _aio.Semaphore(_tune("probe_concurrency", _PROBE_CONCURRENCY)):
             return await _probe_one(shared_http, dep, force,
                                     client_ip=_cip, session=_sess,
                                     attribution=_attr)
 
     async with httpx.AsyncClient() as shared_http:
         outs = await _aio.gather(*[_run(d) for d in targets])
-    journal.record(gw.VAR_DIR, "probe_bulk",
+    journal.record(gw_state.VAR_DIR, "probe_bulk",
                    {"count": len(outs),
                     "ok": sum(1 for o in outs if o.get("ok"))})
     return {"filter": filt, "count": len(outs), "results": outs}
@@ -2271,13 +2225,12 @@ async def admin_insights(request: Request, days: int = 7,
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     days = max(1, min(int(days or 7), 90))
     if group_by not in ("profile", "model", "deployment", "day", "kind",
                         "none"):
         return _err(400, f"group_by '{group_by}' non valido")
     cutoff = time.time() - days * 86400
-    rows = [r for r in await gw.LEDGER.iter_rows_async()
+    rows = [r for r in await gw_state.LEDGER.iter_rows_async()
             if (r.get("ts") or 0) >= cutoff]
     total = {"calls": len(rows), "days": days}
     if group_by == "none":
@@ -2302,9 +2255,8 @@ async def admin_insights_summary(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     cutoff = time.time() - 86400
-    rows = [r for r in await gw.LEDGER.iter_rows_async() if (r.get("ts") or 0) >= cutoff]
+    rows = [r for r in await gw_state.LEDGER.iter_rows_async() if (r.get("ts") or 0) >= cutoff]
     by_kind = _insights_aggregate(rows, "kind")
     tot_tok = sum(v["total_tokens"] for v in by_kind.values())
     tot_cost_r = sum(v["cost_reported_usd"] for v in by_kind.values())
@@ -2328,7 +2280,6 @@ async def deployments_unretire(request: Request):
     Il CSV non viene toccato; si pulisce SOLO l'evidenza di salute
     (key_health.json) e lo streak locale del router.
     """
-    gw = _gw()
     if err := _require_master(request):
         return err
     try:
@@ -2337,17 +2288,17 @@ async def deployments_unretire(request: Request):
         return JSONResponse(status_code=400, content={
             "error": {"message": "invalid JSON body"}})
     uniq = str(payload.get("unique") or "")
-    if not gw.config.deployment_by_unique(uniq):
+    if not gw_state.config.deployment_by_unique(uniq):
         return JSONResponse(status_code=404, content={
             "error": {"message": f"unique '{uniq}' sconosciuto"}})
-    kh = getattr(gw, "KEYHEALTH", None)
+    kh = getattr(gw_state, "KEYHEALTH", None)
     if kh:
         kh.clear(uniq)
-    s = gw.router.stats_for(uniq)          # riparti ottimisti
+    s = gw_state.router.stats_for(uniq)          # riparti ottimisti
     s.fail_streak = 0
     s.success_ema = None
-    gw.router._cooldown.pop(uniq, None)
-    journal.record(gw.VAR_DIR, "unretire", {"unique": uniq})
+    gw_state.router._cooldown.pop(uniq, None)
+    journal.record(gw_state.VAR_DIR, "unretire", {"unique": uniq})
     return {"ok": True, "unique": uniq, "state": "healthy"}
 
 
@@ -2364,8 +2315,7 @@ async def admin_logs_calls(request: Request, tail: int = 500,
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    base = os.path.join(str(gw.VAR_DIR), "gateway.log")
+    base = os.path.join(str(gw_state.VAR_DIR), "gateway.log")
     paths = [p for p in (base + ".1", base) if os.path.exists(p)]
     tagset = {t.strip() for t in tags.split(",") if t.strip()}
     lines = logview._read_tail_lines(paths, max(tail * 6, 3000))
@@ -2382,8 +2332,7 @@ async def admin_logs_errors(request: Request, tail: int = 500,
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    base = os.path.join(str(gw.VAR_DIR), "error-audit.log")
+    base = os.path.join(str(gw_state.VAR_DIR), "error-audit.log")
     paths = [p for p in (base + ".1", base) if os.path.exists(p)]
     lines = logview._read_tail_lines(paths, max(tail * 6, 3000))
     events = logview.parse_error_lines(lines, filter, since, tail)
@@ -2431,10 +2380,9 @@ async def admin_insights_leaderboard(request: Request, window: str = "7d",
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     days = _parse_window_days(window)
     cutoff = time.time() - days * 86400.0
-    rows = [r for r in await gw.LEDGER.iter_rows_async()
+    rows = [r for r in await gw_state.LEDGER.iter_rows_async()
             if r.get("dep") and (r.get("ts") or 0) >= cutoff]
     if profile:
         rows = [r for r in rows if r.get("profile") == profile]
@@ -2449,12 +2397,12 @@ async def admin_insights_leaderboard(request: Request, window: str = "7d",
             durs.setdefault(d, []).append(float(v))
 
     probes = _load_probe_results()
-    stats = gw.router._stats
-    khd = gw.KEYHEALTH.data
+    stats = gw_state.router._stats
+    khd = gw_state.KEYHEALTH.data
 
     out_rows = []
     for dep, a in agg.items():
-        meta = gw.config.deployment_by_unique(dep) or {}
+        meta = gw_state.config.deployment_by_unique(dep) or {}
         # profilo dal group: <prefix><profilo>-<dim>k  -> togli prefix e -<dim>k
         prof = None
         led_model = None
@@ -2534,13 +2482,12 @@ async def admin_deployments_stats(request: Request, profile: str | None = None):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     now = time.time()
-    cfg = gw.config
-    khd_obj = getattr(gw, "KEYHEALTH", None)
+    cfg = gw_state.config
+    khd_obj = getattr(gw_state, "KEYHEALTH", None)
     khd = khd_obj.data if khd_obj is not None else {}
     rows = []
-    for unique, s in gw.router._stats.items():
+    for unique, s in gw_state.router._stats.items():
         dep = cfg.deployment_by_unique(unique) or {}
         group = dep.get("group") or unique.rsplit("__", 2)[0]
         model = dep.get("model") or ""
@@ -2559,7 +2506,7 @@ async def admin_deployments_stats(request: Request, profile: str | None = None):
             provider = dep["tier"]
         else:
             provider = ""
-        cool = gw.router._cooldown.get(unique, 0.0)
+        cool = gw_state.router._cooldown.get(unique, 0.0)
         rows.append({
             "dep": unique,
             "profile": prof,
@@ -2590,9 +2537,8 @@ async def admin_providers_health(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    cfg = gw.config
-    router = gw.router
+    cfg = gw_state.config
+    router = gw_state.router
 
     # Aggrega per provider (api_base)
     providers = {}
@@ -2718,12 +2664,12 @@ def _playground_content(data) -> str | None:
     return None
 
 
-def _playground_result(gw, model_raw: str, model: str, profile,
+def _playground_result(model_raw: str, model: str, profile,
                        group, trace: list[dict], attempts: int,
                        fallbacks: int, error: str,
                        reason: str | None = None) -> dict:
     """Envelope 200 del playground per gli esiti NON riusciti."""
-    journal.record(gw.VAR_DIR, "playground",
+    journal.record(gw_state.VAR_DIR, "playground",
                    {"model": model, "profile": profile,
                     "attempts": attempts, "fallbacks": fallbacks,
                     "ok": False, "reason": reason or error})
@@ -2746,7 +2692,6 @@ async def admin_playground(request: Request):
     _cooldown/_stats/keyhealth; lo stato del router viene ripristinato a fine
     giro. Risposta 200 con `trace`, `attempts`, `fallbacks`, `content`.
     """
-    gw = _gw()
     if err := _require_master(request):
         return err
     body, bad = await _json_body(request)
@@ -2758,8 +2703,8 @@ async def admin_playground(request: Request):
         return _err(400, "model (stringa) e messages (lista non vuota) "
                          "sono obbligatori")
 
-    router = gw.router
-    policy = gw.policy
+    router = gw_state.router
+    policy = gw_state.policy
     model = policy.canonicalize(model_raw)
     _cip = _client_ip_of(request)
     _sess = _session_of(request)
@@ -2775,14 +2720,14 @@ async def admin_playground(request: Request):
                               getattr(policy, "image_token_estimate", 0) or 0)
         profile = str(body.get("profile") or "").strip() or None
         if not profile:
-            profile = gw.config.profile_of_base(model.split("__")[0]) \
-                or gw.config.profile_of_base(model)
+            profile = gw_state.config.profile_of_base(model.split("__")[0]) \
+                or gw_state.config.profile_of_base(model)
 
         group_or_explicit = router.resolve_group_for_request(
             model, messages, None, need, ctx, profile=profile)
         if group_or_explicit is None:
             return _playground_result(
-                gw, model_raw, model, profile, None, trace,
+                model_raw, model, profile, None, trace,
                 attempts=0, fallbacks=0,
                 error=f"nessun deployment instradabile per '{model}'")
 
@@ -2794,7 +2739,7 @@ async def admin_playground(request: Request):
                                       None if explicit else ctx)
         if dep is None:
             return _playground_result(
-                gw, model_raw, model, profile, group_or_explicit, trace,
+                model_raw, model, profile, group_or_explicit, trace,
                 attempts=0, fallbacks=0,
                 error="nessun deployment disponibile")
 
@@ -2814,7 +2759,7 @@ async def admin_playground(request: Request):
         fallbacks = 0
         last_err: BaseException | None = None
         requested_group = dep["group"] if dep else None
-        while dep is not None and attempts < _tune(gw, "playground_max_attempts", _PLAYGROUND_MAX_ATTEMPTS):
+        while dep is not None and attempts < _tune("playground_max_attempts", _PLAYGROUND_MAX_ATTEMPTS):
             cur = dep["unique"]
             if cur in tried:                 # catena che si ripete: fermo
                 break
@@ -2825,16 +2770,16 @@ async def admin_playground(request: Request):
                           "reason": None, "verdict": "fail"})
             try:
                 data = await asyncio.wait_for(
-                    gw.forwarder.call(dep, up_payload,
+                    gw_state.forwarder.call(dep, up_payload,
                                       client_ip=_cip, session=_sess),
-                    timeout=_tune(gw, "playground_timeout_sec", _PLAYGROUND_TIMEOUT_S))
+                    timeout=_tune("playground_timeout_sec", _PLAYGROUND_TIMEOUT_S))
             except (UpstreamError, asyncio.TimeoutError) as err:
                 last_err = err
                 trace[-1]["reason"] = _playground_reason(err)
                 if isinstance(err, asyncio.TimeoutError):
                     # nessun token in 40s: deployment appeso -> penalizza
                     # (persiste: _cooldown non e' nello snapshot).
-                    _cd = int(getattr(gw.policy.qc_json,
+                    _cd = int(getattr(gw_state.policy.qc_json,
                                       "watchdog_cooldown_sec", 90) or 90)
                     try:
                         router.mark_failed(cur, seconds=_cd)
@@ -2861,7 +2806,7 @@ async def admin_playground(request: Request):
             trace[-1]["verdict"] = "ok"
             used = dep
             content = _playground_content(data)
-            journal.record(gw.VAR_DIR, "playground",
+            journal.record(gw_state.VAR_DIR, "playground",
                            {"model": model, "profile": profile,
                             "unique": cur, "group": used["group"],
                             "attempts": attempts, "fallbacks": fallbacks,
@@ -2874,7 +2819,7 @@ async def admin_playground(request: Request):
         reason = (_playground_reason(last_err) if last_err is not None
                   else "chain-exhausted")
         return _playground_result(
-            gw, model_raw, model, profile, group_or_explicit, trace,
+            model_raw, model, profile, group_or_explicit, trace,
             attempts=attempts, fallbacks=fallbacks, reason=reason,
             error=reason)
     finally:
@@ -2892,8 +2837,7 @@ async def list_sessions(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    router = gw.router
+    router = gw_state.router
     now = time.time()
 
     # Sticky sessions
@@ -3131,10 +3075,10 @@ def _preferred_model(rows: list[dict], config) -> dict | None:
     return best
 
 
-def _preferred_models_config(gw) -> dict:
+def _preferred_models_config() -> dict:
     """Modelli preferiti DICHIARATI in policy (bucket -go/-fallback)."""
     try:
-        raw = str(getattr(gw.policy, "go_preferred_models", "") or "")
+        raw = str(getattr(gw_state.policy, "go_preferred_models", "") or "")
     except Exception:                            # noqa: BLE001
         raw = ""
     items = [m.strip() for m in raw.replace(";", ",").split(",") if m.strip()]
@@ -3149,8 +3093,7 @@ async def session_detail(request: Request, session_id: str,
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    router = gw.router
+    router = gw_state.router
     now = time.time()
     window_seconds = _parse_window_seconds(window, default=7 * 86400.0)
     cutoff = now - window_seconds
@@ -3158,7 +3101,7 @@ async def session_detail(request: Request, session_id: str,
     # --- righe ledger della sessione nella finestra
     rows: list[dict] = []
     try:
-        all_rows = await gw.LEDGER.iter_rows_async()
+        all_rows = await gw_state.LEDGER.iter_rows_async()
         for row in all_rows:
             if str(row.get("ses") or "") != session_id:
                 continue
@@ -3167,9 +3110,9 @@ async def session_detail(request: Request, session_id: str,
     except Exception:                            # noqa: BLE001
         report_suppressed("admin.session_detail")
 
-    ranking = _rank_rows_by_deployment(rows, gw.config)
+    ranking = _rank_rows_by_deployment(rows, gw_state.config)
     successful = [r for r in ranking if r["ok"] > 0]
-    preferred = _preferred_model(rows, gw.config)
+    preferred = _preferred_model(rows, gw_state.config)
 
     # --- stato runtime della sessione (sticky / holder / warm / slow)
     sticky = None
@@ -3265,7 +3208,6 @@ async def stats_sessions(request: Request, window: str = "7d",
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     window_seconds = _parse_window_seconds(window, default=7 * 86400.0)
     cutoff = time.time() - window_seconds
     try:
@@ -3276,7 +3218,7 @@ async def stats_sessions(request: Request, window: str = "7d",
 
     by_ses: dict[str, list[dict]] = {}
     try:
-        all_rows = await gw.LEDGER.iter_rows_async()
+        all_rows = await gw_state.LEDGER.iter_rows_async()
         for row in all_rows:
             if (row.get("ts") or 0) < cutoff:
                 continue
@@ -3292,7 +3234,7 @@ async def stats_sessions(request: Request, window: str = "7d",
         ok = sum(1 for r in rows if _ledger_row_ok(r))
         total_tokens = sum(int((r.get("usage") or {}).get("total_tokens") or 0)
                            for r in rows)
-        preferred = _preferred_model(rows, gw.config)
+        preferred = _preferred_model(rows, gw_state.config)
         sessions.append({
             "session_id": sid,
             "calls": len(rows),
@@ -3320,8 +3262,7 @@ async def stats_summary(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    router = gw.router
+    router = gw_state.router
     now = time.time()
 
     # Aggrega metriche dal ledger
@@ -3332,7 +3273,7 @@ async def stats_summary(request: Request):
     ledger_rows_1h = []
     ledger_rows_24h = []
     try:
-        ledger = gw.LEDGER
+        ledger = gw_state.LEDGER
         all_rows = await ledger.iter_rows_async()
         for row in all_rows:
             ts = row.get("ts", 0)
@@ -3394,7 +3335,7 @@ async def stats_summary(request: Request):
     # Model preference (deployment success ranking)
     model_stats = {}
     for unique, s in router._stats.items():
-        dep = gw.config.deployment_by_unique(unique) or {}
+        dep = gw_state.config.deployment_by_unique(unique) or {}
         model = dep.get("model", unique.split("__")[0] if unique else "unknown")
         if model not in model_stats:
             model_stats[model] = {"ok": 0, "fail": 0, "unique": unique}
@@ -3455,8 +3396,8 @@ async def stats_summary(request: Request):
             "rate_percent": success_rate,
         },
         "model_ranking": model_ranking[:20],  # Top 20
-        "preferred_model": _preferred_model(ledger_rows_24h, gw.config),
-        "preferred_models_config": _preferred_models_config(gw),
+        "preferred_model": _preferred_model(ledger_rows_24h, gw_state.config),
+        "preferred_models_config": _preferred_models_config(),
         "metrics": {
             "nx_requests_total": dict(metrics_snapshot.get("nx_requests_total", {})),
             "nx_upstream_calls_total": dict(metrics_snapshot.get("nx_upstream_calls_total", {})),
@@ -3472,7 +3413,6 @@ async def stats_tokens(request: Request, window: str = "24h"):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
 
     # Parse window
     window_seconds = 86400  # default 24h
@@ -3496,7 +3436,7 @@ async def stats_tokens(request: Request, window: str = "24h"):
     cutoff = time.time() - window_seconds
     rows = []
     try:
-        all_rows = await gw.LEDGER.iter_rows_async()
+        all_rows = await gw_state.LEDGER.iter_rows_async()
         for row in all_rows:
             if row.get("ts", 0) >= cutoff:
                 rows.append(row)
@@ -3562,8 +3502,7 @@ async def stats_cache(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    router = gw.router
+    router = gw_state.router
 
     metrics_snapshot = metrics.snapshot()
 
@@ -3617,7 +3556,6 @@ async def stats_models(request: Request, window: str = "7d"):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
 
     # Parse window
     window_days = 7.0
@@ -3638,7 +3576,7 @@ async def stats_models(request: Request, window: str = "7d"):
     # Aggrega da ledger
     rows = []
     try:
-        all_rows = await gw.LEDGER.iter_rows_async()
+        all_rows = await gw_state.LEDGER.iter_rows_async()
         for row in all_rows:
             if row.get("ts", 0) >= cutoff:
                 rows.append(row)
@@ -3719,14 +3657,13 @@ async def stats_deployments(request: Request, profile: str | None = None,
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    router = gw.router
-    cfg = gw.config
+    router = gw_state.router
+    cfg = gw_state.config
     now = time.time()
 
     rows = []
     for unique, s in router._stats.items():
-        dep = gw.config.deployment_by_unique(unique) or {}
+        dep = gw_state.config.deployment_by_unique(unique) or {}
         group = dep.get("group") or unique.rsplit("__", 2)[0]
         model = dep.get("model", "")
         prof = None
@@ -3799,12 +3736,11 @@ async def stats_providers(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
-    router = gw.router
+    router = gw_state.router
 
     providers = {}
     for unique, s in router._stats.items():
-        dep = gw.config.deployment_by_unique(unique) or {}
+        dep = gw_state.config.deployment_by_unique(unique) or {}
         api_base = dep.get("api_base", "unknown")
         model = dep.get("model", "")
 
@@ -3865,11 +3801,10 @@ async def get_tuning(request: Request):
     denied = _require_master(request)
     if denied:
         return denied
-    gw = _gw()
     from . import router as _r, forwarder as _f, ledger as _l, metrics as _m
     from . import keyhealth as _kh, ctxcompact as _cc
     from . import toolrepair as _tr, sniff as _sn
-    policy = gw.policy
+    policy = gw_state.policy
 
     router_c = {
         "LATENCY_ROTATE_THRESHOLD_MS": _r.LATENCY_ROTATE_THRESHOLD_MS,
@@ -3932,8 +3867,8 @@ async def get_tuning(request: Request):
         "JOURNAL_KEEP": journal.JOURNAL_KEEP,
     }
     misc_c = {
-        "COALESCE_CACHE_MAX": getattr(gw, "_COALESCE_CACHE_MAX", None),
-        "VIDEO_JOB_TTL_SEC": getattr(gw, "VIDEO_JOB_TTL_SEC", None),
+        "COALESCE_CACHE_MAX": getattr(gw_state, "_COALESCE_CACHE_MAX", None),
+        "VIDEO_JOB_TTL_SEC": getattr(gw_state, "VIDEO_JOB_TTL_SEC", None),
         "KEYHEALTH_STREAK_DEAD_THRESHOLD": _kh.STREAK_DEAD_THRESHOLD,
         "KEYHEALTH_SUCCESS_EMA_FLOOR": _kh.SUCCESS_EMA_FLOOR,
         "CTXCOMPACT_MIN_PROTECTED_MSGS": _cc._MIN_PROTECTED_MSGS,
@@ -4365,7 +4300,6 @@ async def _mcp_dispatch(tool_name: str, arguments: dict, request: Request):
     `arguments` come body: cosi' la logica (validazione, journal, backup,
     reload) resta UNICA tra HTTP e MCP."""
     tool_name = _mcp_canonical(tool_name)
-    gw = _gw()
     args = arguments if isinstance(arguments, dict) else {}
     synth = _McpRequest(request, args)
 
@@ -4385,12 +4319,12 @@ async def _mcp_dispatch(tool_name: str, arguments: dict, request: Request):
         dep_id = str(args.get("id") or "")
         if not dep_id:
             return _err(400, "id is required")
-        header, rows = csv_store.load_table(gw.CSV_PATH)
+        header, rows = csv_store.load_table(gw_state.CSV_PATH)
         idx, row = csv_store.find_row(header, rows, dep_id)
         if idx is None:
             return _err(404, f"deployment '{dep_id}' non esiste")
         return {"deployment": _deployment_view(
-            header, row, gw.config.proxy_prefix)}
+            header, row, gw_state.config.proxy_prefix)}
     if tool_name == "deploy_create":
         return await create_deployment(synth)
     if tool_name == "deploy_update":

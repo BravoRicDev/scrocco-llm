@@ -9,6 +9,7 @@ su tmp_path per non toccare mai il CSV di produzione.
 """
 import csv
 import os
+import app.state as gw_state
 
 os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
 
@@ -30,18 +31,18 @@ def client(monkeypatch, tmp_path):
     csv_file = tmp_path / "keys_rotation.csv"
     csv_file.write_text(CSV_TEXT)
     (tmp_path / "backups").mkdir()
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-dep-fields"
-    monkeypatch.setattr(m, "CSV_PATH", csv_file)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
-    monkeypatch.setattr(m.config, "csv_path", csv_file)
-    m.config.reload()
-    assert str(m.CSV_PATH).startswith(str(tmp_path))
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-dep-fields"
+    monkeypatch.setattr(gw_state, "CSV_PATH", csv_file)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
+    monkeypatch.setattr(gw_state.config, "csv_path", csv_file)
+    gw_state.config.reload()
+    assert str(gw_state.CSV_PATH).startswith(str(tmp_path))
     yield TestClient(m.app), csv_file
-    m.authn.master_key = orig_mk
-    monkeypatch.setattr(m.config, "csv_path", m.CSV_PATH)
-    m.config.reload()
-    m.router._cooldown.clear()
+    gw_state.authn.master_key = orig_mk
+    monkeypatch.setattr(gw_state.config, "csv_path", gw_state.CSV_PATH)
+    gw_state.config.reload()
+    gw_state.router._cooldown.clear()
 
 
 def _rows(csv_file):

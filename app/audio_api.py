@@ -1,17 +1,18 @@
 """Endpoint audio (TTS, systemone/Jev, STT transcriptions/translations).
-Estratti verbatim da `app/main.py` (cluster C8, Round 4 Clean Code).
-Gli oggetti condivisi (`policy`, `authn`, `router`, `config`, `log`,
-`forwarder`: STATO runtime) sono raggiunti DENTRO il corpo
-delle funzioni tramite `import app.main as M`: a livello di modulo si
-creerebbe un ciclo di import (main include questo router a fine file, dopo
-aver definito tutto).
+Estratti da `app/main.py` (cluster C8, Round 4 Clean Code).
+
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
+import logging
 import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from . import metrics, sttscrub
+from . import state as gw_state
 from .http_responses import unauthorized as _unauthorized
 from .http_responses import forbidden as _forbidden
 from .suppressed import report_suppressed
@@ -37,6 +38,9 @@ from .image_helpers import _cap_chain_pick
 from .policy import refill_out_budget
 from .stream_verdicts import _exhausted, _retry_at_ms
 
+# Stesso logger di app.main: i record (nome "nx.main") restano identici.
+log = logging.getLogger("nx.main")
+
 router = APIRouter()
 
 
@@ -44,9 +48,8 @@ def _audio_route(profile: str | None, model: str, raw_model: str, session_id: st
     """Routing condiviso degli endpoint audio: risolve il primo deployment
     capace (o explicit pass-through) oppure ritorna una JSONResponse d'errore.
     Ritorna (dep, profile, error_response)."""
-    import app.main as M
 
-    group_or_explicit = M.router.resolve_group_for_request(model, [], session_id, need, profile=profile)
+    group_or_explicit = gw_state.router.resolve_group_for_request(model, [], session_id, need, profile=profile)
     if group_or_explicit is None:
         capname = sorted(need)[0] if need else model
         for c in sorted(need):
@@ -64,7 +67,7 @@ def _audio_route(profile: str | None, model: str, raw_model: str, session_id: st
                             f"capability_routing.model_capabilities in "
                             f"gateway.yaml"
                             if need
-                            else f"model '{model}' not managed by {M.policy.service_name}"
+                            else f"model '{model}' not managed by {gw_state.policy.service_name}"
                         ),
                         "type": "invalid_request_error",
                     }
@@ -72,11 +75,11 @@ def _audio_route(profile: str | None, model: str, raw_model: str, session_id: st
             ),
         )
 
-    dep = M.router.config.deployment_by_unique(group_or_explicit)
+    dep = gw_state.router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
-        dep = M.router.pick_deployment(group_or_explicit, need)
+        dep = gw_state.router.pick_deployment(group_or_explicit, need)
     if dep is None and profile:
-        dep = M.router.fallback_after(profile, None, need, out_tokens=refill_out_budget({}, M.router.policy))
+        dep = gw_state.router.fallback_after(profile, None, need, out_tokens=refill_out_budget({}, gw_state.router.policy))
     if dep is None:
         return (
             None,
@@ -92,7 +95,7 @@ def _audio_route(profile: str | None, model: str, raw_model: str, session_id: st
             ),
         )
 
-    custom_key = M.router.resolve_alias_key(raw_model, model)
+    custom_key = gw_state.router.resolve_alias_key(raw_model, model)
     if custom_key:
         dep = {**dep, "api_key": custom_key}
     return dep, profile, None
@@ -101,7 +104,6 @@ def _audio_route(profile: str | None, model: str, raw_model: str, session_id: st
 @router.post("/v1/audio/speech")
 async def audio_speech(request: Request):
     """TTS OpenAI-compatibile: instrada SOLO su deployment con capacità tts."""
-    import app.main as M
 
     try:
         payload = await request.json()
@@ -114,22 +116,22 @@ async def audio_speech(request: Request):
         return JSONResponse(
             status_code=400, content={"error": {"message": "'input' è obbligatorio", "type": "invalid_request_error"}}
         )
-    model = M.policy.canonicalize(raw_model)
-    auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
+    model = gw_state.policy.canonicalize(raw_model)
+    auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
-    if not M.authn.authorize_model(auth, model):
+    if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
-    need = frozenset({"tts"}) if M.router.policy.routing_active() else frozenset()
-    scope = "group" if M.router.is_explicit(model) else "chain"
+    need = frozenset({"tts"}) if gw_state.router.policy.routing_active() else frozenset()
+    scope = "group" if gw_state.router.is_explicit(model) else "chain"
     _set_opencode_gate(request)
     dep, profile, err = _audio_route(auth.profile, model, raw_model, _session_id(request, payload), need)
     if err:
         return err
 
     metrics.inc("nx_tts_total", (dep["group"], "attempt"))
-    M.log.info("[tts] %s -> %s (input=%d chars)", model, dep["unique"], len(str(payload.get("input") or "")))
+    log.info("[tts] %s -> %s (input=%d chars)", model, dep["unique"], len(str(payload.get("input") or "")))
 
     tried: set[str] = set()
     attempts: list[str] = []
@@ -141,18 +143,18 @@ async def audio_speech(request: Request):
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
         cur = dep["unique"]
-        _was_dormant = M.router.is_cooled_down(cur)
+        _was_dormant = gw_state.router.is_cooled_down(cur)
         tried.add(cur)
         attempts.append(cur)
-        M.router.note_start(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
-            content, ctype = await M.forwarder.call_speech(
+            content, ctype = await gw_state.forwarder.call_speech(
                 dep, payload, profile=profile or "", client_ip=_cip, session=_sess, attribution=_attr
             )
-            M.router.note_result(cur, (time.monotonic() - t0) * 1000)
+            gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
-                M.router.clear_cooldown(cur)
+                gw_state.router.clear_cooldown(cur)
             metrics.inc("nx_tts_total", (dep["group"], "ok"))
             _emit_summary(
                 ses=session_id or "-",
@@ -172,7 +174,7 @@ async def audio_speech(request: Request):
             )
             return Response(content=content, media_type=ctype, headers={"x-nx-deployment": cur})
         except UpstreamError as err:
-            M.router.note_end(cur)
+            gw_state.router.note_end(cur)
             last_err = err
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
@@ -200,15 +202,15 @@ async def audio_speech(request: Request):
                 except Exception:
                     report_suppressed("audio_api.audio_speech@197")
             if _was_dormant:
-                M.router.mark_failed_double_residual(
+                gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                M.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_tts_total", (dep["group"], "retry"))
             nxt = (
-                M.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, M.router.policy)
+                gw_state.router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
                 )
                 if profile
                 else None
@@ -239,7 +241,6 @@ async def systemone(request: Request):
     Instrada SOLO su deployment con capacità `decision`. Non-streaming, nessuna
     traduzione di protocollo, niente tool/reasoning/hold.
     """
-    import app.main as M
 
     try:
         payload = await request.json()
@@ -266,22 +267,22 @@ async def systemone(request: Request):
             },
         )
 
-    model = M.policy.canonicalize(raw_model)
-    auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
+    model = gw_state.policy.canonicalize(raw_model)
+    auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
-    if not M.authn.authorize_model(auth, model):
+    if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
-    need = frozenset({"decision"}) if M.router.policy.routing_active() else frozenset()
-    scope = "group" if M.router.is_explicit(model) else "chain"
+    need = frozenset({"decision"}) if gw_state.router.policy.routing_active() else frozenset()
+    scope = "group" if gw_state.router.is_explicit(model) else "chain"
     _set_opencode_gate(request)
     session_id = _session_id(request, payload)
     # Ruota anche con master key: il profilo si ricava dal nome richiesto,
     # altrimenti la rotazione resterebbe spenta (bug dei path audio).
-    _prof = auth.profile or M.config.profile_of_base(model.split("__")[0]) or M.config.profile_of_base(model)
+    _prof = auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
 
-    group_or_explicit = M.router.resolve_group_for_request(model, [], session_id, need, profile=_prof)
+    group_or_explicit = gw_state.router.resolve_group_for_request(model, [], session_id, need, profile=_prof)
     if group_or_explicit is None:
         for c in sorted(need):
             metrics.inc("nx_caps_unroutable_total", (c,))
@@ -294,28 +295,28 @@ async def systemone(request: Request):
                         "configura capability_routing.model_capabilities o la "
                         "colonna caps"
                         if need
-                        else f"model '{model}' non gestito da {M.policy.service_name}"
+                        else f"model '{model}' non gestito da {gw_state.policy.service_name}"
                     ),
                     "type": "invalid_request_error",
                 }
             },
         )
 
-    explicit_req = M.router.is_explicit(model)
-    dep = M.router.config.deployment_by_unique(group_or_explicit)
-    _cap = M.router.config.group_caps.get(group_or_explicit)
+    explicit_req = gw_state.router.is_explicit(model)
+    dep = gw_state.router.config.deployment_by_unique(group_or_explicit)
+    _cap = gw_state.router.config.group_caps.get(group_or_explicit)
     # Gruppo capacità con primario VUOTO (es. righe Jev a pagamento tutte
     # `fallback`): la catena capability attraversa free -> -go -> -fallback e
     # trova i deployment che il solo gruppo primario non ha.
     if dep is None and _cap is not None and not explicit_req:
         dep = _cap_chain_pick(_prof, need)
     if dep is None:
-        dep = M.router.initial_pick(
-            _prof, group_or_explicit, None if explicit_req else need, out_tokens=refill_out_budget(payload, M.policy)
+        dep = gw_state.router.initial_pick(
+            _prof, group_or_explicit, None if explicit_req else need, out_tokens=refill_out_budget(payload, gw_state.policy)
         )
     if dep is None and _prof and not explicit_req:
-        dep = _cap_chain_pick(_prof, need) or M.router.fallback_after(
-            _prof, None, need, out_tokens=refill_out_budget(payload, M.router.policy)
+        dep = _cap_chain_pick(_prof, need) or gw_state.router.fallback_after(
+            _prof, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy)
         )
     if dep is None:
         return JSONResponse(
@@ -324,7 +325,7 @@ async def systemone(request: Request):
         )
 
     metrics.inc("nx_systemone_total", (dep["group"], "attempt"))
-    M.log.info("[systemone] %s -> %s (questions=%d)", model, dep["unique"], len(questions))
+    log.info("[systemone] %s -> %s (questions=%d)", model, dep["unique"], len(questions))
 
     tried: set[str] = set()
     attempts: list[str] = []
@@ -336,13 +337,13 @@ async def systemone(request: Request):
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
         cur = dep["unique"]
-        _was_dormant = M.router.is_cooled_down(cur)
+        _was_dormant = gw_state.router.is_cooled_down(cur)
         tried.add(cur)
         attempts.append(cur)
-        M.router.note_start(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
-            out = await M.forwarder.call_systemone(
+            out = await gw_state.forwarder.call_systemone(
                 dep, payload, profile=_prof or "", client_ip=_cip, session=_sess, attribution=_attr
             )
             # QC: ogni chiave richiesta in `questions` deve comparire in
@@ -352,9 +353,9 @@ async def systemone(request: Request):
             _missing = [k for k in questions if not (isinstance(_answers, dict) and k in _answers)]
             if _missing:
                 raise UpstreamError(502, f"risposta systemone incompleta: chiavi mancanti {_missing}")
-            M.router.note_result(cur, (time.monotonic() - t0) * 1000)
+            gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
-                M.router.clear_cooldown(cur)
+                gw_state.router.clear_cooldown(cur)
             metrics.inc("nx_systemone_total", (dep["group"], "ok"))
             _emit_summary(
                 ses=session_id or "-",
@@ -410,15 +411,15 @@ async def systemone(request: Request):
                 except Exception:
                     report_suppressed("audio_api.systemone@407")
             if _was_dormant:
-                M.router.mark_failed_double_residual(
+                gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                M.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_systemone_total", (dep["group"], "retry"))
             nxt = (
-                M.router.fallback_next(
-                    _prof, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, M.router.policy)
+                gw_state.router.fallback_next(
+                    _prof, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
                 )
                 if _prof
                 else None
@@ -427,10 +428,10 @@ async def systemone(request: Request):
                 break
             dep = nxt
         finally:
-            M.router.note_end(cur)
+            gw_state.router.note_end(cur)
 
     return _exhausted(
-        len(attempts), last_err.detail if last_err else None, trail=trail, retry_at_ms=_retry_at_ms(M.router, trail)
+        len(attempts), last_err.detail if last_err else None, trail=trail, retry_at_ms=_retry_at_ms(gw_state.router, trail)
     )
 
 
@@ -442,7 +443,6 @@ async def _audio_transcribe(request: Request, path: str):
     (json|text|srt|verbose_json|vtt), temperature?. Instrada SOLO su
     deployment con capacità stt.
     """
-    import app.main as M
 
     try:
         form = await request.form()
@@ -479,15 +479,15 @@ async def _audio_transcribe(request: Request, path: str):
     raw_model = str(form.get("model") or "")
     response_format = str(data_fields.get("response_format") or "json").lower()
 
-    model = M.policy.canonicalize(raw_model)
-    auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
+    model = gw_state.policy.canonicalize(raw_model)
+    auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
-    if not M.authn.authorize_model(auth, model):
+    if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
-    need = frozenset({"stt"}) if M.router.policy.routing_active() else frozenset()
-    scope = "group" if M.router.is_explicit(model) else "chain"
+    need = frozenset({"stt"}) if gw_state.router.policy.routing_active() else frozenset()
+    scope = "group" if gw_state.router.is_explicit(model) else "chain"
     _set_opencode_gate(request)
     session_id = _session_id(request, {})
     dep, profile, err = _audio_route(auth.profile, model, raw_model, session_id, need)
@@ -495,7 +495,7 @@ async def _audio_transcribe(request: Request, path: str):
         return err
 
     metrics.inc("nx_stt_total", (dep["group"], "attempt"))
-    M.log.info("[stt] %s -> %s (%s, %d bytes, via /%s)", model, dep["unique"], filename, len(file_bytes), path)
+    log.info("[stt] %s -> %s (%s, %d bytes, via /%s)", model, dep["unique"], filename, len(file_bytes), path)
 
     tried: set[str] = set()
     attempts: list[str] = []
@@ -506,13 +506,13 @@ async def _audio_transcribe(request: Request, path: str):
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
         cur = dep["unique"]
-        _was_dormant = M.router.is_cooled_down(cur)
+        _was_dormant = gw_state.router.is_cooled_down(cur)
         tried.add(cur)
         attempts.append(cur)
-        M.router.note_start(cur)
+        gw_state.router.note_start(cur)
         t0 = time.monotonic()
         try:
-            result = await M.forwarder.transcribe(
+            result = await gw_state.forwarder.transcribe(
                 dep,
                 data_fields,
                 file_bytes,
@@ -524,9 +524,9 @@ async def _audio_transcribe(request: Request, path: str):
                 session=_sess,
                 attribution=_attr,
             )
-            M.router.note_result(cur, (time.monotonic() - t0) * 1000)
+            gw_state.router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
-                M.router.clear_cooldown(cur)
+                gw_state.router.clear_cooldown(cur)
             metrics.inc("nx_stt_total", (dep["group"], "ok"))
             _emit_summary(
                 ses=_session_id(request, {}) or "-",
@@ -545,7 +545,7 @@ async def _audio_transcribe(request: Request, path: str):
             )
             result, _scrubbed = sttscrub.scrub_payload(result)
             if _scrubbed:
-                M.log.info("[stt-scrub] %s: rimosse %d allucinazioni credit", cur, _scrubbed)
+                log.info("[stt-scrub] %s: rimosse %d allucinazioni credit", cur, _scrubbed)
                 metrics.inc("nx_stt_scrubbed_total", (dep["group"],))
             if isinstance(result, dict):
                 result.setdefault("nx_deployment", cur)
@@ -553,7 +553,7 @@ async def _audio_transcribe(request: Request, path: str):
             # formati text/srt/vtt: passthrough testo + header di disclosure
             return PlainTextResponse(result, headers={"x-nx-deployment": cur})
         except UpstreamError as err:
-            M.router.note_end(cur)
+            gw_state.router.note_end(cur)
             last_err = err
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
@@ -581,15 +581,15 @@ async def _audio_transcribe(request: Request, path: str):
                 except Exception:
                     report_suppressed("audio_api._audio_transcribe@578")
             if _was_dormant:
-                M.router.mark_failed_double_residual(
+                gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                M.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
             nxt = (
-                M.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget({}, M.router.policy)
+                gw_state.router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget({}, gw_state.router.policy)
                 )
                 if profile
                 else None

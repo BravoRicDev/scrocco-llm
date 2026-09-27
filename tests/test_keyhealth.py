@@ -4,6 +4,7 @@ import time
 import pytest
 
 from app.keyhealth import KeyHealth
+import app.state as gw_state
 
 
 @pytest.fixture()
@@ -82,7 +83,7 @@ def test_router_excludes_retired(tmp_path, monkeypatch):
     import app.main as m
     from app.keyhealth import KeyHealth as KH
     kh = KH(tmp_path)
-    monkeypatch.setattr(m, "KEYHEALTH", kh)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", kh)
     dep_a = next(d for d in cfg.groups["scrocco-llm-test-32k"]
                  if d["api_key"] == "K-A")
     kh.set_state(dep_a["unique"], "retired")
@@ -103,7 +104,7 @@ def test_probe_success_clears_state(tmp_path, monkeypatch):
     import app.main as m
     from app.keyhealth import KeyHealth as KH
     kh = KH(tmp_path)
-    monkeypatch.setattr(m, "KEYHEALTH", kh)
+    monkeypatch.setattr(gw_state, "KEYHEALTH", kh)
     monkeypatch.setattr(adm, "_probe_path", lambda: tmp_path / "probe.json")
     dep = {"unique": "g__m__0", "group": "g", "model": "m",
            "api_base": "https://ok.test/v1", "api_key": "K"}

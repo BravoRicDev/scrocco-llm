@@ -14,30 +14,31 @@ import asyncio
 
 import pytest
 from fastapi.responses import JSONResponse, StreamingResponse
+import app.state as gw_state
 
 
 @pytest.fixture()
 def M():
     import app.main as _M
-    qj = _M.router.policy.qc_json
-    qs = _M.router.policy.qc_sanity
+    qj = gw_state.router.policy.qc_json
+    qs = gw_state.router.policy.qc_sanity
     snap = (qj.stream_first_content_ms, qj.stream_total_deadline_ms,
             qj.stream_commit_include_reasoning, qj.stream_hold_until_finish,
             qs.rotate_on_length_empty,
             qj.stream_parachute_no_timeout)
-    cooldown_keys = set(_M.router._cooldown)
-    groups_keys = set(_M.config.groups)
+    cooldown_keys = set(gw_state.router._cooldown)
+    groups_keys = set(gw_state.config.groups)
     yield _M
     (qj.stream_first_content_ms, qj.stream_total_deadline_ms,
      qj.stream_commit_include_reasoning, qj.stream_hold_until_finish,
      qs.rotate_on_length_empty,
      qj.stream_parachute_no_timeout) = snap
-    for k in list(_M.router._cooldown):
+    for k in list(gw_state.router._cooldown):
         if k not in cooldown_keys:
-            _M.router._cooldown.pop(k, None)
-    for k in list(_M.config.groups):
+            gw_state.router._cooldown.pop(k, None)
+    for k in list(gw_state.config.groups):
         if k not in groups_keys:
-            _M.config.groups.pop(k, None)
+            gw_state.config.groups.pop(k, None)
 
 
 def _fake_stream_response(chunks, delay=0.0):
@@ -62,7 +63,7 @@ def _fake_stream_response(chunks, delay=0.0):
 
 
 def _a_dep(M):
-    for _grp, deps in M.config.groups.items():
+    for _grp, deps in gw_state.config.groups.items():
         if deps:
             return deps[0]
     raise RuntimeError("nessun deployment nella config globale")
@@ -70,12 +71,12 @@ def _a_dep(M):
 
 def _set(M, first_ms=20000, deadline_ms=90000, incl_reason=False,
          rotate_length=False, hold=True):
-    qj = M.router.policy.qc_json
+    qj = gw_state.router.policy.qc_json
     qj.stream_first_content_ms = first_ms
     qj.stream_total_deadline_ms = deadline_ms
     qj.stream_commit_include_reasoning = incl_reason
     qj.stream_hold_until_finish = hold
-    M.router.policy.qc_sanity.rotate_on_length_empty = rotate_length
+    gw_state.router.policy.qc_sanity.rotate_on_length_empty = rotate_length
 
 
 async def _drain(resp):
@@ -216,14 +217,14 @@ def test_delta_helpers(M):
 def test_e2e_happy_stream_passthrough(M, monkeypatch):
     _set(M)
     dep = _a_dep(M)
-    M.router._cooldown.pop(dep["unique"], None)
+    gw_state.router._cooldown.pop(dep["unique"], None)
     chunks = [
         b'data: {"choices":[{"delta":{"content":"ris"}}]}\n\n',
         b'data: {"choices":[{"delta":{"content":"posta"}}]}\n\n',
         b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
         b"data: [DONE]\n\n",
     ]
-    monkeypatch.setattr(M.forwarder, "stream_response",
+    monkeypatch.setattr(gw_state.forwarder, "stream_response",
                         _fake_stream_response(chunks))
 
     async def _run():
@@ -235,7 +236,7 @@ def test_e2e_happy_stream_passthrough(M, monkeypatch):
     out = asyncio.run(_run())
     assert b'"ris"' in out and b'"posta"' in out and b"[DONE]" in out
     assert b'"error"' not in out
-    assert dep["unique"] not in M.router._cooldown
+    assert dep["unique"] not in gw_state.router._cooldown
 
 
 def test_e2e_empty_stream_no_alternative_returns_503(M, monkeypatch):
@@ -249,7 +250,7 @@ def test_e2e_empty_stream_no_alternative_returns_503(M, monkeypatch):
             return
             yield b""
         return _g()
-    monkeypatch.setattr(M.forwarder, "stream_response", _empty)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _empty)
 
     async def _run():
         payload = {"model": dep["model"],
@@ -276,7 +277,7 @@ def test_e2e_length_empty_rotates_until_exhausted(M, monkeypatch):
             yield (b'data: {"choices":[{"delta":{},'
                    b'"finish_reason":"length"}]}\n\n')
         return _g()
-    monkeypatch.setattr(M.forwarder, "stream_response", _len_empty)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _len_empty)
 
     async def _run():
         payload = {"model": dep["model"],
@@ -285,7 +286,7 @@ def test_e2e_length_empty_rotates_until_exhausted(M, monkeypatch):
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert len(seen) >= 2                        # ha provato piu' alternative
-    assert dep["unique"] not in M.router._cooldown   # length-empty non punisce
+    assert dep["unique"] not in gw_state.router._cooldown   # length-empty non punisce
 
 
 def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypatch):
@@ -294,7 +295,7 @@ def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypa
     (la mancanza di risposta non e' un troncamento: nessuna penale)."""
     _set(M, first_ms=2000)
     dep = _a_dep(M)
-    M.router._cooldown.pop(dep["unique"], None)
+    gw_state.router._cooldown.pop(dep["unique"], None)
     seen = []
 
     async def _reason_only(d, payload, **kwargs):
@@ -305,7 +306,7 @@ def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypa
             yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
             yield b"data: [DONE]\n\n"
         return _g()
-    monkeypatch.setattr(M.forwarder, "stream_response", _reason_only)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _reason_only)
 
     async def _run():
         payload = {"model": dep["model"],
@@ -314,7 +315,7 @@ def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypa
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert len(seen) >= 2                        # ha provato piu' alternative
-    assert dep["unique"] not in M.router._cooldown
+    assert dep["unique"] not in gw_state.router._cooldown
 
 
 def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
@@ -322,7 +323,7 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
     si ROTA verso un altro deployment (+ mark_failed sul primo)."""
     _set(M, first_ms=2000)
     dep = _a_dep(M)
-    M.router._cooldown.pop(dep["unique"], None)
+    gw_state.router._cooldown.pop(dep["unique"], None)
     seen = []
 
     async def _trunc(d, payload, **kwargs):
@@ -332,7 +333,7 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
                    b'{"reasoning_content":"penso e poi la linea cade"}}]}\n\n')
             # niente finish_reason, niente [DONE]: troncato
         return _g()
-    monkeypatch.setattr(M.forwarder, "stream_response", _trunc)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _trunc)
 
     async def _run():
         payload = {"model": dep["model"],
@@ -342,7 +343,7 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
     # ogni dep tronca -> ha provato >1 dep, poi 503 retryable (mai turno finto)
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert len(seen) >= 2                                 # ha provato >1 dep
-    assert dep["unique"] in M.router._cooldown            # primo penalizzato
+    assert dep["unique"] in gw_state.router._cooldown            # primo penalizzato
 
 
 def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
@@ -352,12 +353,12 @@ def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
     post-commit."""
     _set(M, first_ms=2000, hold=False)
     dep = _a_dep(M)
-    M.router._cooldown.pop(dep["unique"], None)
+    gw_state.router._cooldown.pop(dep["unique"], None)
     chunks = [
         b'data: {"choices":[{"delta":{"content":"' + b"m" * 60 + b'"}}]}\n\n',
         # niente [DONE], niente finish_reason -> troncato
     ]
-    monkeypatch.setattr(M.forwarder, "stream_response",
+    monkeypatch.setattr(gw_state.forwarder, "stream_response",
                         _fake_stream_response(chunks))
 
     async def _run():
@@ -368,7 +369,7 @@ def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
         return await _drain(resp)
     out = asyncio.run(_run())
     assert b"m" * 60 in out and b'"error"' not in out
-    assert dep["unique"] in M.router._cooldown
+    assert dep["unique"] in gw_state.router._cooldown
 
 
 # ------------------------------------------- paracadute (-go/-fallback)
@@ -389,19 +390,19 @@ def _parachute_dep(M, suffix="-go"):
     dep = {"unique": base + "__fake__0", "group": base,
            "model": "fake-model", "api_key": "sk-fake",
            "api_base": "https://fake.test/v1"}
-    M.config.groups.setdefault(base, [dep])
+    gw_state.config.groups.setdefault(base, [dep])
     return dep
 
 
 def test_parachute_go_timeout_transmits_not_503(M, monkeypatch):
     """SENZA hold, sulla catena -go (paracadute) il timeout primo-contenuto NON
     produce 503: lo stream parte comunque (comportamento storico live)."""
-    qj = M.router.policy.qc_json
+    qj = gw_state.router.policy.qc_json
     qj.stream_first_content_ms = 60
     qj.stream_parachute_no_timeout = True
     monkeypatch.setattr(qj, "stream_hold_until_finish", False, raising=False)
     dep = _parachute_dep(M, suffix="-go")
-    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _mute_stream_response())
 
     async def _run():
         payload = {"model": dep["model"],
@@ -415,12 +416,12 @@ def test_parachute_go_timeout_transmits_not_503(M, monkeypatch):
 def test_parachute_go_timeout_hold_empty_buffer_is_503(M, monkeypatch):
     """HOLD attivo: -go timeout con buffer VUOTO -> resta timeout -> 503
     (mai una risposta vuota/live al client)."""
-    qj = M.router.policy.qc_json
+    qj = gw_state.router.policy.qc_json
     qj.stream_first_content_ms = 60
     qj.stream_parachute_no_timeout = True
     monkeypatch.setattr(qj, "stream_hold_until_finish", True, raising=False)
     dep = _parachute_dep(M, suffix="-go")
-    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _mute_stream_response())
 
     async def _run():
         payload = {"model": dep["model"],
@@ -433,7 +434,7 @@ def test_parachute_go_timeout_hold_empty_buffer_is_503(M, monkeypatch):
 def test_parachute_go_timeout_hold_partial_buffer_transmits(M, monkeypatch):
     """HOLD attivo: -go timeout con buffer PARZIALE -> consegna bufferizzata
     (mai byte live), cosi' il tool repair hold gira sul buffer."""
-    qj = M.router.policy.qc_json
+    qj = gw_state.router.policy.qc_json
     qj.stream_first_content_ms = 60
     qj.stream_parachute_no_timeout = True
     monkeypatch.setattr(qj, "stream_hold_until_finish", True, raising=False)
@@ -447,7 +448,7 @@ def test_parachute_go_timeout_hold_partial_buffer_transmits(M, monkeypatch):
             yield chunk
             await asyncio.sleep(5.0)      # poi muto -> idle timeout
         return _gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream_response)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream_response)
 
     async def _run():
         payload = {"model": dep["model"],
@@ -462,11 +463,11 @@ def test_parachute_go_timeout_hold_partial_buffer_transmits(M, monkeypatch):
 def test_parachute_go_timeout_legacy_503(M, monkeypatch):
     """Parametro disattivato (stream_parachute_no_timeout=False): sulla -go il
     timeout resta rotazione/503 (utile con molte chiavi valide in catena)."""
-    qj = M.router.policy.qc_json
+    qj = gw_state.router.policy.qc_json
     qj.stream_first_content_ms = 60
     qj.stream_parachute_no_timeout = False
     dep = _parachute_dep(M, suffix="-go")
-    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _mute_stream_response())
 
     async def _run():
         payload = {"model": dep["model"],
@@ -479,11 +480,11 @@ def test_parachute_go_timeout_legacy_503(M, monkeypatch):
 def test_parachute_does_not_affect_dims(M, monkeypatch):
     """I -dim NON sono paracadute: il timeout primo-contenuto resta timeout
     (rotazione) anche col parametro attivo — comportamento invariato."""
-    qj = M.router.policy.qc_json
+    qj = gw_state.router.policy.qc_json
     qj.stream_first_content_ms = 60
     qj.stream_parachute_no_timeout = True
     dep = _parachute_dep(M, suffix="-200k")
-    monkeypatch.setattr(M.forwarder, "stream_response", _mute_stream_response())
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _mute_stream_response())
 
     async def _run():
         payload = {"model": dep["model"],
@@ -494,7 +495,7 @@ def test_parachute_does_not_affect_dims(M, monkeypatch):
 
 
 def test_parachute_verdict_helper(M):
-    pol = M.router.policy
+    pol = gw_state.router.policy
     dep_go = {"group": "scrocco-llm-test-go"}
     dep_fb = {"group": "scrocco-llm-test-fallback"}
     dep_dim = {"group": "scrocco-llm-test-200k"}
@@ -536,12 +537,12 @@ def test_client_disconnect_aborts_upstream_and_no_cooldown(M, monkeypatch):
     contenuto verso il client."""
     _set(M, first_ms=100, hold=False)
     dep = _a_dep(M)
-    M.router._cooldown.pop(dep["unique"], None)
+    gw_state.router._cooldown.pop(dep["unique"], None)
     # primo chunk grande (commit immediato, >= min_chars), poi 50 chunk lenti
     big = b'data: {"choices":[{"delta":{"content":"' + b"x" * 80 + b'"}}]}\n\n'
     chunks = [big] + [b'data: {"choices":[{"delta":{"content":"y%d"}}]}\n\n' % i
                       for i in range(50)]
-    monkeypatch.setattr(M.forwarder, "stream_response",
+    monkeypatch.setattr(gw_state.forwarder, "stream_response",
                         _fake_stream_response(chunks, delay=0.05))
 
     async def _run():
@@ -579,7 +580,7 @@ def test_client_disconnect_aborts_upstream_and_no_cooldown(M, monkeypatch):
         assert b"y49" not in out, "l'upstream non e' stato interrotto"
     asyncio.run(_run())
     # il deployment NON deve essere punito (client-aborted, non colpa sua)
-    assert dep["unique"] not in M.router._cooldown
+    assert dep["unique"] not in gw_state.router._cooldown
 
 
 def _monotonic():

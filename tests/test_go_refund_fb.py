@@ -20,6 +20,7 @@ import pytest
 from app.config import GatewayConfig
 from app.policy import Policy, unknown_yaml_paths
 from app.router import Router
+import app.state as gw_state
 
 # un dim testo free (200k) + un bucket -go (data=giorno, provider non-zen)
 CSV = """commento,modello,provider,endpoint,data,context,max_input,priority,scrocco-llm-gr
@@ -154,19 +155,19 @@ def _dep(M, name, idx=0):
     dep = {"unique": "%s__fake__%d" % (name, idx), "group": name,
            "model": "fake-model", "api_key": "sk-fake-%d" % idx,
            "api_base": "https://fake.test/v1"}
-    M.config.groups.setdefault(name, []).append(dep)
+    gw_state.config.groups.setdefault(name, []).append(dep)
     return dep
 
 
 def _fb_policy_snapshot(M):
-    p = M.router.policy
+    p = gw_state.router.policy
     return (p.go_refund_enabled, p.go_refund_fb_enabled,
             p.go_refund_fb_per_fallback, p.go_refund_fb_min_turns,
             p.go_refund_fb_max_turns)
 
 
 def _fb_policy_restore(M, snap):
-    p = M.router.policy
+    p = gw_state.router.policy
     (p.go_refund_enabled, p.go_refund_fb_enabled,
      p.go_refund_fb_per_fallback, p.go_refund_fb_min_turns,
      p.go_refund_fb_max_turns) = snap
@@ -179,9 +180,9 @@ def test_e2e_served_with_one_fallback_gifts_one(monkeypatch):
     name = "scrocco-llm-test-fb"
     d0 = _dep(M, name, 0)
     d1 = _dep(M, name, 1)
-    cooldowns = set(M.router._cooldown)
+    cooldowns = set(gw_state.router._cooldown)
     snap = _fb_policy_snapshot(M)
-    p = M.router.policy
+    p = gw_state.router.policy
     p.go_refund_enabled = p.go_refund_fb_enabled = True
     p.go_refund_fb_per_fallback = 0.5
     p.go_refund_fb_min_turns, p.go_refund_fb_max_turns = 1, 3
@@ -194,10 +195,10 @@ def test_e2e_served_with_one_fallback_gifts_one(monkeypatch):
             for c in CLEAN:
                 yield c
         return _gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", _stream_response)
-    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: d1)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _stream_response)
+    monkeypatch.setattr(gw_state.router, "fallback_next", lambda *a, **k: d1)
     sid = "sess-fb-e2e-1"
-    M.router._sess_turns_map().pop(sid, None)
+    gw_state.router._sess_turns_map().pop(sid, None)
     meta: dict = {}
 
     async def _run():
@@ -213,16 +214,16 @@ def test_e2e_served_with_one_fallback_gifts_one(monkeypatch):
     try:
         asyncio.run(_run())
         assert meta.get("attempts") == [d0["unique"], d1["unique"]]
-        st = M.router.go_refund_status(sid)
+        st = gw_state.router.go_refund_status(sid)
         assert st["go_until"] == 1, st
         assert st["refund_left"] == 1, st
     finally:
         _fb_policy_restore(M, snap)
-        M.router._sess_turns_map().pop(sid, None)
-        for k in list(M.router._cooldown):
+        gw_state.router._sess_turns_map().pop(sid, None)
+        for k in list(gw_state.router._cooldown):
             if k not in cooldowns:
-                M.router._cooldown.pop(k, None)
-        M.config.groups.pop(name, None)
+                gw_state.router._cooldown.pop(k, None)
+        gw_state.config.groups.pop(name, None)
 
 
 def test_e2e_exhausted_keeps_no_gift(monkeypatch):
@@ -231,19 +232,19 @@ def test_e2e_exhausted_keeps_no_gift(monkeypatch):
     from app.forwarder import UpstreamError
     name = "scrocco-llm-test-fb-503"
     d0 = _dep(M, name, 0)
-    cooldowns = set(M.router._cooldown)
+    cooldowns = set(gw_state.router._cooldown)
     snap = _fb_policy_snapshot(M)
-    p = M.router.policy
+    p = gw_state.router.policy
     p.go_refund_enabled = p.go_refund_fb_enabled = True
     p.go_refund_fb_per_fallback = 0.5
     p.go_refund_fb_min_turns, p.go_refund_fb_max_turns = 1, 3
 
     async def _boom(dep, payload, **kwargs):
         raise UpstreamError(429, "rate limit exceeded")
-    monkeypatch.setattr(M.forwarder, "stream_response", _boom)
-    monkeypatch.setattr(M.router, "fallback_next", lambda *a, **k: None)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", _boom)
+    monkeypatch.setattr(gw_state.router, "fallback_next", lambda *a, **k: None)
     sid = "sess-fb-e2e-503"
-    M.router._sess_turns_map().pop(sid, None)
+    gw_state.router._sess_turns_map().pop(sid, None)
 
     async def _run():
         payload = {"model": d0["model"],
@@ -254,11 +255,11 @@ def test_e2e_exhausted_keeps_no_gift(monkeypatch):
     try:
         resp = asyncio.run(_run())
         assert getattr(resp, "status_code", None) == 503
-        assert M.router.go_refund_status(sid)["go_until"] == 0
+        assert gw_state.router.go_refund_status(sid)["go_until"] == 0
     finally:
         _fb_policy_restore(M, snap)
-        M.router._sess_turns_map().pop(sid, None)
-        for k in list(M.router._cooldown):
+        gw_state.router._sess_turns_map().pop(sid, None)
+        for k in list(gw_state.router._cooldown):
             if k not in cooldowns:
-                M.router._cooldown.pop(k, None)
-        M.config.groups.pop(name, None)
+                gw_state.router._cooldown.pop(k, None)
+        gw_state.config.groups.pop(name, None)

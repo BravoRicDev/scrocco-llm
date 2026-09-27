@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.ledger import Ledger
+import app.state as gw_state
 
 
 def _row(dep="d0", fb=0, qc=0, wd=None, n=1, day=None):
@@ -121,12 +122,12 @@ def test_insights_aggregate_handles_summary_rows():
 def test_endpoint_insights_with_summary(tmp_path, monkeypatch):
     monkeypatch.setattr("app.ledger.LEDGER_SUMMARY_MIN_ROWS", 3)
     import app.main as m
-    orig_key = m.authn.master_key
-    m.authn.master_key = "test-master-ledger-summary"
-    orig_ledger = m.LEDGER
+    orig_key = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-ledger-summary"
+    orig_ledger = gw_state.LEDGER
     led = Ledger(str(tmp_path))
-    monkeypatch.setattr(m, "LEDGER", led)
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "LEDGER", led)
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
     try:
         seg = _write_segment(tmp_path, _row(n=5, fb=1), "usage_ledger.jsonl.1")
         assert led._aggregate_segment(seg) is True
@@ -142,5 +143,5 @@ def test_endpoint_insights_with_summary(tmp_path, monkeypatch):
         assert a["fallback_rate"] == 0.2     # 1 fb su 5
         assert a["bad_rate"] == 0.2
     finally:
-        m.authn.master_key = orig_key
-        monkeypatch.setattr(m, "LEDGER", orig_ledger)
+        gw_state.authn.master_key = orig_key
+        monkeypatch.setattr(gw_state, "LEDGER", orig_ledger)

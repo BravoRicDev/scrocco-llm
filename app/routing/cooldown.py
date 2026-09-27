@@ -36,6 +36,7 @@ import random
 import time
 
 from ..caution import background_cautious_enabled
+from .. import state as gw_state
 from ..policy import policy_float, policy_int
 from .estimate import _is_quota_evidence
 from .evict import drop_expired, entry_ts, evict_oldest, last_sample_ts, record_ts
@@ -224,9 +225,8 @@ class CooldownMixin:
             log.debug("[probe] %s non ritirato: ultima evidenza di quota (%s)", unique, s.last_reason)
             return False
         try:
-            from .. import main as _gw_mod  # lazy: evita cicli d'import
 
-            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            kh = getattr(gw_state, "KEYHEALTH", None)
             if kh is not None and not kh.is_retired(unique):
                 kh.set_state(unique, "retired", reason="probe_escalation_cap")
                 kh.save()
@@ -247,9 +247,8 @@ class CooldownMixin:
         POST /admin/deployments/unretire o con un probe riuscito.
         """
         try:
-            from .. import main as _gw_mod  # lazy: evita cicli d'import
 
-            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            kh = getattr(gw_state, "KEYHEALTH", None)
             return bool(kh and kh.is_retired(unique))
         except Exception:  # mai bloccare il routing
             return False
@@ -258,9 +257,8 @@ class CooldownMixin:
         """Ritirato per motivo PERMANENTE: mai riusabile, nemmeno in ultima
         spiaggia (spam di errori inutili su una chiave/modello morti)."""
         try:
-            from .. import main as _gw_mod  # lazy: evita cicli d'import
 
-            kh = getattr(_gw_mod, "KEYHEALTH", None)
+            kh = getattr(gw_state, "KEYHEALTH", None)
             return bool(kh and kh.is_permanently_retired(unique))
         except Exception:  # mai bloccare il routing
             return False

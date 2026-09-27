@@ -71,6 +71,7 @@ docker buildx imagetools inspect <image:tag> --format '{{.Manifest.Digest}}'
 
 ## Code layout & conventions
 
+- `app/state.py` — shared runtime state: import it as `gw_state` (`from . import state as gw_state`) instead of reaching into `app.main`; tests monkeypatch `gw_state.<name>`.
 - `app/main.py` — HTTP surface + pipeline; `app/router.py` — routing engine;
   `app/forwarder.py` — upstream HTTP; `app/admin.py` — admin API.
 - Extracted routing mixins live in `app/routing/` (`warm.py`, `canary.py`,

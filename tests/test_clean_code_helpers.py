@@ -9,6 +9,7 @@ import random
 from app.config import GatewayConfig
 from app.jsonl_store import append_jsonl, rotate_segments
 from app.routing.evict import drop_expired, entry_ts, evict_oldest
+import app.state as gw_state
 
 
 def _cfg(groups: dict[str, list[dict]]) -> GatewayConfig:
@@ -239,11 +240,11 @@ def test_watcher_tick_persists_thought_sigs(monkeypatch, tmp_path):
     import app.main as M
     from app import runtime_persistence as rp
 
-    monkeypatch.setattr(M, "PERSIST_STATS", True)
-    monkeypatch.setattr(M, "_last_stats_save", 0.0)
-    monkeypatch.setattr(M, "_last_routing_save", 0.0)
-    monkeypatch.setattr(M, "_last_thought_sigs_save", 0.0)
-    monkeypatch.setattr(M, "_thought_sigs_file", tmp_path / "thought_sigs.json")
+    monkeypatch.setattr(gw_state, "PERSIST_STATS", True)
+    monkeypatch.setattr(gw_state, "_last_stats_save", 0.0)
+    monkeypatch.setattr(gw_state, "_last_routing_save", 0.0)
+    monkeypatch.setattr(gw_state, "_last_thought_sigs_save", 0.0)
+    monkeypatch.setattr(gw_state, "_thought_sigs_file", tmp_path / "thought_sigs.json")
     writes = rp._maybe_save_all(defer=True)            # stesso ordine del watcher
     writes += rp._maybe_save_thought_sigs(defer=True)
     assert tmp_path / "thought_sigs.json" in [w.path for w in writes]

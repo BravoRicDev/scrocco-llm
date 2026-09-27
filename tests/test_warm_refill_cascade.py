@@ -19,6 +19,7 @@ from app.config import GatewayConfig
 from app.forwarder import Forwarder, UpstreamError
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 CONTENT = b'data: {"choices":[{"delta":{"content":"ciao mondo"}}]}\n\n'
@@ -162,8 +163,8 @@ def test_wake_sweep_raddoppia_cooldown(router, monkeypatch):
         return (False, 5.0, 429, "")
 
     monkeypatch.setattr(AP, "_probe_one", fake_probe)
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "forwarder", object())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "forwarder", object())
     from app import metrics
     _b4 = dict(metrics.snapshot(("nx_wake_sweep_total",)).get(
         "nx_wake_sweep_total", {}))
@@ -196,8 +197,8 @@ def test_wake_sweep_successo_torna_caldo(router, monkeypatch):
         return (True, 12.0, 200, "")
 
     monkeypatch.setattr(AP, "_probe_one", fake_probe)
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "forwarder", object())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "forwarder", object())
     from app import metrics
     _b4 = dict(metrics.snapshot(("nx_wake_sweep_total",)).get(
         "nx_wake_sweep_total", {}))
@@ -369,8 +370,8 @@ def _fake_peel_router(notes):
 
 
 async def _join_probes(M):
-    while M._PROBE_TASKS:
-        await asyncio.gather(*list(M._PROBE_TASKS), return_exceptions=True)
+    while gw_state._PROBE_TASKS:
+        await asyncio.gather(*list(gw_state._PROBE_TASKS), return_exceptions=True)
 
 
 def test_hedge_refill_gara_a_coppie_e_probe_in_warm(M, monkeypatch):
@@ -402,13 +403,13 @@ def test_hedge_refill_gara_a_coppie_e_probe_in_warm(M, monkeypatch):
             yield FAST
             yield STOP
         return gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
     monkeypatch.setattr(M, "inject_identity",
                         lambda p, d, router=None: None)
 
     async def go():
-        old = (M.router, M.inject_identity)
-        M.router = r
+        old = (gw_state.router, M.inject_identity)
+        gw_state.router = r
         try:
             raced = {"uniq": {"A__m1__0"}, "keys": {"K-A"}}
             out = await M._hedge_peek(
@@ -421,7 +422,7 @@ def test_hedge_refill_gara_a_coppie_e_probe_in_warm(M, monkeypatch):
             await _join_probes(M)
             return out, raced
         finally:
-            M.router, M.inject_identity = old
+            gw_state.router, M.inject_identity = old
     (dep, gen, t_att, verdict, prebuf, pending, meta), raced = asyncio.run(go())
     assert verdict == "content" and dep["unique"] == "C__m9__9"
     # il picker ha visto escluse: chiave di A + chiavi warm +uniq corsi
@@ -468,13 +469,13 @@ def test_hedge_refill_canary_che_sbaglia_apertura_va_in_cooldown(M,
             yield FAST
             yield STOP
         return gen()
-    monkeypatch.setattr(M.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
     monkeypatch.setattr(M, "inject_identity",
                         lambda p, d, router=None: None)
 
     async def go():
-        old = (M.router, M.inject_identity)
-        M.router = r
+        old = (gw_state.router, M.inject_identity)
+        gw_state.router = r
         try:
             raced = {"uniq": {"A__m1__0"}, "keys": {"K-A"}}
             out = await M._hedge_peek(
@@ -487,7 +488,7 @@ def test_hedge_refill_canary_che_sbaglia_apertura_va_in_cooldown(M,
             await _join_probes(M)
             return out
         finally:
-            M.router, M.inject_identity = old
+            gw_state.router, M.inject_identity = old
     (dep, gen, t_att, verdict, prebuf, pending, meta) = asyncio.run(go())
     assert verdict == "content" and dep["unique"] == "A__m1__0"
     assert "C__m9__9" in notes["fail"]
@@ -510,21 +511,21 @@ def ML(tmp_path, monkeypatch):
     import app.main as _M
     csv = tmp_path / "k.csv"
     csv.write_text(CSV_LOOP)
-    orig_csv = _M.config.csv_path
-    qj = _M.router.policy.qc_json
-    pol = _M.router.policy
+    orig_csv = gw_state.config.csv_path
+    qj = gw_state.router.policy.qc_json
+    pol = gw_state.router.policy
     snap = (qj.stream_hedge_delay_ms, qj.stream_first_content_ms,
             qj.stream_hold_until_finish, pol.warm_refill_enabled,
             pol.warm_ready_min, pol.warm_ready_rpm_adaptive,
             pol.warm_ready_rpm_window_sec, pol.warm_ready_rpm_base,
             pol.warm_ready_rpm_step, pol.warm_ready_min_max)
-    cooled = set(_M.router._cooldown)
-    owned = dict(_M.router._dep_last_session)
-    sdeps = {k: set(v) for k, v in _M.router._session_deps.items()}
-    slok = dict(_M.router._session_last_ok)
-    probes = {k: dict(v) for k, v in _M.router._probes().items()}
-    _M.config.csv_path = csv
-    _M.config.reload()
+    cooled = set(gw_state.router._cooldown)
+    owned = dict(gw_state.router._dep_last_session)
+    sdeps = {k: set(v) for k, v in gw_state.router._session_deps.items()}
+    slok = dict(gw_state.router._session_last_ok)
+    probes = {k: dict(v) for k, v in gw_state.router._probes().items()}
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
     qj.stream_hedge_delay_ms = 50
     qj.stream_first_content_ms = 5000
     qj.stream_hold_until_finish = True
@@ -536,19 +537,19 @@ def ML(tmp_path, monkeypatch):
      pol.warm_ready_min, pol.warm_ready_rpm_adaptive,
      pol.warm_ready_rpm_window_sec, pol.warm_ready_rpm_base,
      pol.warm_ready_rpm_step, pol.warm_ready_min_max) = snap
-    _M.config.csv_path = orig_csv
-    _M.config.reload()
-    for k in list(_M.router._cooldown):
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
+    for k in list(gw_state.router._cooldown):
         if k not in cooled:
-            _M.router._cooldown.pop(k, None)
-    _M.router._dep_last_session.clear()
-    _M.router._dep_last_session.update(owned)
-    _M.router._session_deps.clear()
-    _M.router._session_deps.update(sdeps)
-    _M.router._session_last_ok.clear()
-    _M.router._session_last_ok.update(slok)
-    _M.router._probes().clear()
-    _M.router._probes().update(probes)
+            gw_state.router._cooldown.pop(k, None)
+    gw_state.router._dep_last_session.clear()
+    gw_state.router._dep_last_session.update(owned)
+    gw_state.router._session_deps.clear()
+    gw_state.router._session_deps.update(sdeps)
+    gw_state.router._session_last_ok.clear()
+    gw_state.router._session_last_ok.update(slok)
+    gw_state.router._probes().clear()
+    gw_state.router._probes().update(probes)
 
 
 def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
@@ -556,10 +557,10 @@ def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
     sul small, il refill lancia UN canary (il mid), il piu' veloce consegna,
     e A finisce come probe -> warm a 3. Nessun -go/-fallback chiamato."""
     from app.router import set_current_session
-    small = ML.config.groups[f"{BASE}-32k"][0]
-    mid = ML.config.groups[f"{BASE}-200k"][0]
-    big = ML.config.groups[f"{BASE}-1000k"][0]
-    ML.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
+    small = gw_state.config.groups[f"{BASE}-32k"][0]
+    mid = gw_state.config.groups[f"{BASE}-200k"][0]
+    big = gw_state.config.groups[f"{BASE}-1000k"][0]
+    gw_state.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
     calls = []
 
     async def sr(dep, payload, **kw):
@@ -575,7 +576,7 @@ def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
                 yield FAST
                 yield STOP
         return gen()
-    monkeypatch.setattr(ML.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
 
     async def go():
         set_current_session("rf-sess")
@@ -599,11 +600,11 @@ def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
     # solo A + UN canary: mai i pagati, mai il big (chiave gia' in warm)
     assert sorted(calls) == sorted([small["unique"], mid["unique"]])
     # warm completo: holder + winner + probe
-    pool = ML.router.warm_valid_for("rf-sess", "test", f"{BASE}-32k",
+    pool = gw_state.router.warm_valid_for("rf-sess", "test", f"{BASE}-32k",
                                     frozenset(), 100, 4096)
     assert {d["unique"] for d in pool} == {small["unique"], mid["unique"],
                                            big["unique"]}
-    assert small["unique"] not in ML.router._cooldown
+    assert small["unique"] not in gw_state.router._cooldown
 
 
 # ---------------------------------------------- non-streaming: race 2/2
@@ -881,11 +882,11 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
     canario (anche se i validi sono 1/3): A viene servita da sola, e i
     registri restanti si liberano con note_probe_done."""
     from app.router import set_current_session
-    small = ML.config.groups[f"{BASE}-32k"][0]
-    big = ML.config.groups[f"{BASE}-1000k"][0]
-    ML.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
+    small = gw_state.config.groups[f"{BASE}-32k"][0]
+    big = gw_state.config.groups[f"{BASE}-1000k"][0]
+    gw_state.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
     for i in range(6):
-        ML.router.note_probe_started("rf-sess", f"phantom-{i}")
+        gw_state.router.note_probe_started("rf-sess", f"phantom-{i}")
     calls = []
 
     async def sr(dep, payload, **kw):
@@ -895,7 +896,7 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
             yield SLOW
             yield STOP
         return gen()
-    monkeypatch.setattr(ML.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
 
     async def go():
         set_current_session("rf-sess")
@@ -917,9 +918,9 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
     assert isinstance(resp, ML.StreamingResponse)
     assert b"LENTO" in body
     assert calls == [small["unique"]]           # nessun canario: tetto saturo
-    assert ML.router.probes_in_flight("rf-sess") == 6   # phantom non toccati
-    ML.router.note_probe_done("rf-sess", "phantom-0")
-    assert ML.router.probes_in_flight("rf-sess") == 5
+    assert gw_state.router.probes_in_flight("rf-sess") == 6   # phantom non toccati
+    gw_state.router.note_probe_done("rf-sess", "phantom-0")
+    assert gw_state.router.probes_in_flight("rf-sess") == 5
 
 
 def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
@@ -928,10 +929,10 @@ def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
     a ogni round finche' il tetto non e' saturo; il probe di A si scarica da
     solo nel finally (contatore a 0 a gara finita)."""
     from app.router import set_current_session
-    small = ML.config.groups[f"{BASE}-32k"][0]
-    mid = ML.config.groups[f"{BASE}-200k"][0]
-    big = ML.config.groups[f"{BASE}-1000k"][0]
-    ML.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
+    small = gw_state.config.groups[f"{BASE}-32k"][0]
+    mid = gw_state.config.groups[f"{BASE}-200k"][0]
+    big = gw_state.config.groups[f"{BASE}-1000k"][0]
+    gw_state.router.note_session_success("rf-sess", big["unique"], 100, ctx_est=100)
     calls = []
 
     async def sr(dep, payload, **kw):
@@ -947,7 +948,7 @@ def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
                 yield FAST
                 yield STOP
         return gen()
-    monkeypatch.setattr(ML.forwarder, "stream_response", sr)
+    monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
 
     async def go():
         set_current_session("rf-sess")
@@ -969,7 +970,7 @@ def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
     assert b"VELOCE" in body
     assert sorted(calls) == sorted([small["unique"], mid["unique"]])
     # probe conclusi -> registro vuoto (nessun contatore perso)
-    assert ML.router.probes_in_flight("rf-sess") == 0
+    assert gw_state.router.probes_in_flight("rf-sess") == 0
 
 
 def test_metrics_wake_sweep_espone_label_result():
@@ -1040,7 +1041,7 @@ def test_warm_ready_effective_nel_gate_streaming(ML):
     """Nel punto di decisione del refill il valore arriva dal router (stessa
     policy): a rpm alto la soglia sale a 5, a feature off torna 3."""
     from collections import deque
-    r = ML.router
+    r = gw_state.router
     pol = r.policy
     pol.warm_refill_enabled = True
     pol.warm_ready_min = 3

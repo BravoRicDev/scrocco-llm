@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.forwarder import UpstreamError
+import app.state as gw_state
 
 # Questa suite e' la prima (ordine alfabetico) a importare app.main: replico
 # l'env che test_bootstrap si aspetta al primo import, altrimenti
@@ -31,21 +32,21 @@ def client(monkeypatch, tmp_path):
     csv = tmp_path / "k.csv"
     csv.write_text(CSV)
     import app.main as m
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-playground"
-    orig_csv = m.config.csv_path
-    m.config.csv_path = csv
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-playground"
+    orig_csv = gw_state.config.csv_path
+    gw_state.config.csv_path = csv
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    gw_state.config.reload()
     yield TestClient(m.app), m
-    m.config.csv_path = orig_csv
-    m.config.reload()
-    m.authn.master_key = orig_mk
-    m.router._cooldown.clear()
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
+    gw_state.authn.master_key = orig_mk
+    gw_state.router._cooldown.clear()
 
 
 def _uid(m, group, idx=0):
-    return m.config.groups[group][idx]["unique"]
+    return gw_state.config.groups[group][idx]["unique"]
 
 
 def _install_forwarder(monkeypatch, m, responses):
@@ -60,7 +61,7 @@ def _install_forwarder(monkeypatch, m, responses):
             raise item
         return item
 
-    monkeypatch.setattr(m.forwarder, "call", fake)
+    monkeypatch.setattr(gw_state.forwarder, "call", fake)
     return calls
 
 
@@ -139,23 +140,23 @@ def test_playground_no_side_effects(client, monkeypatch):
     """Rete fallita: nessun cooldown/stats/keyhealth/sticky toccati."""
     c, m = client
     _install_forwarder(monkeypatch, m, [UpstreamError(503, "boom")])
-    before_cd = dict(m.router._cooldown)
-    before_stats = dict(m.router._stats)
-    before_kh = dict(m.KEYHEALTH.data)
-    before_sticky = dict(m.router._sticky)
-    before_defer = dict(m.router.media_deferred)
+    before_cd = dict(gw_state.router._cooldown)
+    before_stats = dict(gw_state.router._stats)
+    before_kh = dict(gw_state.KEYHEALTH.data)
+    before_sticky = dict(gw_state.router._sticky)
+    before_defer = dict(gw_state.router.media_deferred)
     r = c.post("/admin/playground", json={
         "model": "scrocco-llm-test",
         "messages": [{"role": "user", "content": "ciao"}]}, headers=MK)
     assert r.status_code == 200
     assert r.json()["ok"] is False
     # il deployment fallito NON è in cooldown, stats senza nuovi ingressi
-    assert _uid(m, f"{BASE}-500k") not in m.router._cooldown
-    assert dict(m.router._cooldown) == before_cd
-    assert dict(m.router._stats) == before_stats
-    assert dict(m.KEYHEALTH.data) == before_kh
-    assert dict(m.router._sticky) == before_sticky
-    assert dict(m.router.media_deferred) == before_defer
+    assert _uid(m, f"{BASE}-500k") not in gw_state.router._cooldown
+    assert dict(gw_state.router._cooldown) == before_cd
+    assert dict(gw_state.router._stats) == before_stats
+    assert dict(gw_state.KEYHEALTH.data) == before_kh
+    assert dict(gw_state.router._sticky) == before_sticky
+    assert dict(gw_state.router.media_deferred) == before_defer
 
 
 def test_playground_requires_master(client):
@@ -190,7 +191,7 @@ def test_playground_profile_max_tokens(client, monkeypatch):
                 "choices": [{"message": {"role": "assistant",
                                          "content": "ok"}}]}
 
-    monkeypatch.setattr(m.forwarder, "call", fake)
+    monkeypatch.setattr(gw_state.forwarder, "call", fake)
     r = c.post("/admin/playground", json={
         "model": "scrocco-llm-test",
         "messages": [{"role": "user", "content": "ciao"}],

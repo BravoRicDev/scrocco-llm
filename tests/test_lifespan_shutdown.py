@@ -8,6 +8,7 @@ sollevava `UnboundLocalError` allo shutdown (traceback su `main.py:896`).
 import asyncio
 
 import app.main as M
+import app.state as gw_state
 
 
 def test_lifespan_shutdown_cautious_no_error(monkeypatch):
@@ -26,9 +27,9 @@ def test_lifespan_shutdown_cautious_no_error(monkeypatch):
     monkeypatch.setattr(M, "_watcher", _noop)
     monkeypatch.setattr(M, "health_loop", _noop)
     monkeypatch.setattr(M, "_nightly_scheduler", _noop)
-    monkeypatch.setattr(M.forwarder, "aclose", _noop)
-    monkeypatch.setattr(M.router, "inflight_total", lambda *a, **k: 0)
-    monkeypatch.setattr(M.LEDGER, "flush_sync", lambda *a, **k: 0)
+    monkeypatch.setattr(gw_state.forwarder, "aclose", _noop)
+    monkeypatch.setattr(gw_state.router, "inflight_total", lambda *a, **k: 0)
+    monkeypatch.setattr(gw_state.LEDGER, "flush_sync", lambda *a, **k: 0)
     monkeypatch.setattr(M.repairlog, "flush_sync", lambda *a, **k: 0)
 
     async def _run():

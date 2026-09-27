@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 
@@ -300,26 +301,26 @@ def client(monkeypatch, tmp_path):
     csv = tmp_path / "k3.csv"
     csv.write_text(CSV_HTTP)
     import app.main as m
-    orig_mk = m.authn.master_key
-    orig_csv = m.config.csv_path
-    m.authn.master_key = "test-master-p3"
-    m.config.csv_path = csv
-    m.config.reload()
-    m.router._cooldown.clear()
+    orig_mk = gw_state.authn.master_key
+    orig_csv = gw_state.config.csv_path
+    gw_state.authn.master_key = "test-master-p3"
+    gw_state.config.csv_path = csv
+    gw_state.config.reload()
+    gw_state.router._cooldown.clear()
     yield TestClient(m.app), m
     # cleanup esteso: le viste non devono inquinare i test successivi
     for attr in ("_key_soft", "_key_hints", "_circuit_breakers",
                  "_dep_circuit_breakers", "_model_cb", "_sess_ratio",
                  "_probes_flight", "_last_go", "_session_slow_timer",
                  "_ctx_frontier", "_prefix_fp", "_session_turns"):
-        d = getattr(m.router, attr, None)
+        d = getattr(gw_state.router, attr, None)
         if isinstance(d, dict):
             d.clear()
-    m.config.csv_path = orig_csv
-    m.config.reload()
-    m.authn.master_key = orig_mk
-    m.router._cooldown.clear()
-    m.router._key_leases().clear()
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
+    gw_state.authn.master_key = orig_mk
+    gw_state.router._cooldown.clear()
+    gw_state.router._key_leases().clear()
 
 
 def test_new_endpoints_master_only(client):
@@ -333,8 +334,8 @@ def test_new_endpoints_master_only(client):
 
 def test_warm_endpoint_shape(client):
     c, m = client
-    uid = m.config.groups[GROUP][0]["unique"]
-    m.router.note_session_success("SESS-1", uid)
+    uid = gw_state.config.groups[GROUP][0]["unique"]
+    gw_state.router.note_session_success("SESS-1", uid)
     out = c.get("/admin/warm", headers=MKH).json()
     assert "sessions" in out and "lendable" in out and "totals" in out
     assert out["enabled"] is True
@@ -345,7 +346,7 @@ def test_keys_soft_endpoint_no_raw(client, monkeypatch):
     from app import autoprobe as ap
     monkeypatch.setattr(ap, "_key_quota_day",
                         {"sk-RAW-HTTP-KEY": time.time() + 100})
-    m.router._key_soft["aabbccddeeff"] = time.time() + 50
+    gw_state.router._key_soft["aabbccddeeff"] = time.time() + 50
     out = c.get("/admin/keys/soft", headers=MKH).json()
     text = json.dumps(out)
     assert "sk-RAW-HTTP-KEY" not in text
@@ -356,18 +357,18 @@ def test_keys_soft_endpoint_no_raw(client, monkeypatch):
 def test_circuits_endpoint_no_raw(client):
     c, m = client
     now = time.time()
-    m.router._circuit_breakers["sk-RAW-HTTP-CB"] = {
+    gw_state.router._circuit_breakers["sk-RAW-HTTP-CB"] = {
         "state": "open", "failures": 2, "last_failure": now, "opened_at": now}
     out = c.get("/admin/circuits", headers=MKH).json()
     assert "models" in out and "keys" in out and "deployments" in out
     assert "sk-RAW-HTTP-CB" not in json.dumps(out)
-    assert m.router._tag_key("sk-RAW-HTTP-CB") in out["keys"]
+    assert gw_state.router._tag_key("sk-RAW-HTTP-CB") in out["keys"]
 
 
 def test_state_additivo_con_nuove_viste(client):
     c, m = client
-    uid = m.config.groups[GROUP][0]["unique"]
-    m.router.note_session_success("SESS-X", uid)
+    uid = gw_state.config.groups[GROUP][0]["unique"]
+    gw_state.router.note_session_success("SESS-X", uid)
     st = c.get("/admin/state", headers=MKH).json()
     ad = st["adaptive"]
     assert "entries" in ad["session_dep_guard"]
@@ -376,14 +377,14 @@ def test_state_additivo_con_nuove_viste(client):
     for k in ("key_leases", "quirks", "degraded", "warm_pool"):
         assert k in ad
     assert ad["session_dep_guard"]["tracked"] == \
-        len(getattr(m.router, "_dep_last_session", {}) or {})
+        len(getattr(gw_state.router, "_dep_last_session", {}) or {})
 
 
 def test_sessions_list_additivo(client):
     c, m = client
-    uid = m.config.groups[GROUP][0]["unique"]
-    m.router.note_session_success("SESS-1", uid)
-    m.router.note_session_turn("SESS-1")
+    uid = gw_state.config.groups[GROUP][0]["unique"]
+    gw_state.router.note_session_success("SESS-1", uid)
+    gw_state.router.note_session_turn("SESS-1")
     out = c.get("/admin/sessions", headers=MKH).json()
     for k in ("sticky_sessions", "dep_sticky_sessions", "session_deps",
               "cache_holders", "slow_demoted"):
@@ -395,12 +396,12 @@ def test_sessions_list_additivo(client):
 
 def test_session_detail_additivo(client):
     c, m = client
-    uid = m.config.groups[GROUP][0]["unique"]
-    m.router.note_session_success("SESS-1", uid)
-    m.router.note_compact_boundary("SESS-1", 7)
-    m.router.audit_prefix("SESS-1", [{"role": "system"}, {"role": "user"},
+    uid = gw_state.config.groups[GROUP][0]["unique"]
+    gw_state.router.note_session_success("SESS-1", uid)
+    gw_state.router.note_compact_boundary("SESS-1", 7)
+    gw_state.router.audit_prefix("SESS-1", [{"role": "system"}, {"role": "user"},
                                      {"role": "assistant"}], 2)
-    m.router.note_session_turn("SESS-1")
+    gw_state.router.note_session_turn("SESS-1")
     out = c.get("/admin/sessions/SESS-1", headers=MKH).json()
     assert out["session_id"] == "SESS-1"
     for k in ("slow_timer", "go_refund", "last_go", "ctx_frontier",

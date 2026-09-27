@@ -24,6 +24,7 @@ from app import journal, metrics
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 BASE = "scrocco-llm-test"
 GROUP = f"{BASE}-500k"
@@ -47,18 +48,18 @@ def client(monkeypatch, tmp_path):
     csv = tmp_path / "k4.csv"
     csv.write_text(CSV)
     import app.main as m
-    orig_mk = m.authn.master_key
-    orig_csv = m.config.csv_path
-    orig_var = m.VAR_DIR
-    m.authn.master_key = "test-master-f4"
-    m.config.csv_path = csv
-    m.VAR_DIR = tmp_path                       # journal isolato per test
-    m.config.reload()
-    m.router._cooldown.clear()
+    orig_mk = gw_state.authn.master_key
+    orig_csv = gw_state.config.csv_path
+    orig_var = gw_state.VAR_DIR
+    gw_state.authn.master_key = "test-master-f4"
+    gw_state.config.csv_path = csv
+    gw_state.VAR_DIR = tmp_path                       # journal isolato per test
+    gw_state.config.reload()
+    gw_state.router._cooldown.clear()
     # _key_soft/_key_hints possono restare popolati da altri test (es. p2
     # pressure/clear): vanno azzerati o il pick esclude il dep sbagliato.
-    getattr(m.router, "_key_soft", {}).clear()
-    getattr(m.router, "_key_hints", {}).clear()
+    getattr(gw_state.router, "_key_soft", {}).clear()
+    getattr(gw_state.router, "_key_hints", {}).clear()
     try:
         yield TestClient(m.app), m
     finally:
@@ -69,21 +70,21 @@ def client(monkeypatch, tmp_path):
                      "_session_rate", "_session_turns", "_probes_flight",
                      "_dep_last_session", "_base_scores", "_provider_scores",
                      "_key_scores", "_key_soft", "_key_hints"):
-            d = getattr(m.router, attr, None)
+            d = getattr(gw_state.router, attr, None)
             if isinstance(d, dict):
                 d.clear()
-        m.router._drain().clear()
-        m.router._key_leases().clear()
-        m.router._cooldown.clear()
+        gw_state.router._drain().clear()
+        gw_state.router._key_leases().clear()
+        gw_state.router._cooldown.clear()
         metrics.reset()
-        m.VAR_DIR = orig_var
-        m.config.csv_path = orig_csv
-        m.config.reload()
-        m.authn.master_key = orig_mk
+        gw_state.VAR_DIR = orig_var
+        gw_state.config.csv_path = orig_csv
+        gw_state.config.reload()
+        gw_state.authn.master_key = orig_mk
 
 
 def _dep(m, key):
-    for lst in m.config.groups.values():
+    for lst in gw_state.config.groups.values():
         for d in lst:
             if d.get("api_key") == key:
                 return d
@@ -120,7 +121,7 @@ def test_metrics_reset_svuota_snapshot(client):
 # -------------------------------------------------------------- scores/reset
 def test_scores_reset_filtrato_per_model(client):
     c, m = client
-    r = m.router
+    r = gw_state.router
     da, db = _dep(m, "K-A"), _dep(m, "K-B")
     r._base_scores = {da["unique"]: 1.0, db["unique"]: 2.0}
     r._provider_scores = {r._provider_key(da): 1.0, r._provider_key(db): 1.0}
@@ -144,7 +145,7 @@ def test_scores_reset_filtrato_per_model(client):
 # --------------------------------------------------------- sessions/purge
 def test_sessions_purge_completa(client):
     c, m = client
-    r = m.router
+    r = gw_state.router
     uid = _uid(m, "K-A")
     now = time.time()
     r._sticky["S1"] = (GROUP, now)
@@ -180,7 +181,7 @@ def test_sessions_purge_completa(client):
 # ------------------------------------------------------ keys/leases/clear
 def test_leases_clear_senza_leak_e_404(client):
     c, m = client
-    r = m.router
+    r = gw_state.router
     da, db = _dep(m, "K-A"), _dep(m, "K-B")
     r._key_leases()["K-A"] = [("tok-a", time.time(), da["unique"])]
 
@@ -209,7 +210,7 @@ def test_leases_clear_senza_leak_e_404(client):
 # -------------------------------------------------------- hosts/drain|undrain
 def test_drain_undrain_idempotenti_e_config(client):
     c, m = client
-    r = m.router
+    r = gw_state.router
     uid = _uid(m, "K-A")
 
     r1 = c.post("/admin/hosts/drain", headers=MKH,
@@ -229,7 +230,7 @@ def test_drain_undrain_idempotenti_e_config(client):
                 json={"unique": uid}).json()
     assert r3["undrained"] is True and r3["already"] is False
     assert not r.is_draining(uid)
-    assert m.config.deployment_by_unique(uid) is not None
+    assert gw_state.config.deployment_by_unique(uid) is not None
     assert "model-a" in {r.pick_deployment(GROUP, need=frozenset({"text"}))
                          ["model"] for _ in range(40)}
     # undrain idempotente
@@ -247,25 +248,25 @@ def test_operator_drain_sopravvive_a_note_end(client, monkeypatch):
     """Regressione: un drain OPERATORE non deve sparire dalla config quando
     l'inflight va a zero (altrimenti undrain non troverebbe piu' l'entry)."""
     c, m = client
-    r = m.router
+    r = gw_state.router
     uid = _uid(m, "K-A")
     c.post("/admin/hosts/drain", headers=MKH,
            json={"unique": uid, "inflight": 1})
-    assert m.config.deployment_by_unique(uid) is not None
+    assert gw_state.config.deployment_by_unique(uid) is not None
     r.note_end(uid)                                # ultima richiesta in volo
     assert not r.is_draining(uid)
-    assert m.config.deployment_by_unique(uid) is not None   # ancora in config
+    assert gw_state.config.deployment_by_unique(uid) is not None   # ancora in config
     r5 = c.post("/admin/hosts/undrain", headers=MKH,
                 json={"unique": uid}).json()
     assert r5["already"] is True                    # nessun drain da annullare
-    assert m.config.deployment_by_unique(uid) is not None
+    assert gw_state.config.deployment_by_unique(uid) is not None
 
 
 # ------------------------------------------------------------- warm/wake
 def test_warm_wake_probe_e_clear_cooldown(client, monkeypatch):
     c, m = client
     import app.admin as admin_mod
-    r = m.router
+    r = gw_state.router
     uid = _uid(m, "K-A")
     r.mark_failed(uid, seconds=600, reason="http_429")
     assert r.is_cooled_down(uid)
@@ -300,7 +301,7 @@ def test_warm_wake_probe_e_clear_cooldown(client, monkeypatch):
 def test_journal_registra_le_op(client, monkeypatch):
     c, m = client
     import app.admin as admin_mod
-    r = m.router
+    r = gw_state.router
     uid = _uid(m, "K-A")
 
     async def fake_probe(http, dep, force, *, client_ip="", session=None,
@@ -317,7 +318,7 @@ def test_journal_registra_le_op(client, monkeypatch):
     c.post("/admin/sessions/purge", headers=MKH, json={})
     c.post("/admin/keys/leases/clear", headers=MKH, json={})
 
-    ops = {e["op"] for e in journal.history(m.VAR_DIR, 50)["entries"]}
+    ops = {e["op"] for e in journal.history(gw_state.VAR_DIR, 50)["entries"]}
     for op in ("warm_wake", "hosts_drain", "hosts_undrain", "metrics_reset",
                "scores_reset", "sessions_purge", "keys_leases_clear"):
         assert op in ops, op

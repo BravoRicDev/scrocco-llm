@@ -27,6 +27,7 @@ import time
 from fastapi import APIRouter
 
 from . import csv_store
+from . import state as gw_state
 from .auth import is_production
 
 bootstrap_api = APIRouter()
@@ -196,12 +197,6 @@ def _playbook() -> dict:
     }
 
 
-def _gw():
-    """Globali del servizio a runtime (evita import circolari)."""
-    from . import main as mod
-    return mod
-
-
 @bootstrap_api.get("/bootstrap/providers")
 async def bootstrap_providers():
     """Registro provider SOLO con fatti stabili + istruzioni di ricerca.
@@ -234,8 +229,7 @@ async def bootstrap_status():
     endpoint esatti. Il probe NON viene mai auto-invocato: al massimo
     segnala quanti deployment non risultano ancora validati.
     """
-    gw = _gw()
-    cfg, pol = gw.config, gw.policy
+    cfg, pol = gw_state.config, gw_state.policy
     now = time.time()
     issues: list[dict] = []
     actions: list[dict] = []
@@ -267,10 +261,10 @@ async def bootstrap_status():
         # chiavi sospette: cooldown attivo o streak alto (+ lifecycle state)
         suspicious = []
         retired_list = []
-        kh = getattr(gw, "KEYHEALTH", None)
-        for u, exp in getattr(gw.router, "_cooldown", {}).items():
+        kh = getattr(gw_state, "KEYHEALTH", None)
+        for u, exp in getattr(gw_state.router, "_cooldown", {}).items():
             dep = cfg.deployment_by_unique(u)
-            streak = gw.router.stats_for(u).fail_streak
+            streak = gw_state.router.stats_for(u).fail_streak
             if exp > now or streak >= 3:
                 suspicious.append({
                     "deployment": u,

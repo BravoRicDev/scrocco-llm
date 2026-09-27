@@ -17,6 +17,7 @@ from app.forwarder import (Forwarder, UpstreamError, dep_host,
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 _CSV = ("commento,modello,provider,endpoint,data,context,max_input,"
         "priority,scrocco-llm-test,caps\n"
@@ -136,9 +137,9 @@ def test_streaming_salta_le_chiavi_gemelle_dell_host_morto(monkeypatch):
                 yield b"data: [DONE]\n\n"
             return _g()
 
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", _Fwd())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", _Fwd())
 
     async def _run():
         payload = {"model": a1["model"],

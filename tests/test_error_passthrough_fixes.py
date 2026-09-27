@@ -19,6 +19,7 @@ from app.forwarder import (Forwarder, UpstreamError, RETRYABLE_STATUS,
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
+import app.state as gw_state
 
 VISION_400 = ('{"error":{"message":"Model \'minimax-m2.7\' does not support '
               'vision input.","type":"invalid_request_error","param":null,'
@@ -137,9 +138,9 @@ def test_streaming_media_reject_never_passthrough(monkeypatch):
                 yield b"data: [DONE]\n\n"
             return _g()
 
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", _Fwd())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", _Fwd())
 
     async def _run():
         payload = {"model": broken["model"],
@@ -177,9 +178,9 @@ def _vision_400_stream_harness(monkeypatch):
                 yield b"data: [DONE]\n\n"
             return _g()
 
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", _Fwd())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", _Fwd())
     return M, router, broken, good, seen, JSONResponse, StreamingResponse
 
 
@@ -361,9 +362,9 @@ def _client_4xx_stream_harness(monkeypatch, error_body):
                 yield b"data: [DONE]\n\n"
             return _g()
 
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", _Fwd())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", _Fwd())
     return M, router, broken, good, seen, JSONResponse, StreamingResponse
 
 
@@ -428,9 +429,9 @@ def test_streaming_generic_4xx_rotates_never_passthrough(monkeypatch):
                 yield b"data: [DONE]\n\n"
             return _g()
 
-    monkeypatch.setattr(M, "router", router)
-    monkeypatch.setattr(M, "config", cfg)
-    monkeypatch.setattr(M, "forwarder", _Fwd())
+    monkeypatch.setattr(gw_state, "router", router)
+    monkeypatch.setattr(gw_state, "config", cfg)
+    monkeypatch.setattr(gw_state, "forwarder", _Fwd())
 
     async def _run():
         payload = {"model": broken["model"],

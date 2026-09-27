@@ -1,23 +1,25 @@
 """Helper probe speculativi e wake-sweep (canari e risvegli 429).
 
-Estratti verbatim da `app/main.py` (cluster C5, Round 4 Clean Code).
-Gli oggetti creati a RUNTIME dentro main.py (`log`, `router`, `forwarder` al
-riga 285, e la funzione `_soft_cd`) sono raggiunti con `import app.main as M`
-DENTRO il corpo delle funzioni che li usano: a livello di modulo non esisterebbero
-ancora, e main.py importa questo modulo.
+Estratti da `app/main.py` (cluster C5, Round 4 Clean Code).
 
-`policy` NON e' importata: i suoi due usi nello span sono attributi di `router`
-(`router.policy.qc_json`), non il global `policy` di main.py.
+Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
+da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
+il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
 
+import logging
 import asyncio
 import contextlib
 import time
 
 from . import autoprobe
+from . import state as gw_state
 from .stream_verdicts import _soft_cd
 from .suppressed import report_suppressed
 from . import metrics
+
+# Stesso logger di app.main: i record (nome "nx.main") restano identici.
+log = logging.getLogger("nx.main")
 
 
 async def _drain_probe_tasks() -> int:
@@ -28,9 +30,8 @@ async def _drain_probe_tasks() -> int:
     dello shutdown e puo' far saltare il salvataggio atomico finale.
     Ritorna quanti task ha cancellato."""
 
-    import app.main as M
 
-    _pt = [t for t in list(M._PROBE_TASKS) if not t.done()]
+    _pt = [t for t in list(gw_state._PROBE_TASKS) if not t.done()]
     for t in _pt:
         t.cancel()
     if _pt:
@@ -39,10 +40,9 @@ async def _drain_probe_tasks() -> int:
 
 
 def _probe_drain_cap_sec() -> float:
-    import app.main as M
 
     try:
-        dd = int(getattr(M.router.policy.qc_json, "stream_total_deadline_ms", 180000) or 180000)
+        dd = int(getattr(gw_state.router.policy.qc_json, "stream_total_deadline_ms", 180000) or 180000)
     except Exception:
         dd = 180000
     return max(120.0, dd / 1000.0 + 60.0)
@@ -94,12 +94,11 @@ def _spawn_probe(
     lui l'holder della sessione (l'altro viene marcato 'lento per la
     sessione'); se e' piu' lento, viene marcato lento il probe."""
 
-    import app.main as M
 
     u = dep.get("unique", "?")
     cap = _probe_drain_cap_sec()
     with contextlib.suppress(Exception):
-        M.router.note_probe_started(session, u)
+        gw_state.router.note_probe_started(session, u)
 
     async def _run():
         ok = False
@@ -131,8 +130,8 @@ def _spawn_probe(
             if ok:
                 if wake:
                     with contextlib.suppress(Exception):
-                        M.router.clear_cooldown(u)  # sveglia riuscita
-                M.router.note_warm_owner(session, u)
+                        gw_state.router.clear_cooldown(u)  # sveglia riuscita
+                gw_state.router.note_warm_owner(session, u)
                 metrics.inc("nx_hedge_total", ("probe_ok",))
                 # ELEZIONE per TEMPO DI TENTATIVO (regola utente): il piu'
                 # veloce diventa holder, indipendentemente da chi ha
@@ -144,12 +143,12 @@ def _spawn_probe(
                         _wu, _wd = race
                         if _wd and _d > 0 and u != _wu:
                             if _d < _wd:
-                                _cur = (M.router._cache_ok().get(session) or (None, 0.0))[0]
+                                _cur = (gw_state.router._cache_ok().get(session) or (None, 0.0))[0]
                                 if _cur in (None, _wu):
                                     with contextlib.suppress(Exception):
-                                        M.router.note_session_success(session, u, latency_ms=_d, ctx_est=ctx)
-                                        M.router._note_session_slow(session, _wu, latency_ms=_wd, ctx_est=ctx)
-                                    M.log.info(
+                                        gw_state.router.note_session_success(session, u, latency_ms=_d, ctx_est=ctx)
+                                        gw_state.router._note_session_slow(session, _wu, latency_ms=_wd, ctx_est=ctx)
+                                    log.info(
                                         "[slow-race] holder -> %s (tentativo %.0fs vs %s %.0fs)",
                                         u,
                                         _d / 1000.0,
@@ -158,36 +157,36 @@ def _spawn_probe(
                                     )
                             else:
                                 with contextlib.suppress(Exception):
-                                    M.router._note_session_slow(session, u, latency_ms=_d, ctx_est=ctx)
+                                    gw_state.router._note_session_slow(session, u, latency_ms=_d, ctx_est=ctx)
                     except Exception:
                         report_suppressed("probes._run@160")
             elif v == "timeout" or (v is None and died):
                 # muto/fallito come il tentativo servito: cooldown lungo.
-                M.router.mark_failed(u, reason="timeout")
+                gw_state.router.mark_failed(u, reason="timeout")
                 metrics.inc("nx_hedge_total", ("probe_fail",))
             elif v in ("error", "truncated") or died:
                 # errore di trasporto/stream rotto: cooldown corto solito.
                 try:
-                    _f24 = M.router.stats_for(u).fail_count_24h
+                    _f24 = gw_state.router.stats_for(u).fail_count_24h
                 except Exception:
                     _f24 = 0
-                M.router.mark_failed(u, seconds=_soft_cd(_f24), reason="probe_error")
+                gw_state.router.mark_failed(u, seconds=_soft_cd(_f24), reason="probe_error")
                 metrics.inc("nx_hedge_total", ("probe_fail",))
             else:
                 # empty_eof/length_truncated: comportamento del modello, non
                 # colpa della chiave — SOLO qui nessuna penale, identico alla
                 # regola del tentativo servito.
                 metrics.inc("nx_hedge_total", ("probe_drop",))
-            M.log.info("[probe] %s: %s (verdetto=%s)", u, "in warm" if ok else "gestito di solito", v)
+            log.info("[probe] %s: %s (verdetto=%s)", u, "in warm" if ok else "gestito di solito", v)
         finally:
             with contextlib.suppress(Exception):
-                M.router.note_probe_done(session, u)
+                gw_state.router.note_probe_done(session, u)
             with contextlib.suppress(Exception):
-                M.router.note_end(u, ctx)
+                gw_state.router.note_end(u, ctx)
 
     t = asyncio.ensure_future(_run())
-    M._PROBE_TASKS.add(t)
-    t.add_done_callback(M._PROBE_TASKS.discard)
+    gw_state._PROBE_TASKS.add(t)
+    t.add_done_callback(gw_state._PROBE_TASKS.discard)
 
 
 async def _probe_late_open(open_task, session, ctx, hold: bool, race: tuple[str, float] | None) -> None:
@@ -235,13 +234,12 @@ def _spawn_wake_sweep(
     vede RADDOPPIATO il proprio cooldown residuo. Gira staccata, mai nel
     percorso della risposta servita."""
 
-    import app.main as M
 
     t = asyncio.ensure_future(
         _wake_sweep(payload, profile, cur_dep, need, ctx, out_tokens, requested_group, session, raced)
     )
-    M._PROBE_TASKS.add(t)
-    t.add_done_callback(M._PROBE_TASKS.discard)
+    gw_state._PROBE_TASKS.add(t)
+    t.add_done_callback(gw_state._PROBE_TASKS.discard)
 
 
 async def _wake_sweep(
@@ -255,10 +253,9 @@ async def _wake_sweep(
     session,
     raced: dict | None,
 ) -> None:
-    import app.main as M
 
     try:
-        _pol = M.router.policy
+        _pol = gw_state.router.policy
         _n = int(getattr(_pol, "warm_refill_wake_max_attempts", 10) or 0)
         _age = float(getattr(_pol, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
     except Exception:  # noqa: BLE001
@@ -271,7 +268,7 @@ async def _wake_sweep(
     tried: list[str] = []
     for i in range(_n):
         try:
-            W = M.router.warm_wake_canary(
+            W = gw_state.router.warm_wake_canary(
                 profile,
                 cur_dep,
                 need,
@@ -293,23 +290,23 @@ async def _wake_sweep(
         tried.append(u)
         done += 1
         with contextlib.suppress(Exception):
-            M.router.note_probe_started(session, u)
+            gw_state.router.note_probe_started(session, u)
         try:
-            ok, lat, code, _body = await autoprobe._probe_one(M.forwarder, W, 30.0)
+            ok, lat, code, _body = await autoprobe._probe_one(gw_state.forwarder, W, 30.0)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
-                M.router.note_probe_done(session, u)
+                gw_state.router.note_probe_done(session, u)
             raise
         except Exception:  # noqa: BLE001
             ok, code = False, 0
         with contextlib.suppress(Exception):
-            M.router.note_probe_done(session, u)
+            gw_state.router.note_probe_done(session, u)
         if ok:
             with contextlib.suppress(Exception):
-                M.router.clear_cooldown(u)
-                M.router.note_warm_owner(session, u)
+                gw_state.router.clear_cooldown(u)
+                gw_state.router.note_warm_owner(session, u)
             metrics.inc("nx_wake_sweep_total", ("ok",))
-            M.log.info(
+            log.info(
                 "[sveglia] %s risponde (%.0fms, order=%s) -> torna caldo (tentativo %d/%d)",
                 u,
                 lat or 0.0,
@@ -320,9 +317,9 @@ async def _wake_sweep(
             return
         # KO: il dormiente ri-fallisce -> cooldown RADDOPPIATO (residuo).
         with contextlib.suppress(Exception):
-            M.router.mark_failed_double_residual(u, reason="wake_probe", status=code or None)
+            gw_state.router.mark_failed_double_residual(u, reason="wake_probe", status=code or None)
         metrics.inc("nx_wake_sweep_total", ("ko",))
-        M.log.info(
+        log.info(
             "[sveglia] %s KO (code=%s, order=%s) -> cooldown raddoppiato (tentativo %d/%d)",
             u,
             code,
@@ -332,6 +329,6 @@ async def _wake_sweep(
         )
     metrics.inc("nx_wake_sweep_total", ("exhausted",))
     if done:
-        M.log.info("[sveglia] giro concluso: %d tentativi su [%s], nessun risveglio", done, ", ".join(tried))
+        log.info("[sveglia] giro concluso: %d tentativi su [%s], nessun risveglio", done, ", ".join(tried))
     else:
-        M.log.info("[sveglia] nessun dormiente maturo (429>=min_age) da svegliare")
+        log.info("[sveglia] nessun dormiente maturo (429>=min_age) da svegliare")

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import app.metrics as nx_metrics
 import app.observability as obs
+import app.state as gw_state
 
 
 @pytest.fixture()
@@ -26,16 +27,16 @@ def client(monkeypatch, tmp_path):
         "free,8,8000,1,sk-test-key,\n"
     )
     import app.main as m
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-metrics"
-    orig_csv = m.config.csv_path
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-metrics"
+    orig_csv = gw_state.config.csv_path
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     yield TestClient(m.app), m
-    m.router._cooldown.clear()
-    m.authn.master_key = orig_mk
-    m.config.csv_path = orig_csv
-    m.config.reload()
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig_mk
+    gw_state.config.csv_path = orig_csv
+    gw_state.config.reload()
 
 
 @pytest.fixture(autouse=True)

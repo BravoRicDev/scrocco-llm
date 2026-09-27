@@ -27,6 +27,7 @@ from app.forwarder import (UpstreamError, chat_only_image_error,
                            image_chat_fallback_signature,
                            images_payload_from_chat, images_response_to_chat,
                            native_images_only_error)
+import app.state as gw_state
 
 PNG_1x1 = b"\x89PNG\r\n\x1a\n" + b"x" * 8
 _B64 = base64.b64encode(b"ABC").decode()
@@ -229,27 +230,27 @@ def _make_client(monkeypatch, tmp_path, csv_text):
     csv = tmp_path / "k.csv"
     csv.write_text(csv_text)
     import app.main as m
-    orig = (m.authn.master_key, m.config.csv_path,
-            m.router.policy.cap_groups_enabled)
-    m.authn.master_key = "test-master-bidir"
-    m.LEDGER.flush()
-    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
-    monkeypatch.setattr(m, "CSV_PATH", str(csv))
-    monkeypatch.setattr(m.config, "csv_path", csv)
-    m.config.reload()
+    orig = (gw_state.authn.master_key, gw_state.config.csv_path,
+            gw_state.router.policy.cap_groups_enabled)
+    gw_state.authn.master_key = "test-master-bidir"
+    gw_state.LEDGER.flush()
+    monkeypatch.setattr(gw_state, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(gw_state, "CSV_PATH", str(csv))
+    monkeypatch.setattr(gw_state.config, "csv_path", csv)
+    gw_state.config.reload()
     from app.ledger import Ledger
-    monkeypatch.setattr(m, "LEDGER", Ledger(tmp_path))
-    m.router.policy.cap_groups_enabled = True
+    monkeypatch.setattr(gw_state, "LEDGER", Ledger(tmp_path))
+    gw_state.router.policy.cap_groups_enabled = True
     return TestClient(m.app), m, orig
 
 
 def _teardown(m, orig):
     m.imagestore.clear()
-    m.router.policy.cap_groups_enabled = orig[2]
-    m.router._cooldown.clear()
-    m.authn.master_key = orig[0]
-    m.config.csv_path = orig[1]
-    m.config.reload()
+    gw_state.router.policy.cap_groups_enabled = orig[2]
+    gw_state.router._cooldown.clear()
+    gw_state.authn.master_key = orig[0]
+    gw_state.config.csv_path = orig[1]
+    gw_state.config.reload()
 
 
 def _client(monkeypatch, tmp_path, model, provider, image_via, caps,
@@ -258,7 +259,7 @@ def _client(monkeypatch, tmp_path, model, provider, image_via, caps,
         monkeypatch, tmp_path,
         _CSV_HEADER + _row(model, provider, image_via, caps))
     fwd = _FakeForwarder(native, chat)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     return c, m, fwd, orig
 
 
@@ -380,7 +381,7 @@ def test_images_generations_ruota_se_unknown_provider(monkeypatch, tmp_path):
                              else (400, _GEMINI_ERR)),
         chat=lambda d, p: (400, "unknown provider for model "
                               "gemini-3.1-flash-image"))
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     try:
         r = c.post("/v1/images/generations", headers=MK,
                    json={"model": "scrocco-llm-test", "prompt": "un gatto"})
@@ -403,7 +404,7 @@ def test_chat_modalities_image_su_modello_generico(monkeypatch, tmp_path):
                                   "image_gen,image_edit")
     c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
     fwd = _FakeForwarder(_NATIVE_OK, _CHAT_IMG_OK)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     try:
         r = c.post("/v1/chat/completions", headers=MK, json={
             "model": "scrocco-llm-test", "modalities": ["image", "text"],
@@ -431,7 +432,7 @@ def test_chat_immagine_salve_da_modello_con_suffisso_dim(monkeypatch, tmp_path):
                        "image_gen,image_edit"))
     c, m, orig = _make_client(monkeypatch, tmp_path, csv_text)
     fwd = _FakeForwarder(_NATIVE_OK, _CHAT_IMG_OK)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     try:
         r = c.post("/v1/chat/completions", headers=MK, json={
             "model": "scrocco-llm-test-8k", "modalities": ["image"],
@@ -466,7 +467,7 @@ def test_chat_immagine_ruota_sulla_catena_capability(monkeypatch, tmp_path):
         return (400, _GEMINI_ERR)
 
     fwd = _FakeForwarder(native, _CHAT_IMG_OK)
-    monkeypatch.setattr(m, "forwarder", fwd)
+    monkeypatch.setattr(gw_state, "forwarder", fwd)
     try:
         r = c.post("/v1/chat/completions", headers=MK, json={
             "model": "scrocco-llm-test", "modalities": ["image"],

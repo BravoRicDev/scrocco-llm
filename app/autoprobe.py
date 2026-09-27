@@ -36,6 +36,7 @@ import time
 from collections import deque
 
 from .bgtasks import spawn
+from . import state as gw_state
 from .forwarder import _MODEL_MISSING_RE, maybe_quarantine_ban
 from . import protocols as proto
 from .caution import background_cautious_enabled
@@ -183,8 +184,7 @@ _retired_day = ""
 def _keyhealth():
     """Istanza KeyHealth del gateway (None se non disponibile)."""
     try:
-        from . import main as _gw_mod
-        return getattr(_gw_mod, "KEYHEALTH", None)
+        return getattr(gw_state, "KEYHEALTH", None)
     except Exception:  # noqa: BLE001
         return None
 

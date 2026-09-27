@@ -3,6 +3,7 @@
 SICUREZZA: la fixture patcha m.CSV_PATH / m.POLICY_PATH / m.VAR_DIR su tmp.
 """
 import os
+import app.state as gw_state
 
 os.environ.setdefault("GATEWAY_MASTER_KEY", "test-master-not-default")
 
@@ -33,25 +34,25 @@ def client(monkeypatch, tmp_path):
     (bdir / "keys_rotation-20260101-000000.csv").write_text(CSV_A)
     (bdir / "gateway.yaml-20260101-000000.yaml").write_text(YAML_A)
 
-    orig_mk = m.authn.master_key
-    m.authn.master_key = "test-master-backups"
-    monkeypatch.setattr(m, "CSV_PATH", csv_f)
-    monkeypatch.setattr(m, "POLICY_PATH", pol_f)
-    monkeypatch.setattr(m, "VAR_DIR", tmp_path)
-    monkeypatch.setattr(m.config, "csv_path", csv_f)
-    m.config.reload()
-    orig_pol = m.policy
-    m.router.policy = m.Policy.load(pol_f)
-    m.policy = m.router.policy
-    assert str(m.CSV_PATH).startswith(str(tmp_path))
-    assert str(m.POLICY_PATH).startswith(str(tmp_path))
+    orig_mk = gw_state.authn.master_key
+    gw_state.authn.master_key = "test-master-backups"
+    monkeypatch.setattr(gw_state, "CSV_PATH", csv_f)
+    monkeypatch.setattr(gw_state, "POLICY_PATH", pol_f)
+    monkeypatch.setattr(gw_state, "VAR_DIR", tmp_path)
+    monkeypatch.setattr(gw_state.config, "csv_path", csv_f)
+    gw_state.config.reload()
+    orig_pol = gw_state.policy
+    gw_state.router.policy = m.Policy.load(pol_f)
+    gw_state.policy = gw_state.router.policy
+    assert str(gw_state.CSV_PATH).startswith(str(tmp_path))
+    assert str(gw_state.POLICY_PATH).startswith(str(tmp_path))
     yield TestClient(m.app)
-    m.authn.master_key = orig_mk
-    monkeypatch.setattr(m.config, "csv_path", m.CSV_PATH)
-    m.config.reload()
-    m.policy = orig_pol
-    m.router.policy = orig_pol
-    m.router._cooldown.clear()
+    gw_state.authn.master_key = orig_mk
+    monkeypatch.setattr(gw_state.config, "csv_path", gw_state.CSV_PATH)
+    gw_state.config.reload()
+    gw_state.policy = orig_pol
+    gw_state.router.policy = orig_pol
+    gw_state.router._cooldown.clear()
 
 
 def test_list_backups(client):
@@ -74,9 +75,9 @@ def test_restore_csv(client):
     j = r.json()
     assert j["ok"] and j["restored"] == "keys_rotation-20260101-000000.csv"
     assert j["rows"] == 1                       # CSV_A ha 1 riga
-    assert m.CSV_PATH.read_text() == CSV_A or "model-b" not in m.CSV_PATH.read_text()
+    assert gw_state.CSV_PATH.read_text() == CSV_A or "model-b" not in gw_state.CSV_PATH.read_text()
     # _commit_csv ha messo l'attuale (B, 2 righe) in backup prima
-    bks = list((m.VAR_DIR / "backups").glob("keys_rotation-*.csv"))
+    bks = list((gw_state.VAR_DIR / "backups").glob("keys_rotation-*.csv"))
     assert any("model-b" in b.read_text() for b in bks)
 
 
@@ -87,9 +88,9 @@ def test_restore_yaml(client):
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["ok"] and j["effective"]["step_up_pct"] == 25
-    assert m.router.policy.step_up_pct == 25
-    assert "step_up_pct: 25" in m.POLICY_PATH.read_text()
-    bks = list((m.VAR_DIR / "backups").glob("gateway.yaml-*.yaml"))
+    assert gw_state.router.policy.step_up_pct == 25
+    assert "step_up_pct: 25" in gw_state.POLICY_PATH.read_text()
+    bks = list((gw_state.VAR_DIR / "backups").glob("gateway.yaml-*.yaml"))
     assert any("step_up_pct: 55" in b.read_text() for b in bks)   # l'attuale B
 
 
@@ -107,8 +108,8 @@ def test_restore_path_traversal_and_missing(client, bad):
     assert r.status_code in (400, 404)
     assert "error" in r.json()
     # nulla e' stato toccato
-    assert "model-b" in m.CSV_PATH.read_text()
-    assert "step_up_pct: 55" in m.POLICY_PATH.read_text()
+    assert "model-b" in gw_state.CSV_PATH.read_text()
+    assert "step_up_pct: 55" in gw_state.POLICY_PATH.read_text()
 
 
 def test_restore_requires_master(client):
