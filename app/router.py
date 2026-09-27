@@ -63,6 +63,7 @@ from .routing.warm import WarmMixin
 from .routing.sessions import SessionMixin
 from .routing.canary import CanaryMixin
 from .routing.circuit_breaker import CircuitBreakerMixin
+from .routing.usage import UsageMixin
 from . import metrics
 
 log = logging.getLogger("nx.router")
@@ -158,7 +159,7 @@ from app.routing.estimate import (  # noqa: F401
 )
 
 
-class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
+class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMixin):
     def __init__(self, config: GatewayConfig, policy: Policy | None = None):
         self.config = config
         self.policy = policy or Policy.default()
@@ -360,159 +361,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     # ------------------------------------------ ctxcompact watermark
 
     # ------------------------------------------------- audit del prefisso (F4)
-
-    # --------------------------------------------- cold usage spread
-    _USAGE_WINDOW = 86400.0
-
-    def _usage(self) -> dict:
-        d = getattr(self, "_usage_times", None)
-        if d is None:
-            d = {}
-            self._usage_times = d
-        return d
-
-    def note_usage(self, unique: str, ts: float | None = None, ctx_est: int | None = None) -> None:
-        """Registra un TENTATIVO (ok o fail, NON un probe) nella finestra
-        rolling 24h usata dallo spread a freddo. F28: il peso e' il PREFILL
-        reale (ctx_est/8000), non 1: 10 chiamate da 80k pesano come 100 da 2k,
-        che e' quello che vede il provider sul rate-limit a token/minuto.
-        Senza ctx (es. ricostruzione dai log) si pesa 1.0."""
-        if not unique:
-            return
-        d = self._usage()
-        dq = d.get(unique)
-        if dq is None:
-            dq = deque()
-            d[unique] = dq
-        now = time.time() if ts is None else ts
-        try:
-            w = max(1.0, float(int(ctx_est)) / 8000.0) if ctx_est else 1.0
-        except (TypeError, ValueError):
-            w = 1.0
-        dq.append((now, w))
-        cut = now - self._USAGE_WINDOW
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-
-    def usage_weight_24h(self, unique: str, now: float | None = None) -> float:
-        """Somma dei pesi (token/8000) dei tentativi nelle ultime 24h."""
-        dq = self._usage().get(unique)
-        if not dq:
-            return 0.0
-        now = time.time() if now is None else now
-        cut = now - self._USAGE_WINDOW
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-        return float(sum(w for _t, w in dq))
-
-    def usage_count_24h(self, unique: str, now: float | None = None) -> int:
-        dq = self._usage().get(unique)
-        if not dq:
-            return 0
-        now = time.time() if now is None else now
-        cut = now - self._USAGE_WINDOW
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-        return len(dq)
-
-    def usage_count_window(self, unique: str, sec: float, now: float | None = None) -> int:
-        """Tentativi (start) nella finestra rolling `sec`, usato dal fair-share
-        delle chiavi nei gruppi capacità primary. NON pota il deque: la finestra
-        a 24h del cold-spread deve restare intatta (si limita a contare, dal
-        fondo, le entry piu' recenti di `cut`)."""
-        dq = self._usage().get(unique)
-        if not dq:
-            return 0
-        now = time.time() if now is None else now
-        cut = now - max(0.001, float(sec))
-        n = 0
-        for ts, _w in reversed(dq):
-            if ts < cut:
-                break
-            n += 1
-        return n
-
-    # ------------------------------------------------- bilanciamento -go
-    _GO_BALANCE_DEFAULT_WINDOW = 18000.0  # 5h
-
-    def _out_toks(self) -> dict:
-        d = getattr(self, "_out_tokens", None)
-        if d is None:
-            d = {}
-            self._out_tokens = d
-        return d
-
-    def _go_balance_window(self) -> float:
-        try:
-            v = float(
-                getattr(self.policy, "go_balance_window_sec", self._GO_BALANCE_DEFAULT_WINDOW)
-                or self._GO_BALANCE_DEFAULT_WINDOW
-            )
-        except (TypeError, ValueError):
-            v = self._GO_BALANCE_DEFAULT_WINDOW
-        return v if v > 0 else self._GO_BALANCE_DEFAULT_WINDOW
-
-    def _go_balance_enabled(self) -> bool:
-        return bool(getattr(self.policy, "go_balance_enabled", True))
-
-    def _go_balance_flat_pool(self) -> bool:
-        return bool(getattr(self.policy, "go_balance_flat_pool", True))
-
-    def _go_stick_ttl_sec(self) -> float:
-        try:
-            v = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
-        except (TypeError, ValueError):
-            v = 600.0
-        return v if v > 0 else 600.0
-
-    def note_output_tokens(self, unique: str, completion_tokens, ts: float | None = None) -> None:
-        """Registra i TOKEN DI OUTPUT di una risposta CONSEGNATA nella finestra
-        rolling del bilanciamento -go. Solo successi con token reali: un
-        fallimento (o una risposta a vuoto) non consuma quota di output."""
-        if not unique:
-            return
-        try:
-            n = int(completion_tokens or 0)
-        except (TypeError, ValueError):
-            return
-        if n <= 0:
-            return
-        d = self._out_toks()
-        dq = d.get(unique)
-        if dq is None:
-            dq = deque()
-            d[unique] = dq
-        now = time.time() if ts is None else ts
-        dq.append((now, n))
-        win = self._go_balance_window()
-        cut = now - win
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-
-    def output_tokens_window(self, unique: str, sec: float | None = None, now: float | None = None) -> int:
-        """Token di output consumati da `unique` nella finestra rolling (default
-        5h, policy `go_balance.window_sec`). 0 se non ci sono campioni."""
-        dq = self._out_toks().get(unique)
-        if not dq:
-            return 0
-        now = time.time() if now is None else now
-        win = self._go_balance_window() if sec is None else float(sec)
-        cut = now - max(0.001, win)
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-        return int(sum(n for _t, n in dq))
-
-    def _attached_unique(self, unique: str) -> bool:
-        """True se `unique` e' 'attaccato' alla sessione CORRENTE (successo
-        recente entro session_dep_guard_sec): resta prioritario e non viene
-        mai nascosto dallo spread (rispetto della cache)."""
-        sid = current_session()
-        if not sid:
-            return False
-        ent = self._dep_sess().get(unique)
-        if not ent or ent[0] != sid:
-            return False
-        return (time.time() - ent[1]) < self._guard_sec()
 
     def _spread_hide(self, deps: list[dict]) -> list[dict]:
         """COLD SPREAD: nasconde i deployment col MAGGIOR numero di tentativi
