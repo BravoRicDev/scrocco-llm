@@ -44,7 +44,8 @@ import asyncio
 import base64
 import binascii
 
-from . import audioconvert
+from . import audioconvert, offload
+from .capabilities import audio_bytes_estimate
 from . import audiostore
 
 # Parti che contengono i byte dell'audio, per ogni forma riconosciuta.
@@ -237,7 +238,7 @@ async def resolve_audio_in_payload(payload: dict, *, boundary: int | None,
             replacements[(mi, pi)] = []      # fuori finestra: sparisce
             continue
         try:
-            raw, fmt = _part_bytes(part)
+            raw, fmt = await offload.run(_part_bytes, part, size=audio_bytes_estimate(part))
         except ValueError:
             replacements[(mi, pi)] = [
                 _text_block(notice, "formato non leggibile.")]
@@ -248,7 +249,9 @@ async def resolve_audio_in_payload(payload: dict, *, boundary: int | None,
             replacements[(mi, pi)] = [transcript_block(hit)]
             continue
         try:
-            chunks = audioconvert.to_ogg_chunks(
+            # transcodifica (PyAV): sempre su un thread, mai sul loop
+            chunks = await asyncio.to_thread(
+                audioconvert.to_ogg_chunks,
                 raw, fmt_hint=fmt, target_sec=target_sec,
                 search_pct=search_pct)
         except audioconvert.AudioConversionError:

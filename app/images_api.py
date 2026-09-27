@@ -11,7 +11,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from . import imagestore, metrics
+from . import imagestore, metrics, offload
 from . import state as gw_state
 from .http_responses import unauthorized as _unauthorized
 from .http_responses import forbidden as _forbidden
@@ -397,7 +397,8 @@ async def images_edits(request: Request):
                 except Exception:
                     mraw = b""
                 if mraw:
-                    payload["mask"] = _data_uri(mraw, getattr(mask_up, "content_type", "") or "")
+                    payload["mask"] = await offload.run(
+                        _data_uri, mraw, getattr(mask_up, "content_type", "") or "", size=len(mraw))
                 else:
                     log.warning("[images] campo 'mask' presente ma vuoto")
         for field in ("image", "image[]", "images"):
@@ -411,7 +412,8 @@ async def images_edits(request: Request):
                 except Exception:
                     raw = b""
                 if raw:
-                    refs.append(_data_uri(raw, getattr(up, "content_type", "") or ""))
+                    refs.append(await offload.run(
+                        _data_uri, raw, getattr(up, "content_type", "") or "", size=len(raw)))
     else:
         try:
             payload = await request.json()

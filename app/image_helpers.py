@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from . import metrics
 from . import state as gw_state
 from .suppressed import report_suppressed
-from . import imagestore
+from . import imagestore, offload
 from .auth import AuthResult
 from .config import CAP_PRIORITY_ORDER
 from .policy import refill_out_budget
@@ -142,9 +142,9 @@ async def _localize_images(request: Request, items):
             parsed = _split_data_uri(url)
             if parsed:
                 mime = parsed[0]
-                data_bytes = _b64decode(parsed[1])
+                data_bytes = await offload.run(_b64decode, parsed[1], size=len(parsed[1]))
         elif b64:
-            data_bytes = _b64decode(b64)
+            data_bytes = await offload.run(_b64decode, b64, size=len(b64) if isinstance(b64, str) else 0)
         elif mirror and isinstance(url, str) and url.startswith(("http://", "https://")):
             got = await _download_remote_image(url, timeout=tmo, max_bytes=rmax)
             if got:
@@ -152,14 +152,14 @@ async def _localize_images(request: Request, items):
         if not data_bytes:
             out.append(dual)
             continue
-        file_id = imagestore.put(data_bytes, mime)
+        file_id = await offload.run(imagestore.put, data_bytes, mime, size=len(data_bytes))
         if not file_id:
             out.append(dual)
             continue
         ext = imagestore.ext_for_mime(mime)
         new = dict(dual)
         new["url"] = f"{base}/v1/images/files/{file_id}"
-        new["b64_json"] = base64.b64encode(data_bytes).decode()
+        new["b64_json"] = await offload.run(offload.b64encode_str, data_bytes, size=len(data_bytes))
         new["mime_type"] = imagestore.normalize_mime(mime)
         new["file_name"] = f"image.{ext}"
         out.append(new)

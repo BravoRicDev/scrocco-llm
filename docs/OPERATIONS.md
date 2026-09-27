@@ -20,6 +20,33 @@ Health is `GET /healthz` (200 when the process is up and serving); `GET
 /health/liveliness` is a trivial liveness probe. `/metrics` exposes Prometheus
 text metrics.
 
+## Capacity & overload
+
+- **One process, one event loop — on purpose.** Cooldowns, reputation
+  scores, the coalescing cache, usage windows, in-flight counters and probes
+  live in memory (`app/state.py`). N uvicorn/gunicorn workers would mean N
+  independent copies of that routing state (a key cooled down by worker 1
+  picked again by worker 2): adding workers is a correctness problem until
+  that state is externalised. Scale by keeping the loop free instead:
+- **Liveness healthcheck** (`python -m app.liveness`): an event-loop task
+  touches a heartbeat file every 5s; the Docker `HEALTHCHECK` only reads its
+  age (no HTTP), so a busy-but-alive gateway stays *healthy* and is not
+  restarted cold under load. It turns unhealthy only if the loop has been
+  stuck for `GATEWAY_HEARTBEAT_MAX_AGE` (120s). `GATEWAY_HEARTBEAT_FILE`
+  overrides the path. `/healthz` is unchanged for external monitoring.
+- **Admission gate** (`app/admission.py`, policy `admission_*`): at most
+  `admission_max_inflight` LLM requests (`POST /v1/*`) in flight, streams
+  counted until they end, and at most `admission_max_streams` streams.
+  Excess requests **wait** in a queue; only after
+  `admission_queue_timeout_sec` do they get `503 gateway_busy` +
+  `Retry-After: 2`. Health, metrics and admin never queue. `0` = no cap.
+- **CPU-bound work off the loop** (`app/offload.py`): base64 of images and
+  audio above 256 KiB, the image store writes and the audio transcoding of
+  STT-in-chat run on threads.
+- **Metrics to watch**: `nx_event_loop_lag_ms` (loop responsiveness),
+  `nx_admission_inflight` / `nx_admission_streams` / `nx_admission_waiting`,
+  `nx_admission_total{outcome="rejected"}`.
+
 ## Admin API (`/admin/*`, master key required)
 
 The admin API manages everything without editing files or restarting:
@@ -94,6 +121,7 @@ under `var/backups/`.
 |---|---|
 | `401` | missing/invalid key. In production, `sk-<profile>` is rejected by design — use an explicit `client_keys` entry. |
 | `403` on `opencode.ai` | client is not opencode and `OPENCODE_SPOOF_HEADERS` is off; or the spoofed session is not in the native `ses_...` format (the gateway normalises it, but check `SNIFF_HEADERS=1`). |
+| `503` `gateway_busy` | the admission queue timed out: the process is saturated. Check `nx_admission_*` and `nx_event_loop_lag_ms`; raise `admission_*` only if the loop lag stays low. |
 | `503` with `Retry-After` | the ladder is exhausted (all candidates cooled/failed). Inspect `/admin/state` (`cooldowns_active`) and `/admin/deployments/stats`. |
 | Timeouts / high TTFB | a cold pool or slow free provider; check `[summary]` `ttfb_ms`/`via` and `/admin/providers/health`. |
 | All requests go to one provider | a warm/sticky session: check `/admin/sessions` and the `[warm]`/`[cache]` log lines. |

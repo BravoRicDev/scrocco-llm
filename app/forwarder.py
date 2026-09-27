@@ -55,7 +55,7 @@ from typing import AsyncIterator
 
 import httpx
 
-from . import metrics
+from . import metrics, offload
 from . import state as gw_state
 from .suppressed import report_suppressed
 from .bgtasks import spawn
@@ -2771,7 +2771,7 @@ async def _materialize_one_ref(cli: httpx.AsyncClient, s: str) -> str:
         mime = resp.headers.get("content-type", "image/png") \
             .split(";")[0].strip() or "image/png"
         return ("data:" + mime + ";base64,"
-                + base64.b64encode(resp.content).decode())
+                + await offload.run(offload.b64encode_str, resp.content, size=len(resp.content)))
     return s
 
 
@@ -5112,7 +5112,9 @@ truncation_hook=None,
                   payload.get("stream", False))
         if endpoint == "edits":
             refs = await _materialize_remote_refs(refs)
-            files, data = _multipart_image_edit(payload, dep["model"], refs)
+            files, data = await offload.run(
+                _multipart_image_edit, payload, dep["model"], refs,
+                size=sum(len(r) for r in (refs or []) if isinstance(r, str)))
             try:
                 resp = await self._client_for(
                     url, dep.get("api_key", "")).post(
