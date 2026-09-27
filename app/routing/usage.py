@@ -27,6 +27,7 @@ import time
 from collections import deque
 
 from ..session_ctx import current_session
+from .lazy import lazy_dict
 
 log = logging.getLogger("nx.router")
 
@@ -36,11 +37,7 @@ class UsageMixin:
     _USAGE_WINDOW = 86400.0
 
     def _usage(self) -> dict:
-        d = getattr(self, "_usage_times", None)
-        if d is None:
-            d = {}
-            self._usage_times = d
-        return d
+        return lazy_dict(self, "_usage_times")
 
     def note_usage(self, unique: str, ts: float | None = None, ctx_est: int | None = None) -> None:
         """Registra un TENTATIVO (ok o fail, NON un probe) nella finestra
@@ -107,11 +104,7 @@ class UsageMixin:
     _GO_BALANCE_DEFAULT_WINDOW = 18000.0  # 5h
 
     def _out_toks(self) -> dict:
-        d = getattr(self, "_out_tokens", None)
-        if d is None:
-            d = {}
-            self._out_tokens = d
-        return d
+        return lazy_dict(self, "_out_tokens")
 
     def _go_balance_window(self) -> float:
         try:

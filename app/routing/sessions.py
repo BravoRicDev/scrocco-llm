@@ -17,6 +17,7 @@ from ..opencode_gate import (dep_usable as _dep_usable,
                              opencode_cautious_request)
 from ..session_ctx import current_session
 from .evict import SESSION_MAP_CAP, drop_expired, entry_ts, evict_oldest, fingerprint_ts
+from .lazy import lazy_dict
 
 log = logging.getLogger("nx.router")
 
@@ -28,11 +29,7 @@ class SessionMixin:
         return bool(g) and str(g).endswith(suf)
 
     def _last_go_map(self) -> dict:
-        d = getattr(self, "_last_go", None)
-        if d is None:
-            d = {}
-            self._last_go = d
-        return d
+        return lazy_dict(self, "_last_go")
 
     def last_go(self, session_id: str | None = None,
                 allow_cooled: bool = False) -> str | None:
@@ -64,11 +61,7 @@ class SessionMixin:
 
     # ------------------------------------------------- rimborso latenza (-go)
     def _sess_turns_map(self) -> dict:
-        d = getattr(self, "_session_turns", None)
-        if d is None:
-            d = {}
-            self._session_turns = d
-        return d
+        return lazy_dict(self, "_session_turns")
 
     def note_session_turn(self, session_id: str | None) -> bool:
         """Conta un turno della sessione e dice se va servito in -go.
@@ -292,40 +285,24 @@ class SessionMixin:
     def _dep_sess(self) -> dict:
         """Accessor lazy della mappa inversa unique -> (session, ts) usata
         dalla SESSION-DEP GUARD (protegge i Router 'nudi' dei test)."""
-        d = getattr(self, "_dep_last_session", None)
-        if d is None:
-            d = {}
-            self._dep_last_session = d
-        return d
+        return lazy_dict(self, "_dep_last_session")
 
     def _sess_deps(self) -> dict:
         """Accessor lazy dell'indice inverso session -> set(unique) posseduti
         (protetto per i Router 'nudi' dei test)."""
-        d = getattr(self, "_session_deps", None)
-        if d is None:
-            d = {}
-            self._session_deps = d
-        return d
+        return lazy_dict(self, "_session_deps")
 
     def _sess_slow(self) -> dict:
         """Accessor lazy dell'indice session -> {unique: ts} dei free-dims
         'lenti per la stessa sessione' (protetto per i Router 'nudi')."""
-        d = getattr(self, "_session_slow", None)
-        if d is None:
-            d = {}
-            self._session_slow = d
-        return d
+        return lazy_dict(self, "_session_slow")
 
     def _sess_slow_timer(self) -> dict:
         """Marchi 'lento' emessi dal TIMER della gara lenta (non dalla
         euristica F1). Si ripuliscono solo con un successo ASSOLUTAMENTE
         rapido (< soglia gara lenta): un dep che a 107s e' "normale per la
         sua baseline" non deve riprendere la prima posizione della warm."""
-        d = getattr(self, "_session_slow_timer", None)
-        if d is None:
-            d = {}
-            self._session_slow_timer = d
-        return d
+        return lazy_dict(self, "_session_slow_timer")
 
     def _slow_timer_flagged(self, unique: str,
                             session_id: str | None = None) -> bool:

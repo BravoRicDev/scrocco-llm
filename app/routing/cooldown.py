@@ -38,6 +38,7 @@ import time
 from ..caution import background_cautious_enabled
 from .estimate import _is_quota_evidence
 from .evict import drop_expired, entry_ts, evict_oldest, last_sample_ts, record_ts
+from .lazy import lazy_dict
 
 log = logging.getLogger("nx.router")
 
@@ -133,11 +134,7 @@ class CooldownMixin:
     def _cooldown_full_map(self) -> dict:
         """Mappa unique -> durata totale del cooldown (lazy: alcuni test
         costruiscono il Router via __new__ senza inizializzarla)."""
-        m = getattr(self, "_cooldown_full", None)
-        if m is None:
-            m = {}
-            self._cooldown_full = m
-        return m
+        return lazy_dict(self, "_cooldown_full")
 
     def probe_ready(self, unique: str) -> bool:
         """True se un deployment dormiente e' maturo per un probe passivo

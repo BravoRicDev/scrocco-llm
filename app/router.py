@@ -63,6 +63,7 @@ from .routing.circuit_breaker import CircuitBreakerMixin
 from .routing.cooldown import CooldownMixin
 from .routing.failure import FailureMixin
 from .routing.usage import UsageMixin
+from .routing.lazy import lazy_dict
 from .routing.evict import drop_expired, entry_ts, evict_oldest
 from . import metrics
 
@@ -333,11 +334,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         """Ritorna (e crea al volo se serve) il dict escalation-winner.
         La lazy-init protegge i Router costruiti SENZA __init__ (pattern dei
         test `Router.__new__(Router)` + set manuale degli attributi minimi)."""
-        d = getattr(self, "_esc_win", None)
-        if d is None:
-            d = {}
-            self._esc_win = d
-        return d
+        return lazy_dict(self, "_esc_win")
 
     # ---------------------------------------------------- deployment-sticky
     def _is_renewal_bucket(self, group_name: str) -> bool:
@@ -348,11 +345,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
 
     # --------------------------------------------- session cache holder
     def _cache_ok(self) -> dict:
-        d = getattr(self, "_session_last_ok", None)
-        if d is None:
-            d = {}
-            self._session_last_ok = d
-        return d
+        return lazy_dict(self, "_session_last_ok")
 
     def _spread_hide(self, deps: list[dict]) -> list[dict]:
         """COLD SPREAD: nasconde i deployment col MAGGIOR numero di tentativi
@@ -857,10 +850,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     # ------------------------------------------------- stima per-sessione
     def _sess_est(self) -> dict[str, dict]:
         """Accessor lazy del registro per-sessione (Router "nudi" nei test)."""
-        d = getattr(self, "_sess_ratio", None)
-        if d is None:
-            d = self._sess_ratio = {}
-        return d
+        return lazy_dict(self, "_sess_ratio")
 
     def note_session_estimate(self, session_id: str | None, pre_chars, post_chars, prompt_tokens) -> None:
         """Accumula i rapporti char/token della sessione su DUE basi.
@@ -955,10 +945,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
 
     def _sess_floor_map(self) -> dict[str, tuple[int, float]]:
         """Accessor lazy del registro floor per-sessione."""
-        d = getattr(self, "_sess_floor", None)
-        if d is None:
-            d = self._sess_floor = {}
-        return d
+        return lazy_dict(self, "_sess_floor")
 
     def note_session_overflow(self, session_id: str | None, tokens: int | float | None) -> None:
         """Alza la soglia minima della sessione dopo un context_length_exceeded.
@@ -3100,11 +3087,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     def _drain(self) -> dict:
         """Accessor lazy di `_draining` (pattern `_esc`): protegge i Router
         costruiti senza __init__ (`Router.__new__(Router)` nei test)."""
-        d = getattr(self, "_draining", None)
-        if d is None:
-            d = {}
-            self._draining = d
-        return d
+        return lazy_dict(self, "_draining")
 
     def is_draining(self, unique: str) -> bool:
         return unique in self._drain()
@@ -4157,18 +4140,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
 
     # --------------------------------- dynamic concurrency limit (per-deployment)
     def _concl(self) -> dict:
-        d = getattr(self, "_conc_limit", None)
-        if d is None:
-            d = {}
-            self._conc_limit = d
-        return d
+        return lazy_dict(self, "_conc_limit")
 
     def _concok(self) -> dict:
-        d = getattr(self, "_conc_ok", None)
-        if d is None:
-            d = {}
-            self._conc_ok = d
-        return d
+        return lazy_dict(self, "_conc_ok")
 
     def _conc_default(self) -> int:
         return max(1, int(getattr(self.policy, "conc_default_limit", 3) or 3))
@@ -5235,10 +5210,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     # Registriamo il limite scoperto e lo usiamo come cap EFFETTIVO: solo
     # RESTRINGERE (mai oltre il dichiarato), persistito nel routing_state.
     def _discovered(self) -> dict:
-        d = getattr(self, "_discovered_max_input", None)
-        if d is None:
-            d = self._discovered_max_input = {}
-        return d
+        return lazy_dict(self, "_discovered_max_input")
 
     def note_discovered_max_input(self, unique: str | None, limit: int | None) -> None:
         """Il provider ha rivelato il VERO limite di input: ridimensiona il
@@ -5320,10 +5292,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     # avviene nel finally di ogni probe (che e' bounded: drain cap / wait_for
     # 900s); il TTL qui sotto e' solo la rete di sicurezza.
     def _probes(self) -> dict:
-        d = getattr(self, "_probes_flight", None)
-        if d is None:
-            d = self._probes_flight = {}
-        return d
+        return lazy_dict(self, "_probes_flight")
 
     def note_probe_started(self, session_id: str | None, unique: str | None) -> None:
         if not session_id or not unique:
@@ -5365,10 +5334,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     # cosi' le rotazioni interne non gonfiano il rate; nel punto di decisione
     # si legge soltanto.
     def _sess_rate(self) -> dict:
-        d = getattr(self, "_session_rate", None)
-        if d is None:
-            d = self._session_rate = {}
-        return d
+        return lazy_dict(self, "_session_rate")
 
     def note_session_request(self, session_id: str | None) -> None:
         if not session_id:
@@ -5416,10 +5382,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     # SCDE da sola, senza ri-provare a martellate (i 253 hit llm7.io di
     # nascevano proprio dal bruciare una chiave dopo l'altra).
     def _ep_quar(self) -> dict:
-        d = getattr(self, "_endpoint_quarantine", None)
-        if d is None:
-            d = self._endpoint_quarantine = {}
-        return d
+        return lazy_dict(self, "_endpoint_quarantine")
 
     def quarantine_endpoint(self, host: str, seconds: float = 86400.0, reason: str = "ban/ToS") -> None:
         if not host:

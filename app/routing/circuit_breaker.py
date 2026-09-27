@@ -25,6 +25,8 @@ import hashlib
 import logging
 import time
 
+from .lazy import lazy_dict
+
 log = logging.getLogger("nx.router")
 
 
@@ -36,11 +38,7 @@ class CircuitBreakerMixin:
         return s if s in ("hybrid", "dep", "key") else "hybrid"
 
     def _dep_cb_store(self) -> dict:
-        store = getattr(self, "_dep_circuit_breakers", None)
-        if store is None:
-            store = {}
-            self._dep_circuit_breakers = store
-        return store
+        return lazy_dict(self, "_dep_circuit_breakers")
 
     def _get_cb_entry(self, store: dict, key: str) -> dict:
         cb = store.get(key)
