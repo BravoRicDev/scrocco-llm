@@ -165,6 +165,28 @@ def _deployment_view(header: list[str], row: dict, prefix: str) -> dict:
     }
 
 
+def _load_table_or_create(csv_path: str) -> tuple[list[str], list[dict]]:
+    """Carica il CSV; se ASSENTE lo crea dal primo insert (bootstrap).
+
+    Fresh install: il file non esiste e va creato con l'header minimale di
+    partenza, che il chiamante estende (profilo/caps/enabled) e poi salva.
+    Senza questo, ogni endpoint che scrive falliva con 400
+    ("CSV non valido dopo la modifica: [Errno 2] No such file") invece di
+    fare bootstrap: rendeva impossibile creare la PRIMA riga.
+    """
+    try:
+        return csv_store.load_table(csv_path)
+    except FileNotFoundError:
+        from .config import (CONTEXT_HEADER as _C, DATA_HEADER as _D,
+                             MAX_INPUT_HEADER as _M, MODEL_HEADER as _MO,
+                             PRIORITY_HEADER as _P, PROVIDER_HEADER as _PR)
+        log.warning("[admin] CSV assente (%s): creo dal primo insert", csv_path)
+        Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(csv_path).touch()
+        header = ["commento", _MO, _PR, "endpoint", _D, _C, _M, _P]
+        return header, []
+
+
 def _commit_csv(header: list[str], rows: list[dict]) -> None:
     """Scrittura atomica+validata del CSV e reload sincrono della config.
     PRIMA della riscrittura: backup rotato (undo possibile)."""
@@ -241,19 +263,7 @@ async def create_deployment(request: Request):
         prefix = gw.config.proxy_prefix
         # FIX bootstrap: fresh install SENZA file -> header minimale di
         # partenza (il create lo estende con profilo/caps e salva).
-        try:
-            header, rows = csv_store.load_table(gw.CSV_PATH)
-        except FileNotFoundError:
-            from .config import (CONTEXT_HEADER as _C, DATA_HEADER as _D,
-                                 MAX_INPUT_HEADER as _M, MODEL_HEADER as _MO,
-                                 PRIORITY_HEADER as _P,
-                                 PROVIDER_HEADER as _PR)
-            log.warning("[admin] CSV assente (%s): creo dal primo insert",
-                        gw.CSV_PATH)
-            Path(gw.CSV_PATH).parent.mkdir(parents=True, exist_ok=True)
-            Path(gw.CSV_PATH).touch()
-            header = ["commento", _MO, _PR, "endpoint", _D, _C, _M, _P]
-            rows = []
+        header, rows = _load_table_or_create(gw.CSV_PATH)
         profile = str(payload["profile"]).strip()
         header = csv_store.ensure_profile_column(header, profile, prefix)
         if "caps" in payload:
@@ -363,7 +373,10 @@ async def bulk_deployments(request: Request):
 
     results: list[dict] = []
     try:
-        header, rows = csv_store.load_table(gw.CSV_PATH)
+        # FIX bootstrap: stesso trattamento di create_deployment. Su fresh
+        # install il FileNotFoundError finiva nel `except Exception` qui
+        # sotto -> 400 e batch atomico senza applicare NULLA.
+        header, rows = _load_table_or_create(gw.CSV_PATH)
         prefix = gw.config.proxy_prefix
         for n, op in enumerate(ops):
             action = op.get("action") if isinstance(op, dict) else None

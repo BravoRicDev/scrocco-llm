@@ -119,3 +119,98 @@ def test_live_playbook_bulk_actually_writes_the_row(client):
                                "Bearer test-master-bootstrap-md"}).json()
     assert rows["count"] == 1
     assert rows["deployments"][0]["profile"] == "mdprofile"
+
+
+# ================================ Bug 4: bootstrap su CSV INESISTENTE
+# `POST /deployments` gia' gestiva il fresh install (header minimale + rows=[]).
+# `POST /admin/deployments/bulk` NO: il FileNotFoundError di
+# `csv_store.load_table` finiva in `except Exception` -> 400
+# ("CSV non valido dopo la modifica: [Errno 2] ...") e il batch atomico non
+# applicava NULLA. Il playbook di bootstrap (unica via su fresh install)
+# era quindi eseguibile solo DOPO che il singolo create avesse girato.
+@pytest.fixture()
+def fresh_client(monkeypatch, tmp_path):
+    """CSV su un path che NON esiste ne' come file ne' come cartella."""
+    import app.main as m
+    csv_file = tmp_path / "nuova" / "dir" / "keys_rotation.csv"
+    assert not csv_file.exists()
+    orig_mk = m.authn.master_key
+    m.authn.master_key = "test-master-bootstrap-fresh"
+    monkeypatch.setattr(m, "CSV_PATH", str(csv_file))
+    monkeypatch.setattr(m, "VAR_DIR", str(tmp_path))
+    monkeypatch.setattr(m.config, "csv_path", csv_file)
+    m.config.reload()
+    assert str(m.CSV_PATH).startswith(str(tmp_path))
+    yield TestClient(m.app), csv_file
+    m.authn.master_key = orig_mk
+    m.router._cooldown.clear()
+    m.config.csv_path = m.CSV_PATH
+    m.config.reload()
+
+
+def _create_op(**over):
+    op = {"action": "create", "profile": "freshprofile",
+          "modello": "openai/gpt-oss-120b", "provider": "openai",
+          "endpoint": "https://api.openai.com/v1", "data": "text",
+          "context": 128, "key": "gsk_0123456789abcdef"}
+    op.update(over)
+    return op
+
+
+def test_bulk_bootstrap_creates_missing_csv(fresh_client):
+    """BUG 4: /admin/deployments/bulk su CSV inesistente deve CREARE il file e
+    applicare le op, non rispondere 400."""
+    c, csv_file = fresh_client
+    auth = {"Authorization": "Bearer test-master-bootstrap-fresh"}
+
+    r = c.post("/admin/deployments/bulk",
+               json={"operations": [_create_op()]}, headers=auth)
+
+    assert r.status_code == 200, (
+        f"il bootstrap su fresh install deve riuscire, non 400: {r.text}")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] == 1
+    assert body["results"][0]["ok"] is True, body["results"]
+    # il file e' stato materializzato (cartelle comprese)
+    assert csv_file.exists(), "il CSV doveva essere creato dal primo insert"
+    assert csv_file.stat().st_size > 0
+    # e la riga e' davvero persistita e servibile
+    rows = c.get("/admin/deployments", headers=auth).json()
+    assert rows["count"] == 1
+    assert rows["deployments"][0]["profile"] == "freshprofile"
+
+
+def test_bulk_bootstrap_multiple_ops_on_missing_csv(fresh_client):
+    """Lo stesso su un batch multi-op: tutte applicate, un solo CSV."""
+    c, csv_file = fresh_client
+    auth = {"Authorization": "Bearer test-master-bootstrap-fresh"}
+    ops = [_create_op(profile="p1", modello="openai/gpt-oss-120b"),
+           _create_op(profile="p2", modello="openai/gpt-oss-120b")]
+
+    r = c.post("/admin/deployments/bulk", json={"operations": ops},
+               headers=auth)
+
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] == 2
+    rows = c.get("/admin/deployments", headers=auth).json()
+    assert rows["count"] == 2
+    assert {d["profile"] for d in rows["deployments"]} == {"p1", "p2"}
+    assert csv_file.exists()
+
+
+def test_create_deployment_bootstrap_still_works(fresh_client):
+    """Il percorso gia' corretto (singolo POST /deployments) NON regredisce."""
+    c, csv_file = fresh_client
+    auth = {"Authorization": "Bearer test-master-bootstrap-fresh"}
+    op = _create_op()
+    op.pop("action")
+
+    r = c.post("/admin/deployments", json=op, headers=auth)
+
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert csv_file.exists()
+    rows = c.get("/admin/deployments", headers=auth).json()
+    assert rows["count"] == 1
+    assert rows["deployments"][0]["profile"] == "freshprofile"
