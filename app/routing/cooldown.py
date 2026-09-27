@@ -37,6 +37,7 @@ import time
 
 from ..caution import background_cautious_enabled
 from .estimate import _is_quota_evidence
+from .evict import drop_expired, entry_ts, evict_oldest, last_sample_ts, record_ts
 
 log = logging.getLogger("nx.router")
 
@@ -321,38 +322,25 @@ class CooldownMixin:
         _sr = self._sess_est()
         _sttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
         if _sttl > 0:
-            for s in [s for s, r in _sr.items() if now - float((r or {}).get("ts") or 0.0) > _sttl]:
-                _sr.pop(s, None)
-        if len(_sr) > 4096:
-            for s in sorted(_sr, key=lambda k: float((_sr[k] or {}).get("ts") or 0.0))[: len(_sr) - 4096]:
-                _sr.pop(s, None)
+            drop_expired(_sr, record_ts, now, _sttl)
+        evict_oldest(_sr, record_ts)
         # FLOOR per-sessione (overflow context): stessa TTL + cap 4096.
         _sf = self._sess_floor_map()
         if _sttl > 0:
-            for s in [s for s, (_v, t) in _sf.items() if now - t > _sttl]:
-                _sf.pop(s, None)
-        if len(_sf) > 4096:
-            for s in sorted(_sf, key=lambda k: _sf[k][1])[: len(_sf) - 4096]:
-                _sf.pop(s, None)
+            drop_expired(_sf, entry_ts, now, _sttl)
+        evict_oldest(_sf, entry_ts)
         # TURNI/RIMBORSO -go per-sessione: TTL sticky + cap 4096.
         _tn = getattr(self, "_session_turns", None)
         if isinstance(_tn, dict):
-            for s in [
-                s for s, e in _tn.items() if now - float((e or {}).get("ts") or 0.0) > self.policy.sticky_ttl_sec
-            ]:
-                _tn.pop(s, None)
-            if len(_tn) > 4096:
-                for s in sorted(_tn, key=lambda k: float((_tn[k] or {}).get("ts") or 0.0))[: len(_tn) - 4096]:
-                    _tn.pop(s, None)
+            drop_expired(_tn, record_ts, now, self.policy.sticky_ttl_sec)
+            evict_oldest(_tn, record_ts)
         # BILANCIAMENTO -go: token di output — pota la finestra e limita le voci.
         _ot = getattr(self, "_out_tokens", None)
         if isinstance(_ot, dict):
             _owin = self._go_balance_window()
             for u in [u for u, dq in _ot.items() if not dq or now - dq[-1][0] > _owin]:
                 _ot.pop(u, None)
-            if len(_ot) > 4096:
-                for u in sorted(_ot, key=lambda k: _ot[k][-1][0] if _ot[k] else 0.0)[: len(_ot) - 4096]:
-                    _ot.pop(u, None)
+            evict_oldest(_ot, last_sample_ts)
         # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
         _gttl = self._guard_sec() * 2
         _ds = self._dep_sess()

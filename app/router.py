@@ -66,6 +66,7 @@ from .routing.circuit_breaker import CircuitBreakerMixin
 from .routing.cooldown import CooldownMixin
 from .routing.failure import FailureMixin
 from .routing.usage import UsageMixin
+from .routing.evict import drop_expired, entry_ts, evict_oldest
 from . import metrics
 
 log = logging.getLogger("nx.router")
@@ -341,16 +342,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             self._esc_win = d
         return d
 
-    # -------------------------------------------------------------- sticky
-
     # ---------------------------------------------------- deployment-sticky
     def _is_renewal_bucket(self, group_name: str) -> bool:
         """True se il gruppo è un bucket rinnovo/pagato (-go, -fallback)."""
         go_suf = self.config.go_suffix or ""
         fb_suf = self.config.fallback_suffix or ""
         return group_name.endswith(go_suf) or group_name.endswith(fb_suf)
-
-    # --- Sticky per-capability (deployment_sticky_per_capability) ---
 
     # --------------------------------------------- session cache holder
     def _cache_ok(self) -> dict:
@@ -359,10 +356,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             d = {}
             self._session_last_ok = d
         return d
-
-    # ------------------------------------------ ctxcompact watermark
-
-    # ------------------------------------------------- audit del prefisso (F4)
 
     def _spread_hide(self, deps: list[dict]) -> list[dict]:
         """COLD SPREAD: nasconde i deployment col MAGGIOR numero di tentativi
@@ -424,8 +417,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     def _free_group(self, group_name: str) -> bool:
         """True se il gruppo NON e' un bucket rinnovo/pagato."""
         return bool(group_name) and not self._is_renewal_bucket(group_name)
-
-    # --------------------------------------- modalita' compatta (sticky)
 
     # ------------------------------------------------- escalation winner
     def record_escalation_win(self, requested_group: str | None, served_dep: dict | None) -> None:
@@ -998,11 +989,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         d[session_id] = (val, now)
         _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
         if _ttl > 0:
-            for s in [s for s, (_v, t) in d.items() if now - t > _ttl]:
-                d.pop(s, None)
-        if len(d) > 4096:
-            for s in sorted(d, key=lambda k: d[k][1])[: len(d) - 4096]:
-                d.pop(s, None)
+            drop_expired(d, entry_ts, now, _ttl)
+        evict_oldest(d, entry_ts)
         log.info("[session-overflow] %s: soglia sessione alzata a >=%d token", session_id, val)
 
     def session_floor_tokens(self, session_id: str | None) -> int | None:

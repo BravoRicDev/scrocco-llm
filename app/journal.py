@@ -14,6 +14,8 @@ import shutil
 import time
 from pathlib import Path
 
+from .jsonl_store import rotate_segments
+
 # FIX: rotazione per DIMENSIONE del journal (prima cresceva senza limiti).
 # Configurabili via ambiente (come LEDGER_MAX_BYTES/LEDGER_KEEP in ledger.py).
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -73,15 +75,7 @@ def _rotate_if_needed(jpath: Path) -> None:
     """Ruota il journal oltre JOURNAL_MAX_BYTES mantenendo JOURNAL_KEEP
     segmenti (.1, .2). Best-effort: un fallimento non blocca l'append."""
     try:
-        if not jpath.exists():
-            return
-        if jpath.stat().st_size < JOURNAL_MAX_BYTES:
-            return
-        for i in range(JOURNAL_KEEP - 1, 0, -1):
-            src = Path(f"{jpath}.{i}")
-            if src.exists():
-                os.replace(src, f"{jpath}.{i + 1}")
-        os.replace(jpath, f"{jpath}.1")
+        rotate_segments(jpath, JOURNAL_MAX_BYTES, JOURNAL_KEEP)
     except Exception:                        # noqa: BLE001
         pass
 

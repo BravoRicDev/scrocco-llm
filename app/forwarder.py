@@ -2740,24 +2740,38 @@ async def _materialize_remote_refs(refs: list[str] | None) -> list[str]:
     """Rende ogni reference un data-URI: gli URL http(s) vengono SCARICATI
     (l'endpoint nativo /images/edits vuole i byte nel multipart, a differenza
     del path chat che accetta URL). Best-effort: un URL che non scarica resta
-    invariato (verra' scartato come ref senza byte)."""
-    out: list[str] = []
-    for r in (refs or []):
-        s = (r or "").strip()
-        if s.startswith("http://") or s.startswith("https://"):
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as cli:
-                    resp = await cli.get(s)
-                if resp.status_code < 400 and resp.content:
-                    mime = resp.headers.get("content-type", "image/png") \
-                        .split(";")[0].strip() or "image/png"
-                    out.append("data:" + mime + ";base64,"
-                               + base64.b64encode(resp.content).decode())
-                    continue
-            except httpx.HTTPError:
-                pass
-        out.append(s)
-    return out
+    invariato (verra' scartato come ref senza byte). I download partono in
+    PARALLELO su un unico client (ordine dell'output invariato)."""
+    items = [(r or "").strip() for r in (refs or [])]
+    if not any(_is_http_url(s) for s in items):
+        return items
+    async with httpx.AsyncClient(timeout=30.0) as cli:
+        results = await asyncio.gather(
+            *(_materialize_one_ref(cli, s) for s in items),
+            return_exceptions=True)
+    for res in results:              # come prima: propaga il primo errore
+        if isinstance(res, BaseException):  # non-HTTP nell'ordine dei ref
+            raise res
+    return list(results)
+
+
+def _is_http_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
+
+
+async def _materialize_one_ref(cli: httpx.AsyncClient, s: str) -> str:
+    if not _is_http_url(s):
+        return s
+    try:
+        resp = await cli.get(s)
+    except httpx.HTTPError:
+        return s
+    if resp.status_code < 400 and resp.content:
+        mime = resp.headers.get("content-type", "image/png") \
+            .split(";")[0].strip() or "image/png"
+        return ("data:" + mime + ";base64,"
+                + base64.b64encode(resp.content).decode())
+    return s
 
 
 def _ref_bytes(ref: str) -> tuple[bytes, str, str]:

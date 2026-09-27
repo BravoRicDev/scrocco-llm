@@ -17,6 +17,7 @@ import time
 from ..opencode_gate import (dep_usable as _dep_usable,
                              opencode_cautious_request)
 from ..session_ctx import current_session
+from .evict import SESSION_MAP_CAP, drop_expired, entry_ts, evict_oldest, fingerprint_ts
 
 log = logging.getLogger("nx.router")
 
@@ -385,15 +386,9 @@ class SessionMixin:
             d[session_id] = (cur[0], time.time())   # solo refresh TTL
             return
         d[session_id] = (b, time.time())
-        if len(d) > 4096:
-            _now = time.time()
-            _ttl = max(1.0, float(self._guard_sec()))
-            for sid, (bb, ts) in list(d.items()):
-                if _now - ts > _ttl:
-                    d.pop(sid, None)
-            while len(d) > 4096:
-                _oldest = min(d, key=lambda k: d[k][1])
-                d.pop(_oldest, None)
+        if len(d) > SESSION_MAP_CAP:
+            drop_expired(d, entry_ts, time.time(), max(1.0, float(self._guard_sec())))
+            evict_oldest(d, entry_ts)
 
     def audit_prefix(self, session_id: str | None, messages,
                      boundary: int | None) -> str:
@@ -434,13 +429,9 @@ class SessionMixin:
         else:
             reason = "prefix"
         reg[session_id] = (h_body, h_sys, now)
-        if len(reg) > 4096:
-            for s in [s for s, (_b, _y, t) in reg.items()
-                      if now - t > self._guard_sec()]:
-                reg.pop(s, None)
-            while len(reg) > 4096:
-                _oldest = min(reg, key=lambda k: reg[k][2])
-                reg.pop(_oldest, None)
+        if len(reg) > SESSION_MAP_CAP:
+            drop_expired(reg, fingerprint_ts, now, self._guard_sec())
+            evict_oldest(reg, fingerprint_ts)
         return reason
 
     def _refresh_session(self, session_id: str, now: float | None = None) -> None:

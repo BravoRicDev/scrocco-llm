@@ -1133,11 +1133,44 @@ class GatewayConfig:
 
 
     def deployment_by_unique(self, unique: str) -> dict | None:
+        """Lookup O(1) via indice `unique -> dep` (hot path del router).
+
+        `groups` puo' essere mutato IN PLACE (draining, test), quindi l'indice
+        e' solo un acceleratore: un hit vale se il dep e' ancora nel SUO
+        gruppo; altrimenti (miss o hit stantio) si ripiega sulla scansione
+        lineare storica e si ricostruisce l'indice. Semantica invariata."""
+        index = self._unique_index_for_groups()
+        dep = index.get(unique)
+        if dep is not None and dep.get("unique") == unique:
+            lst = self.groups.get(dep.get("group", ""))
+            if lst is not None and any(x is dep for x in lst):
+                return dep
+        found = self._scan_deployment(unique)
+        if found is not dep:
+            self._unique_index = None      # stantio: ricostruito al prossimo lookup
+        return found
+
+    def _scan_deployment(self, unique: str) -> dict | None:
         for lst in self.groups.values():
             for dep in lst:
                 if dep["unique"] == unique:
                     return dep
         return None
+
+    def _unique_index_for_groups(self) -> dict[str, dict]:
+        """Indice `unique -> primo dep` (stesso ordine della scansione
+        lineare), ricostruito quando `groups` viene sostituito (reload) o
+        cambia il numero di gruppi."""
+        sig = (id(self.groups), len(self.groups))
+        cached = getattr(self, "_unique_index", None)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        index: dict[str, dict] = {}
+        for lst in self.groups.values():
+            for dep in lst:
+                index.setdefault(dep["unique"], dep)
+        self._unique_index = (sig, index)
+        return index
 
     def whitelist_for(self, pname: str) -> list[str]:
         """Whitelist a tre livelli: base + gruppi + univoci."""

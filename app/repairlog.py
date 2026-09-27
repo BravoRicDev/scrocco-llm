@@ -39,6 +39,7 @@ import time
 from collections import defaultdict
 
 from . import metrics
+from .jsonl_store import append_jsonl, rotate_segments
 
 log = logging.getLogger("nx.repair")
 
@@ -133,11 +134,7 @@ class RepairLog:
             self._buf = []
         try:
             self._rotate()
-            with open(self.path, "a", encoding="utf-8") as f:
-                for r in rows:
-                    f.write(json.dumps(r, ensure_ascii=False,
-                                       separators=(",", ":"), default=str)
-                            + "\n")
+            append_jsonl(self.path, rows)
             return len(rows)
         except Exception:                           # noqa: BLE001
             with self._lock:                        # rimetti in coda
@@ -156,15 +153,8 @@ class RepairLog:
 
     def _rotate(self) -> None:
         try:
-            if not self.path or not os.path.exists(self.path):
+            if not self.path or not rotate_segments(self.path, _LEDGER_MAX_BYTES, _LEDGER_KEEP):
                 return
-            if os.path.getsize(self.path) < _LEDGER_MAX_BYTES:
-                return
-            for i in range(_LEDGER_KEEP - 1, 0, -1):
-                src = f"{self.path}.{i}"
-                if os.path.exists(src):
-                    os.replace(src, f"{self.path}.{i + 1}")
-            os.replace(self.path, f"{self.path}.1")
             log.info("[repair] rotazione ledger")
         except Exception:                           # noqa: BLE001
             log.error("[repair] rotate error", exc_info=True)

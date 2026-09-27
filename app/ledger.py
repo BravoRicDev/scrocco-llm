@@ -33,6 +33,7 @@ import asyncio
 log = logging.getLogger("nx.ledger")
 
 from .atomic_store import load_json as _load_json, save_json as _save_json
+from .jsonl_store import append_jsonl, rotate_segments
 
 LEDGER_MAX_BYTES = int(
     os.environ.get("LEDGER_MAX_BYTES", str(20 * 1024 * 1024)) or
@@ -105,11 +106,7 @@ class Ledger:
             self._buf = []
         try:
             self._rotate_if_needed(len(rows))
-            with open(self.path, "a", encoding="utf-8") as f:
-                for r in rows:
-                    f.write(json.dumps(r, ensure_ascii=False,
-                                       separators=(",", ":"),
-                                       default=str) + "\n")
+            append_jsonl(self.path, rows)
             return len(rows)
         except Exception:                       # noqa: BLE001 - best effort
             # I4: le righe erano gia' state estratte dal buffer: senza
@@ -124,16 +121,8 @@ class Ledger:
 
     def _rotate_if_needed(self, incoming_rows: int) -> None:
         try:
-            if not os.path.exists(self.path):
+            if not rotate_segments(self.path, LEDGER_MAX_BYTES, LEDGER_KEEP):
                 return
-            if os.path.getsize(self.path) < LEDGER_MAX_BYTES:
-                return
-            # shift: .1 -> .2, corrente -> .1
-            for i in range(LEDGER_KEEP - 1, 0, -1):
-                src = f"{self.path}.{i}"
-                if os.path.exists(src):
-                    os.replace(src, f"{self.path}.{i + 1}")
-            os.replace(self.path, f"{self.path}.1")
             log.info("[ledger] rotazione: nuovo segmento (righe in arrivo %d)",
                      incoming_rows)
             # il segmento piu' vecchio (sul punto di uscire dalla finestra di
