@@ -145,6 +145,7 @@ def test_wake_sweep_raddoppia_cooldown(router, monkeypatch):
     e chi KO vede il cooldown residuo RADDOPPIATO."""
     import app.main as M
     from app import autoprobe as AP
+    from app.probes import _wake_sweep
     small = _dep(router, f"{BASE}-32k", "K-S")
     mid = _dep(router, f"{BASE}-200k", "K-M")
     big = _dep(router, f"{BASE}-1000k", "K-B")
@@ -166,7 +167,7 @@ def test_wake_sweep_raddoppia_cooldown(router, monkeypatch):
     from app import metrics
     _b4 = dict(metrics.snapshot(("nx_wake_sweep_total",)).get(
         "nx_wake_sweep_total", {}))
-    asyncio.run(M._wake_sweep({"model": "m", "messages": []}, "test", small,
+    asyncio.run(_wake_sweep({"model": "m", "messages": []}, "test", small,
                               frozenset(), 100, 4096, None, "sess", {}))
     assert sorted(calls) == sorted([mid["unique"], big["unique"]])
     for u in (mid["unique"], big["unique"]):
@@ -181,6 +182,7 @@ def test_wake_sweep_successo_torna_caldo(router, monkeypatch):
     """Chi risponde al primo tentativo torna caldo e il giro si ferma."""
     import app.main as M
     from app import autoprobe as AP
+    from app.probes import _wake_sweep
     small = _dep(router, f"{BASE}-32k", "K-S")
     mid = _dep(router, f"{BASE}-200k", "K-M")
     now = time.time()
@@ -199,7 +201,7 @@ def test_wake_sweep_successo_torna_caldo(router, monkeypatch):
     from app import metrics
     _b4 = dict(metrics.snapshot(("nx_wake_sweep_total",)).get(
         "nx_wake_sweep_total", {}))
-    asyncio.run(M._wake_sweep({"model": "m", "messages": []}, "test", small,
+    asyncio.run(_wake_sweep({"model": "m", "messages": []}, "test", small,
                               frozenset(), 100, 4096, None, "sess",
                               {"uniq": set(), "keys": set()}))
     assert calls == [mid["unique"]]
