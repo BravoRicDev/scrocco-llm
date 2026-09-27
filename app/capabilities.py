@@ -9,7 +9,6 @@ counting; stateless and unit-testable by design.
 from __future__ import annotations
 
 import re
-from typing import Any
 CANONICAL_CAPS = frozenset({"text", "vision", "video", "audio", "image_gen",
                             "tools", "tts", "stt", "video_gen",
                             "image_edit", "image_multi_ref", "decision"})

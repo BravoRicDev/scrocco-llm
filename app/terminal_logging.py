@@ -12,10 +12,8 @@ var/gateway.log remains parseable by app/logview.py's regex.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import sys
-import time
 import zlib
 from datetime import datetime
 from typing import Optional

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fnmatch
 import re
 import sys
 from pathlib import Path
@@ -29,9 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 
-from app.config import GatewayConfig, infer_model_prefix
+from app.config import GatewayConfig
 from app import provider_models
-from tui.gateway_client import GatewayClient, load_master_key
 
 BASE = Path(__file__).resolve().parent.parent
 CSV_PATH = BASE / "var" / "keys_rotation.csv"

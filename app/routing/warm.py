@@ -13,7 +13,7 @@ import time
 from collections import Counter
 
 from ..opencode_gate import (dep_usable as _dep_usable,
-                             is_native_session, is_opencode_zen_dep,
+                             is_opencode_zen_dep,
                              opencode_cautious_request)
 from ..session_ctx import current_session
 

@@ -10,7 +10,6 @@ Verbatim move, no behaviour change. See docs/ROUTING.md.
 from __future__ import annotations
 
 import logging
-import math
 import time
 
 from ..config import ORDER_LAST

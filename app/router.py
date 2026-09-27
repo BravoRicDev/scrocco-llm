@@ -34,7 +34,6 @@ from __future__ import annotations
 
 
 import hashlib
-import json
 import logging
 import math
 import random
@@ -42,23 +41,21 @@ import re
 import time
 import urllib.parse
 from collections import deque
-from dataclasses import dataclass, field
 from typing import Any
 
 from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST, ORDER_LAST
 from .policy import Policy
-from .capabilities import required_caps, count_image_parts
+from .capabilities import count_image_parts
 from .effort import get_effort
 from .caution import background_cautious_enabled
 from .opencode_gate import (
     dep_usable as _dep_usable,
     is_opencode_zen_dep,
-    is_native_session,
     opencode_cautious_request,
     zen_first_request,
 )
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
-from .session_ctx import current_session, set_current_session
+from .session_ctx import current_session, set_current_session  # noqa: F401 - ri-esportato
 from .routing.warm import WarmMixin
 from .routing.sessions import SessionMixin
 from .routing.canary import CanaryMixin
@@ -81,7 +78,7 @@ EFFORT_CAPABLE_BONUS = 1.5
 # Constants imported from app/constants.py
 from app.constants import CHARS_PER_TOKEN as CHARS_PER_TOKEN
 from app.constants import STICKY_TTL_SECONDS as STICKY_TTL_SECONDS
-from app.constants import COOLDOWN_BASE_SECONDS as COOLDOWN_SECONDS
+from app.constants import COOLDOWN_BASE_SECONDS as COOLDOWN_SECONDS  # noqa: F401 - letto da admin (_r.COOLDOWN_SECONDS)
 from app.constants import SCORING_WEIGHTS as SW
 
 # Latency-based routing parameters (configurable via env vars / gateway.yaml)

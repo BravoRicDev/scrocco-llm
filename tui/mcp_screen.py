@@ -15,7 +15,7 @@ import json
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import (DataTable, Input, Label, OptionList, Static)
+from textual.widgets import (Input, Label, OptionList, Static)
 from textual.widgets.option_list import Option
 
 from . import tui_config as cfg

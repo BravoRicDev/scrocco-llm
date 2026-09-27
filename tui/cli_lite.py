@@ -5,7 +5,6 @@ Stesse operazioni della TUI, via admin API. Nessuna dipendenza extra.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 
 from .gateway_client import GatewayClient, GatewayError

@@ -22,7 +22,7 @@ import copy
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 log = logging.getLogger("nx.schemaout")
 

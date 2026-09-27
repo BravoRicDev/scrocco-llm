@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 log = logging.getLogger("nx.texttoolparse")
 

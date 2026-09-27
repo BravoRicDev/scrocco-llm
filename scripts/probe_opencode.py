@@ -2,7 +2,7 @@
 """Probe fedele con httpx (il gateway usa httpx, e Cloudflare blocca urllib).
 Riusa _session_headers del forwarder per il flusso x-opencode-session."""
 from __future__ import annotations
-import asyncio, csv, json, os, sys, time
+import asyncio, csv, json, os, sys
 from pathlib import Path
 import httpx
 

@@ -27,7 +27,6 @@ import time
 from fastapi import APIRouter
 
 from . import csv_store
-from .admin import probe_results_view
 from .auth import is_production
 
 bootstrap_api = APIRouter()

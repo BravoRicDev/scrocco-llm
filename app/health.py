@@ -77,7 +77,6 @@ async def run_health_cycle(router, http) -> tuple[int, int]:
 
 async def health_loop(router, interval_sec: float) -> None:
     """Task di lungo periodo: gira SOLO se la policy lo abilita (a caldo)."""
-    import time as _time
     import httpx
     async with httpx.AsyncClient(timeout=20.0) as http:
         while True:

@@ -5,21 +5,20 @@ header di stato, filtro rapido. Tutto via admin API (mai tocco al CSV).
 """
 from __future__ import annotations
 
-import asyncio
 import time
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static
+from textual.widgets import DataTable, Footer, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .extra_screens import CapacitiesScreen, ClientKeysScreen, ExpiringScreen
 from .observability import ObservabilityScreen
 from .obs_leaderboard import PersistedScoresScreen, ProviderHealthScreen
 from .form import DeploymentFormScreen
-from .gateway_client import DEFAULT_BASE, GatewayClient, GatewayError
+from .gateway_client import GatewayClient, GatewayError
 from .mcp_screen import McpConfigScreen as McpScreen
 from .ops_screen import OperationsScreen
 from .tuning_screen import TuningScreen

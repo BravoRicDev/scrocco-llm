@@ -34,32 +34,25 @@ passive stream watchdog; per-request summary logs.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import copy
-import hashlib
 import json
 import logging
 import os
-import random
 import re
 import time
-import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .admin import admin_api
 from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
-from . import journal, metrics
-from . import imagestore
-from . import audiostore
-from . import capmeta
-from .config import GatewayConfig, csv_mtime_ns, maybe_reload, CAP_PRIORITY_ORDER
+from . import metrics
+from . import imagestore  # noqa: F401 - ri-esportato
+from . import capmeta  # noqa: F401 - ri-esportato
+from .config import GatewayConfig
 from . import sniff
 from .chat_helpers import (
     _apply_go_refund,
@@ -90,13 +83,8 @@ from .stream_verdicts import (
     _soft_cd,
 )
 from .image_helpers import (
-    _cap_chain_pick,
-    _data_uri,
-    _download_remote_image,
+    _download_remote_image,  # noqa: F401 - ri-esportato
     _image_chat_intercept,
-    _images_chat_loop,
-    _images_pick_dep,
-    _localize_images,
     _profile_of_request,
 )
 from . import repairlog
@@ -106,12 +94,8 @@ from . import sttchat
 from . import forwarder as fwd
 from .forwarder import (
     Forwarder,
-    MODEL_MISSING_COOLDOWN_S,
-    PERMISSION_DENIED_COOLDOWN_S,
-    PROVIDER_TRANSIENT_COOLDOWN_S,
     UpstreamError,
     StreamLoopDetected,
-    STREAM_LOOP_COOLDOWN_S,
     _MODEL_MISSING_RE,
     _PAYLOAD_SCHEMA_RE,
     _UNKNOWN_FIELD_RE,
@@ -122,24 +106,9 @@ from .forwarder import (
     _THOUGHT_SIG_RE,
     is_provider_error_body,
     is_provider_fault_body,
-    is_embedded_provider_error,
     media_reject_signature,
     media_input_needed,
     media_modality_signature,
-    image_chat_fallback_signature,
-    image_chat_payload,
-    extract_chat_images,
-    image_refs_from_payload,
-    truncate_refs,
-    images_dual,
-    image_item_dual,
-    dep_image_via,
-    chat_prompt_and_refs,
-    images_payload_from_chat,
-    images_response_to_chat,
-    native_images_only_error,
-    chat_only_image_error,
-    _split_data_uri,
     _looks_context_limit,
     extract_requested_tokens,
     _client_attribution,
@@ -161,8 +130,6 @@ from .forwarder import (
     maybe_quarantine_ban,
     maybe_host_transient_cooldown,
     note_context_limit,
-    repair_reasoning_replay,
-    _REASONING_REPLAY_RE,
     repair_reasoning_error,
     reasoning_err_kind,
     classify_error_class,
@@ -170,7 +137,6 @@ from .forwarder import (
     is_provider_level,
     restore_reasoning,
     is_unclear_error,
-    QUOTA_MIN_COOLDOWN_S,
     maybe_account_quota_cooldown,
 )
 from .csvlearn import learn_thinking_replay, learn_strip_reasoning, learn_no_thinking, learn_content_string
@@ -182,25 +148,18 @@ from .thought_sig import has_unsigned_tool_calls, reset_request_flags, set_avoid
 from .router import Router, inject_identity, estimate_tokens, configure_estimate, _prompt_chars
 from .caution import background_cautious_enabled
 from .opencode_gate import (
-    set_allow_opencode_zen,
-    set_spoofing_request,
-    set_zen_first,
-    client_can_use_opencode_zen,
-    client_is_opencode,
-    spoof_enabled,
     opencode_cautious_request,
     is_opencode_zen_dep,
 )
 from .capabilities import (
     required_caps,
     count_image_parts,
-    refs_max_for,
     wants_image_output,
     _is_image_part,
     count_audio_parts,
 )
 from .effort import set_effort, effort_from_request
-from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
+from .errors import AppError
 
 from .sse_utils import (
     _sse_data_objs,
@@ -209,11 +168,10 @@ from .sse_utils import (
     _collapse_sse_field,
     _collapse_sse_content,
     _rewrite_sse_tool_calls,
-    _delta_has_content,
+    _delta_has_content,  # noqa: F401 - ri-esportato
     _answer_chars,
-    _obj_is_error,
-    _delta_has_answer,
-    _chunk_finish_reason,
+    _delta_has_answer,  # noqa: F401 - ri-esportato
+    _chunk_finish_reason,  # noqa: F401 - ri-esportato
     _tool_calls_sse,
     _buffered_answer_text,
     _peek_stream,
@@ -223,11 +181,7 @@ from .sse_utils import (
 # basicConfig è no-op se root ha già handler (es. sotto pytest/caplog).
 # Formato con colori per terminali (ANSI escape codes)
 from app.terminal_logging import (
-    ColoredFormatter,
     setup_colored_logging,
-    colorize_tag,
-    colorize_level,
-    is_terminal_stream,
 )
 
 console_handler = setup_colored_logging()
@@ -386,7 +340,6 @@ LEDGER = _Ledger(VAR_DIR)
 from .keyhealth import KeyHealth as _KeyHealth
 
 KEYHEALTH = _KeyHealth(VAR_DIR)
-from .atomic_store import load_json as _load_json, save_json as _save_json
 
 # --- Inflight request coalescing (payload identico, solo non-streaming) ---
 # Se due richieste identiche (stesso payload + stesso profilo) sono in volo,
@@ -501,7 +454,7 @@ app.include_router(bootstrap_api)
 from .observability import (
     setup_observability,
     setup_replay_endpoint,
-    render_prometheus,
+    render_prometheus,  # noqa: F401 - ri-esportato
 )
 
 _obs_enabled = os.environ.get("GATEWAY_OBSERVABILITY", "1").strip() != "0"
@@ -4157,8 +4110,8 @@ from .videos_api import router as _videos_api_router  # noqa: E402 (local import
 # helper via nome nudo, e i test li patchano/importano via app.main.<simbolo>.
 from .runtime_persistence import (  # noqa: E402 (re-export per lifespan + test)
     _bootstrap_runtime_from_logs,
-    _coalesce_cache_put,
-    _coalesce_key,
+    _coalesce_cache_put,  # noqa: F401 - ri-esportato
+    _coalesce_key,  # noqa: F401 - ri-esportato
     _forward_coalesced,
     _load_adaptive_stats,
     _load_cooldowns,
@@ -4171,7 +4124,7 @@ from .runtime_persistence import (  # noqa: E402 (re-export per lifespan + test)
     _nightly_scheduler,
     _nonstream_hold_redirect,
     _watcher,
-    seconds_to_midnight,
+    seconds_to_midnight,  # noqa: F401 - ri-esportato
 )
 
 # Re-export: `app/compat/ollama.py` chiama questi helper via
@@ -4179,15 +4132,11 @@ from .runtime_persistence import (  # noqa: E402 (re-export per lifespan + test)
 # M._visible_model_names). Senza questi nomi qui, quelle rotte
 # (/v1/models/{id}, /api/tags, /api/show) prenderebbero un AttributeError.
 from .models_and_health import (  # noqa: E402 (re-export per app/compat/ollama.py)
-    VIEWS,
-    _caps_and_deps,
-    _dedup_deps,
-    _deps_for_name,
-    _model_entry,
-    _names_for_auth,
-    _stable_names,
-    _view_for,
-    _visible_model_names,
+    _caps_and_deps,  # noqa: F401 - ri-esportato
+    _model_entry,  # noqa: F401 - ri-esportato
+    _names_for_auth,  # noqa: F401 - ri-esportato
+    _view_for,  # noqa: F401 - ri-esportato
+    _visible_model_names,  # noqa: F401 - ri-esportato
 )
 
 app.include_router(_ollama_router)

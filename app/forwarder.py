@@ -54,7 +54,6 @@ from collections import deque
 from typing import AsyncIterator
 
 import httpx
-from urllib.parse import urlsplit
 
 from . import metrics
 from . import repairlog

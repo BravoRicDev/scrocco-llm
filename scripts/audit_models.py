@@ -27,7 +27,7 @@ import httpx  # noqa: E402
 
 from app.config import GatewayConfig, infer_model_prefix  # noqa: E402
 from app import provider_models  # noqa: E402
-from tui.gateway_client import GatewayClient, load_master_key  # noqa: E402
+from tui.gateway_client import GatewayClient  # noqa: E402
 
 BASE = Path(__file__).resolve().parent.parent
 CSV_PATH = Path(__file__).resolve().parent.parent / "var" / "keys_rotation.csv"

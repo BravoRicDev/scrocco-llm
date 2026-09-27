@@ -7,7 +7,6 @@ dalle risposte Google e le re-inietta nelle richieste di replay dirette a
 Google, mappandole per tool_call id.
 """
 import contextvars
-import json
 import logging
 import os
 import threading

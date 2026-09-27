@@ -27,7 +27,6 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
 
 from .thought_sig import is_gemini_deployment
 from . import metrics

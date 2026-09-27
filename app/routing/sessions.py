@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import time
 
 from ..opencode_gate import (dep_usable as _dep_usable,

@@ -16,7 +16,13 @@ line-length = 120
 [tool.ruff.lint]
 # Set conservativo e non rumoroso: errori di sintassi e nomi non definiti.
 # Da allargare in modo incrementale senza bloccare le PR.
-select = ["E9", "F63", "F7", "F82"]
+# F401 (import inutilizzati) attivo su app/ e tui/: le ri-esportazioni
+# volute di app/main.py sono marcate `# noqa: F401`.
+select = ["E9", "F63", "F7", "F82", "F401"]
+
+[tool.ruff.lint.per-file-ignores]
+# Nei test un import "inutilizzato" puo' servire per effetti collaterali.
+"tests/**" = ["F401"]
 
 [tool.mypy]
 python_version = "3.12"
