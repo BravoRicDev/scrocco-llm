@@ -1709,16 +1709,9 @@ class Policy:
         if not raw:
             return p
         _set_int(p, raw, "estimate_divisor", minimum=1)
-        if "estimate_adaptive_enabled" in raw:
-            p.estimate_adaptive_enabled = _coerce_bool(
-                raw["estimate_adaptive_enabled"], "estimate_adaptive_enabled")
-        if "estimate_adaptive_shadow" in raw:
-            p.estimate_adaptive_shadow = _coerce_bool(
-                raw["estimate_adaptive_shadow"], "estimate_adaptive_shadow")
-        if "estimate_adaptive_auto_enable" in raw:
-            p.estimate_adaptive_auto_enable = _coerce_bool(
-                raw["estimate_adaptive_auto_enable"],
-                "estimate_adaptive_auto_enable")
+        _set_bool(p, raw, "estimate_adaptive_enabled")
+        _set_bool(p, raw, "estimate_adaptive_shadow")
+        _set_bool(p, raw, "estimate_adaptive_auto_enable")
         _set_int(p, raw, "estimate_adaptive_auto_min_n", minimum=1)
         if "estimate_adaptive_auto_max_delta_pct" in raw:
             v = raw["estimate_adaptive_auto_max_delta_pct"]
@@ -1727,44 +1720,16 @@ class Policy:
                 raise ValueError("estimate_adaptive_auto_max_delta_pct "
                                  "deve essere 0..100")
             p.estimate_adaptive_auto_max_delta_pct = float(v)
-        if "estimate_calib_alpha" in raw:
-            v = raw["estimate_calib_alpha"]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or not (0.0 <= float(v) <= 1.0):
-                raise ValueError("estimate_calib_alpha deve essere 0..1")
-            p.estimate_calib_alpha = float(v)
-        if "session_estimate_enabled" in raw:
-            p.session_estimate_enabled = _coerce_bool(
-                raw["session_estimate_enabled"], "session_estimate_enabled")
-        if "session_estimate_margin" in raw:
-            v = raw["session_estimate_margin"]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or not (0.5 <= float(v) <= 3.0):
-                raise ValueError("session_estimate_margin deve essere 0.5..3.0")
-            p.session_estimate_margin = float(v)
+        _set_float(p, raw, "estimate_calib_alpha", lambda x: not (0.0 <= x <= 1.0), "estimate_calib_alpha deve essere 0..1")
+        _set_bool(p, raw, "session_estimate_enabled")
+        _set_float(p, raw, "session_estimate_margin", lambda x: not (0.5 <= x <= 3.0), "session_estimate_margin deve essere 0.5..3.0")
         _set_int(p, raw, "session_estimate_min_chars", minimum=0)
         _set_int(p, raw, "session_estimate_min_tokens", minimum=0)
         _set_int(p, raw, "session_estimate_ttl_sec", minimum=0)
-        if "session_estimate_min_ratio" in raw:
-            v = raw["session_estimate_min_ratio"]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or float(v) <= 0:
-                raise ValueError("session_estimate_min_ratio deve essere > 0")
-            p.session_estimate_min_ratio = float(v)
-        if "session_estimate_max_ratio" in raw:
-            v = raw["session_estimate_max_ratio"]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or float(v) <= 0:
-                raise ValueError("session_estimate_max_ratio deve essere > 0")
-            p.session_estimate_max_ratio = float(v)
+        _set_float(p, raw, "session_estimate_min_ratio", lambda x: x <= 0, "session_estimate_min_ratio deve essere > 0")
+        _set_float(p, raw, "session_estimate_max_ratio", lambda x: x <= 0, "session_estimate_max_ratio deve essere > 0")
         _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
-        _rmin = raw.get("retry_after_min_sec")
-        if _rmin is not None:
-            try:
-                p.retry_after_min_sec = max(0.0, float(_rmin))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "retry_after_min_sec deve essere un numero >= 0") from None
+        _set_nonneg_float(p, raw, "retry_after_min_sec", "retry_after_min_sec deve essere un numero >= 0")
         _rafp = raw.get("retry_after_floor_by_provider")
         if _rafp is not None:
             if not isinstance(_rafp, dict):
@@ -1781,27 +1746,9 @@ class Policy:
                     ) from None
                 _tbl[str(_k).strip().lower()] = _fv
             p.retry_after_floor_by_provider = _tbl
-        _sds = raw.get("shutdown_drain_sec")
-        if _sds is not None:
-            try:
-                p.shutdown_drain_sec = max(0.0, float(_sds))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "shutdown_drain_sec deve essere un numero >= 0") from None
-        _stall = raw.get("stream_stall_sec")
-        if _stall is not None:
-            try:
-                p.stream_stall_sec = max(0.0, float(_stall))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "stream_stall_sec deve essere un numero >= 0") from None
-        _stm = raw.get("stream_stall_ttft_mult")
-        if _stm is not None:
-            try:
-                p.stream_stall_ttft_mult = max(0.0, float(_stm))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "stream_stall_ttft_mult deve essere un numero >= 0") from None
+        _set_nonneg_float(p, raw, "shutdown_drain_sec", "shutdown_drain_sec deve essere un numero >= 0")
+        _set_nonneg_float(p, raw, "stream_stall_sec", "stream_stall_sec deve essere un numero >= 0")
+        _set_nonneg_float(p, raw, "stream_stall_ttft_mult", "stream_stall_ttft_mult deve essere un numero >= 0")
         _sts = raw.get("stream_stall_max_sec")
         if _sts is not None:
             try:
@@ -1817,12 +1764,8 @@ class Policy:
                 raise ValueError(
                     "reputation_decay_halflife_sec deve essere un numero "
                     ">= 0") from None
-        if "adaptive_timeout_enabled" in raw:
-            p.adaptive_timeout_enabled = _coerce_bool(
-                raw["adaptive_timeout_enabled"], "adaptive_timeout_enabled")
-        if "http_keepalive_pool" in raw:
-            p.http_keepalive_pool = _coerce_bool(
-                raw["http_keepalive_pool"], "http_keepalive_pool")
+        _set_bool(p, raw, "adaptive_timeout_enabled")
+        _set_bool(p, raw, "http_keepalive_pool")
         for _fld in ("adaptive_timeout_floor_sec",
                      "adaptive_timeout_multiplier",
                      "adaptive_timeout_max_sec"):
@@ -1833,9 +1776,7 @@ class Policy:
                 except (TypeError, ValueError):
                     raise ValueError(
                         f"{_fld} deve essere un numero >= 0") from None
-        if "cooldown_probe_enabled" in raw:
-            p.cooldown_probe_enabled = _coerce_bool(
-                raw["cooldown_probe_enabled"], "cooldown_probe_enabled")
+        _set_bool(p, raw, "cooldown_probe_enabled")
         _cpar = raw.get("cooldown_probe_after_ratio")
         if _cpar is not None:
             try:
@@ -1843,16 +1784,8 @@ class Policy:
             except (TypeError, ValueError):
                 raise ValueError(
                     "cooldown_probe_after_ratio deve essere tra 0 e 1") from None
-        if "cooldown_probe_decay" in raw:
-            p.cooldown_probe_decay = _coerce_bool(
-                raw["cooldown_probe_decay"], "cooldown_probe_decay")
-        _csh = raw.get("cooldown_streak_halflife_sec")
-        if _csh is not None:
-            try:
-                p.cooldown_streak_halflife_sec = max(0.0, float(_csh))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "cooldown_streak_halflife_sec deve essere un numero >= 0") from None
+        _set_bool(p, raw, "cooldown_probe_decay")
+        _set_nonneg_float(p, raw, "cooldown_streak_halflife_sec", "cooldown_streak_halflife_sec deve essere un numero >= 0")
         _set_int(p, raw, "probe_retire_after", minimum=0)
         _cjr = raw.get("cooldown_jitter_ratio")
         if _cjr is not None:
@@ -1993,17 +1926,9 @@ class Policy:
         _set_int(p, raw, "model_circuit_keys", minimum=2)
         _set_int(p, raw, "model_circuit_window_sec", minimum=1)
         _set_int(p, raw, "model_circuit_open_sec", minimum=1)
-        if "cooldown_autoprobe_enabled" in raw:
-            p.cooldown_autoprobe_enabled = _coerce_bool(
-                raw["cooldown_autoprobe_enabled"], "cooldown_autoprobe_enabled")
-        if "cooldown_autoprobe_retired_enabled" in raw:
-            p.cooldown_autoprobe_retired_enabled = _coerce_bool(
-                raw["cooldown_autoprobe_retired_enabled"],
-                "cooldown_autoprobe_retired_enabled")
-        if "cooldown_autoprobe_multiply_24h" in raw:
-            p.cooldown_autoprobe_multiply_24h = _coerce_bool(
-                raw["cooldown_autoprobe_multiply_24h"],
-                "cooldown_autoprobe_multiply_24h")
+        _set_bool(p, raw, "cooldown_autoprobe_enabled")
+        _set_bool(p, raw, "cooldown_autoprobe_retired_enabled")
+        _set_bool(p, raw, "cooldown_autoprobe_multiply_24h")
         if raw.get("cooldown_autoprobe_schedule") is not None:
             _sch = str(raw["cooldown_autoprobe_schedule"]).strip().lower()
             if _sch not in ("nightly", "request"):
@@ -2032,10 +1957,7 @@ class Policy:
                 except (TypeError, ValueError):
                     raise ValueError(
                         f"{_fld} deve essere un numero >= 0") from None
-        if "cooldown_autoprobe_crisis_enabled" in raw:
-            p.cooldown_autoprobe_crisis_enabled = _coerce_bool(
-                raw["cooldown_autoprobe_crisis_enabled"],
-                "cooldown_autoprobe_crisis_enabled")
+        _set_bool(p, raw, "cooldown_autoprobe_crisis_enabled")
         if raw.get("repair_exempt_streak_limit") is not None:
             try:
                 p.repair_exempt_streak_limit = max(
@@ -2054,12 +1976,8 @@ class Policy:
                 except (TypeError, ValueError):
                     raise ValueError(
                         f"{_fld} deve essere un intero >= 0") from None
-        if raw.get("degraded_mode_enabled") is not None:
-            p.degraded_mode_enabled = _coerce_bool(
-                raw["degraded_mode_enabled"], "degraded_mode_enabled")
-        if raw.get("key_concurrency_enabled") is not None:
-            p.key_concurrency_enabled = _coerce_bool(
-                raw["key_concurrency_enabled"], "key_concurrency_enabled")
+        _set_bool(p, raw, "degraded_mode_enabled", skip_none=True)
+        _set_bool(p, raw, "key_concurrency_enabled", skip_none=True)
         for _fld in ("key_concurrency_max",
                      "key_concurrency_lease_max_age_sec"):
             if raw.get(_fld) is not None:
@@ -2111,29 +2029,14 @@ class Policy:
                     raise ValueError(
                         f"{_fld} deve essere un numero >= 0") from None
         _set_int(p, raw, "hotreload_probe_max", minimum=0)
-        if "hotreload_probe_enabled" in raw:
-            p.hotreload_probe_enabled = _coerce_bool(
-                raw["hotreload_probe_enabled"], "hotreload_probe_enabled")
+        _set_bool(p, raw, "hotreload_probe_enabled")
         _set_int(p, raw, "loop_stream_buffer_words", minimum=0)
         _set_int(p, raw, "conc_default_limit", minimum=1)
         _set_int(p, raw, "conc_max_limit", minimum=1)
         _set_int(p, raw, "conc_learn_success_streak", minimum=1)
-        if "conc_token_ratio" in raw:
-            v = raw["conc_token_ratio"]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or not (0.0 <= float(v) <= 5.0):
-                raise ValueError("conc_token_ratio deve essere 0..5")
-            p.conc_token_ratio = float(v)
-        if "request_coalescing_enabled" in raw:
-            p.request_coalescing_enabled = _coerce_bool(
-                raw["request_coalescing_enabled"], "request_coalescing_enabled")
-        _rc_ttl = raw.get("request_coalescing_ttl_sec")
-        if _rc_ttl is not None:
-            try:
-                p.request_coalescing_ttl_sec = max(0.0, float(_rc_ttl))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "request_coalescing_ttl_sec deve essere un numero >= 0") from None
+        _set_float(p, raw, "conc_token_ratio", lambda x: not (0.0 <= x <= 5.0), "conc_token_ratio deve essere 0..5")
+        _set_bool(p, raw, "request_coalescing_enabled")
+        _set_nonneg_float(p, raw, "request_coalescing_ttl_sec", "request_coalescing_ttl_sec deve essere un numero >= 0")
         _set_int(p, raw, "request_coalescing_max_waiters", minimum=0)
         _rc_cache = raw.get("request_coalescing_cache_sec")
         if _rc_cache is not None:
@@ -2143,9 +2046,7 @@ class Policy:
                 raise ValueError(
                     "request_coalescing_cache_sec deve essere un "
                     "numero >= 0") from None
-        if "rate_hint_skip_enabled" in raw:
-            p.rate_hint_skip_enabled = _coerce_bool(
-                raw["rate_hint_skip_enabled"], "rate_hint_skip_enabled")
+        _set_bool(p, raw, "rate_hint_skip_enabled")
         _rh = raw.get("rate_hint_ttl_sec")
         if _rh is not None:
             try:
@@ -2165,18 +2066,12 @@ class Policy:
             if not (0.0 <= v <= 86400.0):
                 raise ValueError("rate_hint_proven_sec: 0..86400")
             p.rate_hint_proven_sec = v
-        if "key_soft_429_enabled" in raw:
-            p.key_soft_429_enabled = _coerce_bool(
-                raw["key_soft_429_enabled"], "key_soft_429_enabled")
+        _set_bool(p, raw, "key_soft_429_enabled")
         _set_int(p, raw, "key_soft_max_sec", minimum=10, maximum=86400)
-        if "anon_session_fingerprint" in raw:
-            p.anon_session_fingerprint = _coerce_bool(
-                raw["anon_session_fingerprint"], "anon_session_fingerprint")
+        _set_bool(p, raw, "anon_session_fingerprint")
         _set_int(p, raw, "anon_session_fp_system_chars", minimum=0)
         _set_int(p, raw, "sticky_ttl_sec", minimum=1)
-        if "sticky_handoff_same_family" in raw:
-            p.sticky_handoff_same_family = _coerce_bool(
-                raw["sticky_handoff_same_family"], "sticky_handoff_same_family")
+        _set_bool(p, raw, "sticky_handoff_same_family")
         _set_int(p, raw, "cooldown_sec", minimum=0)
         _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)
         _set_int(p, raw, "max_fallback_tries", minimum=1)
@@ -2336,28 +2231,14 @@ class Policy:
                     "(ammessi: requested|deployment|upstream)")
             p.response_model = str(rm)
 
-        ap = raw.get("adaptive_pick")
-        if ap is not None:
-            p.adaptive_pick = _coerce_bool(ap, "adaptive_pick")
-        ds = raw.get("deployment_sticky")
-        if ds is not None:
-            p.deployment_sticky = _coerce_bool(ds, "deployment_sticky")
-        dspc = raw.get("deployment_sticky_per_capability")
-        if dspc is not None:
-            p.deployment_sticky_per_capability = _coerce_bool(dspc, "deployment_sticky_per_capability")
-        epp = raw.get("escalation_pin")
-        if epp is not None:
-            p.escalation_pin = _coerce_bool(epp, "escalation_pin")
+        _set_bool(p, raw, "adaptive_pick", skip_none=True)
+        _set_bool(p, raw, "deployment_sticky", skip_none=True)
+        _set_bool(p, raw, "deployment_sticky_per_capability", skip_none=True)
+        _set_bool(p, raw, "escalation_pin", skip_none=True)
         _set_int(p, raw, "escalation_pin_ttl_sec", minimum=1)
         _set_int(p, raw, "escalation_pin_probe_dims", minimum=0)
-        _sret = raw.get("escalation_pin_probe_retry")
-        if _sret is not None:
-            p.escalation_pin_probe_retry = _coerce_bool(
-                _sret, "escalation_pin_probe_retry")
-        _srnd = raw.get("escalation_pin_probe_random")
-        if _srnd is not None:
-            p.escalation_pin_probe_random = _coerce_bool(
-                _srnd, "escalation_pin_probe_random")
+        _set_bool(p, raw, "escalation_pin_probe_retry", skip_none=True)
+        _set_bool(p, raw, "escalation_pin_probe_random", skip_none=True)
         for num_key, attr in (("recency_halflife_sec", "recency_halflife_sec"),
                               ("latency_ref_ms", "latency_ref_ms"),
                               ("go_recency_halflife_sec", "go_recency_halflife_sec")):
@@ -2369,10 +2250,7 @@ class Policy:
                                      "(numero > 0 richiesto)")
                 setattr(p, attr, float(nv))
 
-        _ee = raw.get("enable_effort_temperature_override")
-        if _ee is not None:
-            p.enable_effort_temperature_override = _coerce_bool(
-                _ee, "enable_effort_temperature_override")
+        _set_bool(p, raw, "enable_effort_temperature_override", skip_none=True)
         _eiw = raw.get("effort_intel_weight")
         if _eiw is not None:
             if isinstance(_eiw, bool) or not isinstance(_eiw, (int, float)) \
@@ -2455,10 +2333,7 @@ class Policy:
             p.model_preference_base = float(_mpb)
 
         # --- THOUGHT_SIGNATURE (Gemini 3 dummy fill) ---
-        _tsf = raw.get("thought_sig_dummy_fill")
-        if _tsf is not None:
-            p.thought_sig_dummy_fill = _coerce_bool(
-                _tsf, "thought_sig_dummy_fill")
+        _set_bool(p, raw, "thought_sig_dummy_fill", skip_none=True)
         _tsv = raw.get("thought_sig_dummy_value")
         if _tsv is not None:
             _v = str(_tsv).strip()
@@ -2864,23 +2739,15 @@ class Policy:
                 p.provider_alternation_enabled = _coerce_bool(
                     wp["provider_alternation"],
                     "warm_pool.provider_alternation")
-        if raw.get("warm_borrow_enabled") is not None:
-            p.warm_borrow_enabled = _coerce_bool(
-                raw["warm_borrow_enabled"], "warm_borrow_enabled")
+        _set_bool(p, raw, "warm_borrow_enabled", skip_none=True)
         if raw.get("warm_borrow_idle_sec") is not None:
             _v = raw["warm_borrow_idle_sec"]
             if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
                 raise ValueError(f"warm_borrow_idle_sec non valido: {_v!r}")
             p.warm_borrow_idle_sec = float(_v)
-        if raw.get("warm_borrow_selectable") is not None:
-            p.warm_borrow_selectable = _coerce_bool(
-                raw["warm_borrow_selectable"], "warm_borrow_selectable")
-        if raw.get("nonstream_canary_allowed") is not None:
-            p.nonstream_canary_allowed = _coerce_bool(
-                raw["nonstream_canary_allowed"], "nonstream_canary_allowed")
-        if raw.get("nonstream_hold_redirect") is not None:
-            p.nonstream_hold_redirect = _coerce_bool(
-                raw["nonstream_hold_redirect"], "nonstream_hold_redirect")
+        _set_bool(p, raw, "warm_borrow_selectable", skip_none=True)
+        _set_bool(p, raw, "nonstream_canary_allowed", skip_none=True)
+        _set_bool(p, raw, "nonstream_hold_redirect", skip_none=True)
         for _k, _attr in (("stream_slow_race_after_ms",
                            "stream_slow_race_after_ms"),
                           ("nonstream_slow_race_after_ms",
@@ -3172,9 +3039,7 @@ class Policy:
             # stream_buffer_ms / stream_emit_error_tail / on_empty_response:
             # rimossi. Catena esaurita -> sempre 503 retryable, mai un turno
             # finto. Chiavi ignorate se presenti in un vecchio gateway.yaml.
-        ph = raw.get("proactive_health")
-        if ph is not None:
-            p.proactive_health = _coerce_bool(ph, "proactive_health")
+        _set_bool(p, raw, "proactive_health", skip_none=True)
         hi = raw.get("health_interval_sec")
         if hi is not None:
             if isinstance(hi, bool) or not isinstance(hi, (int, float)) \
@@ -3420,9 +3285,7 @@ class Policy:
         _set_int(p, raw, "go_stick_ttl_sec", minimum=1)
 
         # cooldown escalation
-        ce = raw.get("cooldown_escalation")
-        if ce is not None:
-            p.cooldown_escalation = _coerce_bool(ce, "cooldown_escalation")
+        _set_bool(p, raw, "cooldown_escalation", skip_none=True)
         _set_int(p, raw, "max_cooldown_sec", minimum=10)
         _set_int(p, raw, "timeout_cooldown_mult", minimum=1)
         _set_int(p, raw, "retire_after_days", minimum=1)
@@ -3452,10 +3315,7 @@ class Policy:
             if not 0.0 <= _v <= 1.0:
                 raise ValueError("cold_spread_pct deve essere in [0,1]")
             p.cold_spread_pct = _v
-        _ipw = raw.get("initial_pick_cooldown_wakeup")
-        if _ipw is not None:
-            p.initial_pick_cooldown_wakeup = _coerce_bool(
-                _ipw, "initial_pick_cooldown_wakeup")
+        _set_bool(p, raw, "initial_pick_cooldown_wakeup", skip_none=True)
         _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
         _set_int(p, raw, "ladder_chronic_max", minimum=0)
         _set_int(p, raw, "chronic_fail_cooldown_sec", minimum=0)
@@ -3629,6 +3489,36 @@ def _set_int(obj: Policy, raw: dict, key: str, minimum: int = 0,
             or (maximum is not None and v > maximum):
         raise ValueError(f"{key} non valido: {v!r}")
     setattr(obj, key, int(v))
+
+
+def _set_bool(obj: Policy, raw: dict, key: str, *, skip_none: bool = False) -> None:
+    """`obj.<key> = _coerce_bool(raw[key])` se la chiave e' presente.
+    skip_none=True: un valore None viene ignorato (forma `raw.get(k) is not
+    None`) invece di essere rifiutato."""
+    if key not in raw or (skip_none and raw[key] is None):
+        return
+    setattr(obj, key, _coerce_bool(raw[key], key))
+
+
+def _set_float(obj: Policy, raw: dict, key: str, rejected, message: str) -> None:
+    """Numero (non bool) convertito a float; `rejected(x)` True -> ValueError."""
+    if key not in raw:
+        return
+    v = raw[key]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or rejected(float(v)):
+        raise ValueError(message)
+    setattr(obj, key, float(v))
+
+
+def _set_nonneg_float(obj: Policy, raw: dict, key: str, message: str) -> None:
+    """`max(0.0, float(v))` se presente e non None; non convertibile -> ValueError."""
+    v = raw.get(key)
+    if v is None:
+        return
+    try:
+        setattr(obj, key, max(0.0, float(v)))
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
 
 
 def refill_out_budget(payload: dict, policy) -> int:
