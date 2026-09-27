@@ -1708,1734 +1708,8 @@ class Policy:
         p = cls()
         if not raw:
             return p
-        _set_int(p, raw, "estimate_divisor", minimum=1)
-        _set_bool(p, raw, "estimate_adaptive_enabled")
-        _set_bool(p, raw, "estimate_adaptive_shadow")
-        _set_bool(p, raw, "estimate_adaptive_auto_enable")
-        _set_int(p, raw, "estimate_adaptive_auto_min_n", minimum=1)
-        if "estimate_adaptive_auto_max_delta_pct" in raw:
-            v = raw["estimate_adaptive_auto_max_delta_pct"]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or not (0 <= float(v) <= 100):
-                raise ValueError("estimate_adaptive_auto_max_delta_pct "
-                                 "deve essere 0..100")
-            p.estimate_adaptive_auto_max_delta_pct = float(v)
-        _set_float(p, raw, "estimate_calib_alpha", lambda x: not (0.0 <= x <= 1.0), "estimate_calib_alpha deve essere 0..1")
-        _set_bool(p, raw, "session_estimate_enabled")
-        _set_float(p, raw, "session_estimate_margin", lambda x: not (0.5 <= x <= 3.0), "session_estimate_margin deve essere 0.5..3.0")
-        _set_int(p, raw, "session_estimate_min_chars", minimum=0)
-        _set_int(p, raw, "session_estimate_min_tokens", minimum=0)
-        _set_int(p, raw, "session_estimate_ttl_sec", minimum=0)
-        _set_float(p, raw, "session_estimate_min_ratio", lambda x: x <= 0, "session_estimate_min_ratio deve essere > 0")
-        _set_float(p, raw, "session_estimate_max_ratio", lambda x: x <= 0, "session_estimate_max_ratio deve essere > 0")
-        _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
-        _set_nonneg_float(p, raw, "retry_after_min_sec", "retry_after_min_sec deve essere un numero >= 0")
-        _rafp = raw.get("retry_after_floor_by_provider")
-        if _rafp is not None:
-            if not isinstance(_rafp, dict):
-                raise ValueError(
-                    "retry_after_floor_by_provider deve essere una mappa "
-                    "provider -> secondi") from None
-            _tbl: dict[str, float] = {}
-            for _k, _v in _rafp.items():
-                try:
-                    _fv = max(0.0, float(_v))
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"retry_after_floor_by_provider[{_k}] non numerico"
-                    ) from None
-                _tbl[str(_k).strip().lower()] = _fv
-            p.retry_after_floor_by_provider = _tbl
-        _set_nonneg_float(p, raw, "shutdown_drain_sec", "shutdown_drain_sec deve essere un numero >= 0")
-        _set_nonneg_float(p, raw, "stream_stall_sec", "stream_stall_sec deve essere un numero >= 0")
-        _set_nonneg_float(p, raw, "stream_stall_ttft_mult", "stream_stall_ttft_mult deve essere un numero >= 0")
-        _sts = raw.get("stream_stall_max_sec")
-        if _sts is not None:
-            try:
-                p.stream_stall_max_sec = max(1.0, float(_sts))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "stream_stall_max_sec deve essere un numero >= 1") from None
-        _rdh = raw.get("reputation_decay_halflife_sec")
-        if _rdh is not None:
-            try:
-                p.reputation_decay_halflife_sec = max(0.0, float(_rdh))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "reputation_decay_halflife_sec deve essere un numero "
-                    ">= 0") from None
-        _set_bool(p, raw, "adaptive_timeout_enabled")
-        _set_bool(p, raw, "http_keepalive_pool")
-        for _fld in ("adaptive_timeout_floor_sec",
-                     "adaptive_timeout_multiplier",
-                     "adaptive_timeout_max_sec"):
-            _val = raw.get(_fld)
-            if _val is not None:
-                try:
-                    setattr(p, _fld, max(0.0, float(_val)))
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"{_fld} deve essere un numero >= 0") from None
-        _set_bool(p, raw, "cooldown_probe_enabled")
-        _cpar = raw.get("cooldown_probe_after_ratio")
-        if _cpar is not None:
-            try:
-                p.cooldown_probe_after_ratio = min(1.0, max(0.0, float(_cpar)))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "cooldown_probe_after_ratio deve essere tra 0 e 1") from None
-        _set_bool(p, raw, "cooldown_probe_decay")
-        _set_nonneg_float(p, raw, "cooldown_streak_halflife_sec", "cooldown_streak_halflife_sec deve essere un numero >= 0")
-        _set_int(p, raw, "probe_retire_after", minimum=0)
-        _cjr = raw.get("cooldown_jitter_ratio")
-        if _cjr is not None:
-            try:
-                p.cooldown_jitter_ratio = min(1.0, max(0.0, float(_cjr)))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "cooldown_jitter_ratio deve essere tra 0 e 1") from None
-        _cjs = raw.get("cooldown_jitter_sec_max")
-        if _cjs is not None:
-            try:
-                p.cooldown_jitter_sec_max = min(
-                    60.0, max(0.0, float(_cjs)))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "cooldown_jitter_sec_max deve essere tra 0 e 60") from None
-        if "error_class_cooldowns" in raw:
-            p.error_class_cooldowns = _coerce_bool(
-                raw.get("error_class_cooldowns"), "error_class_cooldowns")
-        _set_int(p, raw, "cooldown_transient_sec", minimum=1)
-        _set_int(p, raw, "slow_latency_abs_floor_ms", minimum=0)
-        _set_int(p, raw, "slow_latency_min_peers", minimum=1)
-        _set_int(p, raw, "hunt_backoff_sec", minimum=0)
-        _set_int(p, raw, "hunt_max_per_window", minimum=0)
-        _set_int(p, raw, "hunt_window_sec", minimum=1)
-        _srel = raw.get("slow_latency_rel_mult")
-        if _srel is not None:
-            if isinstance(_srel, bool) or not isinstance(_srel, (int, float)) \
-                    or not (0.0 <= float(_srel) <= 100.0):
-                raise ValueError("slow_latency_rel_mult deve essere 0..100")
-            p.slow_latency_rel_mult = float(_srel)
-        # ---------------------------------------------------- routing tuning
-        _set_int(p, raw, "latency_rotate_threshold_ms", minimum=0)
-        _set_int(p, raw, "soft_slow_latency_ms", minimum=0)
-        _set_int(p, raw, "soft_slow_ctx_min", minimum=0)
-        _set_int(p, raw, "ttft_rate_min_ctx", minimum=0)
-        _cbe = raw.get("ctx_bucket_edges")
-        if _cbe is not None:
-            if not isinstance(_cbe, (list, tuple)) or not _cbe:
-                raise ValueError("ctx_bucket_edges deve essere una lista non vuota")
-            _edges: list[int] = []
-            for _e in _cbe:
-                if isinstance(_e, bool) or not isinstance(_e, (int, float)):
-                    raise ValueError("ctx_bucket_edges: elementi non numerici")
-                _edges.append(int(_e))
-            if _edges != sorted(_edges):
-                raise ValueError("ctx_bucket_edges deve essere crescente")
-            p.ctx_bucket_edges = _edges
-        for _name in ("ttft_rate_floor_ms", "slow_latency_abs_floor_ms",
-                      "slow_gen_mult", "slow_typical_completion_tokens",
-                      "slow_rel_baseline_mult",
-                      "effort_capable_bonus", "latency_penalty_per_sec"):
-            _v = raw.get(_name)
-            if _v is not None:
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)):
-                    raise ValueError(f"{_name} deve essere un numero")
-                setattr(p, _name, float(_v))
-        _pbn = raw.get("provider_bias_normalization")
-        if _pbn is not None:
-            _val = str(_pbn).strip().lower()
-            if _val not in ("log", "sqrt", "none"):
-                raise ValueError(
-                    "provider_bias_normalization deve essere log|sqrt|none")
-            p.provider_bias_normalization = _val
-        _set_int(p, raw, "dynamic_scoring_history_window", minimum=1)
-        # ---------------------------------------------------------- ops tuning
-        _set_int(p, raw, "probe_concurrency", minimum=1)
-        _set_int(p, raw, "playground_max_attempts", minimum=1)
-        for _name in ("probe_timeout_sec", "playground_timeout_sec"):
-            _v = raw.get(_name)
-            if _v is not None:
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or float(_v) < 0:
-                    raise ValueError(f"{_name} deve essere un numero >= 0")
-                setattr(p, _name, float(_v))
-        # ---------------------------------------------------- cooldown tuning
-        _set_int(p, raw, "model_missing_cooldown_sec", minimum=0)
-        _set_int(p, raw, "min_output_floor", minimum=1)
-        for _name in ("quota_min_cooldown_sec", "quota_max_cooldown_sec",
-                      "provider_transient_cooldown_sec",
-                      "permission_denied_cooldown_sec",
-                      "stream_loop_cooldown_sec", "retry_body_cap_sec"):
-            _v = raw.get(_name)
-            if _v is not None:
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or float(_v) < 0:
-                    raise ValueError(f"{_name} deve essere un numero >= 0")
-                setattr(p, _name, float(_v))
-        _set_int(p, raw, "cooldown_timeout_sec", minimum=1)
-        # ------------------------------- runtime/memoria & limiti vari
-        _set_int(p, raw, "coalesce_cache_max", minimum=0)
-        _set_int(p, raw, "video_job_ttl_sec", minimum=0)
-        _set_int(p, raw, "keyhealth_streak_dead_threshold", minimum=1)
-        _set_int(p, raw, "ctxcompact_min_protected_msgs", minimum=0)
-        _set_int(p, raw, "toolrepair_max_unwrap_depth", minimum=0)
-        _set_int(p, raw, "sniff_max_b64_chars", minimum=1)
-        _set_int(p, raw, "sniff_max_str_chars", minimum=1)
-        _set_int(p, raw, "sniff_max_sse_bytes", minimum=1)
-        _kemf = raw.get("keyhealth_success_ema_floor")
-        if _kemf is not None:
-            if isinstance(_kemf, bool) or not isinstance(_kemf, (int, float)) \
-                    or float(_kemf) < 0:
-                raise ValueError(
-                    "keyhealth_success_ema_floor deve essere un numero >= 0")
-            p.keyhealth_success_ema_floor = float(_kemf)
-        # ------------------------------------------ HTTP upstream (forwarder)
-        for _name in ("upstream_connect_timeout_sec", "upstream_read_timeout_sec",
-                      "upstream_write_timeout_sec", "upstream_pool_timeout_sec",
-                      "upstream_keepalive_expiry_sec"):
-            _v = raw.get(_name)
-            if _v is not None:
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or float(_v) <= 0:
-                    raise ValueError(f"{_name} deve essere un numero > 0")
-                setattr(p, _name, float(_v))
-        _set_int(p, raw, "upstream_max_keepalive_connections", minimum=1)
-        _set_int(p, raw, "upstream_max_connections", minimum=1)
-        _rsc = raw.get("retryable_status_codes")
-        if _rsc is not None:
-            if not isinstance(_rsc, list) or not all(
-                    isinstance(x, int) and not isinstance(x, bool)
-                    and 100 <= x <= 599 for x in _rsc):
-                raise ValueError(
-                    "retryable_status_codes deve essere una lista di codici "
-                    "HTTP interi (100..599)")
-            p.retryable_status_codes = [int(x) for x in _rsc]
-        _eih = raw.get("effort_incompatible_hosts")
-        if _eih is not None:
-            if not isinstance(_eih, list) or not all(
-                    isinstance(x, str) and x for x in _eih):
-                raise ValueError(
-                    "effort_incompatible_hosts deve essere una lista di "
-                    "stringhe non vuote")
-            p.effort_incompatible_hosts = [str(x) for x in _eih]
-        if "model_circuit_enabled" in raw:
-            p.model_circuit_enabled = _coerce_bool(
-                raw.get("model_circuit_enabled"), "model_circuit_enabled")
-        _set_int(p, raw, "model_circuit_keys", minimum=2)
-        _set_int(p, raw, "model_circuit_window_sec", minimum=1)
-        _set_int(p, raw, "model_circuit_open_sec", minimum=1)
-        _set_bool(p, raw, "cooldown_autoprobe_enabled")
-        _set_bool(p, raw, "cooldown_autoprobe_retired_enabled")
-        _set_bool(p, raw, "cooldown_autoprobe_multiply_24h")
-        if raw.get("cooldown_autoprobe_schedule") is not None:
-            _sch = str(raw["cooldown_autoprobe_schedule"]).strip().lower()
-            if _sch not in ("nightly", "request"):
-                raise ValueError(
-                    "cooldown_autoprobe_schedule deve essere nightly|request")
-            p.cooldown_autoprobe_schedule = _sch
-        _set_int(p, raw, "cooldown_autoprobe_per_dim", minimum=0)
-        _set_int(p, raw, "cooldown_autoprobe_max_total", minimum=0)
-        _set_int(p, raw, "cooldown_autoprobe_key_day_max", minimum=0)
-        for _fld in ("cooldown_autoprobe_min_age_sec",
-                     "cooldown_autoprobe_grow_sec",
-                     "cooldown_autoprobe_min_gap_sec",
-                     "cooldown_autoprobe_timeout_sec",
-                     "cooldown_autoprobe_fresh_age_sec",
-                     "cooldown_autoprobe_key_gap_sec",
-                     "cooldown_autoprobe_key_ok_fresh_sec",
-                     "cooldown_autoprobe_retired_gap_sec",
-                     "cooldown_autoprobe_transient_sec",
-                     "cooldown_autoprobe_skip_over_sec",
-                     "warm_refill_wake_min_cooldown_age_sec",
-                     "cooldown_host_midstream_502_sec"):
-            _val = raw.get(_fld)
-            if _val is not None:
-                try:
-                    setattr(p, _fld, max(0.0, float(_val)))
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"{_fld} deve essere un numero >= 0") from None
-        _set_bool(p, raw, "cooldown_autoprobe_crisis_enabled")
-        if raw.get("repair_exempt_streak_limit") is not None:
-            try:
-                p.repair_exempt_streak_limit = max(
-                    0, int(raw["repair_exempt_streak_limit"]))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "repair_exempt_streak_limit deve essere un intero >= 0"
-                ) from None
-        for _fld in ("model_fail_window_sec", "model_fail_threshold",
-                     "model_fail_cooldown_sec", "degraded_min_providers",
-                     "degraded_entry_grace_sec", "degraded_exit_grace_sec",
-                     "cooldown_estimate_ceiling_sec"):
-            if raw.get(_fld) is not None:
-                try:
-                    setattr(p, _fld, max(0, int(raw[_fld])))
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"{_fld} deve essere un intero >= 0") from None
-        _set_bool(p, raw, "degraded_mode_enabled", skip_none=True)
-        _set_bool(p, raw, "key_concurrency_enabled", skip_none=True)
-        for _fld in ("key_concurrency_max",
-                     "key_concurrency_lease_max_age_sec"):
-            if raw.get(_fld) is not None:
-                try:
-                    setattr(p, _fld, max(0, int(raw[_fld])))
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"{_fld} deve essere un intero >= 0") from None
-        if raw.get("quirks") is not None:
-            _q = raw["quirks"]
-            if not isinstance(_q, (list, tuple)):
-                raise ValueError("quirks deve essere una lista di oggetti")
-            _qout = []
-            for _it in _q:
-                if not isinstance(_it, dict):
-                    raise ValueError("ogni quirk deve essere un oggetto")
-                _glob = str(_it.get("model") or "").strip().lower()
-                _flag = str(_it.get("flag") or "").strip().lower()
-                if not _glob or not _flag:
-                    raise ValueError(
-                        "ogni quirk richiede 'model' (glob) e 'flag'")
-                _sev = str(_it.get("severity") or "warning").strip().lower()
-                if _sev not in ("blocker", "warning", "info"):
-                    raise ValueError(
-                        "severity deve essere blocker|warning|info")
-                _qout.append({"model": _glob, "flag": _flag,
-                              "severity": _sev,
-                              "note": str(_it.get("note") or "")})
-            p.quirks = _qout
-        if raw.get("degraded_healthy_ratio") is not None:
-            try:
-                _r = float(raw["degraded_healthy_ratio"])
-            except (TypeError, ValueError):
-                raise ValueError("degraded_healthy_ratio deve essere un "
-                                 "numero tra 0 e 1") from None
-            if not (0.0 <= _r <= 1.0):
-                raise ValueError("degraded_healthy_ratio deve essere tra 0 e 1")
-            p.degraded_healthy_ratio = _r
-        for _fld in ("cooldown_autoprobe_crisis_ratio",
-                     "cooldown_autoprobe_crisis_mult",
-                     "hotreload_probe_timeout_sec",
-                     "hotreload_probe_cooldown_sec",
-                     "hotreload_drain_ttl_sec"):
-            _val = raw.get(_fld)
-            if _val is not None:
-                try:
-                    setattr(p, _fld, max(0.0, float(_val)))
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"{_fld} deve essere un numero >= 0") from None
-        _set_int(p, raw, "hotreload_probe_max", minimum=0)
-        _set_bool(p, raw, "hotreload_probe_enabled")
-        _set_int(p, raw, "loop_stream_buffer_words", minimum=0)
-        _set_int(p, raw, "conc_default_limit", minimum=1)
-        _set_int(p, raw, "conc_max_limit", minimum=1)
-        _set_int(p, raw, "conc_learn_success_streak", minimum=1)
-        _set_float(p, raw, "conc_token_ratio", lambda x: not (0.0 <= x <= 5.0), "conc_token_ratio deve essere 0..5")
-        _set_bool(p, raw, "request_coalescing_enabled")
-        _set_nonneg_float(p, raw, "request_coalescing_ttl_sec", "request_coalescing_ttl_sec deve essere un numero >= 0")
-        _set_int(p, raw, "request_coalescing_max_waiters", minimum=0)
-        _rc_cache = raw.get("request_coalescing_cache_sec")
-        if _rc_cache is not None:
-            try:
-                p.request_coalescing_cache_sec = max(0.0, float(_rc_cache))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "request_coalescing_cache_sec deve essere un "
-                    "numero >= 0") from None
-        _set_bool(p, raw, "rate_hint_skip_enabled")
-        _rh = raw.get("rate_hint_ttl_sec")
-        if _rh is not None:
-            try:
-                v = float(_rh)
-            except (TypeError, ValueError):
-                raise ValueError("rate_hint_ttl_sec: numero richiesto") from None
-            if not (0.0 <= v <= 300.0):
-                raise ValueError("rate_hint_ttl_sec: 0..300")
-            p.rate_hint_ttl_sec = v
-        _set_int(p, raw, "rate_hint_remaining_max", minimum=0, maximum=100000)
-        _rp = raw.get("rate_hint_proven_sec")
-        if _rp is not None:
-            try:
-                v = float(_rp)
-            except (TypeError, ValueError):
-                raise ValueError("rate_hint_proven_sec: numero richiesto") from None
-            if not (0.0 <= v <= 86400.0):
-                raise ValueError("rate_hint_proven_sec: 0..86400")
-            p.rate_hint_proven_sec = v
-        _set_bool(p, raw, "key_soft_429_enabled")
-        _set_int(p, raw, "key_soft_max_sec", minimum=10, maximum=86400)
-        _set_bool(p, raw, "anon_session_fingerprint")
-        _set_int(p, raw, "anon_session_fp_system_chars", minimum=0)
-        _set_int(p, raw, "sticky_ttl_sec", minimum=1)
-        _set_bool(p, raw, "sticky_handoff_same_family")
-        _set_int(p, raw, "cooldown_sec", minimum=0)
-        _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)
-        _set_int(p, raw, "max_fallback_tries", minimum=1)
-        _set_int(p, raw, "hotwords_window", minimum=1)
-        _set_int(p, raw, "step_up_pct", minimum=1, maximum=200)
-
-        if "scoring_weights" in raw:
-            sw = raw["scoring_weights"]
-            if not isinstance(sw, dict):
-                raise ValueError("scoring_weights deve essere un oggetto")
-            merged = dict(DEFAULT_SCORING_WEIGHTS)
-            for wk, wv in sw.items():
-                if wk not in DEFAULT_SCORING_WEIGHTS:
-                    raise ValueError(
-                        f"scoring_weights.{wk} non riconosciuto "
-                        f"(ammessi: {', '.join(sorted(DEFAULT_SCORING_WEIGHTS))})")
-                try:
-                    merged[wk] = float(wv)
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"scoring_weights.{wk} deve essere un numero") from None
-            p.scoring_weights = merged
-
-        for key, attr in (("proxy_prefix", "proxy_prefix"),
-                          ("go_suffix", "go_suffix"),
-                          ("fallback_suffix", "fallback_suffix"),
-                          ("service_name", "service_name"),
-                          ("openrouter_app_referer", "openrouter_app_referer"),
-                          ("openrouter_app_title", "openrouter_app_title")):
-            if key in raw:
-                if not isinstance(raw[key], str) or not raw[key]:
-                    raise ValueError(f"{key} deve essere una stringa non vuota")
-                setattr(p, attr, raw[key].strip())
-
-        if "legacy_prefixes" in raw:
-            lp = raw["legacy_prefixes"]
-            if not isinstance(lp, list) or \
-                    not all(isinstance(x, str) and x for x in lp):
-                raise ValueError(
-                    "legacy_prefixes deve essere una lista di stringhe non vuote")
-            p.legacy_prefixes = lp
-
-        if "strip_client_fields" in raw:
-            scf = raw["strip_client_fields"]
-            if not isinstance(scf, list) or \
-                    not all(isinstance(x, str) and x.strip() for x in scf):
-                raise ValueError(
-                    "strip_client_fields deve essere una lista di stringhe "
-                    "non vuote")
-            p.strip_client_fields = [x.strip() for x in scf]
-
-        if "hotwords" in raw:
-            hw = raw["hotwords"]
-            if not isinstance(hw, list) or \
-                    not all(isinstance(x, str) for x in hw):
-                raise ValueError("hotwords deve essere una lista di regex")
-            p.hotwords = hw
-
-        if "speed_hotwords" in raw:
-            shw = raw["speed_hotwords"]
-            if not isinstance(shw, list) or \
-                    not all(isinstance(x, str) for x in shw):
-                raise ValueError(
-                    "speed_hotwords deve essere una lista di regex")
-            p.speed_hotwords = shw
-        _set_int(p, raw, "speed_min_dim_k", minimum=0)
-        if "speed_qualify_pct" in raw:
-            p.speed_qualify_pct = _valid_pct(raw["speed_qualify_pct"],
-                                             "speed_qualify_pct")
-
-        profs = raw.get("profiles")
-        if profs is not None:
-            if not isinstance(profs, dict):
-                raise ValueError("profiles deve essere una mappa profilo->opzioni")
-            for pname, opts in profs.items():
-                if not isinstance(opts, dict):
-                    raise ValueError(f"profiles.{pname}: deve essere una mappa")
-                if "step_up_pct" in opts:
-                    p.profile_step_up_pct[pname] = _valid_pct(
-                        opts["step_up_pct"], f"profiles.{pname}.step_up_pct")
-                if "speed_min_dim_k" in opts:
-                    v = opts["speed_min_dim_k"]
-                    if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                            or v < 0:
-                        raise ValueError(
-                            f"profiles.{pname}.speed_min_dim_k non valido: {v!r}")
-                    p.profile_speed_min_dim_k[pname] = int(v)
-                if "speed_qualify_pct" in opts:
-                    p.profile_speed_qualify_pct[pname] = _valid_pct(
-                        opts["speed_qualify_pct"],
-                        f"profiles.{pname}.speed_qualify_pct")
-
-        als = raw.get("aliases")
-        if als is not None:
-            if not isinstance(als, dict):
-                raise ValueError("aliases deve essere una mappa nome->nome")
-            for k, v in als.items():
-                if not isinstance(v, str) or not v:
-                    raise ValueError(f"aliases.{k}: target deve essere una stringa")
-                p.aliases[str(k)] = v
-
-        aks = raw.get("alias_keys")
-        if aks is not None:
-            if not isinstance(aks, dict):
-                raise ValueError("alias_keys deve essere una mappa alias->chiave")
-            for k, v in aks.items():
-                if str(k) not in p.aliases:
-                    raise ValueError(
-                        f"alias_keys.{k}: l'alias '{k}' non esiste in aliases")
-                if not isinstance(v, str) or len(v.strip()) < 8:
-                    raise ValueError(
-                        f"alias_keys.{k}: la chiave deve avere almeno 8 caratteri")
-                p.alias_keys[str(k)] = v.strip()
-
-        cks = raw.get("client_keys")
-        if cks is not None:
-            if not isinstance(cks, dict):
-                raise ValueError("client_keys deve essere una mappa profilo->chiave")
-            for k, v in cks.items():
-                if not isinstance(k, str) or not k.strip():
-                    raise ValueError("client_keys: nome profilo non valido")
-                if not isinstance(v, str) or len(v.strip()) < 8:
-                    raise ValueError(
-                        f"client_keys.{k}: la chiave deve avere almeno 8 caratteri")
-                p.client_keys[k.strip()] = v.strip()
-
-        # pricing per la stima costi del ledger (pattern glob -> USD/1M tok)
-        pr = raw.get("pricing")
-        if pr is not None:
-            if not isinstance(pr, dict):
-                raise ValueError("pricing deve essere una mappa pattern->costi")
-            for pat, cfgp in pr.items():
-                if not isinstance(pat, str) or not pat.strip():
-                    raise ValueError("pricing: pattern non valido")
-                if not isinstance(cfgp, dict) or (
-                        "prompt_per_1m" not in cfgp
-                        and "completion_per_1m" not in cfgp):
-                    raise ValueError(
-                        f"pricing.{pat}: servono prompt_per_1m e/o "
-                        "completion_per_1m (USD per milione di token)")
-                try:
-                    pp = float(cfgp.get("prompt_per_1m") or 0)
-                    cp = float(cfgp.get("completion_per_1m") or 0)
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"pricing.{pat}: valori numerici richiesti") from None
-                if pp < 0 or cp < 0:
-                    raise ValueError(f"pricing.{pat}: valori >= 0")
-                p.pricing[pat.strip()] = {"prompt_per_1m": pp,
-                                          "completion_per_1m": cp}
-
-        rm = raw.get("response_model")
-        if rm is not None:
-            if rm not in ("requested", "deployment", "upstream"):
-                raise ValueError(
-                    f"response_model non valido: {rm!r} "
-                    "(ammessi: requested|deployment|upstream)")
-            p.response_model = str(rm)
-
-        _set_bool(p, raw, "adaptive_pick", skip_none=True)
-        _set_bool(p, raw, "deployment_sticky", skip_none=True)
-        _set_bool(p, raw, "deployment_sticky_per_capability", skip_none=True)
-        _set_bool(p, raw, "escalation_pin", skip_none=True)
-        _set_int(p, raw, "escalation_pin_ttl_sec", minimum=1)
-        _set_int(p, raw, "escalation_pin_probe_dims", minimum=0)
-        _set_bool(p, raw, "escalation_pin_probe_retry", skip_none=True)
-        _set_bool(p, raw, "escalation_pin_probe_random", skip_none=True)
-        for num_key, attr in (("recency_halflife_sec", "recency_halflife_sec"),
-                              ("latency_ref_ms", "latency_ref_ms"),
-                              ("go_recency_halflife_sec", "go_recency_halflife_sec")):
-            nv = raw.get(num_key)
-            if nv is not None:
-                if isinstance(nv, bool) or not isinstance(nv, (int, float)) \
-                        or nv <= 0:
-                    raise ValueError(f"{num_key} non valido: {nv!r} "
-                                     "(numero > 0 richiesto)")
-                setattr(p, attr, float(nv))
-
-        _set_bool(p, raw, "enable_effort_temperature_override", skip_none=True)
-        _eiw = raw.get("effort_intel_weight")
-        if _eiw is not None:
-            if isinstance(_eiw, bool) or not isinstance(_eiw, (int, float)) \
-                    or float(_eiw) < 0:
-                raise ValueError(
-                    "effort_intel_weight deve essere un numero >= 0")
-            p.effort_intel_weight = float(_eiw)
-        _eto = raw.get("effort_temperature_overrides")
-        if _eto is not None:
-            if not isinstance(_eto, dict):
-                raise ValueError(
-                    "effort_temperature_overrides deve essere una mappa "
-                    "{low: t, medium: t, high: t}")
-            clean: dict[str, float] = {}
-            for k, v in _eto.items():
-                lk = str(k).strip().lower()
-                if lk not in ("low", "medium", "high"):
-                    raise ValueError(
-                        f"effort_temperature_overrides: chiave {k!r} non valida "
-                        "(ammesse: low|medium|high)")
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-                    raise ValueError(
-                        f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
-                clean[lk] = float(v)
-            p.effort_temperature_overrides = clean
-
-        # --- DYNAMIC SCORING ---
-        _ds = raw.get("dynamic_scoring")
-        if _ds is not None:
-            if not isinstance(_ds, dict):
-                raise ValueError("dynamic_scoring deve essere una mappa")
-            if "enabled" in _ds:
-                p.dynamic_scoring_enabled = _coerce_bool(
-                    _ds["enabled"], "dynamic_scoring.enabled")
-            for _k, _attr in (
-                    ("latency_p95_weight", "dynamic_scoring_latency_p95_weight"),
-                    ("error_rate_weight", "dynamic_scoring_error_rate_weight"),
-                    ("throughput_weight", "dynamic_scoring_throughput_weight")):
-                _v = _ds.get(_k)
-                if _v is not None:
-                    if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
-                        raise ValueError(f"dynamic_scoring.{_k} deve essere un numero >= 0")
-                    setattr(p, _attr, float(_v))
-
-        # --- CIRCUIT BREAKER per API Key ---
-        _cb = raw.get("circuit_breaker")
-        if _cb is not None:
-            if not isinstance(_cb, dict):
-                raise ValueError("circuit_breaker deve essere una mappa")
-            if "enabled" in _cb:
-                p.circuit_breaker_enabled = _coerce_bool(
-                    _cb["enabled"], "circuit_breaker.enabled")
-            _ct = _cb.get("threshold")
-            if _ct is not None:
-                if isinstance(_ct, bool) or not isinstance(_ct, (int, float)) or _ct < 1:
-                    raise ValueError("circuit_breaker.threshold deve essere intero >= 1")
-                p.circuit_breaker_threshold = int(_ct)
-            _cto = _cb.get("timeout")
-            if _cto is not None:
-                if isinstance(_cto, bool) or not isinstance(_cto, (int, float)) or _cto <= 0:
-                    raise ValueError("circuit_breaker.timeout deve essere numero > 0")
-                p.circuit_breaker_timeout = float(_cto)
-            _cho = _cb.get("half_open_requests")
-            if _cho is not None:
-                if isinstance(_cho, bool) or not isinstance(_cho, (int, float)) or _cho < 1:
-                    raise ValueError("circuit_breaker.half_open_requests deve essere intero >= 1")
-                p.circuit_breaker_half_open_requests = int(_cho)
-            _cs = _cb.get("scope")
-            if _cs is not None:
-                _csl = str(_cs).lower()
-                if _csl not in ("hybrid", "dep", "key"):
-                    raise ValueError(
-                        "circuit_breaker.scope deve essere hybrid|dep|key")
-                p.circuit_breaker_scope = _csl
-
-        _mpb = raw.get("model_preference_base")
-        if _mpb is not None:
-            if isinstance(_mpb, bool) or not isinstance(_mpb, (int, float)) or _mpb < 0:
-                raise ValueError("model_preference_base deve essere numero >= 0")
-            p.model_preference_base = float(_mpb)
-
-        # --- THOUGHT_SIGNATURE (Gemini 3 dummy fill) ---
-        _set_bool(p, raw, "thought_sig_dummy_fill", skip_none=True)
-        _tsv = raw.get("thought_sig_dummy_value")
-        if _tsv is not None:
-            _v = str(_tsv).strip()
-            if _v:
-                p.thought_sig_dummy_value = _v
-
-        # --- TOOL_REPAIR ---
-        _tr = raw.get("tool_repair")
-        if _tr is not None:
-            if not isinstance(_tr, dict):
-                raise ValueError("tool_repair deve essere una mappa")
-            _tr_en = _tr.get("enabled")
-            if _tr_en is not None:
-                p.tool_repair_enabled = _coerce_bool(_tr_en, "tool_repair.enabled")
-            _tr_lvl = _tr.get("default_level")
-            if _tr_lvl is not None:
-                if str(_tr_lvl).strip().lower() not in ("off", "safe", "aggressive"):
-                    raise ValueError("tool_repair.default_level deve essere off|safe|aggressive")
-                p.tool_repair_default_level = str(_tr_lvl).strip().lower()
-            _tr_g = _tr.get("disable_for_google")
-            if _tr_g is not None:
-                p.tool_repair_disable_for_google = _coerce_bool(_tr_g, "tool_repair.disable_for_google")
-            _tr_sz = _tr.get("max_args_size")
-            if _tr_sz is not None:
-                if isinstance(_tr_sz, bool) or not isinstance(_tr_sz, (int, float)):
-                    raise ValueError("tool_repair.max_args_size deve essere un intero")
-                p.tool_repair_max_args_size = int(_tr_sz)
-            _tr_ar = _tr.get("annotate_reasoning")
-            if _tr_ar is not None:
-                p.tool_repair_annotate_reasoning = _coerce_bool(_tr_ar, "tool_repair.annotate_reasoning")
-            _fc = _tr.get("fake_call")
-            if _fc is not None:
-                if not isinstance(_fc, dict):
-                    raise ValueError("tool_repair.fake_call deve essere una mappa")
-                if "enabled" in _fc:
-                    p.tool_repair_fake_call_enabled = _coerce_bool(
-                        _fc["enabled"], "tool_repair.fake_call.enabled")
-                _pat = _fc.get("patterns")
-                if _pat is not None:
-                    if not isinstance(_pat, (list, tuple)):
-                        raise ValueError("tool_repair.fake_call.patterns deve essere una lista")
-                    p.tool_repair_fake_call_patterns = tuple(str(x) for x in _pat)
-                for _k, _attr in (("max_escalations", "tool_repair_fake_call_max_escalations"),
-                                  ("stream_hold_max_bytes", "tool_repair_fake_call_hold_max_bytes"),
-                                  ("stream_hold_timeout_ms", "tool_repair_fake_call_hold_timeout_ms")):
-                    _v = _fc.get(_k)
-                    if _v is not None:
-                        if isinstance(_v, bool) or not isinstance(_v, (int, float)):
-                            raise ValueError(f"tool_repair.fake_call.{_k} deve essere un intero")
-                        setattr(p, _attr, int(_v))
-
-        # --- HISTORY_NORMALIZE (#1) ---
-        _hn = raw.get("history_normalize")
-        if _hn is not None:
-            if not isinstance(_hn, dict):
-                raise ValueError("history_normalize deve essere una mappa")
-            for _k, _attr in (
-                    ("enabled", "history_normalize_enabled"),
-                    ("tail_only", "history_normalize_tail_only"),
-                    ("drop_orphan_tool", "history_normalize_drop_orphan_tool"),
-                    ("drop_dangling_tool_calls",
-                     "history_normalize_drop_dangling_tool_calls"),
-                    ("drop_empty_assistant",
-                     "history_normalize_drop_empty_assistant"),
-                    ("dedupe_system", "history_normalize_dedupe_system")):
-                if _k in _hn:
-                    setattr(p, _attr, _coerce_bool(
-                        _hn[_k], f"history_normalize.{_k}"))
-            if "reasoning_content_max_chars" in _hn:
-                v = _hn["reasoning_content_max_chars"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (-1 <= int(v) <= 200000):
-                    raise ValueError(
-                        "history_normalize.reasoning_content_max_chars "
-                        "deve essere -1..200000")
-                p.history_normalize_reasoning_content_max_chars = int(v)
-            if "reasoning_keep_recent" in _hn:
-                v = _hn["reasoning_keep_recent"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 20):
-                    raise ValueError(
-                        "history_normalize.reasoning_keep_recent "
-                        "deve essere 0..20")
-                p.history_normalize_reasoning_keep_recent = int(v)
-
-        # --- SAMPLING_DEFAULTS (#2A) + LOOP_DETECTOR (#2B) ---
-        _sd = raw.get("sampling_defaults")
-        if _sd is not None:
-            if not isinstance(_sd, dict):
-                raise ValueError("sampling_defaults deve essere una mappa")
-            if "enabled" in _sd:
-                p.sampling_enabled = _coerce_bool(
-                    _sd["enabled"], "sampling_defaults.enabled")
-            _ap = _sd.get("allow_providers")
-            if _ap is not None:
-                if not isinstance(_ap, (list, tuple)):
-                    raise ValueError("sampling_defaults.allow_providers "
-                                     "deve essere una lista")
-                p.sampling_allow_providers = tuple(
-                    str(x).lower() for x in _ap)
-            _pp = _sd.get("provider_params")
-            if _pp is not None:
-                if not isinstance(_pp, dict):
-                    raise ValueError("sampling_defaults.provider_params "
-                                     "deve essere una mappa")
-                _allowed = {"top_p", "presence_penalty",
-                            "frequency_penalty", "repetition_penalty"}
-                _clean_pp: dict = {}
-                for _pk, _pv in _pp.items():
-                    if not isinstance(_pv, dict):
-                        raise ValueError("sampling_defaults.provider_params "
-                                         "valori devono essere mappe")
-                    _row: dict = {}
-                    for _k2, _v2 in _pv.items():
-                        if str(_k2) not in _allowed:
-                            raise ValueError("sampling_defaults.provider_params:"
-                                             f" chiave {_k2!r} non ammessa")
-                        if isinstance(_v2, bool) or not isinstance(
-                                _v2, (int, float)):
-                            raise ValueError(
-                                f"sampling_defaults.provider_params.{_k2}"
-                                " deve essere numerico")
-                        _row[str(_k2)] = float(_v2)
-                    _clean_pp[str(_pk).lower()] = _row
-                p.sampling_provider_params = _clean_pp
-            _lp = _sd.get("loop")
-            if _lp is not None:
-                if not isinstance(_lp, dict):
-                    raise ValueError("sampling_defaults.loop deve essere "
-                                     "una mappa")
-                for _k, _attr, _lo, _hi in (
-                        ("enabled", "loop_detector_enabled", None, None),
-                        ("ngram_size", "loop_ngram_size", 2, 64),
-                        ("repeats", "loop_repeats", 2, 16),
-                        ("toolcall_repeat", "loop_toolcall_repeat", 2, 16),
-                        ("min_tokens", "loop_min_tokens", 1, 2048)):
-                    _v = _lp.get(_k)
-                    if _v is None:
-                        continue
-                    if _lo is None:
-                        setattr(p, _attr, _coerce_bool(
-                            _v, f"sampling_defaults.loop.{_k}"))
-                        continue
-                    if isinstance(_v, bool) or not isinstance(
-                            _v, (int, float)) or not (_lo <= int(_v) <= _hi):
-                        raise ValueError(
-                            f"sampling_defaults.loop.{_k} deve essere "
-                            f"{_lo}..{_hi}")
-                    setattr(p, _attr, int(_v))
-        _ld = raw.get("loop_detector")
-        if _ld is not None:
-            if not isinstance(_ld, dict):
-                raise ValueError("loop_detector deve essere una mappa")
-            if "enabled" in _ld:
-                p.loop_detector_enabled = _coerce_bool(
-                    _ld["enabled"], "loop_detector.enabled")
-            for _k, _attr, _lo, _hi in (
-                    ("ngram_size", "loop_ngram_size", 2, 64),
-                    ("repeats", "loop_repeats", 2, 16),
-                    ("toolcall_repeat", "loop_toolcall_repeat", 2, 16),
-                    ("min_tokens", "loop_min_tokens", 1, 2048)):
-                _v = _ld.get(_k)
-                if _v is None:
-                    continue
-                if isinstance(_v, bool) or not isinstance(
-                        _v, (int, float)) or not (_lo <= int(_v) <= _hi):
-                    raise ValueError(
-                        f"loop_detector.{_k} deve essere {_lo}..{_hi}")
-                setattr(p, _attr, int(_v))
-
-        # --- CORRECTIVE_RETRY (#3) ---
-        _cr = raw.get("corrective_retry")
-        if _cr is not None:
-            if not isinstance(_cr, dict):
-                raise ValueError("corrective_retry deve essere una mappa")
-            if "enabled" in _cr:
-                p.corrective_retry_enabled = _coerce_bool(
-                    _cr["enabled"], "corrective_retry.enabled")
-            if "max_attempts" in _cr:
-                _v = _cr["max_attempts"]
-                if isinstance(_v, bool) or not isinstance(
-                        _v, (int, float)) or not (0 <= int(_v) <= 1):
-                    raise ValueError("corrective_retry.max_attempts "
-                                     "deve essere 0..1")
-                p.corrective_retry_max_attempts = int(_v)
-
-        # --- TEXT_TOOLCALL (#6) ---
-        _tt = raw.get("text_toolcall")
-        if _tt is not None:
-            if not isinstance(_tt, dict):
-                raise ValueError("text_toolcall deve essere una mappa")
-            if "enabled" in _tt:
-                p.text_toolcall_enabled = _coerce_bool(
-                    _tt["enabled"], "text_toolcall.enabled")
-            if "require_declared_name" in _tt:
-                p.text_toolcall_require_declared_name = _coerce_bool(
-                    _tt["require_declared_name"],
-                    "text_toolcall.require_declared_name")
-            _af = _tt.get("allow_formats")
-            if _af is not None:
-                if not isinstance(_af, (list, tuple)):
-                    raise ValueError("text_toolcall.allow_formats deve "
-                                     "essere una lista")
-                p.text_toolcall_allow_formats = tuple(str(x) for x in _af)
-            if "max_bytes" in _tt:
-                _v = _tt["max_bytes"]
-                if isinstance(_v, bool) or not isinstance(
-                        _v, (int, float)) or int(_v) < 1:
-                    raise ValueError("text_toolcall.max_bytes deve "
-                                     "essere >= 1")
-                p.text_toolcall_max_bytes = int(_v)
-            if "hold_until_close" in _tt:
-                p.text_toolcall_hold_until_close = _coerce_bool(
-                    _tt["hold_until_close"], "text_toolcall.hold_until_close")
-            if "fallback_to_escalation" in _tt:
-                p.text_toolcall_fallback_to_escalation = _coerce_bool(
-                    _tt["fallback_to_escalation"],
-                    "text_toolcall.fallback_to_escalation")
-
-        # --- TOOLCALL_TRUNCATION ---
-        _tct = raw.get("toolcall_truncation")
-        if _tct is not None:
-            if not isinstance(_tct, dict):
-                raise ValueError("toolcall_truncation deve essere una mappa")
-            if "enabled" in _tct:
-                p.toolcall_truncation_enabled = _coerce_bool(
-                    _tct["enabled"], "toolcall_truncation.enabled")
-            if "holdback" in _tct:
-                p.toolcall_truncation_holdback = _coerce_bool(
-                    _tct["holdback"], "toolcall_truncation.holdback")
-            _cd = _tct.get("cooldown_sec")
-            if _cd is not None:
-                if isinstance(_cd, bool) or not isinstance(
-                        _cd, (int, float)) or int(_cd) < 1:
-                    raise ValueError("toolcall_truncation.cooldown_sec deve "
-                                     "essere >= 1")
-                p.toolcall_truncation_cooldown_sec = int(_cd)
-
-        sdg = raw.get("session_dep_guard")
-        if sdg is not None:
-            if not isinstance(sdg, dict):
-                raise ValueError("session_dep_guard deve essere una mappa")
-            if "enabled" in sdg:
-                p.session_dep_guard_enabled = _coerce_bool(
-                    sdg["enabled"], "session_dep_guard.enabled")
-            if sdg.get("sec") is not None:
-                _v = sdg["sec"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"session_dep_guard.sec non valido: {_v!r}")
-                p.session_dep_guard_sec = int(_v)
-
-        wp = raw.get("warm_pool")
-        if wp is not None:
-            if not isinstance(wp, dict):
-                raise ValueError("warm_pool deve essere una mappa")
-            if "enabled" in wp:
-                p.warm_pool_enabled = _coerce_bool(
-                    wp["enabled"], "warm_pool.enabled")
-            if wp.get("ttl_sec") is not None:
-                _v = wp["ttl_sec"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(f"warm_pool.ttl_sec non valido: {_v!r}")
-                p.warm_pool_ttl_sec = int(_v)
-            if wp.get("max_attempts") is not None:
-                _v = wp["max_attempts"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.max_attempts non valido: {_v!r}")
-                p.warm_pool_max_attempts = int(_v)
-            if "allow_slow" in wp:
-                p.warm_pool_allow_slow = _coerce_bool(
-                    wp["allow_slow"], "warm_pool.allow_slow")
-            if "refill_enabled" in wp:
-                p.warm_refill_enabled = _coerce_bool(
-                    wp["refill_enabled"], "warm_pool.refill_enabled")
-            if wp.get("ready_min") is not None:
-                _v = wp["ready_min"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.ready_min non valido: {_v!r}")
-                p.warm_ready_min = int(_v)
-            if "ready_min_adaptive" in wp:
-                p.warm_ready_rpm_adaptive = _coerce_bool(
-                    wp["ready_min_adaptive"], "warm_pool.ready_min_adaptive")
-            if wp.get("ready_min_rpm_window_sec") is not None:
-                _v = wp["ready_min_rpm_window_sec"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v <= 0:
-                    raise ValueError(
-                        f"warm_pool.ready_min_rpm_window_sec non valido: {_v!r}")
-                p.warm_ready_rpm_window_sec = int(_v)
-            if wp.get("ready_min_rpm_base") is not None:
-                _v = wp["ready_min_rpm_base"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.ready_min_rpm_base non valido: {_v!r}")
-                p.warm_ready_rpm_base = float(_v)
-            if wp.get("ready_min_rpm_step") is not None:
-                _v = wp["ready_min_rpm_step"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v <= 0:
-                    raise ValueError(
-                        f"warm_pool.ready_min_rpm_step non valido: {_v!r}")
-                p.warm_ready_rpm_step = float(_v)
-            if wp.get("ready_min_max") is not None:
-                _v = wp["ready_min_max"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.ready_min_max non valido: {_v!r}")
-                p.warm_ready_min_max = int(_v)
-            if "canary_warm_last" in wp:
-                p.canary_warm_last = _coerce_bool(
-                    wp["canary_warm_last"], "warm_pool.canary_warm_last")
-            if wp.get("refill_default_out_tokens") is not None:
-                _v = wp["refill_default_out_tokens"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v <= 0:
-                    raise ValueError(
-                        f"warm_pool.refill_default_out_tokens non valido: {_v!r}")
-                p.warm_refill_default_out_tokens = int(_v)
-            if wp.get("max_inflight") is not None:
-                _v = wp["max_inflight"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.max_inflight non valido: {_v!r}")
-                p.warm_refill_max_inflight = int(_v)
-            if wp.get("wake_max_attempts") is not None:
-                _v = wp["wake_max_attempts"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.wake_max_attempts non valido: {_v!r}")
-                p.warm_refill_wake_max_attempts = int(_v)
-            if "borrow_enabled" in wp:
-                p.warm_borrow_enabled = _coerce_bool(
-                    wp["borrow_enabled"], "warm_pool.borrow_enabled")
-            if wp.get("borrow_idle_sec") is not None:
-                _v = wp["borrow_idle_sec"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.borrow_idle_sec non valido: {_v!r}")
-                p.warm_borrow_idle_sec = float(_v)
-            if "borrow_selectable" in wp:
-                p.warm_borrow_selectable = _coerce_bool(
-                    wp["borrow_selectable"], "warm_pool.borrow_selectable")
-            if "nonstream_canary_allowed" in wp:
-                p.nonstream_canary_allowed = _coerce_bool(
-                    wp["nonstream_canary_allowed"],
-                    "warm_pool.nonstream_canary_allowed")
-            if wp.get("slow_race_after_ms") is not None:
-                _v = wp["slow_race_after_ms"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.slow_race_after_ms non valido: {_v!r}")
-                p.stream_slow_race_after_ms = int(_v)
-            if wp.get("nonstream_slow_race_after_ms") is not None:
-                _v = wp["nonstream_slow_race_after_ms"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        "warm_pool.nonstream_slow_race_after_ms non valido: "
-                        f"{_v!r}")
-                p.nonstream_slow_race_after_ms = int(_v)
-            if wp.get("slow_canary_after_ms") is not None:
-                _v = wp["slow_canary_after_ms"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.slow_canary_after_ms non valido: {_v!r}")
-                p.slow_canary_after_ms = int(_v)
-            if wp.get("slow_race_canaries") is not None:
-                _v = wp["slow_race_canaries"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 1:
-                    raise ValueError(
-                        f"warm_pool.slow_race_canaries non valido: {_v!r}")
-                p.stream_slow_race_canaries = int(_v)
-            if wp.get("slow_race_max_warm") is not None:
-                _v = wp["slow_race_max_warm"]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(
-                        f"warm_pool.slow_race_max_warm non valido: {_v!r}")
-                p.slow_race_max_warm = int(_v)
-            if "warm_pick_fastest" in wp:
-                p.warm_pick_fastest = _coerce_bool(
-                    wp["warm_pick_fastest"], "warm_pool.warm_pick_fastest")
-            if "canary_provider_sweep" in wp:
-                p.canary_provider_sweep_enabled = _coerce_bool(
-                    wp["canary_provider_sweep"],
-                    "warm_pool.canary_provider_sweep")
-            if "provider_alternation" in wp:
-                p.provider_alternation_enabled = _coerce_bool(
-                    wp["provider_alternation"],
-                    "warm_pool.provider_alternation")
-        _set_bool(p, raw, "warm_borrow_enabled", skip_none=True)
-        if raw.get("warm_borrow_idle_sec") is not None:
-            _v = raw["warm_borrow_idle_sec"]
-            if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
-                raise ValueError(f"warm_borrow_idle_sec non valido: {_v!r}")
-            p.warm_borrow_idle_sec = float(_v)
-        _set_bool(p, raw, "warm_borrow_selectable", skip_none=True)
-        _set_bool(p, raw, "nonstream_canary_allowed", skip_none=True)
-        _set_bool(p, raw, "nonstream_hold_redirect", skip_none=True)
-        for _k, _attr in (("stream_slow_race_after_ms",
-                           "stream_slow_race_after_ms"),
-                          ("nonstream_slow_race_after_ms",
-                           "nonstream_slow_race_after_ms"),
-                          ("slow_canary_after_ms",
-                           "slow_canary_after_ms"),
-                          ("stream_slow_race_canaries",
-                           "stream_slow_race_canaries")):
-            if raw.get(_k) is not None:
-                _v = raw[_k]
-                if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
-                        or _v < 0:
-                    raise ValueError(f"{_k} non valido: {_v!r}")
-                setattr(p, _attr, int(_v))
-
-        ca = raw.get("cache_aware")
-        if ca is not None:
-            if not isinstance(ca, dict):
-                raise ValueError("cache_aware deve essere una mappa")
-            if "enabled" in ca:
-                p.cache_aware_enabled = _coerce_bool(ca["enabled"], "cache_aware.enabled")
-            if "prefix_audit" in ca:
-                p.cache_prefix_audit = _coerce_bool(
-                    ca["prefix_audit"], "cache_aware.prefix_audit")
-            if "prefer_last_success" in ca:
-                p.cache_prefer_last_success = _coerce_bool(
-                    ca["prefer_last_success"], "cache_aware.prefer_last_success")
-            if ca.get("holder_ttl_sec") is not None:
-                p.cache_holder_ttl_sec = int(ca["holder_ttl_sec"])
-            if "skip_probe_when_holder" in ca:
-                p.cache_skip_probe_when_holder = _coerce_bool(
-                    ca["skip_probe_when_holder"], "cache_aware.skip_probe_when_holder")
-            ct = ca.get("context_truncation")
-            if ct is not None:
-                if not isinstance(ct, dict):
-                    raise ValueError("cache_aware.context_truncation deve essere una mappa")
-                if "enabled" in ct:
-                    p.cache_ctx_truncation_enabled = _coerce_bool(
-                        ct["enabled"], "cache_aware.context_truncation.enabled")
-                for _k, _attr in (("keep_turns", "cache_ctx_keep_turns"),
-                                  ("max_tool_output_chars", "cache_ctx_max_tool_output_chars"),
-                                  ("min_saved_tokens", "cache_ctx_min_saved_tokens"),
-                                  ("min_ctx_tokens", "cache_ctx_min_ctx_tokens"),
-                                  ("switch_min_tokens", "cache_ctx_switch_min_tokens"),
-                                  ("head_chars", "cache_ctx_head_chars"),
-                                  ("tail_chars", "cache_ctx_tail_chars"),
-                                  ("tool_args_max_chars",
-                                   "cache_ctx_tool_args_max_chars"),
-                                  ("json_struct_max_items",
-                                   "cache_ctx_json_struct_max_items"),
-                                  ("json_struct_head",
-                                   "cache_ctx_json_struct_head"),
-                                  ("json_struct_tail",
-                                   "cache_ctx_json_struct_tail"),
-                                  ("cite_min_freq",
-                                   "cache_ctx_cite_min_freq")):
-                    _v = ct.get(_k)
-                    if _v is not None:
-                        if isinstance(_v, bool) or not isinstance(_v, (int, float)):
-                            raise ValueError(f"cache_aware.context_truncation.{_k} deve essere un intero")
-                        setattr(p, _attr, int(_v))
-                _ktp = ct.get("keep_tail_pct")
-                if _ktp is not None:
-                    if isinstance(_ktp, bool) or not isinstance(_ktp, (int, float)):
-                        raise ValueError("cache_aware.context_truncation."
-                                         "keep_tail_pct deve essere un numero")
-                    p.cache_ctx_keep_tail_pct = max(0.0, float(_ktp))
-                if "keep_error_outputs" in ct:
-                    p.cache_ctx_keep_error_outputs = _coerce_bool(
-                        ct["keep_error_outputs"],
-                        "cache_aware.context_truncation.keep_error_outputs")
-                if "on_deployment_switch" in ct:
-                    p.cache_ctx_on_deployment_switch = _coerce_bool(
-                        ct["on_deployment_switch"],
-                        "cache_aware.context_truncation.on_deployment_switch")
-                if ct.get("stub_text"):
-                    p.cache_ctx_stub_text = str(ct["stub_text"])
-                _ahr = ct.get("abs_headroom_ratio")
-                if _ahr is not None:
-                    if isinstance(_ahr, bool) or not isinstance(_ahr, (int, float)):
-                        raise ValueError("cache_aware.context_truncation."
-                                         "abs_headroom_ratio deve essere un numero")
-                    p.cache_ctx_abs_headroom_ratio = max(0.0, float(_ahr))
-                _rhr = ct.get("reasoning_headroom_ratio")
-                if _rhr is not None:
-                    if isinstance(_rhr, bool) or not isinstance(_rhr, (int, float)):
-                        raise ValueError("cache_aware.context_truncation."
-                                         "reasoning_headroom_ratio deve essere un numero")
-                    p.cache_ctx_reasoning_headroom_ratio = max(0.0, float(_rhr))
-                _rrr = ct.get("reasoning_reserve_ratio")
-                if _rrr is not None:
-                    if isinstance(_rrr, bool) or not isinstance(_rrr, (int, float)):
-                        raise ValueError("cache_aware.context_truncation."
-                                         "reasoning_reserve_ratio deve essere un numero")
-                    p.cache_ctx_reasoning_reserve_ratio = max(0.0,
-                                                              float(_rrr))
-                if "cite_retention" in ct:
-                    p.cache_ctx_cite_retention = _coerce_bool(
-                        ct["cite_retention"],
-                        "cache_aware.context_truncation.cite_retention")
-        # --- DEBUG (sniff input/output) ---
-        _dbg = raw.get("debug")
-        if _dbg is not None:
-            if not isinstance(_dbg, dict):
-                raise ValueError("debug deve essere una mappa")
-            _sn = _dbg.get("sniff")
-            if _sn is not None:
-                if not isinstance(_sn, dict):
-                    raise ValueError("debug.sniff deve essere una mappa")
-                if "enabled" in _sn:
-                    p.debug_sniff_enabled = _coerce_bool(
-                        _sn["enabled"], "debug.sniff.enabled")
-                if _sn.get("retention_hours") is not None:
-                    _rh = _sn["retention_hours"]
-                    if isinstance(_rh, bool) or \
-                            not isinstance(_rh, (int, float)) or int(_rh) < 1:
-                        raise ValueError("debug.sniff.retention_hours deve "
-                                         "essere >= 1")
-                    p.debug_sniff_retention_hours = int(_rh)
-        qj = raw.get("qc_json")
-        if qj is not None:
-            if not isinstance(qj, dict):
-                raise ValueError("qc_json deve essere una mappa")
-            # chiavi sconosciute IGNORATE (validazione soft);
-            # max_attempts clampata 1..8; bool coerenti anche da stringa.
-            if "enabled" in qj:
-                p.qc_json.enabled = _coerce_bool(qj["enabled"],
-                                                 "qc_json.enabled")
-            if "strip_fences" in qj:
-                p.qc_json.strip_fences = _coerce_bool(
-                    qj["strip_fences"], "qc_json.strip_fences")
-            if "annotate_reasoning" in qj:
-                p.qc_json.annotate_reasoning = _coerce_bool(
-                    qj["annotate_reasoning"], "qc_json.annotate_reasoning")
-            if "retry_provider_4xx" in qj:
-                p.qc_json.retry_provider_4xx = _coerce_bool(
-                    qj["retry_provider_4xx"], "qc_json.retry_provider_4xx")
-            if "watchdog_mark_no_done" in qj:
-                p.qc_json.watchdog_mark_no_done = _coerce_bool(
-                    qj["watchdog_mark_no_done"],
-                    "qc_json.watchdog_mark_no_done")
-            if "watchdog_cooldown_sec" in qj:
-                v = qj["watchdog_cooldown_sec"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 3600):
-                    raise ValueError("qc_json.watchdog_cooldown_sec deve "
-                                     "essere 0..3600")
-                p.qc_json.watchdog_cooldown_sec = int(v)
-            if "max_attempts" in qj:
-                v = qj["max_attempts"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)):
-                    raise ValueError("qc_json.max_attempts deve essere un intero")
-                p.qc_json.max_attempts = max(1, min(8, int(v)))
-            if "stream_first_content_ms" in qj:
-                v = qj["stream_first_content_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (2000 <= int(v) <= 900000):
-                    raise ValueError("qc_json.stream_first_content_ms deve "
-                                     "essere 2000..900000")
-                p.qc_json.stream_first_content_ms = int(v)
-            if "stream_first_content_adaptive" in qj:
-                p.qc_json.stream_first_content_adaptive = _coerce_bool(
-                    qj["stream_first_content_adaptive"],
-                    "qc_json.stream_first_content_adaptive")
-            if "stream_first_content_mult" in qj:
-                v = qj["stream_first_content_mult"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0.5 <= float(v) <= 30.0):
-                    raise ValueError("qc_json.stream_first_content_mult deve "
-                                     "essere 0.5..30.0")
-                p.qc_json.stream_first_content_mult = float(v)
-            if "stream_first_content_floor_ms" in qj:
-                v = qj["stream_first_content_floor_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 900000):
-                    raise ValueError("qc_json.stream_first_content_floor_ms "
-                                     "deve essere 0..900000")
-                p.qc_json.stream_first_content_floor_ms = int(v)
-            if "stream_hedge_delay_ms" in qj:
-                v = qj["stream_hedge_delay_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 60000):
-                    raise ValueError("qc_json.stream_hedge_delay_ms deve "
-                                     "essere 0..60000")
-                p.qc_json.stream_hedge_delay_ms = int(v)
-            if "stream_hedge_ttft_frac" in qj:
-                v = qj["stream_hedge_ttft_frac"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0.05 <= float(v) <= 5.0):
-                    raise ValueError("qc_json.stream_hedge_ttft_frac deve "
-                                     "essere 0.05..5.0")
-                p.qc_json.stream_hedge_ttft_frac = float(v)
-            if "stream_hedge_min_ms" in qj:
-                v = qj["stream_hedge_min_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 60000):
-                    raise ValueError("qc_json.stream_hedge_min_ms deve "
-                                     "essere 0..60000")
-                p.qc_json.stream_hedge_min_ms = int(v)
-            if "stream_hedge_max_ms" in qj:
-                v = qj["stream_hedge_max_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 60000):
-                    raise ValueError("qc_json.stream_hedge_max_ms deve "
-                                     "essere 0..60000")
-                p.qc_json.stream_hedge_max_ms = int(v)
-            if "stream_hedge_cross_tier" in qj:
-                p.qc_json.stream_hedge_cross_tier = _coerce_bool(
-                    qj["stream_hedge_cross_tier"],
-                    "qc_json.stream_hedge_cross_tier")
-            if "stream_hedge_tiers" in qj:
-                v = qj["stream_hedge_tiers"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (1 <= int(v) <= 2):
-                    raise ValueError("qc_json.stream_hedge_tiers deve essere 1..2")
-                p.qc_json.stream_hedge_tiers = int(v)
-            if "stream_hedge_max_races" in qj:
-                v = qj["stream_hedge_max_races"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 64):
-                    raise ValueError("qc_json.stream_hedge_max_races deve "
-                                     "essere 0..64 (0=illimitato)")
-                p.qc_json.stream_hedge_max_races = int(v)
-            if "stream_commit_min_chars" in qj:
-                v = qj["stream_commit_min_chars"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 2000):
-                    raise ValueError("qc_json.stream_commit_min_chars deve "
-                                     "essere 0..2000")
-                p.qc_json.stream_commit_min_chars = int(v)
-            if "stream_total_deadline_ms" in qj:
-                v = qj["stream_total_deadline_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (5000 <= int(v) <= 3600000):
-                    raise ValueError("qc_json.stream_total_deadline_ms deve "
-                                     "essere 5000..3600000")
-                p.qc_json.stream_total_deadline_ms = int(v)
-            if "stream_commit_include_reasoning" in qj:
-                p.qc_json.stream_commit_include_reasoning = _coerce_bool(
-                    qj["stream_commit_include_reasoning"],
-                    "qc_json.stream_commit_include_reasoning")
-            if "stream_hold_until_finish" in qj:
-                p.qc_json.stream_hold_until_finish = _coerce_bool(
-                    qj["stream_hold_until_finish"],
-                    "qc_json.stream_hold_until_finish")
-            if "stream_hold_idle_ms" in qj:
-                v = qj["stream_hold_idle_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (1000 <= int(v) <= 600000):
-                    raise ValueError("qc_json.stream_hold_idle_ms deve "
-                                     "essere 1000..600000")
-                p.qc_json.stream_hold_idle_ms = int(v)
-            if "stream_hold_max_buffer_bytes" in qj:
-                v = qj["stream_hold_max_buffer_bytes"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (1048576 <= int(v) <= 524288000):
-                    raise ValueError("qc_json.stream_hold_max_buffer_bytes "
-                                     "deve essere 1048576..524288000")
-                p.qc_json.stream_hold_max_buffer_bytes = int(v)
-            if "stream_parachute_no_timeout" in qj:
-                p.qc_json.stream_parachute_no_timeout = _coerce_bool(
-                    qj["stream_parachute_no_timeout"],
-                    "qc_json.stream_parachute_no_timeout")
-            for _k, _attr in (("struct_out_enabled", "struct_out_enabled"),
-                              ("rewrite_content", "rewrite_content"),
-                              ("strict_schema", "strict_schema"),
-                              ("repair_content", "repair_content"),
-                              ("inject_response_format",
-                               "inject_response_format"),
-                              ("downgrade_response_format",
-                               "downgrade_response_format")):
-                if _k in qj:
-                    setattr(p.qc_json, _attr, _coerce_bool(
-                        qj[_k], f"qc_json.{_k}"))
-            _iap = qj.get("inject_allow_providers")
-            if _iap is not None:
-                if not isinstance(_iap, (list, tuple)):
-                    raise ValueError("qc_json.inject_allow_providers "
-                                     "deve essere una lista")
-                p.qc_json.inject_allow_providers = tuple(
-                    str(x).lower() for x in _iap)
-            _nsp = qj.get("native_schema_providers")
-            if _nsp is not None:
-                if not isinstance(_nsp, (list, tuple)):
-                    raise ValueError("qc_json.native_schema_providers "
-                                     "deve essere una lista")
-                p.qc_json.native_schema_providers = tuple(
-                    str(x).lower() for x in _nsp)
-            # stream_buffer_ms / stream_emit_error_tail / on_empty_response:
-            # rimossi. Catena esaurita -> sempre 503 retryable, mai un turno
-            # finto. Chiavi ignorate se presenti in un vecchio gateway.yaml.
-        _set_bool(p, raw, "proactive_health", skip_none=True)
-        hi = raw.get("health_interval_sec")
-        if hi is not None:
-            if isinstance(hi, bool) or not isinstance(hi, (int, float)) \
-                    or hi < 60:
-                raise ValueError("health_interval_sec deve essere >= 60")
-            p.health_interval_sec = int(hi)
-
-        # capacità (capability_routing)
-        cr = raw.get("capability_routing")
-        if cr is not None:
-            if not isinstance(cr, dict):
-                raise ValueError("capability_routing deve essere una mappa")
-            if "enabled" in cr:
-                p.capability_routing_enabled = _coerce_bool(cr["enabled"], "capability_routing.enabled")
-            mc = cr.get("model_capabilities")
-            if mc is not None:
-                if not isinstance(mc, dict):
-                    raise ValueError("capability_routing.model_capabilities deve essere una mappa")
-                from .capabilities import CapabilitiesError, normalize_caps
-                for k, v in mc.items():
-                    if not isinstance(k, str) or not k:
-                        raise ValueError("capability_routing.model_capabilities: chiavi non valide")
-                    try:
-                        normalize_caps(v, f"capability_routing.model_capabilities[{k}]")
-                    except CapabilitiesError as exc:
-                        raise ValueError(str(exc)) from exc
-                p.model_capabilities = {str(k): list(v) for k, v in mc.items()}
-            if "capabilities_default" in cr:
-                try:
-                    from .capabilities import normalize_caps, CapabilitiesError
-                    p.capabilities_default = normalize_caps(
-                        cr["capabilities_default"], "capability_routing.capabilities_default")
-                except CapabilitiesError as exc:
-                    raise ValueError(str(exc)) from exc
-            if "image_token_estimate" in cr:
-                v = cr["image_token_estimate"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-                    raise ValueError("capability_routing.image_token_estimate deve essere int >= 0")
-                p.image_token_estimate = int(v)
-            if "images_chat_fallback" in cr:
-                p.images_chat_fallback = _coerce_bool(cr["images_chat_fallback"], "capability_routing.images_chat_fallback")
-            if "image_refs_hard_max" in cr:
-                v = cr["image_refs_hard_max"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
-                    raise ValueError("capability_routing.image_refs_hard_max deve essere int >= 1")
-                p.image_refs_hard_max = int(v)
-            if "chat_images_max" in cr:
-                v = cr["chat_images_max"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("capability_routing.chat_images_max deve essere int >= 0 (0 = non limare)")
-                p.chat_images_max = int(v)
-            if "stt_chat_enabled" in cr:
-                p.stt_chat_enabled = _coerce_bool(
-                    cr["stt_chat_enabled"], "capability_routing.stt_chat_enabled")
-            if "stt_chat_target_sec" in cr:
-                v = cr["stt_chat_target_sec"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
-                    raise ValueError("capability_routing.stt_chat_target_sec deve essere > 0")
-                p.stt_chat_target_sec = int(v)
-            if "stt_chat_search_pct" in cr:
-                v = cr["stt_chat_search_pct"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or v < 0 or v > 1:
-                    raise ValueError("capability_routing.stt_chat_search_pct deve essere 0..1")
-                p.stt_chat_search_pct = float(v)
-            if "stt_chat_max_bytes" in cr:
-                v = cr["stt_chat_max_bytes"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("capability_routing.stt_chat_max_bytes deve essere int >= 0")
-                p.stt_chat_max_bytes = int(v)
-            if "stt_chat_max_parallel" in cr:
-                v = cr["stt_chat_max_parallel"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
-                    raise ValueError("capability_routing.stt_chat_max_parallel deve essere int >= 1")
-                p.stt_chat_max_parallel = int(v)
-            if "stt_chat_unavailable_notice" in cr:
-                v = cr["stt_chat_unavailable_notice"]
-                if not isinstance(v, str):
-                    raise ValueError("capability_routing.stt_chat_unavailable_notice deve essere stringa")
-                p.stt_chat_unavailable_notice = v
-            if "stt_chat_cache_ttl_sec" in cr:
-                v = cr["stt_chat_cache_ttl_sec"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("capability_routing.stt_chat_cache_ttl_sec deve essere int >= 0")
-                p.stt_chat_cache_ttl_sec = int(v)
-            if "audio_token_estimate" in cr:
-                v = cr["audio_token_estimate"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("capability_routing.audio_token_estimate deve essere int >= 0")
-                p.audio_token_estimate = int(v)
-            mlr = cr.get("multimodal_last_resort")
-            if mlr is not None:
-                p.multimodal_last_resort = _coerce_bool(
-                    mlr, "capability_routing.multimodal_last_resort")
-            gsf = cr.get("gen_same_model_failover")
-            if gsf is not None:
-                p.gen_same_model_failover = _coerce_bool(
-                    gsf, "capability_routing.gen_same_model_failover")
-            dlf = cr.get("dims_ladder_floor")
-            if dlf is not None:
-                p.dims_ladder_floor = _coerce_bool(
-                    dlf, "capability_routing.dims_ladder_floor")
-            flr = cr.get("free_last_resort")
-            if flr is not None:
-                p.free_last_resort_enabled = _coerce_bool(
-                    flr, "capability_routing.free_last_resort")
-            flrx = cr.get("free_last_resort_extreme")
-            if flrx is not None:
-                p.free_last_resort_extreme = _coerce_bool(
-                    flrx, "capability_routing.free_last_resort_extreme")
-            al = cr.get("auto_learn")
-            if al is not None:
-                if str(al) not in ("off", "suggest", "auto"):
-                    raise ValueError("capability_routing.auto_learn non valido: "
-                                     "ammessi off|suggest|auto")
-                p.cap_auto_learn = str(al)
-            alt = cr.get("auto_learn_threshold")
-            if alt is not None:
-                if isinstance(alt, bool) or not isinstance(alt, (int, float)) \
-                        or not (1 <= int(alt) <= 50):
-                    raise ValueError("capability_routing.auto_learn_threshold "
-                                     "deve essere 1..50")
-                p.cap_auto_learn_threshold = int(alt)
-
-        # immagini: store locale (url di download) + mirror degli URL provider
-        im = raw.get("images")
-        if im is not None:
-            if not isinstance(im, dict):
-                raise ValueError("images deve essere una mappa")
-            if "store_enabled" in im:
-                p.images_store_enabled = _coerce_bool(
-                    im["store_enabled"], "images.store_enabled")
-            if "store_ttl_sec" in im:
-                v = im["store_ttl_sec"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-                    raise ValueError("images.store_ttl_sec deve essere int >= 0")
-                p.images_store_ttl_sec = int(v)
-            if "store_max_items" in im:
-                v = im["store_max_items"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
-                    raise ValueError("images.store_max_items deve essere int >= 1")
-                p.images_store_max_items = int(v)
-            if "store_max_bytes" in im:
-                v = im["store_max_bytes"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-                    raise ValueError("images.store_max_bytes deve essere int >= 0")
-                p.images_store_max_bytes = int(v)
-            if "url_base" in im:
-                if not isinstance(im["url_base"], str):
-                    raise ValueError("images.url_base deve essere una stringa")
-                p.images_url_base = im["url_base"].strip().rstrip("/")
-            if "mirror_remote" in im:
-                p.images_mirror_remote = _coerce_bool(
-                    im["mirror_remote"], "images.mirror_remote")
-            if "remote_timeout_sec" in im:
-                v = im["remote_timeout_sec"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 1:
-                    raise ValueError("images.remote_timeout_sec deve essere int >= 1")
-                p.images_remote_timeout_sec = int(v)
-            if "remote_max_bytes" in im:
-                v = im["remote_max_bytes"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-                    raise ValueError("images.remote_max_bytes deve essere int >= 0")
-                p.images_remote_max_bytes = int(v)
-
-        # rimborso latenza: turni -go regalati alla sessione dopo un "lento"
-        gr = raw.get("go_refund")
-        if gr is not None:
-            if not isinstance(gr, dict):
-                raise ValueError("go_refund deve essere una mappa")
-            if "enabled" in gr:
-                p.go_refund_enabled = _coerce_bool(
-                    gr["enabled"], "go_refund.enabled")
-            if "pct" in gr:
-                v = gr["pct"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= v <= 100):
-                    raise ValueError("go_refund.pct deve essere un numero "
-                                     "tra 0 e 100")
-                p.go_refund_pct = int(v)
-            if "min_turns" in gr:
-                v = gr["min_turns"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("go_refund.min_turns deve essere int >= 0")
-                p.go_refund_min_turns = int(v)
-            if "max_turns" in gr:
-                v = gr["max_turns"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("go_refund.max_turns deve essere int >= 0")
-                p.go_refund_max_turns = int(v)
-            if "trigger_ms" in gr:
-                v = gr["trigger_ms"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or v <= 0:
-                    raise ValueError("go_refund.trigger_ms deve essere un "
-                                     "numero > 0 (ms)")
-                p.go_refund_trigger_ms = int(v)
-            if "fb_enabled" in gr:
-                p.go_refund_fb_enabled = _coerce_bool(
-                    gr["fb_enabled"], "go_refund.fb_enabled")
-            if "fb_per_fallback" in gr:
-                v = gr["fb_per_fallback"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or v < 0:
-                    raise ValueError("go_refund.fb_per_fallback deve essere "
-                                     "un numero >= 0")
-                p.go_refund_fb_per_fallback = float(v)
-            if "fb_min_turns" in gr:
-                v = gr["fb_min_turns"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("go_refund.fb_min_turns deve essere "
-                                     "int >= 0")
-                p.go_refund_fb_min_turns = int(v)
-            if "fb_max_turns" in gr:
-                v = gr["fb_max_turns"]
-                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-                    raise ValueError("go_refund.fb_max_turns deve essere "
-                                     "int >= 0")
-                p.go_refund_fb_max_turns = int(v)
-            if p.go_refund_max_turns < p.go_refund_min_turns:
-                raise ValueError("go_refund.max_turns deve essere >= min_turns")
-            if p.go_refund_fb_max_turns < p.go_refund_fb_min_turns:
-                raise ValueError("go_refund.fb_max_turns deve essere >= "
-                                 "fb_min_turns")
-
-        # bilanciamento -go: metrica a freddo (token di output) + pool
-        gb = raw.get("go_balance")
-        if gb is not None:
-            if not isinstance(gb, dict):
-                raise ValueError("go_balance deve essere una mappa")
-            if "enabled" in gb:
-                p.go_balance_enabled = _coerce_bool(
-                    gb["enabled"], "go_balance.enabled")
-            if "flat_pool" in gb:
-                p.go_balance_flat_pool = _coerce_bool(
-                    gb["flat_pool"], "go_balance.flat_pool")
-            if "window_sec" in gb:
-                v = gb["window_sec"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or v <= 0:
-                    raise ValueError("go_balance.window_sec deve essere > 0")
-                p.go_balance_window_sec = int(v)
-        _set_int(p, raw, "go_stick_ttl_sec", minimum=1)
-
-        # cooldown escalation
-        _set_bool(p, raw, "cooldown_escalation", skip_none=True)
-        _set_int(p, raw, "max_cooldown_sec", minimum=10)
-        _set_int(p, raw, "timeout_cooldown_mult", minimum=1)
-        _set_int(p, raw, "retire_after_days", minimum=1)
-
-        cm = raw.get("cooldown_mode")
-        if cm is not None:
-            if str(cm) not in ("linear", "exponential"):
-                raise ValueError("cooldown_mode non valido: ammessi linear|exponential")
-            p.cooldown_mode = str(cm)
-        _gpm = raw.get("go_preferred_models")
-        if _gpm is not None:
-            if isinstance(_gpm, (list, tuple)):
-                _gpm = ",".join(str(x) for x in _gpm)
-            p.go_preferred_models = str(_gpm).strip().lower()
-        _set_int(p, raw, "cooldown_base_min", minimum=1)
-        _set_int(p, raw, "cooldown_linear_mult_min", minimum=0)
-        _set_int(p, raw, "ladder_skip_after", minimum=1)
-        _set_int(p, raw, "ladder_stale_max", minimum=0)
-        _set_int(p, raw, "ladder_cooldown_wakeups", minimum=0)
-        _set_int(p, raw, "ladder_cooldown_wakeup_window_sec", minimum=1)
-        _csp = raw.get("cold_spread_pct")
-        if _csp is not None:
-            try:
-                _v = float(_csp)
-            except (TypeError, ValueError):
-                raise ValueError(f"cold_spread_pct non valido: {_csp!r}")
-            if not 0.0 <= _v <= 1.0:
-                raise ValueError("cold_spread_pct deve essere in [0,1]")
-            p.cold_spread_pct = _v
-        _set_bool(p, raw, "initial_pick_cooldown_wakeup", skip_none=True)
-        _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
-        _set_int(p, raw, "ladder_chronic_max", minimum=0)
-        _set_int(p, raw, "chronic_fail_cooldown_sec", minimum=0)
-
-        # budget guard (dict con chiavi note; sconosciute ignorate)
-        bg = raw.get("budget_guard")
-        if bg is not None:
-            if not isinstance(bg, dict):
-                raise ValueError("budget_guard deve essere una mappa")
-            merged = dict(p.budget_guard)
-            if "enabled" in bg:
-                merged["enabled"] = _coerce_bool(bg["enabled"],
-                                                 "budget_guard.enabled")
-            for k in ("soft_factor", "min_per_min", "min_per_day"):
-                if k in bg:
-                    try:
-                        v = float(bg[k])
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            f"budget_guard.{k}: numero richiesto") from None
-                    if v <= 0:
-                        raise ValueError(f"budget_guard.{k}: > 0 richiesto")
-                    merged[k] = v
-            if "safety_ratio" in bg:
-                try:
-                    v = float(bg["safety_ratio"])
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        "budget_guard.safety_ratio: numero richiesto") from None
-                if v < 0:
-                    raise ValueError(
-                        "budget_guard.safety_ratio: >= 0 richiesto")
-                merged["safety_ratio"] = v
-            if "count_inflight" in bg:
-                merged["count_inflight"] = _coerce_bool(
-                    bg["count_inflight"], "budget_guard.count_inflight")
-            if "rate_hint_threshold" in bg:
-                try:
-                    v = int(bg["rate_hint_threshold"])
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        "budget_guard.rate_hint_threshold: intero richiesto") \
-                        from None
-                if v < 1:
-                    raise ValueError(
-                        "budget_guard.rate_hint_threshold: >= 1 richiesto")
-                merged["rate_hint_threshold"] = v
-            if "suppress_with_headers" in bg:
-                merged["suppress_with_headers"] = _coerce_bool(
-                    bg["suppress_with_headers"],
-                    "budget_guard.suppress_with_headers")
-            p.budget_guard = merged
-
-        # gruppi capacità strutturali
-        cg = raw.get("capability_groups")
-        if cg is not None:
-            if not isinstance(cg, dict):
-                raise ValueError("capability_groups deve essere una mappa")
-            if "enabled" in cg:
-                p.cap_groups_enabled = _coerce_bool(cg["enabled"],
-                                                    "capability_groups.enabled")
-            om = cg.get("on_missing")
-            if om is not None:
-                if str(om) not in ("dynamic", "error"):
-                    raise ValueError("capability_groups.on_missing non valido: "
-                                     "ammessi dynamic|error")
-                p.cap_groups_on_missing = str(om)
-
-        # fair-share chiavi nei gruppi capacità primary (anti-martellamento)
-        cfs = raw.get("cap_fair_share")
-        if cfs is not None:
-            if not isinstance(cfs, dict):
-                raise ValueError("cap_fair_share deve essere una mappa")
-            if "enabled" in cfs:
-                p.cap_fair_share_enabled = _coerce_bool(
-                    cfs["enabled"], "cap_fair_share.enabled")
-            cs = cfs.get("caps")
-            if cs is not None:
-                if isinstance(cs, str):
-                    cs = [cs]
-                if not isinstance(cs, (list, tuple)):
-                    raise ValueError("cap_fair_share.caps deve essere una lista")
-                from .capabilities import ROUTING_CAPS
-                _caps: list[str] = []
-                for c in cs:
-                    if not isinstance(c, str) or c not in ROUTING_CAPS:
-                        raise ValueError(
-                            "cap_fair_share.caps: capacità non valida "
-                            f"'{c}' (ammesse: {sorted(ROUTING_CAPS)})")
-                    _caps.append(c)
-                p.cap_fair_share_caps = _caps
-            ws = cfs.get("window_sec")
-            if ws is not None:
-                if isinstance(ws, bool) or not isinstance(ws, (int, float)) \
-                        or ws <= 0:
-                    raise ValueError("cap_fair_share.window_sec deve essere > 0")
-                p.cap_fair_share_window_sec = int(ws)
-
-        # sanity QC
-        qs = raw.get("qc_sanity")
-        if qs is not None:
-            if not isinstance(qs, dict):
-                raise ValueError("qc_sanity deve essere una mappa")
-            if "enabled" in qs:
-                p.qc_sanity.enabled = _coerce_bool(qs["enabled"], "qc_sanity.enabled")
-            if "min_chars" in qs:
-                v = qs["min_chars"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                        or not (0 <= int(v) <= 1000):
-                    raise ValueError("qc_sanity.min_chars deve essere 0..1000")
-                p.qc_sanity.min_chars = int(v)
-            if "rotate_on_length_empty" in qs:
-                p.qc_sanity.rotate_on_length_empty = _coerce_bool(
-                    qs["rotate_on_length_empty"],
-                    "qc_sanity.rotate_on_length_empty")
-            if "rotate_on_length_truncated" in qs:
-                p.qc_sanity.rotate_on_length_truncated = _coerce_bool(
-                    qs["rotate_on_length_truncated"],
-                    "qc_sanity.rotate_on_length_truncated")
-
+        for parse in _POLICY_SECTION_PARSERS:
+            parse(p, raw)
         return p
 
     @classmethod
@@ -3478,6 +1752,1817 @@ def _valid_pct(value: Any, ctx: str) -> int:
             or not (1 <= value <= 200):
         raise ValueError(f"{ctx} deve essere un numero tra 1 e 200")
     return int(value)
+
+
+# ------------------------------------------------------------------
+# Parsing della policy per sezioni (Policy.from_dict le applica in ordine)
+# ------------------------------------------------------------------
+
+def _parse_estimation(p: Policy, raw: dict[str, Any]) -> None:
+    """Stima token: divisore, stima adattiva/calibrata e per-sessione."""
+    _set_int(p, raw, "estimate_divisor", minimum=1)
+    _set_bool(p, raw, "estimate_adaptive_enabled")
+    _set_bool(p, raw, "estimate_adaptive_shadow")
+    _set_bool(p, raw, "estimate_adaptive_auto_enable")
+    _set_int(p, raw, "estimate_adaptive_auto_min_n", minimum=1)
+    if "estimate_adaptive_auto_max_delta_pct" in raw:
+        v = raw["estimate_adaptive_auto_max_delta_pct"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or not (0 <= float(v) <= 100):
+            raise ValueError("estimate_adaptive_auto_max_delta_pct "
+                             "deve essere 0..100")
+        p.estimate_adaptive_auto_max_delta_pct = float(v)
+    _set_float(p, raw, "estimate_calib_alpha", lambda x: not (0.0 <= x <= 1.0), "estimate_calib_alpha deve essere 0..1")
+    _set_bool(p, raw, "session_estimate_enabled")
+    _set_float(p, raw, "session_estimate_margin", lambda x: not (0.5 <= x <= 3.0), "session_estimate_margin deve essere 0.5..3.0")
+    _set_int(p, raw, "session_estimate_min_chars", minimum=0)
+    _set_int(p, raw, "session_estimate_min_tokens", minimum=0)
+    _set_int(p, raw, "session_estimate_ttl_sec", minimum=0)
+    _set_float(p, raw, "session_estimate_min_ratio", lambda x: x <= 0, "session_estimate_min_ratio deve essere > 0")
+    _set_float(p, raw, "session_estimate_max_ratio", lambda x: x <= 0, "session_estimate_max_ratio deve essere > 0")
+    _set_int(p, raw, "provider_models_ttl_sec", minimum=0)
+
+
+def _parse_timeouts_and_stalls(p: Policy, raw: dict[str, Any]) -> None:
+    """Retry-After, drain di shutdown, stall dello stream, decay reputazione, timeout adattivo."""
+    _set_nonneg_float(p, raw, "retry_after_min_sec", "retry_after_min_sec deve essere un numero >= 0")
+    _rafp = raw.get("retry_after_floor_by_provider")
+    if _rafp is not None:
+        if not isinstance(_rafp, dict):
+            raise ValueError(
+                "retry_after_floor_by_provider deve essere una mappa "
+                "provider -> secondi") from None
+        _tbl: dict[str, float] = {}
+        for _k, _v in _rafp.items():
+            try:
+                _fv = max(0.0, float(_v))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"retry_after_floor_by_provider[{_k}] non numerico"
+                ) from None
+            _tbl[str(_k).strip().lower()] = _fv
+        p.retry_after_floor_by_provider = _tbl
+    _set_nonneg_float(p, raw, "shutdown_drain_sec", "shutdown_drain_sec deve essere un numero >= 0")
+    _set_nonneg_float(p, raw, "stream_stall_sec", "stream_stall_sec deve essere un numero >= 0")
+    _set_nonneg_float(p, raw, "stream_stall_ttft_mult", "stream_stall_ttft_mult deve essere un numero >= 0")
+    _sts = raw.get("stream_stall_max_sec")
+    if _sts is not None:
+        try:
+            p.stream_stall_max_sec = max(1.0, float(_sts))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "stream_stall_max_sec deve essere un numero >= 1") from None
+    _rdh = raw.get("reputation_decay_halflife_sec")
+    if _rdh is not None:
+        try:
+            p.reputation_decay_halflife_sec = max(0.0, float(_rdh))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "reputation_decay_halflife_sec deve essere un numero "
+                ">= 0") from None
+    _set_bool(p, raw, "adaptive_timeout_enabled")
+    _set_bool(p, raw, "http_keepalive_pool")
+    for _fld in ("adaptive_timeout_floor_sec",
+                 "adaptive_timeout_multiplier",
+                 "adaptive_timeout_max_sec"):
+        _val = raw.get(_fld)
+        if _val is not None:
+            try:
+                setattr(p, _fld, max(0.0, float(_val)))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{_fld} deve essere un numero >= 0") from None
+
+
+def _parse_cooldown_probe_and_jitter(p: Policy, raw: dict[str, Any]) -> None:
+    """Probe dei cooldown, jitter e cooldown per classe d'errore."""
+    _set_bool(p, raw, "cooldown_probe_enabled")
+    _cpar = raw.get("cooldown_probe_after_ratio")
+    if _cpar is not None:
+        try:
+            p.cooldown_probe_after_ratio = min(1.0, max(0.0, float(_cpar)))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "cooldown_probe_after_ratio deve essere tra 0 e 1") from None
+    _set_bool(p, raw, "cooldown_probe_decay")
+    _set_nonneg_float(p, raw, "cooldown_streak_halflife_sec", "cooldown_streak_halflife_sec deve essere un numero >= 0")
+    _set_int(p, raw, "probe_retire_after", minimum=0)
+    _cjr = raw.get("cooldown_jitter_ratio")
+    if _cjr is not None:
+        try:
+            p.cooldown_jitter_ratio = min(1.0, max(0.0, float(_cjr)))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "cooldown_jitter_ratio deve essere tra 0 e 1") from None
+    _cjs = raw.get("cooldown_jitter_sec_max")
+    if _cjs is not None:
+        try:
+            p.cooldown_jitter_sec_max = min(
+                60.0, max(0.0, float(_cjs)))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "cooldown_jitter_sec_max deve essere tra 0 e 60") from None
+    if "error_class_cooldowns" in raw:
+        p.error_class_cooldowns = _coerce_bool(
+            raw.get("error_class_cooldowns"), "error_class_cooldowns")
+
+
+def _parse_latency_and_hunt(p: Policy, raw: dict[str, Any]) -> None:
+    """Soglie di lentezza, caccia al sostituto, bucket di contesto, bias provider."""
+    _set_int(p, raw, "cooldown_transient_sec", minimum=1)
+    _set_int(p, raw, "slow_latency_abs_floor_ms", minimum=0)
+    _set_int(p, raw, "slow_latency_min_peers", minimum=1)
+    _set_int(p, raw, "hunt_backoff_sec", minimum=0)
+    _set_int(p, raw, "hunt_max_per_window", minimum=0)
+    _set_int(p, raw, "hunt_window_sec", minimum=1)
+    _srel = raw.get("slow_latency_rel_mult")
+    if _srel is not None:
+        if isinstance(_srel, bool) or not isinstance(_srel, (int, float)) \
+                or not (0.0 <= float(_srel) <= 100.0):
+            raise ValueError("slow_latency_rel_mult deve essere 0..100")
+        p.slow_latency_rel_mult = float(_srel)
+    # ---------------------------------------------------- routing tuning
+    _set_int(p, raw, "latency_rotate_threshold_ms", minimum=0)
+    _set_int(p, raw, "soft_slow_latency_ms", minimum=0)
+    _set_int(p, raw, "soft_slow_ctx_min", minimum=0)
+    _set_int(p, raw, "ttft_rate_min_ctx", minimum=0)
+    _cbe = raw.get("ctx_bucket_edges")
+    if _cbe is not None:
+        if not isinstance(_cbe, (list, tuple)) or not _cbe:
+            raise ValueError("ctx_bucket_edges deve essere una lista non vuota")
+        _edges: list[int] = []
+        for _e in _cbe:
+            if isinstance(_e, bool) or not isinstance(_e, (int, float)):
+                raise ValueError("ctx_bucket_edges: elementi non numerici")
+            _edges.append(int(_e))
+        if _edges != sorted(_edges):
+            raise ValueError("ctx_bucket_edges deve essere crescente")
+        p.ctx_bucket_edges = _edges
+    for _name in ("ttft_rate_floor_ms", "slow_latency_abs_floor_ms",
+                  "slow_gen_mult", "slow_typical_completion_tokens",
+                  "slow_rel_baseline_mult",
+                  "effort_capable_bonus", "latency_penalty_per_sec"):
+        _v = raw.get(_name)
+        if _v is not None:
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                raise ValueError(f"{_name} deve essere un numero")
+            setattr(p, _name, float(_v))
+    _pbn = raw.get("provider_bias_normalization")
+    if _pbn is not None:
+        _val = str(_pbn).strip().lower()
+        if _val not in ("log", "sqrt", "none"):
+            raise ValueError(
+                "provider_bias_normalization deve essere log|sqrt|none")
+        p.provider_bias_normalization = _val
+
+
+def _parse_probes_and_upstream_limits(p: Policy, raw: dict[str, Any]) -> None:
+    """Probe/playground, cooldown di categoria, cache, keyhealth, HTTP upstream."""
+    _set_int(p, raw, "dynamic_scoring_history_window", minimum=1)
+    # ---------------------------------------------------------- ops tuning
+    _set_int(p, raw, "probe_concurrency", minimum=1)
+    _set_int(p, raw, "playground_max_attempts", minimum=1)
+    for _name in ("probe_timeout_sec", "playground_timeout_sec"):
+        _v = raw.get(_name)
+        if _v is not None:
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or float(_v) < 0:
+                raise ValueError(f"{_name} deve essere un numero >= 0")
+            setattr(p, _name, float(_v))
+    # ---------------------------------------------------- cooldown tuning
+    _set_int(p, raw, "model_missing_cooldown_sec", minimum=0)
+    _set_int(p, raw, "min_output_floor", minimum=1)
+    for _name in ("quota_min_cooldown_sec", "quota_max_cooldown_sec",
+                  "provider_transient_cooldown_sec",
+                  "permission_denied_cooldown_sec",
+                  "stream_loop_cooldown_sec", "retry_body_cap_sec"):
+        _v = raw.get(_name)
+        if _v is not None:
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or float(_v) < 0:
+                raise ValueError(f"{_name} deve essere un numero >= 0")
+            setattr(p, _name, float(_v))
+    _set_int(p, raw, "cooldown_timeout_sec", minimum=1)
+    # ------------------------------- runtime/memoria & limiti vari
+    _set_int(p, raw, "coalesce_cache_max", minimum=0)
+    _set_int(p, raw, "video_job_ttl_sec", minimum=0)
+    _set_int(p, raw, "keyhealth_streak_dead_threshold", minimum=1)
+    _set_int(p, raw, "ctxcompact_min_protected_msgs", minimum=0)
+    _set_int(p, raw, "toolrepair_max_unwrap_depth", minimum=0)
+    _set_int(p, raw, "sniff_max_b64_chars", minimum=1)
+    _set_int(p, raw, "sniff_max_str_chars", minimum=1)
+    _set_int(p, raw, "sniff_max_sse_bytes", minimum=1)
+    _kemf = raw.get("keyhealth_success_ema_floor")
+    if _kemf is not None:
+        if isinstance(_kemf, bool) or not isinstance(_kemf, (int, float)) \
+                or float(_kemf) < 0:
+            raise ValueError(
+                "keyhealth_success_ema_floor deve essere un numero >= 0")
+        p.keyhealth_success_ema_floor = float(_kemf)
+    # ------------------------------------------ HTTP upstream (forwarder)
+    for _name in ("upstream_connect_timeout_sec", "upstream_read_timeout_sec",
+                  "upstream_write_timeout_sec", "upstream_pool_timeout_sec",
+                  "upstream_keepalive_expiry_sec"):
+        _v = raw.get(_name)
+        if _v is not None:
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or float(_v) <= 0:
+                raise ValueError(f"{_name} deve essere un numero > 0")
+            setattr(p, _name, float(_v))
+    _set_int(p, raw, "upstream_max_keepalive_connections", minimum=1)
+    _set_int(p, raw, "upstream_max_connections", minimum=1)
+    _rsc = raw.get("retryable_status_codes")
+    if _rsc is not None:
+        if not isinstance(_rsc, list) or not all(
+                isinstance(x, int) and not isinstance(x, bool)
+                and 100 <= x <= 599 for x in _rsc):
+            raise ValueError(
+                "retryable_status_codes deve essere una lista di codici "
+                "HTTP interi (100..599)")
+        p.retryable_status_codes = [int(x) for x in _rsc]
+    _eih = raw.get("effort_incompatible_hosts")
+    if _eih is not None:
+        if not isinstance(_eih, list) or not all(
+                isinstance(x, str) and x for x in _eih):
+            raise ValueError(
+                "effort_incompatible_hosts deve essere una lista di "
+                "stringhe non vuote")
+        p.effort_incompatible_hosts = [str(x) for x in _eih]
+
+
+def _parse_model_circuit_and_autoprobe(p: Policy, raw: dict[str, Any]) -> None:
+    """Circuit per modello, autoprobe, modalita' degradata, concorrenza per chiave, quirk."""
+    if "model_circuit_enabled" in raw:
+        p.model_circuit_enabled = _coerce_bool(
+            raw.get("model_circuit_enabled"), "model_circuit_enabled")
+    _set_int(p, raw, "model_circuit_keys", minimum=2)
+    _set_int(p, raw, "model_circuit_window_sec", minimum=1)
+    _set_int(p, raw, "model_circuit_open_sec", minimum=1)
+    _set_bool(p, raw, "cooldown_autoprobe_enabled")
+    _set_bool(p, raw, "cooldown_autoprobe_retired_enabled")
+    _set_bool(p, raw, "cooldown_autoprobe_multiply_24h")
+    if raw.get("cooldown_autoprobe_schedule") is not None:
+        _sch = str(raw["cooldown_autoprobe_schedule"]).strip().lower()
+        if _sch not in ("nightly", "request"):
+            raise ValueError(
+                "cooldown_autoprobe_schedule deve essere nightly|request")
+        p.cooldown_autoprobe_schedule = _sch
+    _set_int(p, raw, "cooldown_autoprobe_per_dim", minimum=0)
+    _set_int(p, raw, "cooldown_autoprobe_max_total", minimum=0)
+    _set_int(p, raw, "cooldown_autoprobe_key_day_max", minimum=0)
+    for _fld in ("cooldown_autoprobe_min_age_sec",
+                 "cooldown_autoprobe_grow_sec",
+                 "cooldown_autoprobe_min_gap_sec",
+                 "cooldown_autoprobe_timeout_sec",
+                 "cooldown_autoprobe_fresh_age_sec",
+                 "cooldown_autoprobe_key_gap_sec",
+                 "cooldown_autoprobe_key_ok_fresh_sec",
+                 "cooldown_autoprobe_retired_gap_sec",
+                 "cooldown_autoprobe_transient_sec",
+                 "cooldown_autoprobe_skip_over_sec",
+                 "warm_refill_wake_min_cooldown_age_sec",
+                 "cooldown_host_midstream_502_sec"):
+        _val = raw.get(_fld)
+        if _val is not None:
+            try:
+                setattr(p, _fld, max(0.0, float(_val)))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{_fld} deve essere un numero >= 0") from None
+    _set_bool(p, raw, "cooldown_autoprobe_crisis_enabled")
+    if raw.get("repair_exempt_streak_limit") is not None:
+        try:
+            p.repair_exempt_streak_limit = max(
+                0, int(raw["repair_exempt_streak_limit"]))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "repair_exempt_streak_limit deve essere un intero >= 0"
+            ) from None
+    for _fld in ("model_fail_window_sec", "model_fail_threshold",
+                 "model_fail_cooldown_sec", "degraded_min_providers",
+                 "degraded_entry_grace_sec", "degraded_exit_grace_sec",
+                 "cooldown_estimate_ceiling_sec"):
+        if raw.get(_fld) is not None:
+            try:
+                setattr(p, _fld, max(0, int(raw[_fld])))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{_fld} deve essere un intero >= 0") from None
+    _set_bool(p, raw, "degraded_mode_enabled", skip_none=True)
+    _set_bool(p, raw, "key_concurrency_enabled", skip_none=True)
+    for _fld in ("key_concurrency_max",
+                 "key_concurrency_lease_max_age_sec"):
+        if raw.get(_fld) is not None:
+            try:
+                setattr(p, _fld, max(0, int(raw[_fld])))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{_fld} deve essere un intero >= 0") from None
+    if raw.get("quirks") is not None:
+        _q = raw["quirks"]
+        if not isinstance(_q, (list, tuple)):
+            raise ValueError("quirks deve essere una lista di oggetti")
+        _qout = []
+        for _it in _q:
+            if not isinstance(_it, dict):
+                raise ValueError("ogni quirk deve essere un oggetto")
+            _glob = str(_it.get("model") or "").strip().lower()
+            _flag = str(_it.get("flag") or "").strip().lower()
+            if not _glob or not _flag:
+                raise ValueError(
+                    "ogni quirk richiede 'model' (glob) e 'flag'")
+            _sev = str(_it.get("severity") or "warning").strip().lower()
+            if _sev not in ("blocker", "warning", "info"):
+                raise ValueError(
+                    "severity deve essere blocker|warning|info")
+            _qout.append({"model": _glob, "flag": _flag,
+                          "severity": _sev,
+                          "note": str(_it.get("note") or "")})
+        p.quirks = _qout
+    if raw.get("degraded_healthy_ratio") is not None:
+        try:
+            _r = float(raw["degraded_healthy_ratio"])
+        except (TypeError, ValueError):
+            raise ValueError("degraded_healthy_ratio deve essere un "
+                             "numero tra 0 e 1") from None
+        if not (0.0 <= _r <= 1.0):
+            raise ValueError("degraded_healthy_ratio deve essere tra 0 e 1")
+        p.degraded_healthy_ratio = _r
+    for _fld in ("cooldown_autoprobe_crisis_ratio",
+                 "cooldown_autoprobe_crisis_mult",
+                 "hotreload_probe_timeout_sec",
+                 "hotreload_probe_cooldown_sec",
+                 "hotreload_drain_ttl_sec"):
+        _val = raw.get(_fld)
+        if _val is not None:
+            try:
+                setattr(p, _fld, max(0.0, float(_val)))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{_fld} deve essere un numero >= 0") from None
+
+
+def _parse_concurrency_coalescing_and_sticky(p: Policy, raw: dict[str, Any]) -> None:
+    """Concorrenza appresa, coalescing, rate hint, soft-429, sessioni anonime, sticky."""
+    _set_int(p, raw, "hotreload_probe_max", minimum=0)
+    _set_bool(p, raw, "hotreload_probe_enabled")
+    _set_int(p, raw, "loop_stream_buffer_words", minimum=0)
+    _set_int(p, raw, "conc_default_limit", minimum=1)
+    _set_int(p, raw, "conc_max_limit", minimum=1)
+    _set_int(p, raw, "conc_learn_success_streak", minimum=1)
+    _set_float(p, raw, "conc_token_ratio", lambda x: not (0.0 <= x <= 5.0), "conc_token_ratio deve essere 0..5")
+    _set_bool(p, raw, "request_coalescing_enabled")
+    _set_nonneg_float(p, raw, "request_coalescing_ttl_sec", "request_coalescing_ttl_sec deve essere un numero >= 0")
+    _set_int(p, raw, "request_coalescing_max_waiters", minimum=0)
+    _rc_cache = raw.get("request_coalescing_cache_sec")
+    if _rc_cache is not None:
+        try:
+            p.request_coalescing_cache_sec = max(0.0, float(_rc_cache))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "request_coalescing_cache_sec deve essere un "
+                "numero >= 0") from None
+    _set_bool(p, raw, "rate_hint_skip_enabled")
+    _rh = raw.get("rate_hint_ttl_sec")
+    if _rh is not None:
+        try:
+            v = float(_rh)
+        except (TypeError, ValueError):
+            raise ValueError("rate_hint_ttl_sec: numero richiesto") from None
+        if not (0.0 <= v <= 300.0):
+            raise ValueError("rate_hint_ttl_sec: 0..300")
+        p.rate_hint_ttl_sec = v
+    _set_int(p, raw, "rate_hint_remaining_max", minimum=0, maximum=100000)
+    _rp = raw.get("rate_hint_proven_sec")
+    if _rp is not None:
+        try:
+            v = float(_rp)
+        except (TypeError, ValueError):
+            raise ValueError("rate_hint_proven_sec: numero richiesto") from None
+        if not (0.0 <= v <= 86400.0):
+            raise ValueError("rate_hint_proven_sec: 0..86400")
+        p.rate_hint_proven_sec = v
+    _set_bool(p, raw, "key_soft_429_enabled")
+    _set_int(p, raw, "key_soft_max_sec", minimum=10, maximum=86400)
+    _set_bool(p, raw, "anon_session_fingerprint")
+    _set_int(p, raw, "anon_session_fp_system_chars", minimum=0)
+    _set_int(p, raw, "sticky_ttl_sec", minimum=1)
+    _set_bool(p, raw, "sticky_handoff_same_family")
+    _set_int(p, raw, "cooldown_sec", minimum=0)
+    _set_int(p, raw, "stale_cooldown_retry_sec", minimum=0)
+    _set_int(p, raw, "max_fallback_tries", minimum=1)
+    _set_int(p, raw, "hotwords_window", minimum=1)
+    _set_int(p, raw, "step_up_pct", minimum=1, maximum=200)
+
+
+def _parse_naming_profiles_and_keys(p: Policy, raw: dict[str, Any]) -> None:
+    """Pesi di scoring, prefissi, hotword, profili, alias, chiavi client, pricing."""
+    if "scoring_weights" in raw:
+        sw = raw["scoring_weights"]
+        if not isinstance(sw, dict):
+            raise ValueError("scoring_weights deve essere un oggetto")
+        merged = dict(DEFAULT_SCORING_WEIGHTS)
+        for wk, wv in sw.items():
+            if wk not in DEFAULT_SCORING_WEIGHTS:
+                raise ValueError(
+                    f"scoring_weights.{wk} non riconosciuto "
+                    f"(ammessi: {', '.join(sorted(DEFAULT_SCORING_WEIGHTS))})")
+            try:
+                merged[wk] = float(wv)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"scoring_weights.{wk} deve essere un numero") from None
+        p.scoring_weights = merged
+
+    for key, attr in (("proxy_prefix", "proxy_prefix"),
+                      ("go_suffix", "go_suffix"),
+                      ("fallback_suffix", "fallback_suffix"),
+                      ("service_name", "service_name"),
+                      ("openrouter_app_referer", "openrouter_app_referer"),
+                      ("openrouter_app_title", "openrouter_app_title")):
+        if key in raw:
+            if not isinstance(raw[key], str) or not raw[key]:
+                raise ValueError(f"{key} deve essere una stringa non vuota")
+            setattr(p, attr, raw[key].strip())
+
+    if "legacy_prefixes" in raw:
+        lp = raw["legacy_prefixes"]
+        if not isinstance(lp, list) or \
+                not all(isinstance(x, str) and x for x in lp):
+            raise ValueError(
+                "legacy_prefixes deve essere una lista di stringhe non vuote")
+        p.legacy_prefixes = lp
+
+    if "strip_client_fields" in raw:
+        scf = raw["strip_client_fields"]
+        if not isinstance(scf, list) or \
+                not all(isinstance(x, str) and x.strip() for x in scf):
+            raise ValueError(
+                "strip_client_fields deve essere una lista di stringhe "
+                "non vuote")
+        p.strip_client_fields = [x.strip() for x in scf]
+
+    if "hotwords" in raw:
+        hw = raw["hotwords"]
+        if not isinstance(hw, list) or \
+                not all(isinstance(x, str) for x in hw):
+            raise ValueError("hotwords deve essere una lista di regex")
+        p.hotwords = hw
+
+    if "speed_hotwords" in raw:
+        shw = raw["speed_hotwords"]
+        if not isinstance(shw, list) or \
+                not all(isinstance(x, str) for x in shw):
+            raise ValueError(
+                "speed_hotwords deve essere una lista di regex")
+        p.speed_hotwords = shw
+    _set_int(p, raw, "speed_min_dim_k", minimum=0)
+    if "speed_qualify_pct" in raw:
+        p.speed_qualify_pct = _valid_pct(raw["speed_qualify_pct"],
+                                         "speed_qualify_pct")
+
+    profs = raw.get("profiles")
+    if profs is not None:
+        if not isinstance(profs, dict):
+            raise ValueError("profiles deve essere una mappa profilo->opzioni")
+        for pname, opts in profs.items():
+            if not isinstance(opts, dict):
+                raise ValueError(f"profiles.{pname}: deve essere una mappa")
+            if "step_up_pct" in opts:
+                p.profile_step_up_pct[pname] = _valid_pct(
+                    opts["step_up_pct"], f"profiles.{pname}.step_up_pct")
+            if "speed_min_dim_k" in opts:
+                v = opts["speed_min_dim_k"]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or v < 0:
+                    raise ValueError(
+                        f"profiles.{pname}.speed_min_dim_k non valido: {v!r}")
+                p.profile_speed_min_dim_k[pname] = int(v)
+            if "speed_qualify_pct" in opts:
+                p.profile_speed_qualify_pct[pname] = _valid_pct(
+                    opts["speed_qualify_pct"],
+                    f"profiles.{pname}.speed_qualify_pct")
+
+    als = raw.get("aliases")
+    if als is not None:
+        if not isinstance(als, dict):
+            raise ValueError("aliases deve essere una mappa nome->nome")
+        for k, v in als.items():
+            if not isinstance(v, str) or not v:
+                raise ValueError(f"aliases.{k}: target deve essere una stringa")
+            p.aliases[str(k)] = v
+
+    aks = raw.get("alias_keys")
+    if aks is not None:
+        if not isinstance(aks, dict):
+            raise ValueError("alias_keys deve essere una mappa alias->chiave")
+        for k, v in aks.items():
+            if str(k) not in p.aliases:
+                raise ValueError(
+                    f"alias_keys.{k}: l'alias '{k}' non esiste in aliases")
+            if not isinstance(v, str) or len(v.strip()) < 8:
+                raise ValueError(
+                    f"alias_keys.{k}: la chiave deve avere almeno 8 caratteri")
+            p.alias_keys[str(k)] = v.strip()
+
+    cks = raw.get("client_keys")
+    if cks is not None:
+        if not isinstance(cks, dict):
+            raise ValueError("client_keys deve essere una mappa profilo->chiave")
+        for k, v in cks.items():
+            if not isinstance(k, str) or not k.strip():
+                raise ValueError("client_keys: nome profilo non valido")
+            if not isinstance(v, str) or len(v.strip()) < 8:
+                raise ValueError(
+                    f"client_keys.{k}: la chiave deve avere almeno 8 caratteri")
+            p.client_keys[k.strip()] = v.strip()
+
+    # pricing per la stima costi del ledger (pattern glob -> USD/1M tok)
+    pr = raw.get("pricing")
+    if pr is not None:
+        if not isinstance(pr, dict):
+            raise ValueError("pricing deve essere una mappa pattern->costi")
+        for pat, cfgp in pr.items():
+            if not isinstance(pat, str) or not pat.strip():
+                raise ValueError("pricing: pattern non valido")
+            if not isinstance(cfgp, dict) or (
+                    "prompt_per_1m" not in cfgp
+                    and "completion_per_1m" not in cfgp):
+                raise ValueError(
+                    f"pricing.{pat}: servono prompt_per_1m e/o "
+                    "completion_per_1m (USD per milione di token)")
+            try:
+                pp = float(cfgp.get("prompt_per_1m") or 0)
+                cp = float(cfgp.get("completion_per_1m") or 0)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"pricing.{pat}: valori numerici richiesti") from None
+            if pp < 0 or cp < 0:
+                raise ValueError(f"pricing.{pat}: valori >= 0")
+            p.pricing[pat.strip()] = {"prompt_per_1m": pp,
+                                      "completion_per_1m": cp}
+
+    rm = raw.get("response_model")
+    if rm is not None:
+        if rm not in ("requested", "deployment", "upstream"):
+            raise ValueError(
+                f"response_model non valido: {rm!r} "
+                "(ammessi: requested|deployment|upstream)")
+        p.response_model = str(rm)
+
+
+def _parse_selection_and_scoring(p: Policy, raw: dict[str, Any]) -> None:
+    """Pick adattivo, sticky, escalation pin, effort, dynamic scoring, circuit breaker."""
+    _set_bool(p, raw, "adaptive_pick", skip_none=True)
+    _set_bool(p, raw, "deployment_sticky", skip_none=True)
+    _set_bool(p, raw, "deployment_sticky_per_capability", skip_none=True)
+    _set_bool(p, raw, "escalation_pin", skip_none=True)
+    _set_int(p, raw, "escalation_pin_ttl_sec", minimum=1)
+    _set_int(p, raw, "escalation_pin_probe_dims", minimum=0)
+    _set_bool(p, raw, "escalation_pin_probe_retry", skip_none=True)
+    _set_bool(p, raw, "escalation_pin_probe_random", skip_none=True)
+    for num_key, attr in (("recency_halflife_sec", "recency_halflife_sec"),
+                          ("latency_ref_ms", "latency_ref_ms"),
+                          ("go_recency_halflife_sec", "go_recency_halflife_sec")):
+        nv = raw.get(num_key)
+        if nv is not None:
+            if isinstance(nv, bool) or not isinstance(nv, (int, float)) \
+                    or nv <= 0:
+                raise ValueError(f"{num_key} non valido: {nv!r} "
+                                 "(numero > 0 richiesto)")
+            setattr(p, attr, float(nv))
+
+    _set_bool(p, raw, "enable_effort_temperature_override", skip_none=True)
+    _eiw = raw.get("effort_intel_weight")
+    if _eiw is not None:
+        if isinstance(_eiw, bool) or not isinstance(_eiw, (int, float)) \
+                or float(_eiw) < 0:
+            raise ValueError(
+                "effort_intel_weight deve essere un numero >= 0")
+        p.effort_intel_weight = float(_eiw)
+    _eto = raw.get("effort_temperature_overrides")
+    if _eto is not None:
+        if not isinstance(_eto, dict):
+            raise ValueError(
+                "effort_temperature_overrides deve essere una mappa "
+                "{low: t, medium: t, high: t}")
+        clean: dict[str, float] = {}
+        for k, v in _eto.items():
+            lk = str(k).strip().lower()
+            if lk not in ("low", "medium", "high"):
+                raise ValueError(
+                    f"effort_temperature_overrides: chiave {k!r} non valida "
+                    "(ammesse: low|medium|high)")
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ValueError(
+                    f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
+            clean[lk] = float(v)
+        p.effort_temperature_overrides = clean
+
+    # --- DYNAMIC SCORING ---
+    _ds = raw.get("dynamic_scoring")
+    if _ds is not None:
+        if not isinstance(_ds, dict):
+            raise ValueError("dynamic_scoring deve essere una mappa")
+        if "enabled" in _ds:
+            p.dynamic_scoring_enabled = _coerce_bool(
+                _ds["enabled"], "dynamic_scoring.enabled")
+        for _k, _attr in (
+                ("latency_p95_weight", "dynamic_scoring_latency_p95_weight"),
+                ("error_rate_weight", "dynamic_scoring_error_rate_weight"),
+                ("throughput_weight", "dynamic_scoring_throughput_weight")):
+            _v = _ds.get(_k)
+            if _v is not None:
+                if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
+                    raise ValueError(f"dynamic_scoring.{_k} deve essere un numero >= 0")
+                setattr(p, _attr, float(_v))
+
+    # --- CIRCUIT BREAKER per API Key ---
+    _cb = raw.get("circuit_breaker")
+    if _cb is not None:
+        if not isinstance(_cb, dict):
+            raise ValueError("circuit_breaker deve essere una mappa")
+        if "enabled" in _cb:
+            p.circuit_breaker_enabled = _coerce_bool(
+                _cb["enabled"], "circuit_breaker.enabled")
+        _ct = _cb.get("threshold")
+        if _ct is not None:
+            if isinstance(_ct, bool) or not isinstance(_ct, (int, float)) or _ct < 1:
+                raise ValueError("circuit_breaker.threshold deve essere intero >= 1")
+            p.circuit_breaker_threshold = int(_ct)
+        _cto = _cb.get("timeout")
+        if _cto is not None:
+            if isinstance(_cto, bool) or not isinstance(_cto, (int, float)) or _cto <= 0:
+                raise ValueError("circuit_breaker.timeout deve essere numero > 0")
+            p.circuit_breaker_timeout = float(_cto)
+        _cho = _cb.get("half_open_requests")
+        if _cho is not None:
+            if isinstance(_cho, bool) or not isinstance(_cho, (int, float)) or _cho < 1:
+                raise ValueError("circuit_breaker.half_open_requests deve essere intero >= 1")
+            p.circuit_breaker_half_open_requests = int(_cho)
+        _cs = _cb.get("scope")
+        if _cs is not None:
+            _csl = str(_cs).lower()
+            if _csl not in ("hybrid", "dep", "key"):
+                raise ValueError(
+                    "circuit_breaker.scope deve essere hybrid|dep|key")
+            p.circuit_breaker_scope = _csl
+
+    _mpb = raw.get("model_preference_base")
+    if _mpb is not None:
+        if isinstance(_mpb, bool) or not isinstance(_mpb, (int, float)) or _mpb < 0:
+            raise ValueError("model_preference_base deve essere numero >= 0")
+        p.model_preference_base = float(_mpb)
+
+
+def _parse_response_hygiene(p: Policy, raw: dict[str, Any]) -> None:
+    """Thought signature, tool repair, normalizzazione history, sampling, loop/QC testuali."""
+    # --- THOUGHT_SIGNATURE (Gemini 3 dummy fill) ---
+    _set_bool(p, raw, "thought_sig_dummy_fill", skip_none=True)
+    _tsv = raw.get("thought_sig_dummy_value")
+    if _tsv is not None:
+        _v = str(_tsv).strip()
+        if _v:
+            p.thought_sig_dummy_value = _v
+
+    # --- TOOL_REPAIR ---
+    _tr = raw.get("tool_repair")
+    if _tr is not None:
+        if not isinstance(_tr, dict):
+            raise ValueError("tool_repair deve essere una mappa")
+        _tr_en = _tr.get("enabled")
+        if _tr_en is not None:
+            p.tool_repair_enabled = _coerce_bool(_tr_en, "tool_repair.enabled")
+        _tr_lvl = _tr.get("default_level")
+        if _tr_lvl is not None:
+            if str(_tr_lvl).strip().lower() not in ("off", "safe", "aggressive"):
+                raise ValueError("tool_repair.default_level deve essere off|safe|aggressive")
+            p.tool_repair_default_level = str(_tr_lvl).strip().lower()
+        _tr_g = _tr.get("disable_for_google")
+        if _tr_g is not None:
+            p.tool_repair_disable_for_google = _coerce_bool(_tr_g, "tool_repair.disable_for_google")
+        _tr_sz = _tr.get("max_args_size")
+        if _tr_sz is not None:
+            if isinstance(_tr_sz, bool) or not isinstance(_tr_sz, (int, float)):
+                raise ValueError("tool_repair.max_args_size deve essere un intero")
+            p.tool_repair_max_args_size = int(_tr_sz)
+        _tr_ar = _tr.get("annotate_reasoning")
+        if _tr_ar is not None:
+            p.tool_repair_annotate_reasoning = _coerce_bool(_tr_ar, "tool_repair.annotate_reasoning")
+        _fc = _tr.get("fake_call")
+        if _fc is not None:
+            if not isinstance(_fc, dict):
+                raise ValueError("tool_repair.fake_call deve essere una mappa")
+            if "enabled" in _fc:
+                p.tool_repair_fake_call_enabled = _coerce_bool(
+                    _fc["enabled"], "tool_repair.fake_call.enabled")
+            _pat = _fc.get("patterns")
+            if _pat is not None:
+                if not isinstance(_pat, (list, tuple)):
+                    raise ValueError("tool_repair.fake_call.patterns deve essere una lista")
+                p.tool_repair_fake_call_patterns = tuple(str(x) for x in _pat)
+            for _k, _attr in (("max_escalations", "tool_repair_fake_call_max_escalations"),
+                              ("stream_hold_max_bytes", "tool_repair_fake_call_hold_max_bytes"),
+                              ("stream_hold_timeout_ms", "tool_repair_fake_call_hold_timeout_ms")):
+                _v = _fc.get(_k)
+                if _v is not None:
+                    if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                        raise ValueError(f"tool_repair.fake_call.{_k} deve essere un intero")
+                    setattr(p, _attr, int(_v))
+
+    # --- HISTORY_NORMALIZE (#1) ---
+    _hn = raw.get("history_normalize")
+    if _hn is not None:
+        if not isinstance(_hn, dict):
+            raise ValueError("history_normalize deve essere una mappa")
+        for _k, _attr in (
+                ("enabled", "history_normalize_enabled"),
+                ("tail_only", "history_normalize_tail_only"),
+                ("drop_orphan_tool", "history_normalize_drop_orphan_tool"),
+                ("drop_dangling_tool_calls",
+                 "history_normalize_drop_dangling_tool_calls"),
+                ("drop_empty_assistant",
+                 "history_normalize_drop_empty_assistant"),
+                ("dedupe_system", "history_normalize_dedupe_system")):
+            if _k in _hn:
+                setattr(p, _attr, _coerce_bool(
+                    _hn[_k], f"history_normalize.{_k}"))
+        if "reasoning_content_max_chars" in _hn:
+            v = _hn["reasoning_content_max_chars"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (-1 <= int(v) <= 200000):
+                raise ValueError(
+                    "history_normalize.reasoning_content_max_chars "
+                    "deve essere -1..200000")
+            p.history_normalize_reasoning_content_max_chars = int(v)
+        if "reasoning_keep_recent" in _hn:
+            v = _hn["reasoning_keep_recent"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 20):
+                raise ValueError(
+                    "history_normalize.reasoning_keep_recent "
+                    "deve essere 0..20")
+            p.history_normalize_reasoning_keep_recent = int(v)
+
+    # --- SAMPLING_DEFAULTS (#2A) + LOOP_DETECTOR (#2B) ---
+    _sd = raw.get("sampling_defaults")
+    if _sd is not None:
+        if not isinstance(_sd, dict):
+            raise ValueError("sampling_defaults deve essere una mappa")
+        if "enabled" in _sd:
+            p.sampling_enabled = _coerce_bool(
+                _sd["enabled"], "sampling_defaults.enabled")
+        _ap = _sd.get("allow_providers")
+        if _ap is not None:
+            if not isinstance(_ap, (list, tuple)):
+                raise ValueError("sampling_defaults.allow_providers "
+                                 "deve essere una lista")
+            p.sampling_allow_providers = tuple(
+                str(x).lower() for x in _ap)
+        _pp = _sd.get("provider_params")
+        if _pp is not None:
+            if not isinstance(_pp, dict):
+                raise ValueError("sampling_defaults.provider_params "
+                                 "deve essere una mappa")
+            _allowed = {"top_p", "presence_penalty",
+                        "frequency_penalty", "repetition_penalty"}
+            _clean_pp: dict = {}
+            for _pk, _pv in _pp.items():
+                if not isinstance(_pv, dict):
+                    raise ValueError("sampling_defaults.provider_params "
+                                     "valori devono essere mappe")
+                _row: dict = {}
+                for _k2, _v2 in _pv.items():
+                    if str(_k2) not in _allowed:
+                        raise ValueError("sampling_defaults.provider_params:"
+                                         f" chiave {_k2!r} non ammessa")
+                    if isinstance(_v2, bool) or not isinstance(
+                            _v2, (int, float)):
+                        raise ValueError(
+                            f"sampling_defaults.provider_params.{_k2}"
+                            " deve essere numerico")
+                    _row[str(_k2)] = float(_v2)
+                _clean_pp[str(_pk).lower()] = _row
+            p.sampling_provider_params = _clean_pp
+        _lp = _sd.get("loop")
+        if _lp is not None:
+            if not isinstance(_lp, dict):
+                raise ValueError("sampling_defaults.loop deve essere "
+                                 "una mappa")
+            for _k, _attr, _lo, _hi in (
+                    ("enabled", "loop_detector_enabled", None, None),
+                    ("ngram_size", "loop_ngram_size", 2, 64),
+                    ("repeats", "loop_repeats", 2, 16),
+                    ("toolcall_repeat", "loop_toolcall_repeat", 2, 16),
+                    ("min_tokens", "loop_min_tokens", 1, 2048)):
+                _v = _lp.get(_k)
+                if _v is None:
+                    continue
+                if _lo is None:
+                    setattr(p, _attr, _coerce_bool(
+                        _v, f"sampling_defaults.loop.{_k}"))
+                    continue
+                if isinstance(_v, bool) or not isinstance(
+                        _v, (int, float)) or not (_lo <= int(_v) <= _hi):
+                    raise ValueError(
+                        f"sampling_defaults.loop.{_k} deve essere "
+                        f"{_lo}..{_hi}")
+                setattr(p, _attr, int(_v))
+    _ld = raw.get("loop_detector")
+    if _ld is not None:
+        if not isinstance(_ld, dict):
+            raise ValueError("loop_detector deve essere una mappa")
+        if "enabled" in _ld:
+            p.loop_detector_enabled = _coerce_bool(
+                _ld["enabled"], "loop_detector.enabled")
+        for _k, _attr, _lo, _hi in (
+                ("ngram_size", "loop_ngram_size", 2, 64),
+                ("repeats", "loop_repeats", 2, 16),
+                ("toolcall_repeat", "loop_toolcall_repeat", 2, 16),
+                ("min_tokens", "loop_min_tokens", 1, 2048)):
+            _v = _ld.get(_k)
+            if _v is None:
+                continue
+            if isinstance(_v, bool) or not isinstance(
+                    _v, (int, float)) or not (_lo <= int(_v) <= _hi):
+                raise ValueError(
+                    f"loop_detector.{_k} deve essere {_lo}..{_hi}")
+            setattr(p, _attr, int(_v))
+
+    # --- CORRECTIVE_RETRY (#3) ---
+    _cr = raw.get("corrective_retry")
+    if _cr is not None:
+        if not isinstance(_cr, dict):
+            raise ValueError("corrective_retry deve essere una mappa")
+        if "enabled" in _cr:
+            p.corrective_retry_enabled = _coerce_bool(
+                _cr["enabled"], "corrective_retry.enabled")
+        if "max_attempts" in _cr:
+            _v = _cr["max_attempts"]
+            if isinstance(_v, bool) or not isinstance(
+                    _v, (int, float)) or not (0 <= int(_v) <= 1):
+                raise ValueError("corrective_retry.max_attempts "
+                                 "deve essere 0..1")
+            p.corrective_retry_max_attempts = int(_v)
+
+    # --- TEXT_TOOLCALL (#6) ---
+    _tt = raw.get("text_toolcall")
+    if _tt is not None:
+        if not isinstance(_tt, dict):
+            raise ValueError("text_toolcall deve essere una mappa")
+        if "enabled" in _tt:
+            p.text_toolcall_enabled = _coerce_bool(
+                _tt["enabled"], "text_toolcall.enabled")
+        if "require_declared_name" in _tt:
+            p.text_toolcall_require_declared_name = _coerce_bool(
+                _tt["require_declared_name"],
+                "text_toolcall.require_declared_name")
+        _af = _tt.get("allow_formats")
+        if _af is not None:
+            if not isinstance(_af, (list, tuple)):
+                raise ValueError("text_toolcall.allow_formats deve "
+                                 "essere una lista")
+            p.text_toolcall_allow_formats = tuple(str(x) for x in _af)
+        if "max_bytes" in _tt:
+            _v = _tt["max_bytes"]
+            if isinstance(_v, bool) or not isinstance(
+                    _v, (int, float)) or int(_v) < 1:
+                raise ValueError("text_toolcall.max_bytes deve "
+                                 "essere >= 1")
+            p.text_toolcall_max_bytes = int(_v)
+        if "hold_until_close" in _tt:
+            p.text_toolcall_hold_until_close = _coerce_bool(
+                _tt["hold_until_close"], "text_toolcall.hold_until_close")
+        if "fallback_to_escalation" in _tt:
+            p.text_toolcall_fallback_to_escalation = _coerce_bool(
+                _tt["fallback_to_escalation"],
+                "text_toolcall.fallback_to_escalation")
+
+    # --- TOOLCALL_TRUNCATION ---
+    _tct = raw.get("toolcall_truncation")
+    if _tct is not None:
+        if not isinstance(_tct, dict):
+            raise ValueError("toolcall_truncation deve essere una mappa")
+        if "enabled" in _tct:
+            p.toolcall_truncation_enabled = _coerce_bool(
+                _tct["enabled"], "toolcall_truncation.enabled")
+        if "holdback" in _tct:
+            p.toolcall_truncation_holdback = _coerce_bool(
+                _tct["holdback"], "toolcall_truncation.holdback")
+        _cd = _tct.get("cooldown_sec")
+        if _cd is not None:
+            if isinstance(_cd, bool) or not isinstance(
+                    _cd, (int, float)) or int(_cd) < 1:
+                raise ValueError("toolcall_truncation.cooldown_sec deve "
+                                 "essere >= 1")
+            p.toolcall_truncation_cooldown_sec = int(_cd)
+
+
+def _parse_warm_pool(p: Policy, raw: dict[str, Any]) -> None:
+    """Session-dep guard, warm pool/borrow, canary non-stream, slow race."""
+    sdg = raw.get("session_dep_guard")
+    if sdg is not None:
+        if not isinstance(sdg, dict):
+            raise ValueError("session_dep_guard deve essere una mappa")
+        if "enabled" in sdg:
+            p.session_dep_guard_enabled = _coerce_bool(
+                sdg["enabled"], "session_dep_guard.enabled")
+        if sdg.get("sec") is not None:
+            _v = sdg["sec"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"session_dep_guard.sec non valido: {_v!r}")
+            p.session_dep_guard_sec = int(_v)
+
+    wp = raw.get("warm_pool")
+    if wp is not None:
+        if not isinstance(wp, dict):
+            raise ValueError("warm_pool deve essere una mappa")
+        if "enabled" in wp:
+            p.warm_pool_enabled = _coerce_bool(
+                wp["enabled"], "warm_pool.enabled")
+        if wp.get("ttl_sec") is not None:
+            _v = wp["ttl_sec"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(f"warm_pool.ttl_sec non valido: {_v!r}")
+            p.warm_pool_ttl_sec = int(_v)
+        if wp.get("max_attempts") is not None:
+            _v = wp["max_attempts"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.max_attempts non valido: {_v!r}")
+            p.warm_pool_max_attempts = int(_v)
+        if "allow_slow" in wp:
+            p.warm_pool_allow_slow = _coerce_bool(
+                wp["allow_slow"], "warm_pool.allow_slow")
+        if "refill_enabled" in wp:
+            p.warm_refill_enabled = _coerce_bool(
+                wp["refill_enabled"], "warm_pool.refill_enabled")
+        if wp.get("ready_min") is not None:
+            _v = wp["ready_min"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.ready_min non valido: {_v!r}")
+            p.warm_ready_min = int(_v)
+        if "ready_min_adaptive" in wp:
+            p.warm_ready_rpm_adaptive = _coerce_bool(
+                wp["ready_min_adaptive"], "warm_pool.ready_min_adaptive")
+        if wp.get("ready_min_rpm_window_sec") is not None:
+            _v = wp["ready_min_rpm_window_sec"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v <= 0:
+                raise ValueError(
+                    f"warm_pool.ready_min_rpm_window_sec non valido: {_v!r}")
+            p.warm_ready_rpm_window_sec = int(_v)
+        if wp.get("ready_min_rpm_base") is not None:
+            _v = wp["ready_min_rpm_base"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.ready_min_rpm_base non valido: {_v!r}")
+            p.warm_ready_rpm_base = float(_v)
+        if wp.get("ready_min_rpm_step") is not None:
+            _v = wp["ready_min_rpm_step"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v <= 0:
+                raise ValueError(
+                    f"warm_pool.ready_min_rpm_step non valido: {_v!r}")
+            p.warm_ready_rpm_step = float(_v)
+        if wp.get("ready_min_max") is not None:
+            _v = wp["ready_min_max"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.ready_min_max non valido: {_v!r}")
+            p.warm_ready_min_max = int(_v)
+        if "canary_warm_last" in wp:
+            p.canary_warm_last = _coerce_bool(
+                wp["canary_warm_last"], "warm_pool.canary_warm_last")
+        if wp.get("refill_default_out_tokens") is not None:
+            _v = wp["refill_default_out_tokens"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v <= 0:
+                raise ValueError(
+                    f"warm_pool.refill_default_out_tokens non valido: {_v!r}")
+            p.warm_refill_default_out_tokens = int(_v)
+        if wp.get("max_inflight") is not None:
+            _v = wp["max_inflight"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.max_inflight non valido: {_v!r}")
+            p.warm_refill_max_inflight = int(_v)
+        if wp.get("wake_max_attempts") is not None:
+            _v = wp["wake_max_attempts"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.wake_max_attempts non valido: {_v!r}")
+            p.warm_refill_wake_max_attempts = int(_v)
+        if "borrow_enabled" in wp:
+            p.warm_borrow_enabled = _coerce_bool(
+                wp["borrow_enabled"], "warm_pool.borrow_enabled")
+        if wp.get("borrow_idle_sec") is not None:
+            _v = wp["borrow_idle_sec"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.borrow_idle_sec non valido: {_v!r}")
+            p.warm_borrow_idle_sec = float(_v)
+        if "borrow_selectable" in wp:
+            p.warm_borrow_selectable = _coerce_bool(
+                wp["borrow_selectable"], "warm_pool.borrow_selectable")
+        if "nonstream_canary_allowed" in wp:
+            p.nonstream_canary_allowed = _coerce_bool(
+                wp["nonstream_canary_allowed"],
+                "warm_pool.nonstream_canary_allowed")
+        if wp.get("slow_race_after_ms") is not None:
+            _v = wp["slow_race_after_ms"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.slow_race_after_ms non valido: {_v!r}")
+            p.stream_slow_race_after_ms = int(_v)
+        if wp.get("nonstream_slow_race_after_ms") is not None:
+            _v = wp["nonstream_slow_race_after_ms"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    "warm_pool.nonstream_slow_race_after_ms non valido: "
+                    f"{_v!r}")
+            p.nonstream_slow_race_after_ms = int(_v)
+        if wp.get("slow_canary_after_ms") is not None:
+            _v = wp["slow_canary_after_ms"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.slow_canary_after_ms non valido: {_v!r}")
+            p.slow_canary_after_ms = int(_v)
+        if wp.get("slow_race_canaries") is not None:
+            _v = wp["slow_race_canaries"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 1:
+                raise ValueError(
+                    f"warm_pool.slow_race_canaries non valido: {_v!r}")
+            p.stream_slow_race_canaries = int(_v)
+        if wp.get("slow_race_max_warm") is not None:
+            _v = wp["slow_race_max_warm"]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(
+                    f"warm_pool.slow_race_max_warm non valido: {_v!r}")
+            p.slow_race_max_warm = int(_v)
+        if "warm_pick_fastest" in wp:
+            p.warm_pick_fastest = _coerce_bool(
+                wp["warm_pick_fastest"], "warm_pool.warm_pick_fastest")
+        if "canary_provider_sweep" in wp:
+            p.canary_provider_sweep_enabled = _coerce_bool(
+                wp["canary_provider_sweep"],
+                "warm_pool.canary_provider_sweep")
+        if "provider_alternation" in wp:
+            p.provider_alternation_enabled = _coerce_bool(
+                wp["provider_alternation"],
+                "warm_pool.provider_alternation")
+    _set_bool(p, raw, "warm_borrow_enabled", skip_none=True)
+    if raw.get("warm_borrow_idle_sec") is not None:
+        _v = raw["warm_borrow_idle_sec"]
+        if isinstance(_v, bool) or not isinstance(_v, (int, float)) or _v < 0:
+            raise ValueError(f"warm_borrow_idle_sec non valido: {_v!r}")
+        p.warm_borrow_idle_sec = float(_v)
+    _set_bool(p, raw, "warm_borrow_selectable", skip_none=True)
+    _set_bool(p, raw, "nonstream_canary_allowed", skip_none=True)
+    _set_bool(p, raw, "nonstream_hold_redirect", skip_none=True)
+    for _k, _attr in (("stream_slow_race_after_ms",
+                       "stream_slow_race_after_ms"),
+                      ("nonstream_slow_race_after_ms",
+                       "nonstream_slow_race_after_ms"),
+                      ("slow_canary_after_ms",
+                       "slow_canary_after_ms"),
+                      ("stream_slow_race_canaries",
+                       "stream_slow_race_canaries")):
+        if raw.get(_k) is not None:
+            _v = raw[_k]
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)) \
+                    or _v < 0:
+                raise ValueError(f"{_k} non valido: {_v!r}")
+            setattr(p, _attr, int(_v))
+
+
+def _parse_cache_debug_qc(p: Policy, raw: dict[str, Any]) -> None:
+    """Cache-aware, debug e QC JSON."""
+    ca = raw.get("cache_aware")
+    if ca is not None:
+        if not isinstance(ca, dict):
+            raise ValueError("cache_aware deve essere una mappa")
+        if "enabled" in ca:
+            p.cache_aware_enabled = _coerce_bool(ca["enabled"], "cache_aware.enabled")
+        if "prefix_audit" in ca:
+            p.cache_prefix_audit = _coerce_bool(
+                ca["prefix_audit"], "cache_aware.prefix_audit")
+        if "prefer_last_success" in ca:
+            p.cache_prefer_last_success = _coerce_bool(
+                ca["prefer_last_success"], "cache_aware.prefer_last_success")
+        if ca.get("holder_ttl_sec") is not None:
+            p.cache_holder_ttl_sec = int(ca["holder_ttl_sec"])
+        if "skip_probe_when_holder" in ca:
+            p.cache_skip_probe_when_holder = _coerce_bool(
+                ca["skip_probe_when_holder"], "cache_aware.skip_probe_when_holder")
+        ct = ca.get("context_truncation")
+        if ct is not None:
+            if not isinstance(ct, dict):
+                raise ValueError("cache_aware.context_truncation deve essere una mappa")
+            if "enabled" in ct:
+                p.cache_ctx_truncation_enabled = _coerce_bool(
+                    ct["enabled"], "cache_aware.context_truncation.enabled")
+            for _k, _attr in (("keep_turns", "cache_ctx_keep_turns"),
+                              ("max_tool_output_chars", "cache_ctx_max_tool_output_chars"),
+                              ("min_saved_tokens", "cache_ctx_min_saved_tokens"),
+                              ("min_ctx_tokens", "cache_ctx_min_ctx_tokens"),
+                              ("switch_min_tokens", "cache_ctx_switch_min_tokens"),
+                              ("head_chars", "cache_ctx_head_chars"),
+                              ("tail_chars", "cache_ctx_tail_chars"),
+                              ("tool_args_max_chars",
+                               "cache_ctx_tool_args_max_chars"),
+                              ("json_struct_max_items",
+                               "cache_ctx_json_struct_max_items"),
+                              ("json_struct_head",
+                               "cache_ctx_json_struct_head"),
+                              ("json_struct_tail",
+                               "cache_ctx_json_struct_tail"),
+                              ("cite_min_freq",
+                               "cache_ctx_cite_min_freq")):
+                _v = ct.get(_k)
+                if _v is not None:
+                    if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                        raise ValueError(f"cache_aware.context_truncation.{_k} deve essere un intero")
+                    setattr(p, _attr, int(_v))
+            _ktp = ct.get("keep_tail_pct")
+            if _ktp is not None:
+                if isinstance(_ktp, bool) or not isinstance(_ktp, (int, float)):
+                    raise ValueError("cache_aware.context_truncation."
+                                     "keep_tail_pct deve essere un numero")
+                p.cache_ctx_keep_tail_pct = max(0.0, float(_ktp))
+            if "keep_error_outputs" in ct:
+                p.cache_ctx_keep_error_outputs = _coerce_bool(
+                    ct["keep_error_outputs"],
+                    "cache_aware.context_truncation.keep_error_outputs")
+            if "on_deployment_switch" in ct:
+                p.cache_ctx_on_deployment_switch = _coerce_bool(
+                    ct["on_deployment_switch"],
+                    "cache_aware.context_truncation.on_deployment_switch")
+            if ct.get("stub_text"):
+                p.cache_ctx_stub_text = str(ct["stub_text"])
+            _ahr = ct.get("abs_headroom_ratio")
+            if _ahr is not None:
+                if isinstance(_ahr, bool) or not isinstance(_ahr, (int, float)):
+                    raise ValueError("cache_aware.context_truncation."
+                                     "abs_headroom_ratio deve essere un numero")
+                p.cache_ctx_abs_headroom_ratio = max(0.0, float(_ahr))
+            _rhr = ct.get("reasoning_headroom_ratio")
+            if _rhr is not None:
+                if isinstance(_rhr, bool) or not isinstance(_rhr, (int, float)):
+                    raise ValueError("cache_aware.context_truncation."
+                                     "reasoning_headroom_ratio deve essere un numero")
+                p.cache_ctx_reasoning_headroom_ratio = max(0.0, float(_rhr))
+            _rrr = ct.get("reasoning_reserve_ratio")
+            if _rrr is not None:
+                if isinstance(_rrr, bool) or not isinstance(_rrr, (int, float)):
+                    raise ValueError("cache_aware.context_truncation."
+                                     "reasoning_reserve_ratio deve essere un numero")
+                p.cache_ctx_reasoning_reserve_ratio = max(0.0,
+                                                          float(_rrr))
+            if "cite_retention" in ct:
+                p.cache_ctx_cite_retention = _coerce_bool(
+                    ct["cite_retention"],
+                    "cache_aware.context_truncation.cite_retention")
+    # --- DEBUG (sniff input/output) ---
+    _dbg = raw.get("debug")
+    if _dbg is not None:
+        if not isinstance(_dbg, dict):
+            raise ValueError("debug deve essere una mappa")
+        _sn = _dbg.get("sniff")
+        if _sn is not None:
+            if not isinstance(_sn, dict):
+                raise ValueError("debug.sniff deve essere una mappa")
+            if "enabled" in _sn:
+                p.debug_sniff_enabled = _coerce_bool(
+                    _sn["enabled"], "debug.sniff.enabled")
+            if _sn.get("retention_hours") is not None:
+                _rh = _sn["retention_hours"]
+                if isinstance(_rh, bool) or \
+                        not isinstance(_rh, (int, float)) or int(_rh) < 1:
+                    raise ValueError("debug.sniff.retention_hours deve "
+                                     "essere >= 1")
+                p.debug_sniff_retention_hours = int(_rh)
+    qj = raw.get("qc_json")
+    if qj is not None:
+        if not isinstance(qj, dict):
+            raise ValueError("qc_json deve essere una mappa")
+        # chiavi sconosciute IGNORATE (validazione soft);
+        # max_attempts clampata 1..8; bool coerenti anche da stringa.
+        if "enabled" in qj:
+            p.qc_json.enabled = _coerce_bool(qj["enabled"],
+                                             "qc_json.enabled")
+        if "strip_fences" in qj:
+            p.qc_json.strip_fences = _coerce_bool(
+                qj["strip_fences"], "qc_json.strip_fences")
+        if "annotate_reasoning" in qj:
+            p.qc_json.annotate_reasoning = _coerce_bool(
+                qj["annotate_reasoning"], "qc_json.annotate_reasoning")
+        if "retry_provider_4xx" in qj:
+            p.qc_json.retry_provider_4xx = _coerce_bool(
+                qj["retry_provider_4xx"], "qc_json.retry_provider_4xx")
+        if "watchdog_mark_no_done" in qj:
+            p.qc_json.watchdog_mark_no_done = _coerce_bool(
+                qj["watchdog_mark_no_done"],
+                "qc_json.watchdog_mark_no_done")
+        if "watchdog_cooldown_sec" in qj:
+            v = qj["watchdog_cooldown_sec"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 3600):
+                raise ValueError("qc_json.watchdog_cooldown_sec deve "
+                                 "essere 0..3600")
+            p.qc_json.watchdog_cooldown_sec = int(v)
+        if "max_attempts" in qj:
+            v = qj["max_attempts"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise ValueError("qc_json.max_attempts deve essere un intero")
+            p.qc_json.max_attempts = max(1, min(8, int(v)))
+        if "stream_first_content_ms" in qj:
+            v = qj["stream_first_content_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (2000 <= int(v) <= 900000):
+                raise ValueError("qc_json.stream_first_content_ms deve "
+                                 "essere 2000..900000")
+            p.qc_json.stream_first_content_ms = int(v)
+        if "stream_first_content_adaptive" in qj:
+            p.qc_json.stream_first_content_adaptive = _coerce_bool(
+                qj["stream_first_content_adaptive"],
+                "qc_json.stream_first_content_adaptive")
+        if "stream_first_content_mult" in qj:
+            v = qj["stream_first_content_mult"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0.5 <= float(v) <= 30.0):
+                raise ValueError("qc_json.stream_first_content_mult deve "
+                                 "essere 0.5..30.0")
+            p.qc_json.stream_first_content_mult = float(v)
+        if "stream_first_content_floor_ms" in qj:
+            v = qj["stream_first_content_floor_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 900000):
+                raise ValueError("qc_json.stream_first_content_floor_ms "
+                                 "deve essere 0..900000")
+            p.qc_json.stream_first_content_floor_ms = int(v)
+        if "stream_hedge_delay_ms" in qj:
+            v = qj["stream_hedge_delay_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 60000):
+                raise ValueError("qc_json.stream_hedge_delay_ms deve "
+                                 "essere 0..60000")
+            p.qc_json.stream_hedge_delay_ms = int(v)
+        if "stream_hedge_ttft_frac" in qj:
+            v = qj["stream_hedge_ttft_frac"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0.05 <= float(v) <= 5.0):
+                raise ValueError("qc_json.stream_hedge_ttft_frac deve "
+                                 "essere 0.05..5.0")
+            p.qc_json.stream_hedge_ttft_frac = float(v)
+        if "stream_hedge_min_ms" in qj:
+            v = qj["stream_hedge_min_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 60000):
+                raise ValueError("qc_json.stream_hedge_min_ms deve "
+                                 "essere 0..60000")
+            p.qc_json.stream_hedge_min_ms = int(v)
+        if "stream_hedge_max_ms" in qj:
+            v = qj["stream_hedge_max_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 60000):
+                raise ValueError("qc_json.stream_hedge_max_ms deve "
+                                 "essere 0..60000")
+            p.qc_json.stream_hedge_max_ms = int(v)
+        if "stream_hedge_cross_tier" in qj:
+            p.qc_json.stream_hedge_cross_tier = _coerce_bool(
+                qj["stream_hedge_cross_tier"],
+                "qc_json.stream_hedge_cross_tier")
+        if "stream_hedge_tiers" in qj:
+            v = qj["stream_hedge_tiers"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (1 <= int(v) <= 2):
+                raise ValueError("qc_json.stream_hedge_tiers deve essere 1..2")
+            p.qc_json.stream_hedge_tiers = int(v)
+        if "stream_hedge_max_races" in qj:
+            v = qj["stream_hedge_max_races"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 64):
+                raise ValueError("qc_json.stream_hedge_max_races deve "
+                                 "essere 0..64 (0=illimitato)")
+            p.qc_json.stream_hedge_max_races = int(v)
+        if "stream_commit_min_chars" in qj:
+            v = qj["stream_commit_min_chars"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 2000):
+                raise ValueError("qc_json.stream_commit_min_chars deve "
+                                 "essere 0..2000")
+            p.qc_json.stream_commit_min_chars = int(v)
+        if "stream_total_deadline_ms" in qj:
+            v = qj["stream_total_deadline_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (5000 <= int(v) <= 3600000):
+                raise ValueError("qc_json.stream_total_deadline_ms deve "
+                                 "essere 5000..3600000")
+            p.qc_json.stream_total_deadline_ms = int(v)
+        if "stream_commit_include_reasoning" in qj:
+            p.qc_json.stream_commit_include_reasoning = _coerce_bool(
+                qj["stream_commit_include_reasoning"],
+                "qc_json.stream_commit_include_reasoning")
+        if "stream_hold_until_finish" in qj:
+            p.qc_json.stream_hold_until_finish = _coerce_bool(
+                qj["stream_hold_until_finish"],
+                "qc_json.stream_hold_until_finish")
+        if "stream_hold_idle_ms" in qj:
+            v = qj["stream_hold_idle_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (1000 <= int(v) <= 600000):
+                raise ValueError("qc_json.stream_hold_idle_ms deve "
+                                 "essere 1000..600000")
+            p.qc_json.stream_hold_idle_ms = int(v)
+        if "stream_hold_max_buffer_bytes" in qj:
+            v = qj["stream_hold_max_buffer_bytes"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (1048576 <= int(v) <= 524288000):
+                raise ValueError("qc_json.stream_hold_max_buffer_bytes "
+                                 "deve essere 1048576..524288000")
+            p.qc_json.stream_hold_max_buffer_bytes = int(v)
+        if "stream_parachute_no_timeout" in qj:
+            p.qc_json.stream_parachute_no_timeout = _coerce_bool(
+                qj["stream_parachute_no_timeout"],
+                "qc_json.stream_parachute_no_timeout")
+        for _k, _attr in (("struct_out_enabled", "struct_out_enabled"),
+                          ("rewrite_content", "rewrite_content"),
+                          ("strict_schema", "strict_schema"),
+                          ("repair_content", "repair_content"),
+                          ("inject_response_format",
+                           "inject_response_format"),
+                          ("downgrade_response_format",
+                           "downgrade_response_format")):
+            if _k in qj:
+                setattr(p.qc_json, _attr, _coerce_bool(
+                    qj[_k], f"qc_json.{_k}"))
+        _iap = qj.get("inject_allow_providers")
+        if _iap is not None:
+            if not isinstance(_iap, (list, tuple)):
+                raise ValueError("qc_json.inject_allow_providers "
+                                 "deve essere una lista")
+            p.qc_json.inject_allow_providers = tuple(
+                str(x).lower() for x in _iap)
+        _nsp = qj.get("native_schema_providers")
+        if _nsp is not None:
+            if not isinstance(_nsp, (list, tuple)):
+                raise ValueError("qc_json.native_schema_providers "
+                                 "deve essere una lista")
+            p.qc_json.native_schema_providers = tuple(
+                str(x).lower() for x in _nsp)
+
+
+def _parse_health_and_capability_routing(p: Policy, raw: dict[str, Any]) -> None:
+    """Health proattivo e routing per capacita'."""
+        # stream_buffer_ms / stream_emit_error_tail / on_empty_response:
+        # rimossi. Catena esaurita -> sempre 503 retryable, mai un turno
+        # finto. Chiavi ignorate se presenti in un vecchio gateway.yaml.
+    _set_bool(p, raw, "proactive_health", skip_none=True)
+    hi = raw.get("health_interval_sec")
+    if hi is not None:
+        if isinstance(hi, bool) or not isinstance(hi, (int, float)) \
+                or hi < 60:
+            raise ValueError("health_interval_sec deve essere >= 60")
+        p.health_interval_sec = int(hi)
+
+    # capacità (capability_routing)
+    cr = raw.get("capability_routing")
+    if cr is not None:
+        if not isinstance(cr, dict):
+            raise ValueError("capability_routing deve essere una mappa")
+        if "enabled" in cr:
+            p.capability_routing_enabled = _coerce_bool(cr["enabled"], "capability_routing.enabled")
+        mc = cr.get("model_capabilities")
+        if mc is not None:
+            if not isinstance(mc, dict):
+                raise ValueError("capability_routing.model_capabilities deve essere una mappa")
+            from .capabilities import CapabilitiesError, normalize_caps
+            for k, v in mc.items():
+                if not isinstance(k, str) or not k:
+                    raise ValueError("capability_routing.model_capabilities: chiavi non valide")
+                try:
+                    normalize_caps(v, f"capability_routing.model_capabilities[{k}]")
+                except CapabilitiesError as exc:
+                    raise ValueError(str(exc)) from exc
+            p.model_capabilities = {str(k): list(v) for k, v in mc.items()}
+        if "capabilities_default" in cr:
+            try:
+                from .capabilities import normalize_caps, CapabilitiesError
+                p.capabilities_default = normalize_caps(
+                    cr["capabilities_default"], "capability_routing.capabilities_default")
+            except CapabilitiesError as exc:
+                raise ValueError(str(exc)) from exc
+        if "image_token_estimate" in cr:
+            v = cr["image_token_estimate"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ValueError("capability_routing.image_token_estimate deve essere int >= 0")
+            p.image_token_estimate = int(v)
+        if "images_chat_fallback" in cr:
+            p.images_chat_fallback = _coerce_bool(cr["images_chat_fallback"], "capability_routing.images_chat_fallback")
+        if "image_refs_hard_max" in cr:
+            v = cr["image_refs_hard_max"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError("capability_routing.image_refs_hard_max deve essere int >= 1")
+            p.image_refs_hard_max = int(v)
+        if "chat_images_max" in cr:
+            v = cr["chat_images_max"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("capability_routing.chat_images_max deve essere int >= 0 (0 = non limare)")
+            p.chat_images_max = int(v)
+        if "stt_chat_enabled" in cr:
+            p.stt_chat_enabled = _coerce_bool(
+                cr["stt_chat_enabled"], "capability_routing.stt_chat_enabled")
+        if "stt_chat_target_sec" in cr:
+            v = cr["stt_chat_target_sec"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError("capability_routing.stt_chat_target_sec deve essere > 0")
+            p.stt_chat_target_sec = int(v)
+        if "stt_chat_search_pct" in cr:
+            v = cr["stt_chat_search_pct"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or v < 0 or v > 1:
+                raise ValueError("capability_routing.stt_chat_search_pct deve essere 0..1")
+            p.stt_chat_search_pct = float(v)
+        if "stt_chat_max_bytes" in cr:
+            v = cr["stt_chat_max_bytes"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("capability_routing.stt_chat_max_bytes deve essere int >= 0")
+            p.stt_chat_max_bytes = int(v)
+        if "stt_chat_max_parallel" in cr:
+            v = cr["stt_chat_max_parallel"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError("capability_routing.stt_chat_max_parallel deve essere int >= 1")
+            p.stt_chat_max_parallel = int(v)
+        if "stt_chat_unavailable_notice" in cr:
+            v = cr["stt_chat_unavailable_notice"]
+            if not isinstance(v, str):
+                raise ValueError("capability_routing.stt_chat_unavailable_notice deve essere stringa")
+            p.stt_chat_unavailable_notice = v
+        if "stt_chat_cache_ttl_sec" in cr:
+            v = cr["stt_chat_cache_ttl_sec"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("capability_routing.stt_chat_cache_ttl_sec deve essere int >= 0")
+            p.stt_chat_cache_ttl_sec = int(v)
+        if "audio_token_estimate" in cr:
+            v = cr["audio_token_estimate"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("capability_routing.audio_token_estimate deve essere int >= 0")
+            p.audio_token_estimate = int(v)
+        mlr = cr.get("multimodal_last_resort")
+        if mlr is not None:
+            p.multimodal_last_resort = _coerce_bool(
+                mlr, "capability_routing.multimodal_last_resort")
+        gsf = cr.get("gen_same_model_failover")
+        if gsf is not None:
+            p.gen_same_model_failover = _coerce_bool(
+                gsf, "capability_routing.gen_same_model_failover")
+        dlf = cr.get("dims_ladder_floor")
+        if dlf is not None:
+            p.dims_ladder_floor = _coerce_bool(
+                dlf, "capability_routing.dims_ladder_floor")
+        flr = cr.get("free_last_resort")
+        if flr is not None:
+            p.free_last_resort_enabled = _coerce_bool(
+                flr, "capability_routing.free_last_resort")
+        flrx = cr.get("free_last_resort_extreme")
+        if flrx is not None:
+            p.free_last_resort_extreme = _coerce_bool(
+                flrx, "capability_routing.free_last_resort_extreme")
+        al = cr.get("auto_learn")
+        if al is not None:
+            if str(al) not in ("off", "suggest", "auto"):
+                raise ValueError("capability_routing.auto_learn non valido: "
+                                 "ammessi off|suggest|auto")
+            p.cap_auto_learn = str(al)
+        alt = cr.get("auto_learn_threshold")
+        if alt is not None:
+            if isinstance(alt, bool) or not isinstance(alt, (int, float)) \
+                    or not (1 <= int(alt) <= 50):
+                raise ValueError("capability_routing.auto_learn_threshold "
+                                 "deve essere 1..50")
+            p.cap_auto_learn_threshold = int(alt)
+
+
+def _parse_images(p: Policy, raw: dict[str, Any]) -> None:
+    """Generazione immagini."""
+    # immagini: store locale (url di download) + mirror degli URL provider
+    im = raw.get("images")
+    if im is not None:
+        if not isinstance(im, dict):
+            raise ValueError("images deve essere una mappa")
+        if "store_enabled" in im:
+            p.images_store_enabled = _coerce_bool(
+                im["store_enabled"], "images.store_enabled")
+        if "store_ttl_sec" in im:
+            v = im["store_ttl_sec"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ValueError("images.store_ttl_sec deve essere int >= 0")
+            p.images_store_ttl_sec = int(v)
+        if "store_max_items" in im:
+            v = im["store_max_items"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError("images.store_max_items deve essere int >= 1")
+            p.images_store_max_items = int(v)
+        if "store_max_bytes" in im:
+            v = im["store_max_bytes"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ValueError("images.store_max_bytes deve essere int >= 0")
+            p.images_store_max_bytes = int(v)
+        if "url_base" in im:
+            if not isinstance(im["url_base"], str):
+                raise ValueError("images.url_base deve essere una stringa")
+            p.images_url_base = im["url_base"].strip().rstrip("/")
+        if "mirror_remote" in im:
+            p.images_mirror_remote = _coerce_bool(
+                im["mirror_remote"], "images.mirror_remote")
+        if "remote_timeout_sec" in im:
+            v = im["remote_timeout_sec"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 1:
+                raise ValueError("images.remote_timeout_sec deve essere int >= 1")
+            p.images_remote_timeout_sec = int(v)
+        if "remote_max_bytes" in im:
+            v = im["remote_max_bytes"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ValueError("images.remote_max_bytes deve essere int >= 0")
+            p.images_remote_max_bytes = int(v)
+
+
+def _parse_go_buckets(p: Policy, raw: dict[str, Any]) -> None:
+    """Bucket -go: rimborso, bilanciamento, sticky."""
+    # rimborso latenza: turni -go regalati alla sessione dopo un "lento"
+    gr = raw.get("go_refund")
+    if gr is not None:
+        if not isinstance(gr, dict):
+            raise ValueError("go_refund deve essere una mappa")
+        if "enabled" in gr:
+            p.go_refund_enabled = _coerce_bool(
+                gr["enabled"], "go_refund.enabled")
+        if "pct" in gr:
+            v = gr["pct"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= v <= 100):
+                raise ValueError("go_refund.pct deve essere un numero "
+                                 "tra 0 e 100")
+            p.go_refund_pct = int(v)
+        if "min_turns" in gr:
+            v = gr["min_turns"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("go_refund.min_turns deve essere int >= 0")
+            p.go_refund_min_turns = int(v)
+        if "max_turns" in gr:
+            v = gr["max_turns"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("go_refund.max_turns deve essere int >= 0")
+            p.go_refund_max_turns = int(v)
+        if "trigger_ms" in gr:
+            v = gr["trigger_ms"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or v <= 0:
+                raise ValueError("go_refund.trigger_ms deve essere un "
+                                 "numero > 0 (ms)")
+            p.go_refund_trigger_ms = int(v)
+        if "fb_enabled" in gr:
+            p.go_refund_fb_enabled = _coerce_bool(
+                gr["fb_enabled"], "go_refund.fb_enabled")
+        if "fb_per_fallback" in gr:
+            v = gr["fb_per_fallback"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or v < 0:
+                raise ValueError("go_refund.fb_per_fallback deve essere "
+                                 "un numero >= 0")
+            p.go_refund_fb_per_fallback = float(v)
+        if "fb_min_turns" in gr:
+            v = gr["fb_min_turns"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("go_refund.fb_min_turns deve essere "
+                                 "int >= 0")
+            p.go_refund_fb_min_turns = int(v)
+        if "fb_max_turns" in gr:
+            v = gr["fb_max_turns"]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError("go_refund.fb_max_turns deve essere "
+                                 "int >= 0")
+            p.go_refund_fb_max_turns = int(v)
+        if p.go_refund_max_turns < p.go_refund_min_turns:
+            raise ValueError("go_refund.max_turns deve essere >= min_turns")
+        if p.go_refund_fb_max_turns < p.go_refund_fb_min_turns:
+            raise ValueError("go_refund.fb_max_turns deve essere >= "
+                             "fb_min_turns")
+
+    # bilanciamento -go: metrica a freddo (token di output) + pool
+    gb = raw.get("go_balance")
+    if gb is not None:
+        if not isinstance(gb, dict):
+            raise ValueError("go_balance deve essere una mappa")
+        if "enabled" in gb:
+            p.go_balance_enabled = _coerce_bool(
+                gb["enabled"], "go_balance.enabled")
+        if "flat_pool" in gb:
+            p.go_balance_flat_pool = _coerce_bool(
+                gb["flat_pool"], "go_balance.flat_pool")
+        if "window_sec" in gb:
+            v = gb["window_sec"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or v <= 0:
+                raise ValueError("go_balance.window_sec deve essere > 0")
+            p.go_balance_window_sec = int(v)
+    _set_int(p, raw, "go_stick_ttl_sec", minimum=1)
+
+
+def _parse_cooldown_and_ladder(p: Policy, raw: dict[str, Any]) -> None:
+    """Escalation/durate dei cooldown, scala dei gruppi, spread a freddo, cronici."""
+    # cooldown escalation
+    _set_bool(p, raw, "cooldown_escalation", skip_none=True)
+    _set_int(p, raw, "max_cooldown_sec", minimum=10)
+    _set_int(p, raw, "timeout_cooldown_mult", minimum=1)
+    _set_int(p, raw, "retire_after_days", minimum=1)
+
+    cm = raw.get("cooldown_mode")
+    if cm is not None:
+        if str(cm) not in ("linear", "exponential"):
+            raise ValueError("cooldown_mode non valido: ammessi linear|exponential")
+        p.cooldown_mode = str(cm)
+    _gpm = raw.get("go_preferred_models")
+    if _gpm is not None:
+        if isinstance(_gpm, (list, tuple)):
+            _gpm = ",".join(str(x) for x in _gpm)
+        p.go_preferred_models = str(_gpm).strip().lower()
+    _set_int(p, raw, "cooldown_base_min", minimum=1)
+    _set_int(p, raw, "cooldown_linear_mult_min", minimum=0)
+    _set_int(p, raw, "ladder_skip_after", minimum=1)
+    _set_int(p, raw, "ladder_stale_max", minimum=0)
+    _set_int(p, raw, "ladder_cooldown_wakeups", minimum=0)
+    _set_int(p, raw, "ladder_cooldown_wakeup_window_sec", minimum=1)
+    _csp = raw.get("cold_spread_pct")
+    if _csp is not None:
+        try:
+            _v = float(_csp)
+        except (TypeError, ValueError):
+            raise ValueError(f"cold_spread_pct non valido: {_csp!r}")
+        if not 0.0 <= _v <= 1.0:
+            raise ValueError("cold_spread_pct deve essere in [0,1]")
+        p.cold_spread_pct = _v
+    _set_bool(p, raw, "initial_pick_cooldown_wakeup", skip_none=True)
+    _set_int(p, raw, "cooldown_retry_max_fail_24h", minimum=1)
+    _set_int(p, raw, "ladder_chronic_max", minimum=0)
+    _set_int(p, raw, "chronic_fail_cooldown_sec", minimum=0)
+
+
+def _parse_budget_and_capability_groups(p: Policy, raw: dict[str, Any]) -> None:
+    """Budget guard, gruppi di capacita', fair-share, QC sanity."""
+    # budget guard (dict con chiavi note; sconosciute ignorate)
+    bg = raw.get("budget_guard")
+    if bg is not None:
+        if not isinstance(bg, dict):
+            raise ValueError("budget_guard deve essere una mappa")
+        merged = dict(p.budget_guard)
+        if "enabled" in bg:
+            merged["enabled"] = _coerce_bool(bg["enabled"],
+                                             "budget_guard.enabled")
+        for k in ("soft_factor", "min_per_min", "min_per_day"):
+            if k in bg:
+                try:
+                    v = float(bg[k])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"budget_guard.{k}: numero richiesto") from None
+                if v <= 0:
+                    raise ValueError(f"budget_guard.{k}: > 0 richiesto")
+                merged[k] = v
+        if "safety_ratio" in bg:
+            try:
+                v = float(bg["safety_ratio"])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "budget_guard.safety_ratio: numero richiesto") from None
+            if v < 0:
+                raise ValueError(
+                    "budget_guard.safety_ratio: >= 0 richiesto")
+            merged["safety_ratio"] = v
+        if "count_inflight" in bg:
+            merged["count_inflight"] = _coerce_bool(
+                bg["count_inflight"], "budget_guard.count_inflight")
+        if "rate_hint_threshold" in bg:
+            try:
+                v = int(bg["rate_hint_threshold"])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "budget_guard.rate_hint_threshold: intero richiesto") \
+                    from None
+            if v < 1:
+                raise ValueError(
+                    "budget_guard.rate_hint_threshold: >= 1 richiesto")
+            merged["rate_hint_threshold"] = v
+        if "suppress_with_headers" in bg:
+            merged["suppress_with_headers"] = _coerce_bool(
+                bg["suppress_with_headers"],
+                "budget_guard.suppress_with_headers")
+        p.budget_guard = merged
+
+    # gruppi capacità strutturali
+    cg = raw.get("capability_groups")
+    if cg is not None:
+        if not isinstance(cg, dict):
+            raise ValueError("capability_groups deve essere una mappa")
+        if "enabled" in cg:
+            p.cap_groups_enabled = _coerce_bool(cg["enabled"],
+                                                "capability_groups.enabled")
+        om = cg.get("on_missing")
+        if om is not None:
+            if str(om) not in ("dynamic", "error"):
+                raise ValueError("capability_groups.on_missing non valido: "
+                                 "ammessi dynamic|error")
+            p.cap_groups_on_missing = str(om)
+
+    # fair-share chiavi nei gruppi capacità primary (anti-martellamento)
+    cfs = raw.get("cap_fair_share")
+    if cfs is not None:
+        if not isinstance(cfs, dict):
+            raise ValueError("cap_fair_share deve essere una mappa")
+        if "enabled" in cfs:
+            p.cap_fair_share_enabled = _coerce_bool(
+                cfs["enabled"], "cap_fair_share.enabled")
+        cs = cfs.get("caps")
+        if cs is not None:
+            if isinstance(cs, str):
+                cs = [cs]
+            if not isinstance(cs, (list, tuple)):
+                raise ValueError("cap_fair_share.caps deve essere una lista")
+            from .capabilities import ROUTING_CAPS
+            _caps: list[str] = []
+            for c in cs:
+                if not isinstance(c, str) or c not in ROUTING_CAPS:
+                    raise ValueError(
+                        "cap_fair_share.caps: capacità non valida "
+                        f"'{c}' (ammesse: {sorted(ROUTING_CAPS)})")
+                _caps.append(c)
+            p.cap_fair_share_caps = _caps
+        ws = cfs.get("window_sec")
+        if ws is not None:
+            if isinstance(ws, bool) or not isinstance(ws, (int, float)) \
+                    or ws <= 0:
+                raise ValueError("cap_fair_share.window_sec deve essere > 0")
+            p.cap_fair_share_window_sec = int(ws)
+
+    # sanity QC
+    qs = raw.get("qc_sanity")
+    if qs is not None:
+        if not isinstance(qs, dict):
+            raise ValueError("qc_sanity deve essere una mappa")
+        if "enabled" in qs:
+            p.qc_sanity.enabled = _coerce_bool(qs["enabled"], "qc_sanity.enabled")
+        if "min_chars" in qs:
+            v = qs["min_chars"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not (0 <= int(v) <= 1000):
+                raise ValueError("qc_sanity.min_chars deve essere 0..1000")
+            p.qc_sanity.min_chars = int(v)
+        if "rotate_on_length_empty" in qs:
+            p.qc_sanity.rotate_on_length_empty = _coerce_bool(
+                qs["rotate_on_length_empty"],
+                "qc_sanity.rotate_on_length_empty")
+        if "rotate_on_length_truncated" in qs:
+            p.qc_sanity.rotate_on_length_truncated = _coerce_bool(
+                qs["rotate_on_length_truncated"],
+                "qc_sanity.rotate_on_length_truncated")
+
+
+_POLICY_SECTION_PARSERS = (
+    _parse_estimation,
+    _parse_timeouts_and_stalls,
+    _parse_cooldown_probe_and_jitter,
+    _parse_latency_and_hunt,
+    _parse_probes_and_upstream_limits,
+    _parse_model_circuit_and_autoprobe,
+    _parse_concurrency_coalescing_and_sticky,
+    _parse_naming_profiles_and_keys,
+    _parse_selection_and_scoring,
+    _parse_response_hygiene,
+    _parse_warm_pool,
+    _parse_cache_debug_qc,
+    _parse_health_and_capability_routing,
+    _parse_images,
+    _parse_go_buckets,
+    _parse_cooldown_and_ladder,
+    _parse_budget_and_capability_groups,
+)
 
 
 def _set_int(obj: Policy, raw: dict, key: str, minimum: int = 0,
