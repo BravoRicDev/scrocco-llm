@@ -13,6 +13,27 @@
   },
   "status": 200
  },
+ "json:e401:plain": {
+  "attempts": [
+   "m/zeta:e401",
+   "m/gamma:e401",
+   "m/delta:e401",
+   "m/eta:e401"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"auth\",\"status\":401,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"auth\",\"status\":401,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"auth\",\"status\":401,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"auth\",\"status\":401,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:auth,scrocco-llm-gold-32k__m-gamma__2:auth,scrocco-llm-gold-128k__m-delta__0:auth,scrocco-llm-gold-128k__m-eta__1:auth"
+  },
+  "status": 503
+ },
  "json:e401>ok:plain": {
   "attempts": [
    "m/zeta:e401",
@@ -26,6 +47,27 @@
    "content-type": "application/json"
   },
   "status": 200
+ },
+ "json:e402:plain": {
+  "attempts": [
+   "m/zeta:e402",
+   "m/gamma:e402",
+   "m/delta:e402",
+   "m/eta:e402"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"insufficient credits\\\"}}))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:out_of_credits,scrocco-llm-gold-32k__m-gamma__2:out_of_credits,scrocco-llm-gold-128k__m-delta__0:out_of_credits,scrocco-llm-gold-128k__m-eta__1:out_of_credits"
+  },
+  "status": 503
  },
  "json:e404model>ok:plain": {
   "attempts": [
@@ -69,7 +111,7 @@
    "m/delta:empty",
    "m/eta:e401"
   ],
-  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"auth\",\"status\":401,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
   "cooled": [
    "m-delta",
    "m-eta",
@@ -77,9 +119,11 @@
    "m-zeta"
   ],
   "headers": {
-   "content-type": "application/json"
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:rate_limited,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:auth"
   },
-  "status": 401
+  "status": 503
  },
  "json:e429>e500>empty>e401>enone>e503>ok:plain": {
   "attempts": [
@@ -88,7 +132,7 @@
    "m/delta:empty",
    "m/eta:e401"
   ],
-  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}))\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"auth\",\"status\":401,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
   "cooled": [
    "m-delta",
    "m-eta",
@@ -96,9 +140,11 @@
    "m-zeta"
   ],
   "headers": {
-   "content-type": "application/json"
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:rate_limited,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:auth"
   },
-  "status": 401
+  "status": 503
  },
  "json:e429>ok:plain": {
   "attempts": [
@@ -496,6 +542,27 @@
   },
   "status": 200
  },
+ "stream:e401:plain": {
+  "attempts": [
+   "m/zeta:e401",
+   "m/gamma:e401",
+   "m/delta:e401",
+   "m/eta:e401"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}})\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"auth\",\"status\":401,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"auth\",\"status\":401,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"auth\",\"status\":401,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"auth\",\"status\":401,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:auth,scrocco-llm-gold-32k__m-gamma__2:auth,scrocco-llm-gold-128k__m-delta__0:auth,scrocco-llm-gold-128k__m-eta__1:auth"
+  },
+  "status": 503
+ },
  "stream:e401>ok:plain": {
   "attempts": [
    "m/zeta:e401",
@@ -523,6 +590,27 @@
    "content-type": "text/event-stream; charset=utf-8"
   },
   "status": 200
+ },
+ "stream:e402:plain": {
+  "attempts": [
+   "m/zeta:e402",
+   "m/gamma:e402",
+   "m/delta:e402",
+   "m/eta:e402"
+  ],
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"insufficient credits\\\"}})\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"out_of_credits\",\"status\":402,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
+  "cooled": [
+   "m-delta",
+   "m-eta",
+   "m-gamma",
+   "m-zeta"
+  ],
+  "headers": {
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:out_of_credits,scrocco-llm-gold-32k__m-gamma__2:out_of_credits,scrocco-llm-gold-128k__m-delta__0:out_of_credits,scrocco-llm-gold-128k__m-eta__1:out_of_credits"
+  },
+  "status": 503
  },
  "stream:e404model>ok:plain": {
   "attempts": [
@@ -580,7 +668,7 @@
    "m/delta:empty",
    "m/eta:e401"
   ],
-  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}})\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"auth\",\"status\":401,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
   "cooled": [
    "m-delta",
    "m-eta",
@@ -588,9 +676,11 @@
    "m-zeta"
   ],
   "headers": {
-   "content-type": "application/json"
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:rate_limited,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:auth"
   },
-  "status": 401
+  "status": 503
  },
  "stream:e429>e500>empty>e401>enone>e503>ok:plain": {
   "attempts": [
@@ -599,7 +689,7 @@
    "m/delta:empty",
    "m/eta:e401"
   ],
-  "body": "{\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}}\",\"type\":\"upstream_error\"}}",
+  "body": "{\"error\":{\"message\":\"nessun deployment upstream ha prodotto una risposta dopo 4 tentativi (ultimo: {\\\"error\\\":{\\\"message\\\":\\\"invalid api key\\\"}})\",\"type\":\"upstream_unavailable\",\"code\":\"no_healthy_deployment\",\"attempts\":[{\"ord\":1,\"dep\":\"scrocco-llm-gold-32k__m-zeta__4\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/zeta\",\"cls\":\"rate_limited\",\"status\":429,\"ms\":0},{\"ord\":2,\"dep\":\"scrocco-llm-gold-32k__m-gamma__2\",\"group\":\"scrocco-llm-gold-32k\",\"model\":\"m/gamma\",\"cls\":\"upstream_error\",\"status\":500,\"ms\":0},{\"ord\":3,\"dep\":\"scrocco-llm-gold-128k__m-delta__0\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/delta\",\"cls\":\"empty_eof\",\"status\":502,\"ms\":0},{\"ord\":4,\"dep\":\"scrocco-llm-gold-128k__m-eta__1\",\"group\":\"scrocco-llm-gold-128k\",\"model\":\"m/eta\",\"cls\":\"auth\",\"status\":401,\"ms\":0}],\"retry_at_ms\":<ts-ms>}}",
   "cooled": [
    "m-delta",
    "m-eta",
@@ -607,9 +697,11 @@
    "m-zeta"
   ],
   "headers": {
-   "content-type": "application/json"
+   "content-type": "application/json",
+   "retry-after": "2",
+   "x-scrocco-trail": "scrocco-llm-gold-32k__m-zeta__4:rate_limited,scrocco-llm-gold-32k__m-gamma__2:upstream_error,scrocco-llm-gold-128k__m-delta__0:empty_eof,scrocco-llm-gold-128k__m-eta__1:auth"
   },
-  "status": 401
+  "status": 503
  },
  "stream:e429>ok:plain": {
   "attempts": [

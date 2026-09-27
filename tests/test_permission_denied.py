@@ -49,11 +49,19 @@ def test_various_403_bodies_all_not_actionable():
             f"should NOT be actionable: {body}"
 
 
-def test_plain_401_402_still_actionable():
-    """401 e 402 restano actionable (auth, quota)."""
+def test_401_402_upstream_not_actionable():
+    """401/402 dell'upstream riguardano la chiave/credito del GATEWAY, non la
+    richiesta: a catena esaurita il client riceve un 503 retryable."""
     from app.main import _actionable_upstream_error
-    assert _actionable_upstream_error(UpstreamError(-401, "Unauthorized"))
-    assert _actionable_upstream_error(UpstreamError(-402, "quota"))
+    assert not _actionable_upstream_error(UpstreamError(-401, "Unauthorized"))
+    assert not _actionable_upstream_error(UpstreamError(-402, "quota"))
+    assert not _actionable_upstream_error(UpstreamError(401, "Unauthorized"))
+
+
+def test_request_errors_stay_actionable():
+    """Gli errori che dipendono dalla richiesta restano consegnati col loro status."""
+    from app.main import _actionable_upstream_error
+    assert _actionable_upstream_error(UpstreamError(-404, "The model `m/x` does not exist"))
 
 
 # ----------------------------------------------------------------- integrazione

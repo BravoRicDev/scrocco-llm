@@ -23,20 +23,17 @@ log = logging.getLogger("nx.main")
 
 
 def _actionable_upstream_error(err) -> bool:
-    """True se l'errore e' AZIONABILE dall'agente/utente (auth, credito,
-    modello inesistente, thought_signature) e va consegnato col suo status
-    vero. Il resto (rete, 5xx, 404 transitori, body d'errore provider)
-    -> risposta 'notice' non vuota, cosi' il loop dell'agente non si pianta.
+    """True se l'errore dipende dalla RICHIESTA del client (modello inesistente,
+    schema del payload, thought_signature) e va consegnato col suo status vero:
+    riprovare identica non servirebbe.
 
-    Il 403 NON e' mai azionabile dal client: un upstream che risponde 403
-    sta rifiutando la CHIAVE/deployment (project banned, key disabled,
-    permission denied...), non la richiesta. Il client non puo' farci nulla
-    -> si ruota; a catena esaurita si consegna un 503 retryable."""
+    Gli errori di CREDENZIALI/CREDITO dell'upstream (401, 402, 403) NON sono
+    azionabili dal client: riguardano la chiave del gateway verso il provider,
+    non la richiesta. Si ruota e, a catena esaurita, si consegna un 503
+    retryable, cosi' il client lo riconosce e ritenta."""
     detail = getattr(err, "detail", "") or ""
-    if _THOUGHT_SIG_RE.search(detail) or _MODEL_MISSING_RE.search(detail) or _PAYLOAD_SCHEMA_RE.search(detail):
-        return True
-    st = getattr(err, "status", None)
-    return st in (-401, -402, 401, 402)
+    return bool(_THOUGHT_SIG_RE.search(detail) or _MODEL_MISSING_RE.search(detail)
+                or _PAYLOAD_SCHEMA_RE.search(detail))
 
 
 def _soft_cd(fail_24h: int = 0) -> int:

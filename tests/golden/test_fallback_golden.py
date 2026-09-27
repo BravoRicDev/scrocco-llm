@@ -114,6 +114,7 @@ ERRORS = {  # status, detail
     "e500": (500, '{"error":{"message":"internal error"}}'),
     "e503": (503, '{"error":{"message":"service unavailable"}}'),
     "e401": (401, '{"error":{"message":"invalid api key"}}'),
+    "e402": (-402, '{"error":{"message":"insufficient credits"}}'),
     "e400": (-400, '{"error":{"message":"bad request: unsupported parameter foo"}}'),
     "e404model": (404, '{"error":{"message":"The model `m/x` does not exist"}}'),
     "enone": (None, "connect timeout"),
@@ -139,7 +140,7 @@ for stream in (True, False):
         ["ok"], ["empty", "ok"], ["reasoning_only", "ok"], ["length_empty", "ok"],
         ["e429", "ok"], ["e500", "e500", "ok"], ["e503", "ok"], ["e401", "ok"],
         ["e400", "ok"], ["e404model", "ok"], ["enone", "ok"],
-        ["e429"], ["e500"], ["empty"], ["length_empty"], ["reasoning_only"],
+        ["e429"], ["e500"], ["e401"], ["e402"], ["empty"], ["length_empty"], ["reasoning_only"],
         ["think_tags"], ["tool_call"],
     ]
     if stream:
