@@ -132,10 +132,10 @@ def test_trail_campione_per_verdetto_generato():
     """
     import inspect
 
-    src = inspect.getsource(main._stream_with_fallback)
+    src = inspect.getsource(main._StreamFallback)
     # append al trail con classe e status, non un recordon generico
-    assert '"cls": _v_cls' in src and '"status": _v_st' in src
-    assert "trail.append(" in src
+    assert '"cls": self._v_cls' in src and '"status": self._v_st' in src
+    assert "self.trail.append(" in src
     # e la mappa deve coprire i verdetti citati nel contratto
     for v in ("timeout", "struct_invalid", "empty_eof", "length_truncated",
               "fake_tool_call"):
@@ -150,13 +150,13 @@ def test_ret_popola_il_trail_nel_result_box():
     """Criterio 3 (il percorso dati): _ret consegna il trail al chiamante."""
     import inspect
 
-    src = inspect.getsource(main._stream_with_fallback)
-    ret_src = src[src.index("def _ret(resp):"):]
+    src = inspect.getsource(main._StreamFallback)
+    ret_src = src[src.index("def _ret(self, resp):"):]
     ret_src = ret_src[:ret_src.index("\n    def ")]
-    assert 'result_box["trail"] = list(trail)' in ret_src
+    assert 'self.result_box["trail"] = list(self.trail)' in ret_src
     # insieme a dep/attempts, che il redirect non-stream gia' usava
-    assert 'result_box["dep"]' in ret_src
-    assert 'result_box["attempts"]' in ret_src
+    assert 'self.result_box["dep"]' in ret_src
+    assert 'self.result_box["attempts"]' in ret_src
 
 
 def test_redirect_nonstream_trasporta_il_trail():

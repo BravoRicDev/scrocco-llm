@@ -15,6 +15,7 @@ import tempfile
 import time
 
 import httpx
+import pytest
 
 from app import metrics
 from app.config import GatewayConfig
@@ -34,6 +35,23 @@ _CSV = ("commento,modello,provider,endpoint,data,context,max_input,"
         "a,qc-cf,cloudflare,https://api.cloudflare.com/client/v4/accounts/"
         "ACC1/ai/v1,free,128,128000,5,K1,\n"
         "b,qc-ok,groq,https://ok.test/v1,free,128,128000,5,K2,\n")
+
+
+@pytest.fixture(autouse=True)
+def _orologio_a_inizio_giornata_utc(monkeypatch):
+    """Il reset delle quote giornaliere e' la mezzanotte UTC: l'orologio del
+    forwarder parte dall'01:00 UTC, cosi' il 'tempo al reset' (~23h) non
+    dipende dall'ora in cui gira la suite (prima falliva dopo le 19 UTC)."""
+    import types
+
+    import app.forwarder as fwd
+
+    real = time.time
+    t0 = real()
+    start = t0 - (t0 % 86400.0) + 3600.0
+    shim = types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
+    shim.time = lambda: start + (real() - t0)
+    monkeypatch.setattr(fwd, "time", shim)
 
 
 def _dep(cfg, key):
