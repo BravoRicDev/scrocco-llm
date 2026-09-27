@@ -473,6 +473,13 @@ from .observability import (
     render_prometheus,  # noqa: F401 - ri-esportato
 )
 
+# Porta di ammissione del processo (tetto globale richieste/stream LLM):
+# aggiunta PRIMA dell'osservabilita' -> il trace ID resta il middleware piu'
+# esterno e copre anche un eventuale 503 di coda.
+from .admission import AdmissionMiddleware  # noqa: E402
+
+app.add_middleware(AdmissionMiddleware, policy_getter=lambda: gw_state.router.policy)
+
 _obs_enabled = os.environ.get("GATEWAY_OBSERVABILITY", "1").strip() != "0"
 if _obs_enabled:
     setup_observability(

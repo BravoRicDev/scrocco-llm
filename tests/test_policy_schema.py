@@ -19,7 +19,7 @@ from app.policy import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_COUNT = 402
+EXPECTED_SCHEMA_COUNT = 405
 
 
 def _by_path() -> dict:

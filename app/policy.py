@@ -807,6 +807,13 @@ class Policy:
     # chiavi e playground di prova. Default = valori storici.
     probe_concurrency: int = 5
     probe_timeout_sec: float = 20.0
+    # Controllo di ammissione del PROCESSO (app/admission.py): richieste LLM
+    # in volo (stream compresi, fino alla fine della risposta) e tetto
+    # dedicato agli stream. Oltre il tetto si ASPETTA in coda; 503 retryable
+    # solo dopo admission_queue_timeout_sec. 0 = nessun tetto.
+    admission_max_inflight: int = 128
+    admission_max_streams: int = 48
+    admission_queue_timeout_sec: float = 60.0
     playground_timeout_sec: float = 90.0
     playground_max_attempts: int = 128
     # Durate dei cooldown "di categoria" (prima hardcoded in forwarder.py).
@@ -1921,6 +1928,9 @@ def _parse_probes_and_upstream_limits(p: Policy, raw: dict[str, Any]) -> None:
     _set_int(p, raw, "dynamic_scoring_history_window", minimum=1)
     # ---------------------------------------------------------- ops tuning
     _set_int(p, raw, "probe_concurrency", minimum=1)
+    _set_int(p, raw, "admission_max_inflight", minimum=0)
+    _set_int(p, raw, "admission_max_streams", minimum=0)
+    _set_nonneg_float(p, raw, "admission_queue_timeout_sec", "admission_queue_timeout_sec deve essere un numero >= 0")
     _set_int(p, raw, "playground_max_attempts", minimum=1)
     for _name in ("probe_timeout_sec", "playground_timeout_sec"):
         _v = raw.get(_name)

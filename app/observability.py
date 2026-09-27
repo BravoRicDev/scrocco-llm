@@ -19,11 +19,10 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 
 log = logging.getLogger("nx.observability")
@@ -71,8 +70,17 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False)
 
 
-class TraceIDMiddleware(BaseHTTPMiddleware):
-    """Middleware che aggiunge/genera trace ID e logga inizio/fine richiesta."""
+class TraceIDMiddleware:
+    """Middleware ASGI puro: aggiunge/genera il trace ID e logga inizio/fine
+    richiesta.
+
+    Prima era un `BaseHTTPMiddleware`: Starlette lo esegue in un task separato
+    e fa passare OGNI chunk della risposta (anche degli stream SSE lunghi)
+    attraverso uno stream di memoria anyio, con costo CPU per chunk sullo stesso
+    event loop che serve tutto il resto. Qui il `send` viene solo avvolto.
+    Comportamento invariato: header di risposta, log "[http]" e metriche sono
+    registrati all'inizio della risposta (quando `call_next` tornava), le
+    eccezioni prima della risposta sono loggate e rilanciate."""
 
     def __init__(
         self,
@@ -81,12 +89,17 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
         generate_if_missing: bool = True,
         log_requests: bool = True,
     ):
-        super().__init__(app)
+        self.app = app
         self.header_name = header_name
+        self._header_key = header_name.lower().encode("latin-1")
         self.generate_if_missing = generate_if_missing
         self.log_requests = log_requests
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
         trace_id = request.headers.get(self.header_name)
         if not trace_id and self.generate_if_missing:
             trace_id = uuid.uuid4().hex[:16]
@@ -98,50 +111,64 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
         start = time.time()
         method = request.method
         path = request.url.path
+        loggable = self.log_requests and path not in ("/healthz", "/metrics")
+        client = scope.get("client")
+        client_host = client[0] if client else None
 
-        if self.log_requests and path not in ("/healthz", "/metrics"):
+        if loggable:
             log.debug(
                 "[http] -> %s %s da %s",
                 method, path,
-                request.client.host if request.client else "-",
+                client_host or "-",
                 extra={
                     "trace_id": trace_id,
                     "method": method,
                     "path": path,
-                    "client": request.client.host if request.client else None,
+                    "client": client_host,
                 },
             )
 
+        started = False
+
+        async def send_with_trace(message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start" and not started:
+                started = True
+                duration_ms = (time.time() - start) * 1000.0
+                status = message["status"]
+                headers = [(k, v) for k, v in message.get("headers", [])
+                           if k.lower() != self._header_key]
+                headers.append((self._header_key, trace_id.encode("latin-1")))
+                message = {**message, "headers": headers}
+                if loggable:
+                    _mark = "OK" if status < 400 else "KO"
+                    log.info(
+                        "[http] %s %s %s -> %d in %.0fms",
+                        _mark, method, path, status, duration_ms,
+                        extra={
+                            "trace_id": trace_id,
+                            "method": method,
+                            "path": path,
+                            "status": status,
+                            "duration_ms": round(duration_ms, 2),
+                        },
+                    )
+                # Record Prometheus metrics. Il template della route (e non il
+                # path concreto) limita la cardinalita' dell'etichetta `path`:
+                # ogni {id} generava una serie nuova -> memoria illimitata.
+                # Va letto all'inizio della risposta: lo scope e' valorizzato
+                # dal router durante l'instradamento, non prima.
+                record_request_metrics(method, _route_template(request),
+                                       status, duration_ms, trace_id)
+            await send(message)
+
         try:
-            response = await call_next(request)
-            duration_ms = (time.time() - start) * 1000.0
-
-            response.headers[self.header_name] = trace_id
-
-            if self.log_requests and path not in ("/healthz", "/metrics"):
-                _mark = "OK" if response.status_code < 400 else "KO"
-                log.info(
-                    "[http] %s %s %s -> %d in %.0fms",
-                    _mark, method, path, response.status_code, duration_ms,
-                    extra={
-                        "trace_id": trace_id,
-                        "method": method,
-                        "path": path,
-                        "status": response.status_code,
-                        "duration_ms": round(duration_ms, 2),
-                    },
-                )
-
-            # Record Prometheus metrics. Il template della route (e non il
-            # path concreto) limita la cardinalita' dell'etichetta `path`:
-            # ogni {id} generava una serie nuova -> memoria illimitata.
-            # Va letto DOPO call_next: lo scope e' valorizzato dal router
-            # durante l'instradamento, non prima.
-            record_request_metrics(method, _route_template(request),
-                                   response.status_code, duration_ms, trace_id)
-
-            return response
+            await self.app(scope, receive, send_with_trace)
         except Exception as e:
+            if started:
+                # errore a risposta gia' iniziata (es. a meta' stream): come
+                # prima, lo gestisce chi sta sopra; niente doppio conteggio.
+                raise
             duration_ms = (time.time() - start) * 1000.0
             if self.log_requests:
                 log.exception(
