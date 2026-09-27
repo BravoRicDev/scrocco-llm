@@ -80,7 +80,17 @@ def _log_calls(relpath: str) -> list[dict]:
         func = node.func
         if not isinstance(func, ast.Attribute) or func.attr not in _LOG_METHODS:
             continue
-        if not isinstance(func.value, ast.Name) or func.value.id not in _LOGGERS:
+        # I moduli estratti raggiungono il logger con il lazy import
+        # (`M.log.info(...)`), quindi func.value e' un Attribute e non un Name.
+        # Senza questo ramo i call site dei moduli nuovi diventerebbero
+        # invisibili e il test passerebbe senza controllare nulla.
+        if isinstance(func.value, ast.Name):
+            logger_ok = func.value.id in _LOGGERS
+        elif isinstance(func.value, ast.Attribute):
+            logger_ok = func.value.attr in _LOGGERS
+        else:
+            logger_ok = False
+        if not logger_ok:
             continue
         out.append({
             "file": relpath,
@@ -244,7 +254,7 @@ def test_recuperabili_usa_warning(relpath, marker):
 # questo"), con un fratello gia' a info a poche righe di distanza.
 _MOVEMENT_INFO = [
     ("main.py", "[refill] nessuna sveglia 429 matura"),
-    ("main.py", "[sveglia] nessun dormiente maturo"),
+    ("probes.py", "[sveglia] nessun dormiente maturo"),
     ("router.py", "[ladder] %s cronico (fail_24h>=%d)"),
     ("router.py", "[restrict] %s: failover same-model -> %s"),
     ("routing/failure.py", "[cooldown-class] %s classe=transient"),
