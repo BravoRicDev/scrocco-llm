@@ -50,8 +50,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import (JSONResponse, PlainTextResponse, Response,
-                               StreamingResponse)
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from .admin import admin_api
 from .bootstrap import bootstrap_api
@@ -60,82 +59,127 @@ from . import journal, metrics
 from . import imagestore
 from . import audiostore
 from . import capmeta
-from .config import (GatewayConfig, csv_mtime_ns, maybe_reload,
-                     CAP_PRIORITY_ORDER)
+from .config import GatewayConfig, csv_mtime_ns, maybe_reload, CAP_PRIORITY_ORDER
 from . import sniff
 from . import repairlog
 from . import autoprobe
 from . import sttscrub
 from . import sttchat
 from . import forwarder as fwd
-from .forwarder import (Forwarder, MODEL_MISSING_COOLDOWN_S,
-                        PERMISSION_DENIED_COOLDOWN_S,
-                        PROVIDER_TRANSIENT_COOLDOWN_S, UpstreamError,
-                        StreamLoopDetected, STREAM_LOOP_COOLDOWN_S,
-                        _MODEL_MISSING_RE, _PAYLOAD_SCHEMA_RE,
-                        _UNKNOWN_FIELD_RE,
-                        _length_truncated_should_fail,
-                        _CONTENT_ARRAY_RE,
-                        tool_combo_signature,
-                        _PROVIDER_TRANSIENT_RE,
-                        _THOUGHT_SIG_RE, is_provider_error_body,
-                        is_provider_fault_body,
-                        is_embedded_provider_error,
-                        media_reject_signature, media_input_needed,
-                        media_modality_signature,
-                        image_chat_fallback_signature, image_chat_payload,
-                        extract_chat_images, image_refs_from_payload,
-                        truncate_refs, images_dual, image_item_dual,
-                        dep_image_via, chat_prompt_and_refs,
-                        images_payload_from_chat, images_response_to_chat,
-                        native_images_only_error, chat_only_image_error,
-                        _split_data_uri,
-                        _looks_context_limit, extract_requested_tokens,
-                        _client_attribution,
-                        _QUOTA_EXHAUSTED_RE, parse_quota_reset_seconds,
-                        _QUOTA_RESET_RE,
-                        set_retry_after_floors,
-                        set_stream_stall_sec,
-                        set_strip_client_fields,
-                        set_adaptive_timeout, set_latency_lookup,
-                        set_reasoning_reserve,
-                        apply_cooldown_policy,
-                        set_estimate_defaults, set_ttft_lookup,
-                        set_nonstream_hook,
-                        set_stall_bucket,
-                        set_schemaout_config,
-                        maybe_quarantine_ban,
-                        maybe_host_transient_cooldown,
-                        note_context_limit,
-                        repair_reasoning_replay, _REASONING_REPLAY_RE,
-                        repair_reasoning_error, reasoning_err_kind,
-                        classify_error_class,
-                        dep_host, is_provider_level,
-                        restore_reasoning, is_unclear_error,
-                        QUOTA_MIN_COOLDOWN_S,
-                        maybe_account_quota_cooldown,
+from .forwarder import (
+    Forwarder,
+    MODEL_MISSING_COOLDOWN_S,
+    PERMISSION_DENIED_COOLDOWN_S,
+    PROVIDER_TRANSIENT_COOLDOWN_S,
+    UpstreamError,
+    StreamLoopDetected,
+    STREAM_LOOP_COOLDOWN_S,
+    _MODEL_MISSING_RE,
+    _PAYLOAD_SCHEMA_RE,
+    _UNKNOWN_FIELD_RE,
+    _length_truncated_should_fail,
+    _CONTENT_ARRAY_RE,
+    tool_combo_signature,
+    _PROVIDER_TRANSIENT_RE,
+    _THOUGHT_SIG_RE,
+    is_provider_error_body,
+    is_provider_fault_body,
+    is_embedded_provider_error,
+    media_reject_signature,
+    media_input_needed,
+    media_modality_signature,
+    image_chat_fallback_signature,
+    image_chat_payload,
+    extract_chat_images,
+    image_refs_from_payload,
+    truncate_refs,
+    images_dual,
+    image_item_dual,
+    dep_image_via,
+    chat_prompt_and_refs,
+    images_payload_from_chat,
+    images_response_to_chat,
+    native_images_only_error,
+    chat_only_image_error,
+    _split_data_uri,
+    _looks_context_limit,
+    extract_requested_tokens,
+    _client_attribution,
+    _QUOTA_EXHAUSTED_RE,
+    parse_quota_reset_seconds,
+    _QUOTA_RESET_RE,
+    set_retry_after_floors,
+    set_stream_stall_sec,
+    set_strip_client_fields,
+    set_adaptive_timeout,
+    set_latency_lookup,
+    set_reasoning_reserve,
+    apply_cooldown_policy,
+    set_estimate_defaults,
+    set_ttft_lookup,
+    set_nonstream_hook,
+    set_stall_bucket,
+    set_schemaout_config,
+    maybe_quarantine_ban,
+    maybe_host_transient_cooldown,
+    note_context_limit,
+    repair_reasoning_replay,
+    _REASONING_REPLAY_RE,
+    repair_reasoning_error,
+    reasoning_err_kind,
+    classify_error_class,
+    dep_host,
+    is_provider_level,
+    restore_reasoning,
+    is_unclear_error,
+    QUOTA_MIN_COOLDOWN_S,
+    maybe_account_quota_cooldown,
 )
-from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
-                       learn_no_thinking, learn_content_string)
+from .csvlearn import learn_thinking_replay, learn_strip_reasoning, learn_no_thinking, learn_content_string
 from .health import health_loop
 from .policy import Policy, refill_out_budget
 from .histnorm import flatten_text_content
 from .qc import annotate_reasoning
-from .thought_sig import (has_unsigned_tool_calls, reset_request_flags,
-                          set_avoid_gemini, set_dummy_fill)
-from .router import (Router, inject_identity, estimate_tokens,
-                     configure_estimate, _prompt_chars)
+from .thought_sig import has_unsigned_tool_calls, reset_request_flags, set_avoid_gemini, set_dummy_fill
+from .router import Router, inject_identity, estimate_tokens, configure_estimate, _prompt_chars
 from .caution import background_cautious_enabled
-from .opencode_gate import (set_allow_opencode_zen, set_spoofing_request,
-                            set_zen_first,
-                            client_can_use_opencode_zen, client_is_opencode,
-                            spoof_enabled, opencode_cautious_request,
-                            is_opencode_zen_dep)
-from .capabilities import (required_caps, count_image_parts, refs_max_for,
-                           wants_image_output, _is_image_part,
-                           count_audio_parts)
+from .opencode_gate import (
+    set_allow_opencode_zen,
+    set_spoofing_request,
+    set_zen_first,
+    client_can_use_opencode_zen,
+    client_is_opencode,
+    spoof_enabled,
+    opencode_cautious_request,
+    is_opencode_zen_dep,
+)
+from .capabilities import (
+    required_caps,
+    count_image_parts,
+    refs_max_for,
+    wants_image_output,
+    _is_image_part,
+    count_audio_parts,
+)
 from .effort import set_effort, effort_from_request
 from .errors import AppError, UnauthorizedError, NotFoundError, ForbiddenError
+
+from .sse_utils import (
+    _sse_data_objs,
+    _merge_qc_tool_calls,
+    _strip_sse_content,
+    _collapse_sse_field,
+    _collapse_sse_content,
+    _rewrite_sse_tool_calls,
+    _delta_has_content,
+    _answer_chars,
+    _obj_is_error,
+    _delta_has_answer,
+    _chunk_finish_reason,
+    _tool_calls_sse,
+    _buffered_answer_text,
+    _peek_stream,
+)
 
 # Logging strutturato: [auth] [route] [vigile] [identity] [fallback] [cooldown]
 # basicConfig è no-op se root ha già handler (es. sotto pytest/caplog).
@@ -150,9 +194,7 @@ from app.terminal_logging import (
 
 console_handler = setup_colored_logging()
 
-logging.basicConfig(level=logging.INFO,
-                    handlers=[console_handler],
-                    force=True)  # Override any existing basicConfig
+logging.basicConfig(level=logging.INFO, handlers=[console_handler], force=True)  # Override any existing basicConfig
 log = logging.getLogger("nx.main")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -160,8 +202,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # container Docker, così l'admin API scrive i file VERO dell'host.
 VAR_DIR = BASE_DIR / "var"
 CSV_PATH = Path(os.environ.get("GATEWAY_CSV", VAR_DIR / "keys_rotation.csv"))
-POLICY_PATH = Path(os.environ.get("GATEWAY_POLICY",
-                                  VAR_DIR / "gateway.yaml"))
+POLICY_PATH = Path(os.environ.get("GATEWAY_POLICY", VAR_DIR / "gateway.yaml"))
 PORT = int(os.environ.get("GATEWAY_PORT", "4001"))
 # 127.0.0.1 di default (loopback-only); nel container vale 0.0.0.0
 HOST = os.environ.get("GATEWAY_HOST", "127.0.0.1")
@@ -182,31 +223,28 @@ def _install_file_logging() -> None:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
     from logging.handlers import RotatingFileHandler
+
     # Same format as console for consistency
     fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
     mb = int(os.environ.get("GATEWAY_LOG_MAX_MB", "20"))
     bk = int(os.environ.get("GATEWAY_LOG_BACKUPS", "5"))
     main_path = os.environ.get("GATEWAY_LOG_FILE", str(VAR_DIR / "gateway.log"))
-    audit_path = os.environ.get("GATEWAY_ERROR_LOG_FILE",
-                                str(VAR_DIR / "error-audit.log"))
+    audit_path = os.environ.get("GATEWAY_ERROR_LOG_FILE", str(VAR_DIR / "error-audit.log"))
     try:
-        h = RotatingFileHandler(main_path, maxBytes=mb * 1024 * 1024,
-                                backupCount=bk, encoding="utf-8")
+        h = RotatingFileHandler(main_path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
         h.setFormatter(logging.Formatter(fmt))
         h.setLevel(logging.INFO)
         logging.getLogger().addHandler(h)
-    except OSError as exc:                       # noqa: BLE001
-        log.warning("[log] file %s non scrivibile (%s): solo stdout",
-                    main_path, exc)
+    except OSError as exc:  # noqa: BLE001
+        log.warning("[log] file %s non scrivibile (%s): solo stdout", main_path, exc)
     try:
-        ah = RotatingFileHandler(audit_path, maxBytes=mb * 1024 * 1024,
-                                 backupCount=bk, encoding="utf-8")
+        ah = RotatingFileHandler(audit_path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
         ah.setFormatter(logging.Formatter(fmt))
         ah.setLevel(logging.INFO)
         eaudit = logging.getLogger("nx.erroraudit")
         eaudit.addHandler(ah)
-        eaudit.propagate = True                  # va anche in gateway.log/stdout
-    except OSError as exc:                       # noqa: BLE001
+        eaudit.propagate = True  # va anche in gateway.log/stdout
+    except OSError as exc:  # noqa: BLE001
         log.warning("[log] file %s non scrivibile (%s)", audit_path, exc)
 
 
@@ -218,30 +256,30 @@ _install_file_logging()
 policy = Policy.load_or_default(POLICY_PATH)
 # Debug SNIFF: handler con rotazione oraria, default OFF. Registrato anche se
 # disattivato (l'abilitazione e' live via policy/env) — nessun costo se spento.
-sniff.configure(str(VAR_DIR / "debug-sniff.log"),
-                policy.debug_sniff_retention_hours)
+sniff.configure(str(VAR_DIR / "debug-sniff.log"), policy.debug_sniff_retention_hours)
 # Ledger persistente delle riparazioni tool-call (log a schermo + JSONL).
 repairlog.configure(str(VAR_DIR))
-config = GatewayConfig(CSV_PATH, proxy_prefix=policy.proxy_prefix,
-                       go_suffix=policy.go_suffix,
-                       fallback_suffix=policy.fallback_suffix,
-                       extra_prefixes=policy.legacy_prefixes)
+config = GatewayConfig(
+    CSV_PATH,
+    proxy_prefix=policy.proxy_prefix,
+    go_suffix=policy.go_suffix,
+    fallback_suffix=policy.fallback_suffix,
+    extra_prefixes=policy.legacy_prefixes,
+)
 router = Router(config, policy)
 # provider callable: l'hot-reload della policy aggiorna anche le chiavi client
 authn = AuthManager(config, client_keys_provider=lambda: policy.client_keys)
 forwarder = Forwarder(keepalive_pool=policy.http_keepalive_pool)
-set_retry_after_floors(policy.retry_after_min_sec,
-                       policy.retry_after_floor_by_provider)
+set_retry_after_floors(policy.retry_after_min_sec, policy.retry_after_floor_by_provider)
 set_stream_stall_sec(policy.stream_stall_sec)
 set_strip_client_fields(policy.strip_client_fields)
 set_latency_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx))
 # F21: lo stall guard si calibra sul TTFT per bucket e sul moltiplicatore/
 # tetto di policy; F20: divisore+immagini condivisi per le stime "senza router".
 set_ttft_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx, "ttft"))
-set_stall_bucket(multiplier=policy.stream_stall_ttft_mult,
-                 max_sec=policy.stream_stall_max_sec)
-set_estimate_defaults(policy.estimate_divisor,
-                      getattr(policy, "image_token_estimate", 0) or 0)
+set_stall_bucket(multiplier=policy.stream_stall_ttft_mult, max_sec=policy.stream_stall_max_sec)
+set_estimate_defaults(policy.estimate_divisor, getattr(policy, "image_token_estimate", 0) or 0)
+
 
 # P4: i dep che IGNORANO stream:true vengono annotati (json_fallback++) e poi
 # esclusi dai canary: un non-streaming non puo' vincere la gara.
@@ -249,24 +287,29 @@ def _note_json_fallback(_u):
     try:
         if _u:
             router.stats_for(_u).json_fallback += 1
-    except Exception:                          # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
 
+
 set_nonstream_hook(_note_json_fallback)
-set_adaptive_timeout(enabled=policy.adaptive_timeout_enabled,
-                     floor_sec=policy.adaptive_timeout_floor_sec,
-                     multiplier=policy.adaptive_timeout_multiplier,
-                     max_sec=policy.adaptive_timeout_max_sec)
-set_reasoning_reserve(1.0 - float(getattr(policy,
-                      "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
+set_adaptive_timeout(
+    enabled=policy.adaptive_timeout_enabled,
+    floor_sec=policy.adaptive_timeout_floor_sec,
+    multiplier=policy.adaptive_timeout_multiplier,
+    max_sec=policy.adaptive_timeout_max_sec,
+)
+set_reasoning_reserve(1.0 - float(getattr(policy, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
 apply_cooldown_policy(policy)
 from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
+
 set_schemaout_config(_so_cfg_from_policy(policy))
-configure_estimate(adaptive=policy.estimate_adaptive_enabled,
-                   shadow=policy.estimate_adaptive_shadow,
-                   auto_enable=policy.estimate_adaptive_auto_enable,
-                   auto_min_n=policy.estimate_adaptive_auto_min_n,
-                   auto_max_delta_pct=policy.estimate_adaptive_auto_max_delta_pct)
+configure_estimate(
+    adaptive=policy.estimate_adaptive_enabled,
+    shadow=policy.estimate_adaptive_shadow,
+    auto_enable=policy.estimate_adaptive_auto_enable,
+    auto_min_n=policy.estimate_adaptive_auto_min_n,
+    auto_max_delta_pct=policy.estimate_adaptive_auto_max_delta_pct,
+)
 
 _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
@@ -301,16 +344,19 @@ def set_video_job_ttl_sec(value=None) -> None:
         except (TypeError, ValueError):
             pass
 
+
 # i TEST settano GATEWAY_PERSIST_STATS=0: nessuna contaminazione col live
 PERSIST_STATS = os.environ.get("GATEWAY_PERSIST_STATS", "1") != "0"
 
 # Ledger usage/costi (Feature: /admin/insights). Stessa env dei test per non
 # sporcare var/ reale durante la suite.
 from .ledger import Ledger as _Ledger
+
 LEDGER = _Ledger(VAR_DIR)
 
 # Evidenza persistente salute chiavi (lifecycle dead/retired, no-delete).
 from .keyhealth import KeyHealth as _KeyHealth
+
 KEYHEALTH = _KeyHealth(VAR_DIR)
 from .atomic_store import load_json as _load_json, save_json as _save_json
 
@@ -352,42 +398,45 @@ def _apply_misc_policy(pol) -> None:
             ttl_sec=getattr(pol, "images_store_ttl_sec", None),
             max_items=getattr(pol, "images_store_max_items", None),
             max_bytes=getattr(pol, "images_store_max_bytes", None),
-            storage_dir=Path(VAR_DIR) / "images")
-    except Exception:                                  # noqa: BLE001
+            storage_dir=Path(VAR_DIR) / "images",
+        )
+    except Exception:  # noqa: BLE001
         pass
     try:
         # Cache delle trascrizioni STT: TTL dalla policy, gli altri limiti
         # restano quelli del modulo (il budget e' in caratteri di testo, che
         # non ha un equivalente nella policy delle immagini).
-        audiostore.configure(
-            ttl_sec=getattr(pol, "stt_chat_cache_ttl_sec", None))
-    except Exception:                                  # noqa: BLE001
+        audiostore.configure(ttl_sec=getattr(pol, "stt_chat_cache_ttl_sec", None))
+    except Exception:  # noqa: BLE001
         pass
     try:
         sniff.set_sniff_caps(
             max_b64_chars=getattr(pol, "sniff_max_b64_chars", None),
             max_str_chars=getattr(pol, "sniff_max_str_chars", None),
-            max_sse_bytes=getattr(pol, "sniff_max_sse_bytes", None))
-    except Exception:                                  # noqa: BLE001
+            max_sse_bytes=getattr(pol, "sniff_max_sse_bytes", None),
+        )
+    except Exception:  # noqa: BLE001
         pass
     try:
         from .keyhealth import set_health_thresholds
+
         set_health_thresholds(
             streak_dead=getattr(pol, "keyhealth_streak_dead_threshold", None),
-            success_ema_floor=getattr(
-                pol, "keyhealth_success_ema_floor", None))
-    except Exception:                                  # noqa: BLE001
+            success_ema_floor=getattr(pol, "keyhealth_success_ema_floor", None),
+        )
+    except Exception:  # noqa: BLE001
         pass
     try:
         from .ctxcompact import set_min_protected_msgs
-        set_min_protected_msgs(
-            getattr(pol, "ctxcompact_min_protected_msgs", None))
-    except Exception:                                  # noqa: BLE001
+
+        set_min_protected_msgs(getattr(pol, "ctxcompact_min_protected_msgs", None))
+    except Exception:  # noqa: BLE001
         pass
     try:
         from .toolrepair import set_max_unwrap_depth
+
         set_max_unwrap_depth(getattr(pol, "toolrepair_max_unwrap_depth", None))
-    except Exception:                                  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
     try:
         fwd.set_upstream_http(
@@ -395,16 +444,13 @@ def _apply_misc_policy(pol) -> None:
             read=getattr(pol, "upstream_read_timeout_sec", None),
             write=getattr(pol, "upstream_write_timeout_sec", None),
             pool=getattr(pol, "upstream_pool_timeout_sec", None),
-            max_keepalive=getattr(
-                pol, "upstream_max_keepalive_connections", None),
+            max_keepalive=getattr(pol, "upstream_max_keepalive_connections", None),
             max_connections=getattr(pol, "upstream_max_connections", None),
-            keepalive_expiry=getattr(
-                pol, "upstream_keepalive_expiry_sec", None))
-        fwd.set_retryable_status(
-            getattr(pol, "retryable_status_codes", None))
-        fwd.set_effort_incompatible_hosts(
-            getattr(pol, "effort_incompatible_hosts", None))
-    except Exception:                                  # noqa: BLE001
+            keepalive_expiry=getattr(pol, "upstream_keepalive_expiry_sec", None),
+        )
+        fwd.set_retryable_status(getattr(pol, "retryable_status_codes", None))
+        fwd.set_effort_incompatible_hosts(getattr(pol, "effort_incompatible_hosts", None))
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -432,7 +478,7 @@ def _coalesce_cacheable(res) -> bool:
             return False
         if isinstance(obj, dict) and isinstance(obj.get("error"), dict):
             return False
-    except Exception:                                  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return True
     return True
 
@@ -448,37 +494,31 @@ def _coalesce_cache_put(key: str, res, exp: float) -> None:
 
 def _coalesce_key(payload: dict, extra: str = "") -> str:
     """SHA-256 del payload intero serializzato in modo deterministico."""
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                     default=str)
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     # NB: `extra` puo' essere None (profile assente): era un 500 trasparente
     # al client ("unsupported operand type(s) for +") su ogni non-stream.
     return hashlib.sha256(((extra or "") + "|" + raw).encode()).hexdigest()
 
 
-def _nonstream_hold_redirect(stream: bool, dep: dict | None,
-                             qc_json, policy) -> bool:
+def _nonstream_hold_redirect(stream: bool, dep: dict | None, qc_json, policy) -> bool:
     """True se una richiesta NON-stream va eseguita col MOTORE STREAM sotto
     hold (parita' stream/non-stream). Hold = flag per-deployment OR policy.
     Kill-switch: policy.nonstream_hold_redirect."""
     if stream:
         return False
-    hold = bool((dep or {}).get("hold_until_finish")) or bool(
-        getattr(qc_json, "stream_hold_until_finish", False))
+    hold = bool((dep or {}).get("hold_until_finish")) or bool(getattr(qc_json, "stream_hold_until_finish", False))
     return hold and bool(getattr(policy, "nonstream_hold_redirect", True))
 
 
-async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
-                             factory):
+async def _forward_coalesced(policy_obj, payload: dict, extra_key: str, factory):
     """Coalescing delle richieste identiche in volo (solo non-streaming)."""
     if payload.get("stream"):
         return await factory()
     if not getattr(policy_obj, "request_coalescing_enabled", True):
         return await factory()
     ttl = float(getattr(policy_obj, "request_coalescing_ttl_sec", 60.0) or 60.0)
-    max_waiters = int(getattr(policy_obj,
-                              "request_coalescing_max_waiters", 10) or 0)
-    cache_sec = float(getattr(policy_obj,
-                              "request_coalescing_cache_sec", 0.0) or 0.0)
+    max_waiters = int(getattr(policy_obj, "request_coalescing_max_waiters", 10) or 0)
+    cache_sec = float(getattr(policy_obj, "request_coalescing_cache_sec", 0.0) or 0.0)
     key = _coalesce_key(payload, extra_key)
     now = time.time()
     if cache_sec > 0:
@@ -517,7 +557,7 @@ async def _forward_coalesced(policy_obj, payload: dict, extra_key: str,
                 entry["future"].cancel()
             _inflight_coalesce.pop(key, None)
             raise
-        except BaseException as exc:                    # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
             if entry["waiters"] > 0 and not entry["future"].done():
                 entry["future"].set_exception(exc)
             _inflight_coalesce.pop(key, None)
@@ -553,9 +593,8 @@ def _load_adaptive_stats() -> None:
         data = _load_json(_stats_file, dict)
         if data:
             router.load_stats(data)
-            log.info("[stats] ripristinate da %s (%d deployment tracciati)",
-                     _stats_file.name, len(router._stats))
-    except Exception as exc:                 # mai bloccare lo startup
+            log.info("[stats] ripristinate da %s (%d deployment tracciati)", _stats_file.name, len(router._stats))
+    except Exception as exc:  # mai bloccare lo startup
         log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
 
@@ -571,10 +610,10 @@ def _load_thought_sigs() -> None:
         data = _load_json(_thought_sigs_file, dict)
         if data:
             from .thought_sig import THOUGHT_SIGS
+
             THOUGHT_SIGS.load(data)
-            log.info("[thought_sig] ripristinate %d firme da %s",
-                     len(THOUGHT_SIGS), _thought_sigs_file.name)
-    except Exception as exc:                 # mai bloccare lo startup
+            log.info("[thought_sig] ripristinate %d firme da %s", len(THOUGHT_SIGS), _thought_sigs_file.name)
+    except Exception as exc:  # mai bloccare lo startup
         log.warning("[thought_sig] load fallito (%s): riparto pulito", exc)
 
 
@@ -587,6 +626,7 @@ def _maybe_save_thought_sigs(force: bool = False) -> None:
     if not force and now - _last_stats_save < 60:
         return
     from .thought_sig import THOUGHT_SIGS
+
     if not _save_json(_thought_sigs_file, THOUGHT_SIGS.dump()):
         log.warning("[thought_sig] save fallito")
 
@@ -628,9 +668,8 @@ def _load_cooldowns() -> None:
         data = _load_json(_cooldown_file, dict)
         if data:
             n = router.load_cooldowns(data)
-            log.info("[cooldown] ripristinati %d cooldown da %s", n,
-                     _cooldown_file.name)
-    except Exception as exc:                 # mai bloccare lo startup
+            log.info("[cooldown] ripristinati %d cooldown da %s", n, _cooldown_file.name)
+    except Exception as exc:  # mai bloccare lo startup
         log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
 
 
@@ -647,7 +686,7 @@ def _maybe_save_routing_state(force: bool = False) -> None:
     _exc: BaseException | None = None
     try:
         ok = _save_json(_routing_file, router.dump_routing_state())
-    except Exception as e:            # noqa: BLE001 - mai bloccare lo shutdown
+    except Exception as e:  # noqa: BLE001 - mai bloccare lo shutdown
         ok = False
         _exc = e
     if not ok:
@@ -671,7 +710,7 @@ def _load_routing_state() -> None:
             rep = router.load_routing_state(data)
             if any(rep.values()):
                 log.info("[warmstart] ripristinato %s", rep)
-    except Exception as exc:                 # mai bloccare lo startup
+    except Exception as exc:  # mai bloccare lo startup
         log.warning("[warmstart] load fallito (%s): riparto freddo", exc)
 
 
@@ -682,10 +721,11 @@ def _bootstrap_runtime_from_logs() -> None:
     in `app.logboot.scan_log`. Mai bloccare lo startup."""
     from . import autoprobe as _ap
     from .logboot import scan_log
+
     path = os.environ.get("GATEWAY_LOG_FILE", str(VAR_DIR / "gateway.log"))
     try:
         usage, probes = scan_log(path, time.time() - 86400.0)
-    except Exception as exc:                 # mai bloccare lo startup
+    except Exception as exc:  # mai bloccare lo startup
         log.warning("[bootstrap] scan log fallito (%s)", exc)
         return
     for u, ts in usage:
@@ -693,8 +733,7 @@ def _bootstrap_runtime_from_logs() -> None:
     for u, ts in probes:
         _ap.note_probe_time(u, ts)
     if usage or probes:
-        log.info("[bootstrap] finestre 24h da log: %d tentativi, %d probe",
-                 len(usage), len(probes))
+        log.info("[bootstrap] finestre 24h da log: %d tentativi, %d probe", len(usage), len(probes))
 
 
 def _maybe_save_cooldowns(force: bool = False) -> None:
@@ -745,14 +784,14 @@ async def _watcher(interval: float) -> None:
     _reload_lock = asyncio.Lock()
     while True:
         try:
-            router.purge_expired()      # igiene: sticky/cooldown scaduti
-            router.purge_draining()     # draining scaduti oltre il TTL
-            _maybe_save_all()           # F26: stats+routing, stesso istante
+            router.purge_expired()  # igiene: sticky/cooldown scaduti
+            router.purge_draining()  # draining scaduti oltre il TTL
+            _maybe_save_all()  # F26: stats+routing, stesso istante
             # giro giornaliero sui RITIRATI: parte al primo tick dopo
             # mezzanotte e li sonda con calma (un probe riuscito riabilita)
-            if not background_cautious_enabled():      # cautela: nessun probe automatico
+            if not background_cautious_enabled():  # cautela: nessun probe automatico
                 autoprobe.maybe_spawn_retired(router, forwarder)
-            _maybe_save_cooldowns()     # cooldown attivi su disco
+            _maybe_save_cooldowns()  # cooldown attivi su disco
             _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
             await LEDGER.flush_async()  # ledger usage: offload su thread
             await repairlog.flush_async()  # ledger riparazioni: idem
@@ -762,51 +801,52 @@ async def _watcher(interval: float) -> None:
                 now = time.time()
                 for u, s in list(router._stats.items()):
                     cooled = router._cooldown.get(u, 0) > now
-                    KEYHEALTH.observe(u, fail_streak=s.fail_streak,
-                                      success_ema=s.success_ema,
-                                      is_cooled=cooled,
-                                      reason=getattr(s, "last_reason", None),
-                                      now=now)
-                new_retired = KEYHEALTH.apply_retirement(
-                    policy.retire_after_days)
+                    KEYHEALTH.observe(
+                        u,
+                        fail_streak=s.fail_streak,
+                        success_ema=s.success_ema,
+                        is_cooled=cooled,
+                        reason=getattr(s, "last_reason", None),
+                        now=now,
+                    )
+                new_retired = KEYHEALTH.apply_retirement(policy.retire_after_days)
                 if new_retired:
-                    log.warning("[keyhealth] %d chiavi passate RETIRED: %s",
-                                len(new_retired), ", ".join(new_retired[:5]))
+                    log.warning(
+                        "[keyhealth] %d chiavi passate RETIRED: %s", len(new_retired), ", ".join(new_retired[:5])
+                    )
                 KEYHEALTH.save()
-            except Exception:           # analytics non deve mai mordere
+            except Exception:  # analytics non deve mai mordere
                 log.warning("[keyhealth] tick error", exc_info=True)
             # purge job video scaduti (mapping in memoria, TTL 24h)
             now = time.time()
-            expired = [j for j, m in _videos_jobs.items()
-                       if now - m.get("created", 0) > VIDEO_JOB_TTL_SEC]
+            expired = [j for j, m in _videos_jobs.items() if now - m.get("created", 0) > VIDEO_JOB_TTL_SEC]
             for j in expired:
                 _videos_jobs.pop(j, None)
             # purge immagini scadute (store in memoria, TTL policy images.*)
             try:
                 imagestore.sweep()
-            except Exception:                                  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 log.warning("[images] sweep error", exc_info=True)
 
             async with _reload_lock:
                 new = maybe_reload(config, last_csv)
                 if last_csv is not None and new != last_csv:
-                    log.info("[config] CSV ricaricato: profili=%s deployment=%d",
-                             ",".join(config.profiles),
-                             sum(len(v) for v in config.groups.values()))
+                    log.info(
+                        "[config] CSV ricaricato: profili=%s deployment=%d",
+                        ",".join(config.profiles),
+                        sum(len(v) for v in config.groups.values()),
+                    )
                     try:
-                        router.apply_quirks()   # flag in-memory (P2-9)
+                        router.apply_quirks()  # flag in-memory (P2-9)
                     except Exception:
                         pass
                     # Probe immediato dei deployment appena aggiunti: scoprono lo
                     # stato di salute PRIMA del traffico reale (vedi autoprobe).
                     _added = sorted(_all_uniques() - _prev_uniques)
-                    _max_p = max(0, int(getattr(policy, "hotreload_probe_max", 20)
-                                        or 0))
+                    _max_p = max(0, int(getattr(policy, "hotreload_probe_max", 20) or 0))
                     if _added and _max_p and not background_cautious_enabled():
-                        autoprobe.spawn_hotreload_probe(router, forwarder,
-                                                        _added[:_max_p])
-                        log.info("[hotreload] %d deployment nuovi: probe "
-                                 "fire-and-forget", min(len(_added), _max_p))
+                        autoprobe.spawn_hotreload_probe(router, forwarder, _added[:_max_p])
+                        log.info("[hotreload] %d deployment nuovi: probe fire-and-forget", min(len(_added), _max_p))
                     # CONNECTION DRAINING: i deployment rimossi dal CSV con
                     # richieste in volo restano in config marcati draining
                     # (ignorati dal pick per le nuove richieste); l'inflight
@@ -816,15 +856,14 @@ async def _watcher(interval: float) -> None:
                         _inf = router.stats_for(_u).inflight
                         if _inf > 0:
                             router.start_draining(_u, _prev_deps[_u], _inf)
-                            log.info("[drain] %s: rimosso dal CSV con %d "
-                                     "richieste in volo -> draining (TTL %ds)",
-                                     _u, _inf,
-                                     int(getattr(policy,
-                                                 "hotreload_drain_ttl_sec",
-                                                 120) or 120))
+                            log.info(
+                                "[drain] %s: rimosso dal CSV con %d richieste in volo -> draining (TTL %ds)",
+                                _u,
+                                _inf,
+                                int(getattr(policy, "hotreload_drain_ttl_sec", 120) or 120),
+                            )
                         else:
-                            log.debug("[drain] %s: rimosso dal CSV, nessuna "
-                                      "richiesta in volo -> drop immediato", _u)
+                            log.debug("[drain] %s: rimosso dal CSV, nessuna richiesta in volo -> drop immediato", _u)
                 last_csv = new
                 _prev_uniques = _all_uniques()
                 _prev_deps = _all_deps()
@@ -834,53 +873,44 @@ async def _watcher(interval: float) -> None:
                 try:
                     fresh = Policy.load(POLICY_PATH)
                 except Exception as exc:
-                    log.warning("[policy] reload FALLITO (%s): resta la "
-                                "precedente", exc)
+                    log.warning("[policy] reload FALLITO (%s): resta la precedente", exc)
                 else:
-                    router.policy = fresh          # swap atomico dei riferimenti
+                    router.policy = fresh  # swap atomico dei riferimenti
                     globals()["policy"] = fresh
-                    set_retry_after_floors(fresh.retry_after_min_sec,
-                                           fresh.retry_after_floor_by_provider)
+                    set_retry_after_floors(fresh.retry_after_min_sec, fresh.retry_after_floor_by_provider)
                     set_stream_stall_sec(fresh.stream_stall_sec)
                     set_strip_client_fields(fresh.strip_client_fields)
-                    set_ttft_lookup(
-                        lambda u, ctx=None: router.bucket_latency_ms(
-                            u, ctx, "ttft"))
-                    set_stall_bucket(
-                        multiplier=fresh.stream_stall_ttft_mult,
-                        max_sec=fresh.stream_stall_max_sec)
-                    set_estimate_defaults(
-                        fresh.estimate_divisor,
-                        getattr(fresh, "image_token_estimate", 0) or 0)
+                    set_ttft_lookup(lambda u, ctx=None: router.bucket_latency_ms(u, ctx, "ttft"))
+                    set_stall_bucket(multiplier=fresh.stream_stall_ttft_mult, max_sec=fresh.stream_stall_max_sec)
+                    set_estimate_defaults(fresh.estimate_divisor, getattr(fresh, "image_token_estimate", 0) or 0)
                     set_adaptive_timeout(
                         enabled=fresh.adaptive_timeout_enabled,
                         floor_sec=fresh.adaptive_timeout_floor_sec,
                         multiplier=fresh.adaptive_timeout_multiplier,
-                        max_sec=fresh.adaptive_timeout_max_sec)
-                    set_reasoning_reserve(
-                        1.0 - float(getattr(
-                            fresh, "cache_ctx_reasoning_headroom_ratio",
-                            0.7) or 0.0))
+                        max_sec=fresh.adaptive_timeout_max_sec,
+                    )
+                    set_reasoning_reserve(1.0 - float(getattr(fresh, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
                     apply_cooldown_policy(fresh)
                     _apply_misc_policy(fresh)
-                    set_schemaout_config(
-                        _so_cfg_from_policy(fresh))
+                    set_schemaout_config(_so_cfg_from_policy(fresh))
                     forwarder._keepalive_pool = fresh.http_keepalive_pool
                     configure_estimate(
                         adaptive=fresh.estimate_adaptive_enabled,
                         shadow=fresh.estimate_adaptive_shadow,
                         auto_enable=fresh.estimate_adaptive_auto_enable,
                         auto_min_n=fresh.estimate_adaptive_auto_min_n,
-                        auto_max_delta_pct=(
-                            fresh.estimate_adaptive_auto_max_delta_pct))
-                    log.info("[policy] ricaricata: step_up=%s%% aliases=%d "
-                             "per-profilo=%s", fresh.step_up_pct,
-                             len(fresh.aliases),
-                             fresh.profile_step_up_pct or "-")
+                        auto_max_delta_pct=(fresh.estimate_adaptive_auto_max_delta_pct),
+                    )
+                    log.info(
+                        "[policy] ricaricata: step_up=%s%% aliases=%d per-profilo=%s",
+                        fresh.step_up_pct,
+                        len(fresh.aliases),
+                        fresh.profile_step_up_pct or "-",
+                    )
             if ym is not None and last_yaml is None:
                 log.info("[policy] watcher: baseline %s", POLICY_PATH.name)
             last_yaml = ym
-        except Exception as exc:            # mai far morire il watcher
+        except Exception as exc:  # mai far morire il watcher
             log.warning("[config] watcher error: %s", exc)
         await asyncio.sleep(interval)
 
@@ -888,10 +918,10 @@ async def _watcher(interval: float) -> None:
 def seconds_to_midnight(now: float | None = None) -> float:
     """Secondi alla PROSSIMA mezzanotte locale (helper puro, testabile)."""
     import datetime as _dt
+
     now_ts = time.time() if now is None else now
     local = _dt.datetime.fromtimestamp(now_ts)
-    nxt = (local + _dt.timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0)
+    nxt = (local + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(1.0, (nxt - local).total_seconds())
 
 
@@ -901,18 +931,17 @@ async def _nightly_scheduler():
     il task resta vivo ma non fa nulla (puo' essere riattivato a caldo)."""
     while True:
         try:
-            await asyncio.sleep(seconds_to_midnight()
-                                + random.uniform(0.0, 120.0))
-            if str(getattr(router.policy, "cooldown_autoprobe_schedule",
-                           "nightly")).lower() == "nightly" \
-                    and autoprobe._cfg(router.policy)[0] \
-                    and not background_cautious_enabled():
+            await asyncio.sleep(seconds_to_midnight() + random.uniform(0.0, 120.0))
+            if (
+                str(getattr(router.policy, "cooldown_autoprobe_schedule", "nightly")).lower() == "nightly"
+                and autoprobe._cfg(router.policy)[0]
+                and not background_cautious_enabled()
+            ):
                 await autoprobe.nightly_pass(router, forwarder)
         except asyncio.CancelledError:
             raise
-        except Exception:                    # il scheduler non muore MAI
-            log.warning("[autoprobe] nightly scheduler: errore",
-                        exc_info=True)
+        except Exception:  # il scheduler non muore MAI
+            log.warning("[autoprobe] nightly scheduler: errore", exc_info=True)
             await asyncio.sleep(60.0)
 
 
@@ -928,25 +957,30 @@ async def lifespan(_app: FastAPI):
     # In development (default) e' un no-op.
     authn.enforce_startup()
     log.info("[start] env=%s production=%s", gateway_env(), authn.production)
-    _load_adaptive_stats()                  # F4: ripristino EMA/cooldown
-    _load_cooldowns()                       # cooldown NON scaduti (since/full)
-    _load_routing_state()                   # warm-start: holder/sticky/warm/pin/frontiere
-    _bootstrap_runtime_from_logs()          # finestre 24h uso/probe dal log
-    _load_thought_sigs()                    # firme Gemini: sopravvivono al restart
+    _load_adaptive_stats()  # F4: ripristino EMA/cooldown
+    _load_cooldowns()  # cooldown NON scaduti (since/full)
+    _load_routing_state()  # warm-start: holder/sticky/warm/pin/frontiere
+    _bootstrap_runtime_from_logs()  # finestre 24h uso/probe dal log
+    _load_thought_sigs()  # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
     _cautious = background_cautious_enabled()
     if _cautious:
-        log.warning("[start] modalita' CAUTA generica (BACKGROUND_CAUTIOUS): "
-                    "probe/health/nightly automatici DISATTIVATI")
+        log.warning(
+            "[start] modalita' CAUTA generica (BACKGROUND_CAUTIOUS): probe/health/nightly automatici DISATTIVATI"
+        )
     else:
-        _health_task = asyncio.create_task(
-            health_loop(router, policy.health_interval_sec))
+        _health_task = asyncio.create_task(health_loop(router, policy.health_interval_sec))
     if not _cautious:
         _nightly_task = asyncio.create_task(_nightly_scheduler())
-    log.info("[start] %s su %s:%d · profili=%s · deployment=%d",
-             policy.service_name, HOST, PORT, ",".join(config.profiles),
-             sum(len(v) for v in config.groups.values()))
+    log.info(
+        "[start] %s su %s:%d · profili=%s · deployment=%d",
+        policy.service_name,
+        HOST,
+        PORT,
+        ",".join(config.profiles),
+        sum(len(v) for v in config.groups.values()),
+    )
     try:
         yield
     finally:
@@ -960,18 +994,16 @@ async def lifespan(_app: FastAPI):
             _drain = float(getattr(policy, "shutdown_drain_sec", 0.0) or 0.0)
             _infl = router.inflight_total()
             if _infl:
-                log.info("[shutdown] drain di %d richieste in volo "
-                         "(max %.1fs)...", _infl, _drain)
+                log.info("[shutdown] drain di %d richieste in volo (max %.1fs)...", _infl, _drain)
             _deadline = time.monotonic() + _drain
             while router.inflight_total() > 0 and time.monotonic() < _deadline:
                 await asyncio.sleep(0.2)
             _left = router.inflight_total()
             if _left:
-                log.warning("[shutdown] drain scaduto: %d richieste ancora "
-                            "in volo", _left)
+                log.warning("[shutdown] drain scaduto: %d richieste ancora in volo", _left)
             elif _infl:
                 log.info("[shutdown] drain completato")
-        except Exception:                       # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         # Task di background (canary/probe/sveglie): vanno cancellati PRIMA di
         # chiudere il client httpx, altrimenti i probe in volo esplodono sul
@@ -981,15 +1013,15 @@ async def lifespan(_app: FastAPI):
             _np = await _drain_probe_tasks()
             if _np:
                 log.info("[shutdown] cancel di %d probe/sveglie in volo", _np)
-        except Exception:                       # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         await forwarder.aclose()
-        _maybe_save_all(force=True)              # F26: stats+routing insieme
-        _maybe_save_cooldowns(force=True)        # cooldown: salva allo shutdown
-        _maybe_save_thought_sigs(force=True)     # firme Gemini: salva allo shutdown
-        _rows = LEDGER.flush_sync()              # ledger: nessuna riga persa
+        _maybe_save_all(force=True)  # F26: stats+routing insieme
+        _maybe_save_cooldowns(force=True)  # cooldown: salva allo shutdown
+        _maybe_save_thought_sigs(force=True)  # firme Gemini: salva allo shutdown
+        _rows = LEDGER.flush_sync()  # ledger: nessuna riga persa
         log.info("[shutdown] ledger flush_sync: %d righe salvate", _rows)
-        _rrows = repairlog.flush_sync()          # ledger riparazioni
+        _rrows = repairlog.flush_sync()  # ledger riparazioni
         if _rrows:
             log.info("[shutdown] repair flush_sync: %d righe salvate", _rrows)
 
@@ -1000,8 +1032,11 @@ app.include_router(bootstrap_api)
 
 # --- Observability: Trace ID, JSON logging, Prometheus /metrics ---
 from .observability import (
-    setup_observability, setup_replay_endpoint, render_prometheus,
+    setup_observability,
+    setup_replay_endpoint,
+    render_prometheus,
 )
+
 _obs_enabled = os.environ.get("GATEWAY_OBSERVABILITY", "1").strip() != "0"
 if _obs_enabled:
     setup_observability(
@@ -1012,6 +1047,7 @@ if _obs_enabled:
     )
     setup_replay_endpoint(app)
 
+
 # ------------------------------------------------------------------ Exception handlers (Blocco 1: Refactoring errori globali)
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError):
@@ -1020,53 +1056,41 @@ async def app_error_handler(request: Request, exc: AppError):
     # (client-side ma anomalia). Mai DEBUG: a INFO il root logger e il
     # file handler silenziano completamente i log DEBUG.
     _log_fn = log.error if exc.status >= 500 else log.warning
-    _log_fn("[error-handler] %s %s -> %d %s: %s",
-            request.method, request.url.path,
-            exc.status, exc.error_type, exc.message)
-    return JSONResponse(
-        status_code=exc.status,
-        content={
-            "error": {
-                "message": exc.message,
-                "type": exc.error_type,
-                "code": exc.code
-            }
-        }
+    _log_fn(
+        "[error-handler] %s %s -> %d %s: %s", request.method, request.url.path, exc.status, exc.error_type, exc.message
     )
+    return JSONResponse(
+        status_code=exc.status, content={"error": {"message": exc.message, "type": exc.error_type, "code": exc.code}}
+    )
+
 
 @app.exception_handler(Exception)
 async def generic_error_handler(request: Request, exc: Exception):
     """Gestione errori non catturati (fallback generico)."""
-    log.warning("[error-handler] Unhandled error %s %s: %s",
-                request.method, request.url.path, exc)
+    log.warning("[error-handler] Unhandled error %s %s: %s", request.method, request.url.path, exc)
     return JSONResponse(
-        status_code=500,
-        content={
-            "error": {
-                "message": "errore interno",
-                "type": "server_error",
-                "code": "500"
-            }
-        }
+        status_code=500, content={"error": {"message": "errore interno", "type": "server_error", "code": "500"}}
     )
 
 
 def _unauthorized(detail: str) -> JSONResponse:
     return JSONResponse(
-        status_code=401,
-        content={"error": {"message": detail,
-                           "type": "auth_error",
-                           "param": None, "code": "401"}})
+        status_code=401, content={"error": {"message": detail, "type": "auth_error", "param": None, "code": "401"}}
+    )
 
 
 def _forbidden(model: str, profile: str | None) -> JSONResponse:
     return JSONResponse(
         status_code=403,
-        content={"error": {"message":
-                           f"Model '{model}' not allowed for this key"
-                           + (f" (profile '{profile}')" if profile else ""),
-                           "type": "permission_error",
-                           "param": None, "code": "403"}})
+        content={
+            "error": {
+                "message": f"Model '{model}' not allowed for this key" + (f" (profile '{profile}')" if profile else ""),
+                "type": "permission_error",
+                "param": None,
+                "code": "403",
+            }
+        },
+    )
 
 
 # ------------------------------------------------------------------- health
@@ -1097,8 +1121,7 @@ async def healthz() -> dict:
         "policy": {
             "file": POLICY_PATH.name,
             "step_up_pct": policy.step_up_pct,
-            "step_up_per_profile": {k: f"{v}%" for k, v
-                                     in policy.profile_step_up_pct.items()},
+            "step_up_per_profile": {k: f"{v}%" for k, v in policy.profile_step_up_pct.items()},
             "speed_hotwords": len(policy.speed_hotwords),
             "speed_min_dim_k": policy.speed_min_dim_k,
             "aliases": len(policy.aliases),
@@ -1239,7 +1262,7 @@ def _caps_and_deps(name: str) -> tuple[set[str], list[dict]]:
     caps: set[str] = set()
     for d in deps:
         member = d.get("caps") or frozenset()
-        caps |= (member if member else policy.caps_for(d["model"]))
+        caps |= member if member else policy.caps_for(d["model"])
     return caps, deps
 
 
@@ -1251,10 +1274,14 @@ def _model_entry(name: str, *, rich: bool = True) -> dict:
     solo `capabilities` + `architecture`: i campi più grandi sono ridondanti
     per un deployment singolo e gonfierebbero la risposta di diverse volte.
     """
-    entry = {"id": name, "object": "model",
-             "created": int(time.time()), "owned_by": policy.service_name,
-             "reasoning_effort": ["default", "low", "medium", "high"],
-             "reasoning_effort_default": "default"}
+    entry = {
+        "id": name,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": policy.service_name,
+        "reasoning_effort": ["default", "low", "medium", "high"],
+        "reasoning_effort_default": "default",
+    }
     caps, deps = _caps_and_deps(name)
     if not caps:
         return entry
@@ -1284,8 +1311,7 @@ async def list_models(request: Request):
     view = _view_for(request, auth)
     rich = view == "stable"
     names = sorted(set(_names_for_auth(auth, view)))
-    return {"object": "list",
-            "data": [_model_entry(n, rich=rich) for n in names]}
+    return {"object": "list", "data": [_model_entry(n, rich=rich) for n in names]}
 
 
 # ------------------------------------------------ compat endpoints (404 fixes)
@@ -1317,10 +1343,12 @@ def _visible_model_names(request: Request):
     else:
         names.extend(config.alias_names_for(auth.profile or ""))
     # de-dup preservando l'ordine
-    seen = set(); out = []
+    seen = set()
+    out = []
     for n in names:
         if n not in seen:
-            seen.add(n); out.append(n)
+            seen.add(n)
+            out.append(n)
     return out, auth
 
 
@@ -1329,11 +1357,21 @@ def _ollama_entry(name: str) -> dict:
     (`api/types.go` -> `ListModelResponse.Capabilities []model.Capability`, con
     `omitempty`): aggiungerlo e' additivo e non rompe i client."""
     caps, _deps = _caps_and_deps(name)
-    entry = {"name": name, "model": name,
-             "modified_at": "1970-01-01T00:00:00Z", "size": 0, "digest": "",
-             "details": {"parent_model": "", "format": "gguf", "family": "",
-                         "families": None, "parameter_size": "",
-                         "quantization_level": ""}}
+    entry = {
+        "name": name,
+        "model": name,
+        "modified_at": "1970-01-01T00:00:00Z",
+        "size": 0,
+        "digest": "",
+        "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "",
+            "families": None,
+            "parameter_size": "",
+            "quantization_level": "",
+        },
+    }
     if caps:
         entry["capabilities"] = capmeta.ollama_capabilities(caps)
     return entry
@@ -1352,17 +1390,25 @@ async def retrieve_model(model_id: str, request: Request):
     if names is None:
         return _unauthorized(auth.error)
     canon = policy.canonicalize(model_id)
-    known = (model_id in names or canon in names
-             or canon in config.groups
-             or canon in config.alias_groups
-             or config.deployment_by_unique(canon) is not None
-             or any(canon == a or canon == policy.aliases.get(a)
-                    for a in policy.aliases))
+    known = (
+        model_id in names
+        or canon in names
+        or canon in config.groups
+        or canon in config.alias_groups
+        or config.deployment_by_unique(canon) is not None
+        or any(canon == a or canon == policy.aliases.get(a) for a in policy.aliases)
+    )
     if not known:
-        return JSONResponse(status_code=404, content={"error": {
-            "message": f"model '{model_id}' not found",
-            "type": "invalid_request_error",
-            "code": "model_not_found"}})
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": f"model '{model_id}' not found",
+                    "type": "invalid_request_error",
+                    "code": "model_not_found",
+                }
+            },
+        )
     return _model_entry(model_id)
 
 
@@ -1384,8 +1430,7 @@ async def api_v1_models(request: Request):
     view = _view_for(request, auth)
     rich = view == "stable"
     names = sorted(set(_names_for_auth(auth, view)))
-    return {"object": "list",
-            "data": [_model_entry(n, rich=rich) for n in names]}
+    return {"object": "list", "data": [_model_entry(n, rich=rich) for n in names]}
 
 
 @app.get("/v1/model/info")
@@ -1438,12 +1483,14 @@ async def ollama_show(request: Request):
         body = {}
     name = (body.get("name") or body.get("model") or "") if isinstance(body, dict) else ""
     canon = policy.canonicalize(name) if name else ""
-    known = bool(name) and (name in names or canon in names or canon in config.groups
-                            or config.deployment_by_unique(canon) is not None)
+    known = bool(name) and (
+        name in names or canon in names or canon in config.groups or config.deployment_by_unique(canon) is not None
+    )
     if name and not known:
-        return JSONResponse(status_code=404, content={"error": {
-            "message": f"model '{name}' not found",
-            "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"message": f"model '{name}' not found", "type": "invalid_request_error"}},
+        )
     target = name or policy.service_name
     caps, deps = _caps_and_deps(target)
     ctx_max, ctx_min = capmeta.context_lengths(deps)
@@ -1452,8 +1499,8 @@ async def ollama_show(request: Request):
         model_info["scrocco.caps"] = sorted(caps)
         model_info["scrocco.capabilities_ollama"] = capmeta.ollama_capabilities(caps)
         model_info["scrocco.endpoints"] = {
-            c: capmeta.supported_endpoints({c})[0]
-            for c in sorted(caps) if capmeta.supported_endpoints({c})}
+            c: capmeta.supported_endpoints({c})[0] for c in sorted(caps) if capmeta.supported_endpoints({c})
+        }
         model_info["scrocco.architecture"] = capmeta.modalities(caps)
         model_info["scrocco.supported_parameters"] = capmeta.supported_parameters(caps)
         if ctx_max:
@@ -1463,11 +1510,15 @@ async def ollama_show(request: Request):
         _hint = capmeta.usage_hint(caps)
         if _hint:
             model_info["scrocco.usage"] = _hint
-    return {"license": "", "modelfile": "", "parameters": "", "template": "",
-            "details": _ollama_entry(target)["details"],
-            "model_info": model_info,
-            "capabilities": (capmeta.ollama_capabilities(caps) if caps
-                             else ["completion"])}
+    return {
+        "license": "",
+        "modelfile": "",
+        "parameters": "",
+        "template": "",
+        "details": _ollama_entry(target)["details"],
+        "model_info": model_info,
+        "capabilities": (capmeta.ollama_capabilities(caps) if caps else ["completion"]),
+    }
 
 
 @app.get("/api/version")
@@ -1483,17 +1534,25 @@ async def llamacpp_version():
 @app.get("/props")
 async def llamacpp_props():
     """llama.cpp server props: stub minimo ma valido."""
-    return {"default_generation_settings": {"n_ctx": 0},
-            "total_slots": 1, "chat_template": "",
-            "model_path": policy.service_name, "build_info": f"nx {app.version}"}
+    return {
+        "default_generation_settings": {"n_ctx": 0},
+        "total_slots": 1,
+        "chat_template": "",
+        "model_path": policy.service_name,
+        "build_info": f"nx {app.version}",
+    }
 
 
 @app.get("/v1/props")
 async def llamacpp_props_v1():
     """llama.cpp server props (prefisso /v1): stesso stub di /props."""
-    return {"default_generation_settings": {"n_ctx": 0},
-            "total_slots": 1, "chat_template": "",
-            "model_path": policy.service_name, "build_info": f"nx {app.version}"}
+    return {
+        "default_generation_settings": {"n_ctx": 0},
+        "total_slots": 1,
+        "chat_template": "",
+        "model_path": policy.service_name,
+        "build_info": f"nx {app.version}",
+    }
 
 
 # ---------------------------------------------------------- chat completions
@@ -1641,8 +1700,7 @@ _SNIFF_OPENCODE_HEADERS = (
 )
 
 
-def _sniff_headers(request: Request, *, logger, body_size: int = 0,
-                   session_id: str | None = None) -> None:
+def _sniff_headers(request: Request, *, logger, body_size: int = 0, session_id: str | None = None) -> None:
     """Log diagnostico degli header in ingresso a /v1/chat/completions.
 
     Attivo SOLO se l'env SNIFF_HEADERS e' truthy. Scopo: verificare se e con
@@ -1658,19 +1716,19 @@ def _sniff_headers(request: Request, *, logger, body_size: int = 0,
             if name in request.headers:
                 picked[name] = request.headers[name]
         auth = request.headers.get("authorization") or ""
-        picked["authorization"] = (
-            (auth[:8] + "***" + auth[-4:]) if len(auth) > 12 else "***"
-        )
+        picked["authorization"] = (auth[:8] + "***" + auth[-4:]) if len(auth) > 12 else "***"
         # Tutti gli altri header (mascherando authorization), per non perdere
         # header utili non ancora contemplati nella lista sopra.
         picked["all_headers"] = {
-            k: (v[:8] + "***" + v[-4:] if k.lower() == "authorization" else v)
-            for k, v in request.headers.items()
+            k: (v[:8] + "***" + v[-4:] if k.lower() == "authorization" else v) for k, v in request.headers.items()
         }
         logger.warning(
             "[sniff] path=%s body_size=%s session_id=%s headers=%s",
-            request.url.path, body_size, session_id,
-            json.dumps(picked, ensure_ascii=False, default=str))
+            request.url.path,
+            body_size,
+            session_id,
+            json.dumps(picked, ensure_ascii=False, default=str),
+        )
     except Exception:
         pass
 
@@ -1694,16 +1752,14 @@ def _emit_summary(**f) -> None:
                 if "://" in base:
                     base = base.split("://", 1)[1].split("/", 1)[0]
                 f["via"] = base
-        log.info("[summary] %s",
-                 json.dumps(f, ensure_ascii=False, separators=(",", ":"),
-                            default=str))
-    except Exception:                        # mai bloccare la risposta per un log
+        log.info("[summary] %s", json.dumps(f, ensure_ascii=False, separators=(",", ":"), default=str))
+    except Exception:  # mai bloccare la risposta per un log
         pass
     try:
         grp = str(f.get("grp") or "")
         prof = f.get("profile")
         if not prof:
-            for p in config.profiles:        # match esatto sul segmento
+            for p in config.profiles:  # match esatto sul segmento
                 if grp.startswith(config.proxy_prefix + p + "-"):
                     prof = p
                     break
@@ -1712,19 +1768,30 @@ def _emit_summary(**f) -> None:
         d = config.deployment_by_unique(dep_unique)
         if d:
             model = d["model"]
-        LEDGER.record({
-            "ses": f.get("ses"), "profile": prof, "req": f.get("req"),
-            "grp": grp or None, "dep": dep_unique or None, "model": model,
-            "tries": f.get("tries"), "fb": f.get("fb"),
-            "dur_ms": f.get("dur_ms"), "stream": f.get("stream", False),
-            "qc": f.get("qc", False), "wd": f.get("wd"),
-            "fr": f.get("fr"),
-            "ttfb_ms": f.get("ttfb_ms"), "kind": f.get("kind", "chat"),
-            "status": f.get("status"),
-            "usage": f.get("usage") if isinstance(f.get("usage"), dict)
-            else None,
-        }, pricing=policy.pricing, upstream_model=model)
-    except Exception:                        # analytics non deve mai mordere
+        LEDGER.record(
+            {
+                "ses": f.get("ses"),
+                "profile": prof,
+                "req": f.get("req"),
+                "grp": grp or None,
+                "dep": dep_unique or None,
+                "model": model,
+                "tries": f.get("tries"),
+                "fb": f.get("fb"),
+                "dur_ms": f.get("dur_ms"),
+                "stream": f.get("stream", False),
+                "qc": f.get("qc", False),
+                "wd": f.get("wd"),
+                "fr": f.get("fr"),
+                "ttfb_ms": f.get("ttfb_ms"),
+                "kind": f.get("kind", "chat"),
+                "status": f.get("status"),
+                "usage": f.get("usage") if isinstance(f.get("usage"), dict) else None,
+            },
+            pricing=policy.pricing,
+            upstream_model=model,
+        )
+    except Exception:  # analytics non deve mai mordere
         pass
 
 
@@ -1748,8 +1815,7 @@ def _usage_of(data) -> dict | None:
     u = data.get("usage")
     if not isinstance(u, dict):
         return None
-    out = {k: u.get(k) for k in ("prompt_tokens", "completion_tokens",
-                                 "total_tokens") if u.get(k) is not None}
+    out = {k: u.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens") if u.get(k) is not None}
     if not out:
         # SystemOne/Jev usa `input_tokens`/`output_tokens` (forma nativa).
         _pt, _ct = u.get("input_tokens"), u.get("output_tokens")
@@ -1783,51 +1849,64 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
         # righe candidate alla rimozione del token cap (membership CSV)
         try:
             from .admin import membership_removal_candidates as _mrc
+
             candidates = _mrc(model, cap)
         except Exception:
             candidates = []
-        journal.record(VAR_DIR, "cap_learn_suggest",
-                       {"model": model, "cap": cap, "count": count,
-                        "evidence": evidence[:200],
-                        "candidates": candidates,
-                        "suggested_ops": [{"action": "update", "id": c["id"],
-                                           "caps": ",".join(
-                                               [t for t in c["caps"] if t != cap])}
-                                          for c in candidates]})
-        log.warning("[caps][suggest] %s rifiuta '%s' (%d strike): %d righe "
-                    "candidate alla rimozione del token (GET /admin/history)",
-                    model, cap, count, len(candidates))
+        journal.record(
+            VAR_DIR,
+            "cap_learn_suggest",
+            {
+                "model": model,
+                "cap": cap,
+                "count": count,
+                "evidence": evidence[:200],
+                "candidates": candidates,
+                "suggested_ops": [
+                    {"action": "update", "id": c["id"], "caps": ",".join([t for t in c["caps"] if t != cap])}
+                    for c in candidates
+                ],
+            },
+        )
+        log.warning(
+            "[caps][suggest] %s rifiuta '%s' (%d strike): %d righe "
+            "candidate alla rimozione del token (GET /admin/history)",
+            model,
+            cap,
+            count,
+            len(candidates),
+        )
         return
     try:
         from .admin import remove_cap_for_model
-        remove_cap_for_model(model=model, cap=cap, evidence=evidence,
-                             count=count)
-    except Exception as exc:                 # noqa: BLE001
-        log.error("[caps][auto-learn] applicazione fallita %s/%s: %s",
-                  model, cap, exc)
+
+        remove_cap_for_model(model=model, cap=cap, evidence=evidence, count=count)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[caps][auto-learn] applicazione fallita %s/%s: %s", model, cap, exc)
 
 
 def _strike_hook(explicit: bool, need=frozenset()):
     """Hook per il forwarder/loop endpoint: attribuisce i rifiuti modalità al
     modello upstream. MAI su richieste esplicite (il client le ha volute), mai
     con routing disattivato; conta solo cap dichiarate dal modello colpito."""
+
     def hook(model: str, detail: str) -> None:
         pol = router.policy
         if explicit or not pol.routing_active() or pol.cap_auto_learn == "off":
             return
         from .forwarder import media_reject_signature
+
         if not media_reject_signature(detail):
             return
         declared = pol.caps_for(model)
-        active = {c for c in need if c != "text" and c != "tools"
-                  and c in declared}
+        active = {c for c in need if c != "text" and c != "tools" and c in declared}
         if not active:
             return
         hits = router.note_cap_strike(model, active, detail)
         for cap in hits:
-            cnt = next((s["count"] for s in router.cap_strikes_view()
-                        if s["model"] == model and s["cap"] == cap), 0)
+            cnt = next((s["count"] for s in router.cap_strikes_view() if s["model"] == model and s["cap"] == cap), 0)
             _auto_learn_apply(model, cap, detail, cnt)
+
     return hook
 
 
@@ -1839,13 +1918,13 @@ def _note_fb_refund(router, session_id: str | None, fb: int) -> None:
     mordere la richiesta."""
     try:
         router.note_request_fallbacks(session_id, fb)
-    except Exception:                                  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
 
 
-def _apply_go_refund(router, group: str | None, profile: str | None,
-                     turn_go: bool,
-                     session_id: str | None = None) -> tuple[str | None, bool]:
+def _apply_go_refund(
+    router, group: str | None, profile: str | None, turn_go: bool, session_id: str | None = None
+) -> tuple[str | None, bool]:
     """Rimborso latenza all'atterraggio: se il turno corrente e' coperto dal
     regalo (`turn_go`) e la richiesta atterra su un dim testo (-Nk), sposta il
     gruppo sul bucket -go del profilo. Ritorna (gruppo, rediretto?).
@@ -1861,17 +1940,21 @@ def _apply_go_refund(router, group: str | None, profile: str | None,
         return group, False
     try:
         metrics.inc("nx_go_refund_total", ("redirect",))
-    except Exception:                                  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
     _st = {}
     if hasattr(router, "go_refund_status"):
         try:
             _st = router.go_refund_status(session_id) or {}
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             _st = {}
     logging.getLogger("nx.api").info(
         "🎁 [go-refund] atterraggio %s -> %s (turno %d, restano %d)",
-        group, go_group, _st.get("turns", 0), _st.get("refund_left", 0))
+        group,
+        go_group,
+        _st.get("turns", 0),
+        _st.get("refund_left", 0),
+    )
     return go_group, True
 
 
@@ -1883,8 +1966,9 @@ async def chat_completions(request: Request, response: Response):
     except Exception as exc:
         # FIX: Log error details for debugging; previously blank exception handler
         _api_log.warning("[api] invalid JSON body: %s", exc)
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "invalid JSON body", "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
+        )
 
     # EFFORT/reasoning: `reasoning_effort` (o alias `effort`) nel body, oppure
     # header `x-effort`. Lo stato vive in una ContextVar legata al task della
@@ -1901,6 +1985,7 @@ async def chat_completions(request: Request, response: Response):
     stream = bool(payload.get("stream"))
     # id breve per correlare input/output nel file di debug-sniff
     import uuid as _uuid
+
     _rid = _uuid.uuid4().hex[:12]
 
     # I6: azzera i flag per-request prima di QUALSIASI return anticipato
@@ -1915,8 +2000,7 @@ async def chat_completions(request: Request, response: Response):
     # turno corrente: Gemini resta quindi eleggibile come qualunque provider.
     # Solo con la dummy-fill DISATTIVATA lo escludiamo A MONTE dalla selezione
     # (come un cap mancante, senza salti o tentativi finti).
-    set_avoid_gemini(has_unsigned_tool_calls(messages)
-                     and not policy.thought_sig_dummy_fill)
+    set_avoid_gemini(has_unsigned_tool_calls(messages) and not policy.thought_sig_dummy_fill)
     set_dummy_fill(policy.thought_sig_dummy_fill, policy.thought_sig_dummy_value)
 
     # --- normalizzazione del nome richiesto:
@@ -1944,8 +2028,7 @@ async def chat_completions(request: Request, response: Response):
     # l'audio in modo affidabile) invece che nel pool testo normale. Dopo
     # questa riga `messages` non ha piu' audio.
     if count_audio_parts(payload.get("messages") or []):
-        payload = await _stt_bridge(
-            request, payload, auth, session_id, model, raw_model)
+        payload = await _stt_bridge(request, payload, auth, session_id, model, raw_model)
         messages = payload.get("messages") or []
 
     # --- capability detection ---
@@ -1961,6 +2044,7 @@ async def chat_completions(request: Request, response: Response):
     # initial_pick/pick_deployment (guardia anti-usurpazione cross-sessione),
     # non solo dopo il pick come in passato.
     from .router import set_current_session
+
     set_current_session(session_id)
     # SESSION-DEP GUARD: la sessione ha USATO il servizio -> rinnova
     # l'ownership di tutti i suoi deployment (restano suoi finché e' viva;
@@ -1977,13 +2061,16 @@ async def chat_completions(request: Request, response: Response):
     # motore chat normale qui sotto.
     if wants_image_output(payload):
         _img_resp = await _image_chat_intercept(
-            request, payload=payload, model=model, raw_model=raw_model,
-            auth=auth, session_id=session_id)
+            request, payload=payload, model=model, raw_model=raw_model, auth=auth, session_id=session_id
+        )
         if _img_resp is not None:
             return _img_resp
-    _sniff_headers(request, logger=_api_log,
-                   body_size=len(request._body) if hasattr(request, "_body")
-                   else 0, session_id=session_id)
+    _sniff_headers(
+        request,
+        logger=_api_log,
+        body_size=len(request._body) if hasattr(request, "_body") else 0,
+        session_id=session_id,
+    )
     _img_est = getattr(router.policy, "image_token_estimate", 0) or 0
     # Base di stima = payload con la sola histnorm (preview deterministica,
     # PRIMA di ctxcompact): la STESSA base su cui si apprende e si applica il
@@ -1991,11 +2078,12 @@ async def chat_completions(request: Request, response: Response):
     # routing.
     _est_msgs = messages
     try:
-        from .histnorm import (hist_config_from_policy, normalize_messages)
+        from .histnorm import hist_config_from_policy, normalize_messages
+
         _est_msgs, _ = normalize_messages(
-            messages, hist_config_from_policy(router.policy),
-            tail_floor=router.ctx_boundary_floor(session_id))
-    except Exception:                              # noqa: BLE001
+            messages, hist_config_from_policy(router.policy), tail_floor=router.ctx_boundary_floor(session_id)
+        )
+    except Exception:  # noqa: BLE001
         _est_msgs = messages
     _est_chars_pre = _prompt_chars(_est_msgs, payload.get("tools"))
     _cpt = router.session_chars_per_token(session_id)
@@ -2004,29 +2092,30 @@ async def chat_completions(request: Request, response: Response):
         #  ctx_dim = token POST-compressione previsti -> scelta della dim;
         #  ctx_est = token PRE-compressione -> sicurezza (ctxcompact/overflow).
         ctx_dim, _ = router.estimate_for_session(
-            session_id, _est_msgs, router.policy.estimate_divisor, _img_est,
-            tools=payload.get("tools"), pre=True)
+            session_id, _est_msgs, router.policy.estimate_divisor, _img_est, tools=payload.get("tools"), pre=True
+        )
         ctx_est, _ = router.estimate_for_session(
-            session_id, _est_msgs, router.policy.estimate_divisor, _img_est,
-            tools=payload.get("tools"))
+            session_id, _est_msgs, router.policy.estimate_divisor, _img_est, tools=payload.get("tools")
+        )
         metrics.inc("nx_sess_est_used_total")
-        log.info("[estimate] sess cpt_pre=%.2f cpt_post=%.2f -> ctx_dim≈%d "
-                 "ctx_pre≈%d (chars_pre=%d, +%.0f%%)",
-                 router.session_chars_per_token(session_id, pre=True),
-                 _cpt, ctx_dim, ctx_est, _est_chars_pre,
-                 (float(getattr(router.policy, "session_estimate_margin",
-                                1.05)) - 1.0) * 100.0)
+        log.info(
+            "[estimate] sess cpt_pre=%.2f cpt_post=%.2f -> ctx_dim≈%d ctx_pre≈%d (chars_pre=%d, +%.0f%%)",
+            router.session_chars_per_token(session_id, pre=True),
+            _cpt,
+            ctx_dim,
+            ctx_est,
+            _est_chars_pre,
+            (float(getattr(router.policy, "session_estimate_margin", 1.05)) - 1.0) * 100.0,
+        )
     else:
         # 1o turno della sessione: stima euristica basata sui soli char.
-        ctx_est = estimate_tokens(messages, router.policy.estimate_divisor,
-                                  _img_est, tools=payload.get("tools"))
+        ctx_est = estimate_tokens(messages, router.policy.estimate_divisor, _img_est, tools=payload.get("tools"))
         ctx_dim = ctx_est
         metrics.inc("nx_sess_est_fallback_total")
 
-    group_or_explicit = router.resolve_group_for_request(model, messages,
-                                                         session_id, need,
-                                                         ctx_dim,
-                                                         profile=auth.profile)
+    group_or_explicit = router.resolve_group_for_request(
+        model, messages, session_id, need, ctx_dim, profile=auth.profile
+    )
     if group_or_explicit is None:
         if need:
             for c in sorted(need):
@@ -2040,25 +2129,42 @@ async def chat_completions(request: Request, response: Response):
             # solo al turno dopo invece di fare un giro di scoperta.
             _missing = router._missing_media_caps(model, need)
             if _missing:
-                return JSONResponse(status_code=400, content={
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": (
+                                f"il modello '{model}' non supporta: "
+                                f"{', '.join(_missing)}. La richiesta contiene "
+                                f"media che quel modello non puo' elaborare; usa "
+                                f"un modello con capacita' "
+                                f"{'+'.join(_missing)}."
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "model_capability_unsupported",
+                            "missing_capabilities": _missing,
+                        }
+                    },
+                )
+            return JSONResponse(
+                status_code=400,
+                content={
                     "error": {
-                        "message": (
-                            f"il modello '{model}' non supporta: "
-                            f"{', '.join(_missing)}. La richiesta contiene "
-                            f"media che quel modello non puo' elaborare; usa "
-                            f"un modello con capacita' "
-                            f"{'+'.join(_missing)}."),
+                        "message": f"nessun deployment dichiara le capacità richieste: {sorted(need)}. "
+                        f"Configura capability_routing.model_capabilities in gateway.yaml",
                         "type": "invalid_request_error",
-                        "code": "model_capability_unsupported",
-                        "missing_capabilities": _missing}})
-            return JSONResponse(status_code=400, content={
-                "error": {"message": f"nessun deployment dichiara le capacità richieste: {sorted(need)}. "
-                                     f"Configura capability_routing.model_capabilities in gateway.yaml",
-                         "type": "invalid_request_error"}})
-        return JSONResponse(status_code=404, content={
-            "error": {"message": f"model '{model}' not managed by "
-                                 f"{policy.service_name}",
-                      "type": "invalid_request_error"}})
+                    }
+                },
+            )
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": f"model '{model}' not managed by {policy.service_name}",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
 
     # RIMBORSO LATENZA: conta il turno della sessione (all'atterraggio) e, se
     # un "lento" ha regalato turni -go, atterra sul bucket -go come se il
@@ -2069,10 +2175,9 @@ async def chat_completions(request: Request, response: Response):
     if session_id:
         try:
             _turn_go = router.note_session_turn(session_id)
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             _turn_go = False
-    group_or_explicit, _refund_go = _apply_go_refund(
-        router, group_or_explicit, auth.profile, _turn_go, session_id)
+    group_or_explicit, _refund_go = _apply_go_refund(router, group_or_explicit, auth.profile, _turn_go, session_id)
 
     explicit_req = router.is_explicit(model)
     # Se il client chiama esplicitamente un gruppo diverso (es. -200k -> -1000k
@@ -2105,22 +2210,23 @@ async def chat_completions(request: Request, response: Response):
         # l'upstream. Evita 2-3 tentativi di catena e 10-15s di prefill inutile.
         _max_grp = 0
         try:
-            _max_grp = max((int(d.get("max_input_tokens") or 0)
-                            for d in (router.config.groups.get(
-                                group_or_explicit) or [])), default=0)
+            _max_grp = max(
+                (int(d.get("max_input_tokens") or 0) for d in (router.config.groups.get(group_or_explicit) or [])),
+                default=0,
+            )
         except Exception:
             _max_grp = 0
         _zen_first = False
         try:
             _zen_first = router._zen_first_active()
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             _zen_first = False
         # Zen-first: si tiene conto anche della RISERVA DI OUTPUT (il picker
         # richiede ctx+out <= max_input) e si compatta per rientrare nel tier
         # zen. Per i non-nativi resta lo storico 5% di margine sull'input.
         try:
             _out_res = int(refill_out_budget(payload, router.policy) or 0)
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             _out_res = 0
         if _zen_first:
             _budget = max(1, _max_grp - _out_res) if _max_grp else 0
@@ -2135,52 +2241,60 @@ async def chat_completions(request: Request, response: Response):
                 # ZEN-FIRST (client opencode nativo): PRIMA di salire a una
                 # dim senza zen si prova a COMPATTARE per restare nel tier
                 # free; solo se il payload resta troppo grande si sale di dim.
-                from .ctxcompact import (compact_tool_outputs,
-                                         ctxcompact_config_from_policy)
+                from .ctxcompact import compact_tool_outputs, ctxcompact_config_from_policy
+
                 _ccf = ctxcompact_config_from_policy(router.policy)
                 _ccf.min_saved_tokens = 0
                 _img = getattr(router.policy, "image_token_estimate", 0) or 0
                 _forced, _frep = compact_tool_outputs(
-                    payload.get("messages") or [], _ccf, max_in=_budget,
+                    payload.get("messages") or [],
+                    _ccf,
+                    max_in=_budget,
                     estimator=lambda ms: router.estimate_for_session(
-                        session_id, ms, router.policy.estimate_divisor,
-                        _img)[0])
+                        session_id, ms, router.policy.estimate_divisor, _img
+                    )[0],
+                )
                 if _frep.get("changed"):
                     payload["messages"] = _forced
                     metrics.inc("nx_ctx_compacted_forced")
-                    log.info("[ctx-overflow] compattazione forzata (zen) per "
-                             "%s: %s", group_or_explicit,
-                             {k: _frep.get(k) for k in (
-                                 "stubbed", "deduped", "args_trimmed",
-                                 "saved_chars")})
+                    log.info(
+                        "[ctx-overflow] compattazione forzata (zen) per %s: %s",
+                        group_or_explicit,
+                        {k: _frep.get(k) for k in ("stubbed", "deduped", "args_trimmed", "saved_chars")},
+                    )
                 ctx_est = router.estimate_for_session(
-                    session_id, payload.get("messages") or [],
-                    router.policy.estimate_divisor, _img,
-                    tools=payload.get("tools"))[0]
+                    session_id,
+                    payload.get("messages") or [],
+                    router.policy.estimate_divisor,
+                    _img,
+                    tools=payload.get("tools"),
+                )[0]
                 if ctx_est <= _budget:
                     metrics.inc("nx_zen_dim_stay")
-                    log.info("[zen-dim] compattato: ctx≈%d entra in %s (zen, "
-                             "budget=%d out=%d): resto nel tier free",
-                             ctx_est, group_or_explicit, _budget, _out_res)
+                    log.info(
+                        "[zen-dim] compattato: ctx≈%d entra in %s (zen, budget=%d out=%d): resto nel tier free",
+                        ctx_est,
+                        group_or_explicit,
+                        _budget,
+                        _out_res,
+                    )
                     _handled = True
             if not _handled:
-                _climb = ((ctx_est > _budget) if _zen_first
-                          else (ctx_est > _max_grp))
+                _climb = (ctx_est > _budget) if _zen_first else (ctx_est > _max_grp)
                 if _climb:
                     # SALITA DI DIM (regola dell'utente): la dim PIU' PICCOLA
                     # che contiene il payload (+ riserva output per lo zen).
-                    _up = router.climb_dim_group(
-                        group_or_explicit,
-                        ctx_est + (_out_res if _zen_first else 0))
+                    _up = router.climb_dim_group(group_or_explicit, ctx_est + (_out_res if _zen_first else 0))
                 if _up:
-                    log.info("[dim] ctx≈%d non entra in %s (max %d): salgo a %s",
-                             ctx_est, group_or_explicit, _max_grp, _up)
+                    log.info(
+                        "[dim] ctx≈%d non entra in %s (max %d): salgo a %s", ctx_est, group_or_explicit, _max_grp, _up
+                    )
                     group_or_explicit = _up
                     if explicit_req and session_id:
                         router.sticky_set(session_id, _up)
                 else:
-                    from .ctxcompact import (compact_tool_outputs,
-                                             ctxcompact_config_from_policy)
+                    from .ctxcompact import compact_tool_outputs, ctxcompact_config_from_policy
+
                     # NB: CtxCompactConfig NON e' un dataclass -> niente
                     # `dataclasses.replace` (TypeError a runtime: era il bug di
                     # produzione). E' un'istanza fresca per chiamata: si muta il campo.
@@ -2188,32 +2302,42 @@ async def chat_completions(request: Request, response: Response):
                     _ccf.min_saved_tokens = 0
                     _img = getattr(router.policy, "image_token_estimate", 0) or 0
                     _forced, _frep = compact_tool_outputs(
-                        payload.get("messages") or [], _ccf, max_in=_max_grp,
+                        payload.get("messages") or [],
+                        _ccf,
+                        max_in=_max_grp,
                         estimator=lambda ms: router.estimate_for_session(
-                            session_id, ms, router.policy.estimate_divisor,
-                            _img)[0])
+                            session_id, ms, router.policy.estimate_divisor, _img
+                        )[0],
+                    )
                     if _frep.get("changed"):
                         payload["messages"] = _forced
                         metrics.inc("nx_ctx_compacted_forced")
-                        log.info("[ctx-overflow] compattazione forzata per %s: %s",
-                                 group_or_explicit,
-                                 {k: _frep.get(k) for k in (
-                                     "stubbed", "deduped", "args_trimmed",
-                                     "saved_chars")})
+                        log.info(
+                            "[ctx-overflow] compattazione forzata per %s: %s",
+                            group_or_explicit,
+                            {k: _frep.get(k) for k in ("stubbed", "deduped", "args_trimmed", "saved_chars")},
+                        )
                     ctx_est = router.estimate_for_session(
-                        session_id, payload.get("messages") or [],
-                        router.policy.estimate_divisor, _img,
-                        tools=payload.get("tools"))[0]
+                        session_id,
+                        payload.get("messages") or [],
+                        router.policy.estimate_divisor,
+                        _img,
+                        tools=payload.get("tools"),
+                    )[0]
                     if ctx_est > int(_max_grp * 1.05):
                         metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
-                        return JSONResponse(status_code=400, content={
-                            "error": {"code": "context_length_exceeded",
-                                      "message": "ctx ~%d oltre il max_input %d del "
-                                                 "gruppo %s, anche dopo la "
-                                                 "compattazione" % (
-                                                     ctx_est, _max_grp,
-                                                     group_or_explicit),
-                                      "type": "invalid_request_error"}})
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "error": {
+                                    "code": "context_length_exceeded",
+                                    "message": "ctx ~%d oltre il max_input %d del "
+                                    "gruppo %s, anche dopo la "
+                                    "compattazione" % (ctx_est, _max_grp, group_or_explicit),
+                                    "type": "invalid_request_error",
+                                }
+                            },
+                        )
         # ESPLICITO: nessun filtro (la lettera della richiesta vince); il retry
         # ruota solo nel gruppo. BASE: need+ctx con catena del mondo scelta da
         # initial_pick (dims per testo, cap-chain per -C).
@@ -2224,8 +2348,9 @@ async def chat_completions(request: Request, response: Response):
         # "qwen-32k" matcha per caso). Verita' canonica = config.group_caps:
         # se il gruppo NON e' una capacita' ed e' un bucket -dim/apice, il warm
         # resta valido anche esplicito.
-        _grp_is_dim = (router.config.group_caps.get(group_or_explicit) is None
-                       and not router._is_renewal_bucket(group_or_explicit))
+        _grp_is_dim = router.config.group_caps.get(group_or_explicit) is None and not router._is_renewal_bucket(
+            group_or_explicit
+        )
         _warm = (not explicit_req) or _grp_is_dim
         # CACHE PAGATA: SOLO su richiesta esplicita a -go/-fallback testo:
         # riusa la stessa chiave della sessione (KV-cache calda) anche se sta
@@ -2234,46 +2359,57 @@ async def chat_completions(request: Request, response: Response):
         # account alla volta). Auto-routing ed escalation interne non lo usano.
         _go_suf = router.config.go_suffix or "-go"
         _fb_suf = router.config.fallback_suffix or "-fallback"
-        _paid_holder = explicit_req and (group_or_explicit.endswith(_go_suf)
-                                         or group_or_explicit.endswith(_fb_suf))
+        _paid_holder = explicit_req and (group_or_explicit.endswith(_go_suf) or group_or_explicit.endswith(_fb_suf))
         # PARITA' stream/non-stream sotto HOLD: se questa richiesta non-stream
         # sara' servita dal MOTORE STREAM (redirect hold, vedi _redirect sotto),
         # anche il pick iniziale deve ordinare il warm come lo stream
         # (prefer_fast=False). Qui `dep` non esiste ancora: l'intento si ricava
         # dalla policy (il flag per-deployment resta gestito dal ramo a valle).
-        _pre_redirect = _nonstream_hold_redirect(
-            stream, None, router.policy.qc_json, router.policy)
-        dep = router.initial_pick(auth.profile, group_or_explicit,
-                                  None if explicit_req else need,
-                                  ctx_dim,
-                                  session_id=session_id,
-                                  warm=_warm,
-                                  prefer_holder=_paid_holder,
-                                  prefer_fast=(not stream) and not _pre_redirect,
-                                  out_tokens=refill_out_budget(payload,
-                                                               router.policy))
+        _pre_redirect = _nonstream_hold_redirect(stream, None, router.policy.qc_json, router.policy)
+        dep = router.initial_pick(
+            auth.profile,
+            group_or_explicit,
+            None if explicit_req else need,
+            ctx_dim,
+            session_id=session_id,
+            warm=_warm,
+            prefer_holder=_paid_holder,
+            prefer_fast=(not stream) and not _pre_redirect,
+            out_tokens=refill_out_budget(payload, router.policy),
+        )
     if dep is None:
         # F31: se il motivo e' l'overflow (tutti i dep del gruppo hanno
         # max_input < ctx) NON e' un disservizio ma un errore del client:
         # 400 context_length_exceeded invece del 503 "nessun deployment".
         try:
-            _mx = max((int(d.get("max_input_tokens") or 0)
-                       for d in (router.config.groups.get(
-                           group_or_explicit) or [])), default=0)
+            _mx = max(
+                (int(d.get("max_input_tokens") or 0) for d in (router.config.groups.get(group_or_explicit) or [])),
+                default=0,
+            )
         except Exception:
             _mx = 0
         if _mx > 0 and ctx_est and ctx_est > _mx:
             metrics.inc("nx_ctx_overflow_total", (group_or_explicit,))
-            return JSONResponse(status_code=400, content={
-                "error": {"code": "context_length_exceeded",
-                          "message": "ctx ~%d oltre il max_input %d del "
-                                     "gruppo %s" % (ctx_est, _mx,
-                                                    group_or_explicit),
-                          "type": "invalid_request_error"}})
-        return JSONResponse(status_code=503, content={
-            "error": {"message": "nessun deployment disponibile"
-                      + (" per le capacità richieste" if not explicit_req else ""),
-                      "type": "server_error"}})
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "ctx ~%d oltre il max_input %d del gruppo %s" % (ctx_est, _mx, group_or_explicit),
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": "nessun deployment disponibile"
+                    + (" per le capacità richieste" if not explicit_req else ""),
+                    "type": "server_error",
+                }
+            },
+        )
 
     # override chiave: alias GENERICO con chiave custom (policy.alias_keys):
     # sostituisce SOLO dep["api_key"]. Vale solo per il PRIMO tentativo —
@@ -2283,22 +2419,24 @@ async def chat_completions(request: Request, response: Response):
     if custom_key:
         dep = {**dep, "api_key": custom_key}
 
-    profile = auth.profile or config.profile_of_base(model.split("__")[0]) \
-        or config.profile_of_base(model)
+    profile = auth.profile or config.profile_of_base(model.split("__")[0]) or config.profile_of_base(model)
 
     if model != raw_model:
         log.info("[route] alias %r -> %r", raw_model, model)
-    metrics.inc("nx_requests_total",
-                (raw_model[:60], str(bool(payload.get("stream")))))
+    metrics.inc("nx_requests_total", (raw_model[:60], str(bool(payload.get("stream")))))
     metrics.inc("nx_group_total", (dep["group"],))
     for c in sorted(need):
         metrics.inc("nx_caps_requests_total", (c,))
-    log.info("[route] %s -> %s (ctx≈%d tok%s, need=%s, session=%s, stream=%s)",
-             model, dep["group"],
-             ctx_est,
-             f"+{count_image_parts(messages)}img" if count_image_parts(messages) else "",
-             sorted(need) if need else "-",
-             session_id or "anonima", bool(payload.get("stream")))
+    log.info(
+        "[route] %s -> %s (ctx≈%d tok%s, need=%s, session=%s, stream=%s)",
+        model,
+        dep["group"],
+        ctx_est,
+        f"+{count_image_parts(messages)}img" if count_image_parts(messages) else "",
+        sorted(need) if need else "-",
+        session_id or "anonima",
+        bool(payload.get("stream")),
+    )
 
     # autoprobe cooldown (fire-and-forget: non entra nella risposta)
     autoprobe.maybe_spawn(router, forwarder, profile)
@@ -2307,8 +2445,7 @@ async def chat_completions(request: Request, response: Response):
     # esplicite (-Nk/-go/-fallback/__univoco) non leggono né scrivono sticky.
     # I bucket renewal (-go/-fallback) NON vengono mai salvati: -go si
     # raggiunge solo esplicitamente o a fine scala (free -> zen -> -go).
-    if session_id and not router.is_explicit(model) \
-            and not router._is_renewal_bucket(group_or_explicit):
+    if session_id and not router.is_explicit(model) and not router._is_renewal_bucket(group_or_explicit):
         router.sticky_set(session_id, group_or_explicit)
 
     # iniezione identità + modello univoco nel payload upstream
@@ -2316,26 +2453,23 @@ async def chat_completions(request: Request, response: Response):
 
     # ---- L1/L2 preprocessing (cache-safe: solo la coda) ----
     from .histnorm import hist_config_from_policy, normalize_messages
-    from .sampling import (sampling_config_from_policy,
-                           apply_sampling_defaults)
-    from .schemaout import (schemaout_config_from_policy,
-                            maybe_inject_response_format)
+    from .sampling import sampling_config_from_policy, apply_sampling_defaults
+    from .schemaout import schemaout_config_from_policy, maybe_inject_response_format
+
     _hn = hist_config_from_policy(router.policy)
     _sm = sampling_config_from_policy(router.policy)
     _so = schemaout_config_from_policy(router.policy)
-    _orig_msgs = payload.get("messages")          # pre-normalizzazione
+    _orig_msgs = payload.get("messages")  # pre-normalizzazione
     _orig_for_retry = None
     if _hn.enabled:
-        _nm, _nr = normalize_messages(payload.get("messages"), _hn,
-                                      tail_floor=router.ctx_boundary_floor(
-                                          session_id))
+        _nm, _nr = normalize_messages(payload.get("messages"), _hn, tail_floor=router.ctx_boundary_floor(session_id))
         if _nr.get("changed"):
             payload["messages"] = _nm
             metrics.inc("nx_histnorm_total", ("changed",))
-            log.info("[histnorm] coda normalizzata: %s",
-                     {k: _nr.get(k) for k in (
-                         "shown_orphan_tool", "dangling_tool_calls",
-                         "empty_assistant", "dup_system")})
+            log.info(
+                "[histnorm] coda normalizzata: %s",
+                {k: _nr.get(k) for k in ("shown_orphan_tool", "dangling_tool_calls", "empty_assistant", "dup_system")},
+            )
         # Il taglio del reasoning e' un'ottimizzazione di TOKEN: la history
         # originale serve (a) ai deployment con `thinking_replay` per rimettere
         # il reasoning VERO prima dell'invio, (b) al retry una-tantum dopo un
@@ -2343,9 +2477,8 @@ async def chat_completions(request: Request, response: Response):
         if _orig_msgs:
             _orig_for_retry = _orig_msgs
     # ---- cache-aware: detentore sessione + troncamento contesto ----
-    from .ctxcompact import (ctxcompact_config_from_policy,
-                             compact_tool_outputs, should_compact,
-                             frontier_boundary)
+    from .ctxcompact import ctxcompact_config_from_policy, compact_tool_outputs, should_compact, frontier_boundary
+
     _cc = ctxcompact_config_from_policy(router.policy)
     _holder = router.session_holder(session_id)
     _max_in = int(dep.get("max_input_tokens") or 0)
@@ -2372,23 +2505,34 @@ async def chat_completions(request: Request, response: Response):
     except Exception:
         _div_eff = float(getattr(router.policy, "estimate_divisor", 4) or 4)
     _dec = should_compact(
-        _cc, _ctx_corr, _max_in, _holder, dep.get("unique"),
+        _cc,
+        _ctx_corr,
+        _max_in,
+        _holder,
+        dep.get("unique"),
         bool(session_id and router.is_session_compact(session_id)),
         same_family=_same_family,
-        reasoning=bool(dep.get("effort_capable")))
+        reasoning=bool(dep.get("effort_capable")),
+    )
     _do_compact = _dec["compact"]
     if _do_compact and session_id:
         router.mark_session_compact(session_id)
     _ctx_saved_hdr = 0
     if _do_compact:
         _cmsgs, _crep = compact_tool_outputs(
-            payload.get("messages"), _cc, max_in=_max_in,
+            payload.get("messages"),
+            _cc,
+            max_in=_max_in,
             estimator=lambda ms: router.estimate_for_session(
-                session_id, ms, _div_eff,
+                session_id,
+                ms,
+                _div_eff,
                 getattr(router.policy, "image_token_estimate", 0) or 0,
-                unique=dep.get("unique"))[0],
+                unique=dep.get("unique"),
+            )[0],
             boundary_floor=router.ctx_boundary_floor(session_id),
-            divisor=_div_eff)
+            divisor=_div_eff,
+        )
         if _crep.get("changed"):
             payload["messages"] = _cmsgs
             router.note_compact_boundary(session_id, _crep.get("boundary"))
@@ -2396,10 +2540,15 @@ async def chat_completions(request: Request, response: Response):
             for _tn, _tcnt in (_crep.get("tools") or {}).items():
                 metrics.inc("nx_ctxcompact_tool_total", (_tn,))
             _ctx_saved_hdr = int(_crep.get("saved_tokens_est") or 0)
-            log.info("[ctxcompact] ses=%s stubbed=%d dedup=%d args=%d "
-                     "saved≈%dtok reason=%s", session_id, _crep["stubbed"],
-                     _crep.get("deduped", 0), _crep.get("args_trimmed", 0),
-                     _crep["saved_tokens_est"], _dec["reason"])
+            log.info(
+                "[ctxcompact] ses=%s stubbed=%d dedup=%d args=%d saved≈%dtok reason=%s",
+                session_id,
+                _crep["stubbed"],
+                _crep.get("deduped", 0),
+                _crep.get("args_trimmed", 0),
+                _crep["saved_tokens_est"],
+                _dec["reason"],
+            )
     # AUDIT DEL PREFISSO (F4): prima di spendere la cache a monte, impronta
     # il prefisso [1:frontier] e dice perche' e' cambiato (se e' cambiato).
     # 'identity' = colpa nostra (system/inject), 'prefix' = ctxcompact,
@@ -2407,35 +2556,41 @@ async def chat_completions(request: Request, response: Response):
     # scelta del deployment, ma F10 lo usa come breadcrumb sui 503.
     _aud = None
     if getattr(router.policy, "cache_prefix_audit", True) and session_id:
-        _bnd = (_crep.get("boundary")
-                if (_do_compact and _crep.get("changed")) else None)
+        _bnd = _crep.get("boundary") if (_do_compact and _crep.get("changed")) else None
         if _bnd is None:
             try:
-                _bnd = frontier_boundary(payload.get("messages") or [],
-                                         _cc, _max_in,
-                                         router.ctx_boundary_floor(session_id),
-                                         _div_eff)
-            except Exception:                 # noqa: BLE001
+                _bnd = frontier_boundary(
+                    payload.get("messages") or [], _cc, _max_in, router.ctx_boundary_floor(session_id), _div_eff
+                )
+            except Exception:  # noqa: BLE001
                 _bnd = None
-        _aud = router.audit_prefix(session_id,
-                                   payload.get("messages") or [], _bnd)
+        _aud = router.audit_prefix(session_id, payload.get("messages") or [], _bnd)
         metrics.inc("nx_cache_audit_total", (_aud,))
         if _aud in ("identity", "prefix"):
-            log.info("[cache-audit] ses=%s prefisso MUTATO (%s, boundary=%s): "
-                     "cache upstream riparte da li'", session_id, _aud, _bnd)
-    log.info("[cache] ses=%s holder=%s family=%s same_fam=%s compact=%s "
-             "cold=%s reason=%s ctx≈%d max_in=%d", session_id, _holder or "-",
-             dep.get("family") or "-", _same_family,
-             _do_compact, _dec["cold"], _dec["reason"] or "-",
-             ctx_est, _max_in)
+            log.info(
+                "[cache-audit] ses=%s prefisso MUTATO (%s, boundary=%s): cache upstream riparte da li'",
+                session_id,
+                _aud,
+                _bnd,
+            )
+    log.info(
+        "[cache] ses=%s holder=%s family=%s same_fam=%s compact=%s cold=%s reason=%s ctx≈%d max_in=%d",
+        session_id,
+        _holder or "-",
+        dep.get("family") or "-",
+        _same_family,
+        _do_compact,
+        _dec["cold"],
+        _dec["reason"] or "-",
+        ctx_est,
+        _max_in,
+    )
     if stream and _sm.enabled:
         _ap = apply_sampling_defaults(payload, dep, _sm)
         if _ap:
-            log.debug("[sampling] %s: default %s",
-                      dep.get("unique"), _ap)
+            log.debug("[sampling] %s: default %s", dep.get("unique"), _ap)
         if maybe_inject_response_format(payload, dep, _so):
-            metrics.inc("nx_resp_format_injected_total",
-                        (dep.get("unique"),))
+            metrics.inc("nx_resp_format_injected_total", (dep.get("unique"),))
     t_req = time.monotonic()
     # sessione OpenCode: passthrough se il client la invia (x-opencode-session
     # oppure x-session-affinity/x-session-id nativi), altrimenti fallback alla
@@ -2452,25 +2607,41 @@ async def chat_completions(request: Request, response: Response):
         _sniffer = None
         if sniff.enabled(router.policy):
             _sniffer = sniff.begin(
-                _rid, {"model": raw_model, "canonical": model,
-                       "profile": profile, "session": _sess or "-",
-                       "client_ip": _cip, "need": sorted(need),
-                       "group": group_or_explicit,
-                       "dep": dep.get("unique"), "stream": True},
-                payload)
+                _rid,
+                {
+                    "model": raw_model,
+                    "canonical": model,
+                    "profile": profile,
+                    "session": _sess or "-",
+                    "client_ip": _cip,
+                    "need": sorted(need),
+                    "group": group_or_explicit,
+                    "dep": dep.get("unique"),
+                    "stream": True,
+                },
+                payload,
+            )
         _sresp = await _stream_with_fallback(
-            profile, dep, payload, need,
+            profile,
+            dep,
+            payload,
+            need,
             hook=_strike_hook(explicit_req, need),
             scope="group" if explicit_req else "chain",
             ctx=ctx_dim,
             cold=bool(_dec.get("cold")),
             prefix_reason=(_aud if _aud in ("identity", "prefix") else None),
-            ses=session_id, req=raw_model,
+            ses=session_id,
+            req=raw_model,
             est_chars=_est_chars_pre,
-            session=_sess, client_ip=_cip, request=request,
-            attribution=_attr, requested_group=group_or_explicit,
+            session=_sess,
+            client_ip=_cip,
+            request=request,
+            attribution=_attr,
+            requested_group=group_or_explicit,
             orig_messages=_orig_for_retry,
-            sniffer=_sniffer)
+            sniffer=_sniffer,
+        )
         if _ctx_saved_hdr:
             _sresp.headers["X-Ctxcompact-Saved"] = str(_ctx_saved_hdr)
         return _sresp
@@ -2485,37 +2656,46 @@ async def chat_completions(request: Request, response: Response):
 
     async def _redirect_once():
         from .protocols import sse_to_chat_obj
+
         _sp = dict(payload)
         _sp["stream"] = True
         try:
             if _sm.enabled:
                 apply_sampling_defaults(_sp, dep, _sm)
             maybe_inject_response_format(_sp, dep, _so)
-        except Exception:                    # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         _meta: dict = {}
         _sresp = await _stream_with_fallback(
-            profile, dep, _sp, need,
+            profile,
+            dep,
+            _sp,
+            need,
             hook=_strike_hook(explicit_req, need),
             scope="group" if explicit_req else "chain",
             ctx=ctx_dim,
             cold=bool(_dec.get("cold")),
             prefix_reason=(_aud if _aud in ("identity", "prefix") else None),
-            ses=session_id, req=raw_model,
+            ses=session_id,
+            req=raw_model,
             est_chars=_est_chars_pre,
-            session=_sess, client_ip=_cip, request=request,
-            attribution=_attr, requested_group=group_or_explicit,
-            orig_messages=_orig_for_retry, sniffer=None,
-            result_box=_meta, client_stream=False)
+            session=_sess,
+            client_ip=_cip,
+            request=request,
+            attribution=_attr,
+            requested_group=group_or_explicit,
+            orig_messages=_orig_for_retry,
+            sniffer=None,
+            result_box=_meta,
+            client_stream=False,
+        )
         if isinstance(_sresp, StreamingResponse):
             _chunks = [c async for c in _sresp.body_iterator]
             attempts_box.extend(_meta.get("attempts") or [])
             try:
                 _data = sse_to_chat_obj(_chunks)
             except ValueError as _ex:
-                raise UpstreamError(
-                    503, "stream non assemblable: %s" % _ex,
-                    final=True) from _ex
+                raise UpstreamError(503, "stream non assemblable: %s" % _ex, final=True) from _ex
             return (_data, _meta.get("dep") or dep)
         # errore PRE-BYTE: il motore stream ritorna gia' un JSONResponse
         # (503 retryable o status vero). Ricostruiamo l'errore per riusare
@@ -2523,65 +2703,72 @@ async def chat_completions(request: Request, response: Response):
         attempts_box.extend(_meta.get("attempts") or [])
         _st = int(getattr(_sresp, "status_code", 503) or 503)
         try:
-            _detail = json.loads(
-                bytes(getattr(_sresp, "body", b"") or b"")
-            ).get("error", {}).get("message")
-        except Exception:                    # noqa: BLE001
+            _detail = json.loads(bytes(getattr(_sresp, "body", b"") or b"")).get("error", {}).get("message")
+        except Exception:  # noqa: BLE001
             _detail = None
         # Il trail (quali hop e con quale classe) arriva da _ret() nel
         # result_box: senza questo l'handler non-stream ricostruiva un
         # UpstreamError SENZA trail e il 503 finale usciva con attempts=[].
-        _err = UpstreamError(
-            _st, _detail or "upstream error (redirect stream)")
+        _err = UpstreamError(_st, _detail or "upstream error (redirect stream)")
         _err.trail = _meta.get("trail")
         raise _err
 
     try:
         if _redirect:
-            res = await _forward_coalesced(router.policy, payload, profile,
-                                           _redirect_once)
+            res = await _forward_coalesced(router.policy, payload, profile, _redirect_once)
         else:
+
             async def _fwd_once():
                 return await forwarder.call_with_fallback(
-                    router, profile, dep, payload,
-                    collect_qc_failures=bool(qc_pol.enabled
-                                             or router.policy.qc_sanity.enabled),
+                    router,
+                    profile,
+                    dep,
+                    payload,
+                    collect_qc_failures=bool(qc_pol.enabled or router.policy.qc_sanity.enabled),
                     media_strike_hook=_strike_hook(explicit_req, need),
                     need=need,
                     scope="group" if explicit_req else "chain",
                     ctx=ctx_dim,
                     attempts_box=attempts_box,
-                    session=_sess, ses=session_id, client_ip=_cip,
+                    session=_sess,
+                    ses=session_id,
+                    client_ip=_cip,
                     attribution=_attr,
                     orig_messages=_orig_for_retry,
-                    requested_group=group_or_explicit)
-            res = await _forward_coalesced(router.policy, payload, profile,
-                                           _fwd_once)
+                    requested_group=group_or_explicit,
+                )
+
+            res = await _forward_coalesced(router.policy, payload, profile, _fwd_once)
     except UpstreamError as err:
         # errore azionabile -> status vero; catena esaurita / nessun output
         # utile -> 503 RETRYABLE (mai un turno finto verso il client).
         if _actionable_upstream_error(err) and err.status:
             st = abs(err.status)
-            return JSONResponse(status_code=st if st >= 400 else 502,
-                                content={"error": {"message": err.detail,
-                                                   "type": "upstream_error"}})
+            return JSONResponse(
+                status_code=st if st >= 400 else 502,
+                content={"error": {"message": err.detail, "type": "upstream_error"}},
+            )
         # grp/dep coerenti: l'ULTIMO deployment tentato (dopo un'eventuale
         # escalation di gruppo), non quello iniziale.
         _last_u = attempts_box[-1] if attempts_box else dep.get("unique")
-        _last_d = (router.config.deployment_by_unique(_last_u)
-                   if _last_u else None) or dep
-        _emit_summary(ses=session_id or "-", req=raw_model,
-                      grp=_last_d.get("group"),
-                      dep=_last_u,
-                      tries=max(1, len(attempts_box)),
-                      fb=max(0, len(attempts_box) - 1),
-                      dur_ms=int((time.monotonic() - t_req) * 1000),
-                      stream=False, qc=True, wd="chain-exhausted", usage=None)
+        _last_d = (router.config.deployment_by_unique(_last_u) if _last_u else None) or dep
+        _emit_summary(
+            ses=session_id or "-",
+            req=raw_model,
+            grp=_last_d.get("group"),
+            dep=_last_u,
+            tries=max(1, len(attempts_box)),
+            fb=max(0, len(attempts_box) - 1),
+            dur_ms=int((time.monotonic() - t_req) * 1000),
+            stream=False,
+            qc=True,
+            wd="chain-exhausted",
+            usage=None,
+        )
         _trail = getattr(err, "trail", None)
-        return _exhausted(len(attempts_box), err.detail,
-                          prefix_reason=_aud,
-                          trail=_trail,
-                          retry_at_ms=_retry_at_ms(router, _trail))
+        return _exhausted(
+            len(attempts_box), err.detail, prefix_reason=_aud, trail=_trail, retry_at_ms=_retry_at_ms(router, _trail)
+        )
     data, used = res[0], res[1]
     qc_failed = res[2] if len(res) > 2 else []
 
@@ -2595,11 +2782,10 @@ async def chat_completions(request: Request, response: Response):
             # (es. groq ritorna "meta-llama/llama-3.3-70b-instruct");
             # fallback al nome che noi inviamo se il campo manca/vuoto
             orig = data.get("model")
-            data["model"] = (orig if isinstance(orig, str) and orig.strip()
-                             else used["model"])
+            data["model"] = orig if isinstance(orig, str) and orig.strip() else used["model"]
         elif disc == "deployment":
             data["model"] = used["unique"]
-        else:                                   # requested (storico)
+        else:  # requested (storico)
             data["model"] = raw_model
         data["nx_deployment"] = used["unique"]
     # nota QC nel reasoning (D3): solo se ci sono stati scarti e la policy
@@ -2613,575 +2799,54 @@ async def chat_completions(request: Request, response: Response):
     if not _redirect:
         try:
             if _u_f14 and _u_f14.get("prompt_tokens"):
-                router.note_estimate_error(used["unique"], ctx_est,
-                                           _u_f14["prompt_tokens"])
+                router.note_estimate_error(used["unique"], ctx_est, _u_f14["prompt_tokens"])
                 # Stima per-sessione: char REALI del payload inviato a monte
                 # (post inject_identity/histnorm/ctxcompact) / prompt_tokens.
                 router.note_session_estimate(
                     session_id,
                     _est_chars_pre,
                     _prompt_chars(payload.get("messages"), payload.get("tools")),
-                    _u_f14["prompt_tokens"])
+                    _u_f14["prompt_tokens"],
+                )
                 metrics.inc("nx_sess_est_samples_total")
         except Exception:
             pass
-        _emit_summary(ses=session_id or "-", req=raw_model,
-                      grp=used.get("group"), dep=used["unique"],
-                      tries=max(1, len(attempts_box)),
-                      fb=max(0, len(attempts_box) - 1),
-                      dur_ms=int((time.monotonic() - t_req) * 1000),
-                      stream=False, qc=bool(qc_failed), wd=None,
-                      usage=_u_f14)
+        _emit_summary(
+            ses=session_id or "-",
+            req=raw_model,
+            grp=used.get("group"),
+            dep=used["unique"],
+            tries=max(1, len(attempts_box)),
+            fb=max(0, len(attempts_box) - 1),
+            dur_ms=int((time.monotonic() - t_req) * 1000),
+            stream=False,
+            qc=bool(qc_failed),
+            wd=None,
+            usage=_u_f14,
+        )
     # Regalo -go per i fallback (#50): SOLO quando il non-stream ha servito
     # direttamente (con hold ON il motore stream ha gia' regalato: la richiesta
     # non-stream vi viene rediretta e il suo summary farebbe doppio regalo).
     if not _redirect:
         _note_fb_refund(router, session_id, max(0, len(attempts_box) - 1))
     if sniff.enabled(router.policy):
-        sniff.begin(_rid, {"model": raw_model, "canonical": model,
-                           "profile": profile, "session": _sess or "-",
-                           "client_ip": _cip, "need": sorted(need),
-                           "dep": used["unique"], "stream": False},
-                    payload).finish_json(
-            data, {"status": "success", "tries": max(1, len(attempts_box)),
-                   "qc_failed": bool(qc_failed)})
+        sniff.begin(
+            _rid,
+            {
+                "model": raw_model,
+                "canonical": model,
+                "profile": profile,
+                "session": _sess or "-",
+                "client_ip": _cip,
+                "need": sorted(need),
+                "dep": used["unique"],
+                "stream": False,
+            },
+            payload,
+        ).finish_json(data, {"status": "success", "tries": max(1, len(attempts_box)), "qc_failed": bool(qc_failed)})
     if _ctx_saved_hdr:
         response.headers["X-Ctxcompact-Saved"] = str(_ctx_saved_hdr)
     return data
-
-
-# --------------------------------------------------- streaming helpers (TASK D2)
-def _sse_data_objs(chunk: bytes):
-    """Yield gli oggetti JSON dei righi 'data: {...}' in un chunk SSE
-    (salta [DONE] e i rigi non-JSON)."""
-    for line in chunk.split(b"\n"):
-        s = line.strip()
-        if not s.startswith(b"data:"):
-            continue
-        body = s[5:].strip()
-        if body == b"[DONE]" or not body:
-            continue
-        try:
-            yield json.loads(body)
-        except Exception:
-            continue
-
-
-def _merge_qc_tool_calls(chunk: bytes):
-    """Assembla le tool-call di uno stream SSE bufferizzato UNENDO i frammenti
-    per `index` (come fa OpenAI in streaming).
-
-    Necessario per il QC: gli argomenti di una tool-call arrivano in molti
-    delta; validarli frammento per frammento da' falsi positivi ("Unterminated
-    string" sul primo pezzo `{"`). Qui si uniscono in un array di tool-call
-    complete, pronte per `check_response`.
-    """
-    from .protocols import _merge_tool_call
-    acc: dict[int, dict] = {}
-    for obj in _sse_data_objs(chunk):
-        for ch in (obj.get("choices") or []) if isinstance(obj, dict) else []:
-            d = ch.get("delta") if isinstance(ch, dict) else None
-            tc = d.get("tool_calls") if isinstance(d, dict) else None
-            for one in tc or []:
-                _merge_tool_call(acc, one)
-    return [acc[k] for k in sorted(acc)]
-
-
-def _strip_sse_content(chunk: bytes, stripper) -> bytes:
-    """STRIP dei marker di template (Nemotron/Ling) da `delta.content` in SSE.
-
-    GARANZIA: i marker di tool-call testuali non devono MAI raggiungere il
-    client. Il `stripper` e' stateful (gestisce token spezzati tra chunk).
-    Il `reasoning_content` NON viene toccato.
-    """
-    if not isinstance(chunk, bytes) or b'"content"' not in chunk:
-        return chunk
-    out_lines = []
-    changed = False
-    for line in chunk.split(b"\n"):
-        st = line.strip()
-        if not st.startswith(b"data:"):
-            out_lines.append(line)
-            continue
-        body = st[5:].strip()
-        if not body or body == b"[DONE]":
-            out_lines.append(line)
-            continue
-        try:
-            obj = json.loads(body)
-        except Exception:
-            out_lines.append(line)
-            continue
-        hit = False
-        terminal = False
-        for ch in (obj.get("choices") or []) if isinstance(obj, dict) else []:
-            if not isinstance(ch, dict):
-                continue
-            if ch.get("finish_reason"):
-                terminal = True
-            d = ch.get("delta")
-            if isinstance(d, dict) and isinstance(d.get("content"), str):
-                new = stripper.feed(d["content"])
-                if new != d["content"]:
-                    d["content"] = new
-                    hit = True
-        if terminal and getattr(stripper, "tail", None):
-            flushed = stripper.flush()
-            if flushed:
-                for ch in (obj.get("choices") or []):
-                    d = ch.get("delta") if isinstance(ch, dict) else None
-                    if isinstance(d, dict) and isinstance(d.get("content"), str):
-                        d["content"] = d["content"] + flushed
-                        hit = True
-                        break
-                else:
-                    try:
-                        obj["choices"][0].setdefault("delta", {})["content"] = flushed
-                        hit = True
-                    except Exception:
-                        pass
-        if hit:
-            out_lines.append(b"data: " + json.dumps(
-                obj, ensure_ascii=False).encode("utf-8"))
-            changed = True
-        else:
-            out_lines.append(line)
-    return b"\n".join(out_lines) if changed else chunk
-
-
-def _collapse_sse_field(chunks, field: str, text):
-    """Riscrive il campo `field` (content/reasoning_content) dei delta di uno
-    stream SSE (choices[0]) con `text`.
-
-    Usato dopo la pulizia/riparazione in HOLD: la risposta e' gia' completa in
-    `chunks`, quindi si sostituisce il valore originale con quello sanificato,
-    preservando finish_reason, usage e [DONE]. Il testo viene scritto una sola
-    volta (la prima occorrenza del campo); le successive diventano vuote.
-    Ritorna una NUOVA lista di chunk.
-    """
-    if not isinstance(text, str) or not chunks:
-        return chunks
-    key = ('"%s"' % field).encode()
-    out = []
-    placed = False
-    for chunk in chunks:
-        if not isinstance(chunk, bytes) or key not in chunk:
-            out.append(chunk)
-            continue
-        changed = False
-        new_lines = []
-        for line in chunk.split(b"\n"):
-            st = line.strip()
-            if not st.startswith(b"data:"):
-                new_lines.append(line)
-                continue
-            body = st[5:].strip()
-            if not body or body == b"[DONE]":
-                new_lines.append(line)
-                continue
-            try:
-                obj = json.loads(body)
-            except Exception:
-                new_lines.append(line)
-                continue
-            hit = False
-            chs = obj.get("choices") if isinstance(obj, dict) else None
-            ch0 = chs[0] if isinstance(chs, list) and chs else None
-            d = ch0.get("delta") if isinstance(ch0, dict) else None
-            if isinstance(d, dict) and isinstance(d.get(field), str):
-                d[field] = text if not placed else ""
-                placed = True
-                hit = True
-            if hit:
-                new_lines.append(b"data: " + json.dumps(
-                    obj, ensure_ascii=False).encode("utf-8"))
-                changed = True
-            else:
-                new_lines.append(line)
-        out.append(b"\n".join(new_lines) if changed else chunk)
-    if not placed:
-        try:
-            synth = {"choices": [{"index": 0, "delta": {field: text},
-                                  "finish_reason": None}]}
-            out.insert(0, b"data: " + json.dumps(
-                synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
-        except Exception:                # noqa: BLE001
-            pass
-    return out
-
-
-def _collapse_sse_content(chunks, text):
-    """Riscrive l'intero content di uno stream SSE (choices[0]) con `text`.
-
-    Usato dopo la pulizia/riparazione dell'output STRUTTURATO in HOLD: la
-    risposta e' gia' completa in `chunks`, quindi si sostituisce il contenuto
-    originale (che espone JSON sporco) con quello sanificato, preservando
-    finish_reason, usage e [DONE]. Ritorna una NUOVA lista di chunk.
-    """
-    return _collapse_sse_field(chunks, "content", text)
-
-
-def _rewrite_sse_tool_calls(chunks, tool_calls):
-    """Riscrive i tool_calls di uno stream SSE bufferizzato (HOLD).
-
-    Rimuove i delta `tool_calls` originali e ne inserisce uno sintetico con
-    l'array riparato (formato chat.completion, con `index`), nel punto del
-    primo. Preserva finish_reason, usage e [DONE]. Ritorna una NUOVA lista.
-    """
-    if not isinstance(tool_calls, list) or not tool_calls or not chunks:
-        return chunks
-    tcs = [dict(tc, index=i) for i, tc in enumerate(tool_calls)
-           if isinstance(tc, dict)]
-    if not tcs:
-        return chunks
-    out = []
-    inserted = False
-    for chunk in chunks:
-        if not isinstance(chunk, bytes) or b'"tool_calls"' not in chunk:
-            out.append(chunk)
-            continue
-        changed = False
-        new_lines = []
-        for line in chunk.split(b"\n"):
-            st = line.strip()
-            if not st.startswith(b"data:"):
-                new_lines.append(line)
-                continue
-            body = st[5:].strip()
-            if not body or body == b"[DONE]":
-                new_lines.append(line)
-                continue
-            try:
-                obj = json.loads(body)
-            except Exception:
-                new_lines.append(line)
-                continue
-            chs = obj.get("choices") if isinstance(obj, dict) else None
-            ch0 = chs[0] if isinstance(chs, list) and chs else None
-            d = ch0.get("delta") if isinstance(ch0, dict) else None
-            if isinstance(d, dict) and "tool_calls" in d:
-                if not inserted:
-                    d["tool_calls"] = tcs
-                    inserted = True
-                    new_lines.append(b"data: " + json.dumps(
-                        obj, ensure_ascii=False).encode("utf-8"))
-                else:
-                    d.pop("tool_calls", None)
-                    if d:
-                        new_lines.append(b"data: " + json.dumps(
-                            obj, ensure_ascii=False).encode("utf-8"))
-                changed = True
-                continue
-            new_lines.append(line)
-        out.append(b"\n".join(new_lines) if changed else chunk)
-    if not inserted:
-        try:
-            synth = {"choices": [{"index": 0, "delta": {"tool_calls": tcs},
-                                  "finish_reason": None}]}
-            out.insert(0, b"data: " + json.dumps(
-                synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
-        except Exception:                # noqa: BLE001
-            pass
-    return out
-
-
-def _delta_has_content(obj) -> bool:
-    """True se un oggetto chunk OpenAI-style porta contenuto reale
-    (answer, reasoning o tool_call)."""
-    if not isinstance(obj, dict):
-        return False
-    for ch in (obj.get("choices") or []):
-        d = ch.get("delta") or ch.get("message") or {}
-        if not isinstance(d, dict):
-            continue
-        c = d.get("content")
-        if isinstance(c, str) and c.strip():
-            return True
-        if isinstance(c, list) and c:
-            return True
-        rc = d.get("reasoning_content") or d.get("reasoning")
-        if isinstance(rc, str) and rc.strip():
-            return True
-        if d.get("tool_calls"):
-            return True
-    return False
-
-
-def _answer_chars(obj) -> int:
-    """Solo il testo di risposta (NON reasoning) per il verdetto finale C."""
-    n = 0
-    for ch in (obj.get("choices") or []) if isinstance(obj, dict) else []:
-        d = ch.get("delta") or ch.get("message") or {}
-        c = d.get("content") if isinstance(d, dict) else None
-        if isinstance(c, str):
-            n += len(c.strip())
-        elif isinstance(c, list):
-            for p in c:
-                t = p.get("text") if isinstance(p, dict) else None
-                if isinstance(t, str):
-                    n += len(t.strip())
-    return n
-
-
-def _obj_is_error(obj) -> bool:
-    return isinstance(obj, dict) and bool(obj.get("error"))
-
-
-def _delta_has_answer(obj) -> bool:
-    """Contenuto di RISPOSTA (testo answer o tool_calls), NON reasoning.
-    E' questo che impegna lo stream verso il client."""
-    if not isinstance(obj, dict):
-        return False
-    for ch in (obj.get("choices") or []):
-        d = ch.get("delta") or ch.get("message") or {}
-        if not isinstance(d, dict):
-            continue
-        c = d.get("content")
-        if isinstance(c, str) and c.strip():
-            return True
-        if isinstance(c, list) and c:
-            return True
-        if d.get("tool_calls"):
-            return True
-    return False
-
-
-def _chunk_finish_reason(obj):
-    for ch in (obj.get("choices") or []) if isinstance(obj, dict) else []:
-        fr = ch.get("finish_reason") if isinstance(ch, dict) else None
-        if fr:
-            return fr
-    return None
-
-
-def _tool_calls_sse(tool_calls, model) -> list[bytes]:
-    """SSE OpenAI sintetico per consegnare tool_calls dal testo (#6)."""
-    import time as _time
-    import uuid as _uuid
-    cid = "chatcmpl-" + _uuid.uuid4().hex[:24]
-    created = int(_time.time())
-
-    def _chunk(delta, finish=None) -> bytes:
-        obj = {"id": cid, "object": "chat.completion.chunk",
-               "created": created, "model": model,
-               "choices": [{"index": 0, "delta": delta,
-                            "finish_reason": finish}]}
-        return ("data: " + json.dumps(obj, ensure_ascii=False) +
-                "\n\n").encode()
-
-    out = [_chunk({"role": "assistant", "tool_calls": [
-        {"index": i, "id": tc.get("id"), "type": "function",
-         "function": tc.get("function")}
-        for i, tc in enumerate(tool_calls)]})]
-    out.append(_chunk({}, "tool_calls"))
-    out.append(b"data: [DONE]\n\n")
-    return out
-
-
-def _buffered_answer_text(buffered) -> str:
-    """Testo di risposta (delta.content) accumulato nei chunk da _peek_stream."""
-    parts: list[str] = []
-    for chunk in buffered or []:
-        for obj in _sse_data_objs(chunk):
-            for ch in (obj.get("choices") or []):
-                d = (ch.get("delta") or ch.get("message") or {}) \
-                    if isinstance(ch, dict) else {}
-                c = d.get("content") if isinstance(d, dict) else None
-                if isinstance(c, str):
-                    parts.append(c)
-    return "".join(parts)
-
-
-async def _peek_stream(gen, first_content_ms: int, include_reasoning: bool,
-                       min_chars: int = 40, hold_until_finish: bool = False,
-                       hold_idle_ms: int = 120000,
-                       hold_max_bytes: int = 50 * 1024 * 1024,
-                       first_byte: "asyncio.Event | None" = None):
-    """Consuma `gen` finche' arriva CONTENUTO DI RISPOSTA sufficiente, oppure
-    error / EOF / deadline.
-
-    Impegna lo stream (verdict 'content') solo quando:
-      - i caratteri di risposta accumulati raggiungono `min_chars`, OPPURE
-      - arriva un finish_reason / [DONE] con almeno 1 char di risposta
-        (risposta breve ma COMPLETA, es. "OK"), OPPURE
-      - tool_calls (risposta valida senza testo), OPPURE
-      - reasoning (solo se include_reasoning).
-    Un finish_reason / [DONE] con 0 char -> 'empty_eof'. Un solo token seguito
-    dalla morte dello stream NON impegna: -> 'timeout' -> rotazione.
-
-    Con `hold_until_finish` (hold mode) NON si committa a `min_chars`: si
-    consuma fino a una chiusura PULITA (finish_reason stop/tool_calls o
-    [DONE]) cosi' da non consegnare MAI una risposta a meta'. Chiusure non
-    pulite -> verdict 'truncated'. finish_reason=='length' NON e' mai
-    'content', nemmeno con 0 caratteri (reasoning che ha esaurito il budget):
-    -> 'length_truncated' (il chiamante consegna solo se e' il cap del
-    client). Chiusura pulita con 0 caratteri -> 'empty_eof' con
-    meta['empty_clean']=True: si ruota SENZA punire il deployment.
-    Idle per-chunk = `hold_idle_ms`; cap buffer = `hold_max_bytes` (oltre il
-    cap si consegna il buffer accumulato come 'content').
-    `first_byte`: se fornito (gara hedge in hold), viene settato al primo
-    chunk ricevuto: il chiamante capisce se A sta streammando o e' muto.
-
-    Ritorna (verdict, buffered, pending, meta) con verdict in
-    {'content','error','empty_eof','timeout','truncated','length_truncated'};
-    `pending` = task `__anext__` in volo (SOLO se 'timeout'): NON cancellato
-    qui, chi ruota chiama _discard_stream(). meta = {'finish_reason': str|None}.
-    """
-    buffered: list[bytes] = []
-    meta = {"finish_reason": None, "saw_reasoning": False}
-    answer_chars = 0
-    saw_tool_calls = False
-    saw_reasoning = False
-    saw_done = False
-    buffered_bytes = 0
-    hold = bool(hold_until_finish)
-    # FIX: cap difensivo anti-memoria. In condizioni normali si esce dopo
-    # min_chars (40 char): il cap scatta SOLO su upstream patologici che
-    # floodano stream reasoning-only senza contenuto di risposta.
-    # In hold mode il cap e' quello configurato (50MB): oltre il cap si
-    # consegna comunque il buffer (risposta enorme, ma NON troncata).
-    MAX_PEEK_BUFFER_BYTES = 10 * 1024 * 1024  # 10MB prima di ruotare
-    if hold:
-        # in hold mode il cap e' quello configurato (default 50MB).
-        MAX_PEEK_BUFFER_BYTES = max(1024, int(hold_max_bytes))
-
-    def _eof():
-        # fine stream senza una risposta impegnalbile.
-        if hold:
-            fr = meta.get("finish_reason")
-            if fr == "length":
-                # TRONCATURE mai 'content' (fix incidente 2026-09-15):
-                # finish_reason=length significa che l'output e' stato TAGLIATO
-                # (budget o nostro clamp), anche con 0 caratteri (reasoning che
-                # si e' mangiato tutto il budget): si ruota, non si consegna il
-                # moncone. Il chiamante riconsegna solo se e' il cap del client.
-                meta["saw_reasoning"] = saw_reasoning
-                meta["no_rotate"] = False
-                return "length_truncated", buffered, None, meta
-            if answer_chars or saw_tool_calls \
-                    or (include_reasoning and saw_reasoning):
-                if fr or saw_done:
-                    # chiusura PULITA (finish_reason o [DONE]) -> risposta completa.
-                    return "content", buffered, None, meta
-                # contenuto ma nessun terminatore pulito -> troncata.
-                return "truncated", buffered, None, meta
-            # zero caratteri utili: se il modello ha CHIUSO pulito (stop/[DONE])
-            # non e' rotto, ha solo risposto vuoto -> si ruota SENZA penale
-            # (empty_clean); se non ha chiuso e' upstream rotto -> ruota + penale.
-            meta["saw_reasoning"] = saw_reasoning
-            if fr or saw_done:
-                meta["empty_clean"] = True
-            meta["no_rotate"] = False
-            return "empty_eof", buffered, None, meta
-        if answer_chars or saw_tool_calls or (include_reasoning and saw_reasoning):
-            return "content", buffered, None, meta
-        meta["saw_reasoning"] = saw_reasoning
-        # no_rotate = il modello ha COMPLETATO (c'e' un finish_reason) senza
-        # rispondere: non e' rotto, ruotare nel gruppo non aiuta -> notice.
-        # reasoning TRONCATO senza finish_reason = troncamento upstream -> un
-        # altro deployment puo' farcela -> ruota (+ mark_failed).
-        meta["no_rotate"] = bool(meta.get("finish_reason"))
-        return "empty_eof", buffered, None, meta
-
-    deadline = time.monotonic() + max(0.0, first_content_ms) / 1000.0
-    while True:
-        if hold:
-            # idle timeout per-chunk: si resetta ad ogni chunk ricevuto.
-            remaining = max(0.001, hold_idle_ms / 1000.0)
-            if not buffered:
-                # PRIMA del primo byte vale anche il deadline primo-contenuto:
-                # un upstream MUTO (morto) non puo' trattenere la richiesta per
-                # 120s; la rotazione (e il paracadute sull'ultimo scaglione)
-                # restano possibili. Dopo il primo byte, solo idle per-chunk.
-                remaining = min(remaining,
-                                max(0.0, deadline - time.monotonic()))
-                if remaining <= 0:
-                    return "timeout", buffered, None, meta
-        else:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return "timeout", buffered, None, meta
-        task = asyncio.ensure_future(gen.__anext__())
-        done, _ = await asyncio.wait({task}, timeout=remaining)
-        if not done:
-            return "timeout", buffered, task, meta
-        try:
-            chunk = task.result()
-        except StopAsyncIteration:
-            return _eof()
-        except (asyncio.TimeoutError, httpx.TimeoutException):
-            # TIMEOUT del TRASPORTO (l'upstream "appende" senza rispondere ne'
-            # fallire con codice): danno REALE, tempo perso -> verdict
-            # 'timeout' (cooldown lungo via reason=timeout), NON 'empty_eof'.
-            return "timeout", buffered, None, meta
-        except Exception:
-            return "empty_eof", buffered, None, meta
-        buffered.append(chunk)
-        buffered_bytes += len(chunk)
-        if first_byte is not None:
-            first_byte.set()
-        # FIX: upstream patologico (flood reasoning-only / contenuto enorme):
-        # esci prima della deadline per non accumulare memoria illimitata.
-        if buffered_bytes > MAX_PEEK_BUFFER_BYTES:
-            log.warning("[peek] buffer %d byte senza contenuto sufficiente: "
-                        "rotazione (answer_chars=%d)", buffered_bytes,
-                        answer_chars)
-            if hold:
-                # risposta enorme: la consegniamo (non e' troncata).
-                return "content", buffered, None, meta
-            if answer_chars or saw_tool_calls:
-                return "content", buffered, None, meta
-            return "timeout", buffered, None, meta
-        saw_fr_here = False
-        for obj in _sse_data_objs(chunk):
-            if _obj_is_error(obj):
-                return "error", buffered, None, meta
-            # alcuni provider infilano il PROPRIO envelope d'errore
-            # ({"type":"error",...} / {"error":...}) DENTRO delta.content come
-            # se fosse testo: non e' una risposta reale -> ruota.
-            for ch in (obj.get("choices") or []):
-                dd = (ch.get("delta") or ch.get("message") or {}) \
-                    if isinstance(ch, dict) else {}
-                cc = dd.get("content") if isinstance(dd, dict) else None
-                if isinstance(cc, str) and is_embedded_provider_error(cc):
-                    return "error", buffered, None, meta
-            answer_chars += _answer_chars(obj)
-            for ch in (obj.get("choices") or []):
-                d = ch.get("delta") or ch.get("message") or {} \
-                    if isinstance(ch, dict) else {}
-                if isinstance(d, dict):
-                    if d.get("tool_calls"):
-                        saw_tool_calls = True
-                    rc = d.get("reasoning_content") or d.get("reasoning")
-                    if isinstance(rc, str) and rc.strip():
-                        saw_reasoning = True
-            fr = _chunk_finish_reason(obj)
-            if fr:
-                meta["finish_reason"] = fr
-                saw_fr_here = True
-            if hold:
-                continue
-            if saw_tool_calls or answer_chars >= max(1, min_chars):
-                return "content", buffered, None, meta
-            if fr:
-                return ("content", buffered, None, meta) if answer_chars > 0 \
-                    else _eof()
-            if include_reasoning and saw_reasoning:
-                return "content", buffered, None, meta
-        if b"[DONE]" in chunk:
-            saw_done = True
-            if answer_chars > 0 or saw_tool_calls \
-                    or (include_reasoning and saw_reasoning):
-                return "content", buffered, None, meta
-            return _eof()
-        if hold and saw_fr_here:
-            if meta.get("finish_reason") == "length":
-                # troncatura (con o senza answer): mai content, vedi _eof()
-                return _eof()
-            if answer_chars > 0 or saw_tool_calls \
-                    or (include_reasoning and saw_reasoning):
-                return "content", buffered, None, meta
-            return _eof()
 
 
 def _actionable_upstream_error(err) -> bool:
@@ -3195,8 +2860,7 @@ def _actionable_upstream_error(err) -> bool:
     permission denied...), non la richiesta. Il client non puo' farci nulla
     -> si ruota; a catena esaurita si consegna un 503 retryable."""
     detail = getattr(err, "detail", "") or ""
-    if (_THOUGHT_SIG_RE.search(detail) or _MODEL_MISSING_RE.search(detail)
-            or _PAYLOAD_SCHEMA_RE.search(detail)):
+    if _THOUGHT_SIG_RE.search(detail) or _MODEL_MISSING_RE.search(detail) or _PAYLOAD_SCHEMA_RE.search(detail):
         return True
     st = getattr(err, "status", None)
     return st in (-401, -402, 401, 402)
@@ -3215,8 +2879,7 @@ def _soft_cd(fail_24h: int = 0) -> int:
     riparte dal cooldown base; e su successo (clear_cooldown) torna subito
     disponibile.
     """
-    base = int(getattr(router.policy.qc_json, "watchdog_cooldown_sec", 90)
-               or 90)
+    base = int(getattr(router.policy.qc_json, "watchdog_cooldown_sec", 90) or 90)
     return int(router.escalate_cooldown(base, fail_24h))
 
 
@@ -3238,10 +2901,13 @@ async def _discard_stream(gen, pending=None) -> None:
         pass
 
 
-def _exhausted(n_tries: int, detail: str | None = None,
-               prefix_reason: str | None = None,
-               trail: list | None = None,
-               retry_at_ms: int | None = None):
+def _exhausted(
+    n_tries: int,
+    detail: str | None = None,
+    prefix_reason: str | None = None,
+    trail: list | None = None,
+    retry_at_ms: int | None = None,
+):
     """Risposta di errore RETRYABLE quando nessun deployment ha prodotto un
     output utile: HTTP 503 + Retry-After. MAI un turno finto verso il client —
     l'agente ritenta (e col routing resiliente/transient il retry di solito
@@ -3258,22 +2924,19 @@ def _exhausted(n_tries: int, detail: str | None = None,
     lab = prefix_reason if prefix_reason in ("identity", "prefix") else "clean"
     try:
         metrics.inc("nx_chain_503_total", (lab,))
-    except Exception:                        # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
     if lab != "clean":
-        log.warning("[cache-audit] 503 catena esaurita dopo prefisso MUTATO "
-                    "(%s): possibile cache-miss percepito come provider morto",
-                    lab)
-    msg = ("nessun deployment upstream ha prodotto una risposta dopo %d "
-           "tentativi" % max(1, int(n_tries or 1)))
+        log.warning(
+            "[cache-audit] 503 catena esaurita dopo prefisso MUTATO "
+            "(%s): possibile cache-miss percepito come provider morto",
+            lab,
+        )
+    msg = "nessun deployment upstream ha prodotto una risposta dopo %d tentativi" % max(1, int(n_tries or 1))
     if detail:
         msg += " (ultimo: %s)" % str(detail)[:160]
     _tr = list(trail or [])[:10]
-    body = {"error": {
-        "message": msg,
-        "type": "upstream_unavailable",
-        "code": "no_healthy_deployment",
-        "attempts": _tr}}
+    body = {"error": {"message": msg, "type": "upstream_unavailable", "code": "no_healthy_deployment", "attempts": _tr}}
     if retry_at_ms:
         body["error"]["retry_at_ms"] = int(retry_at_ms)
     # Gli header devono raccontare i tentativi REALI. Se il trail e' vuoto ma
@@ -3282,8 +2945,7 @@ def _exhausted(n_tries: int, detail: str | None = None,
     _n_att = len(_tr) if _tr else max(1, int(n_tries or 1))
     headers = {"Retry-After": "2", "X-Scrocco-Attempts": str(_n_att)}
     if _tr:
-        headers["X-Scrocco-Trail"] = ",".join(
-            "%s:%s" % (t.get("dep", "?"), t.get("cls", "?")) for t in _tr)
+        headers["X-Scrocco-Trail"] = ",".join("%s:%s" % (t.get("dep", "?"), t.get("cls", "?")) for t in _tr)
     return JSONResponse(status_code=503, headers=headers, content=body)
 
 
@@ -3299,7 +2961,7 @@ def _retry_at_ms(router, trail: list | None) -> int | None:
                 best = r
         if best:
             return int((time.time() + best) * 1000)
-    except Exception:                        # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return None
     return None
 
@@ -3313,8 +2975,7 @@ def _payload_text_empty(payload: dict) -> bool:
                 return False
             if isinstance(c, list):
                 for p in c:
-                    if (isinstance(p, dict) and isinstance(p.get("text"), str)
-                            and p["text"].strip()):
+                    if isinstance(p, dict) and isinstance(p.get("text"), str) and p["text"].strip():
                         return False
         for k in ("input", "prompt"):
             v = payload.get(k)
@@ -3325,9 +2986,7 @@ def _payload_text_empty(payload: dict) -> bool:
         return False
 
 
-def _parachute_verdict(verdict: str, qcp, dep: dict, policy,
-                       *, hold: bool = False,
-                       has_buffer: bool = False) -> str:
+def _parachute_verdict(verdict: str, qcp, dep: dict, policy, *, hold: bool = False, has_buffer: bool = False) -> str:
     """Sulla catena PARACADUTE (-go/-fallback, ultimo scaglione del ladder) il
     timeout sul primo contenuto non deve produrre rotazione/503: li' non c'e'
     piu' nessun deployment dietro, quindi si consegna comunque quello che
@@ -3338,30 +2997,49 @@ def _parachute_verdict(verdict: str, qcp, dep: dict, policy,
     il tool repair hold si applica): si torna 'content' solo se c'e' un buffer
     parziale da consegnare, altrimenti si resta 'timeout' (rotazione/503).
     Senza hold resta il comportamento storico (trasmissione live)."""
-    if (verdict == "timeout"
-            and getattr(qcp, "stream_parachute_no_timeout", True)):
+    if verdict == "timeout" and getattr(qcp, "stream_parachute_no_timeout", True):
         grp = dep.get("group") or ""
-        if grp.endswith(policy.go_suffix) \
-                or grp.endswith(policy.fallback_suffix):
+        if grp.endswith(policy.go_suffix) or grp.endswith(policy.fallback_suffix):
             if hold and not has_buffer:
                 return "timeout"
             return "content"
     return verdict
 
 
-async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
-                      hold_idle, hold_maxb, *, payload, profile, need,
-                      scope, ctx, tried_set, attempts, requested_group,
-                      session, client_ip, attribution, hedge_ms,
-                      _tr_cfg, _tct_cfg, k: int = 1,
-                      slow_race_ms: int = 0,
-                      slow_canary_ms: int = 0,
-                      fresh_only: bool = False,
-                      hold: bool = False,
-                      refill: bool = False,
-                      zen_only: bool = False,
-                      out_tokens: int | None = None,
-                      raced: dict | None = None):
+async def _hedge_peek(
+    dep,
+    gen,
+    t_att,
+    fc_ms,
+    incl_reason,
+    min_ch,
+    hold_idle,
+    hold_maxb,
+    *,
+    payload,
+    profile,
+    need,
+    scope,
+    ctx,
+    tried_set,
+    attempts,
+    requested_group,
+    session,
+    client_ip,
+    attribution,
+    hedge_ms,
+    _tr_cfg,
+    _tct_cfg,
+    k: int = 1,
+    slow_race_ms: int = 0,
+    slow_canary_ms: int = 0,
+    fresh_only: bool = False,
+    hold: bool = False,
+    refill: bool = False,
+    zen_only: bool = False,
+    out_tokens: int | None = None,
+    raced: dict | None = None,
+):
     """HEDGE sul primo contenuto (stream, pre-commit).
 
     A e' gia' aperto; se dopo `hedge_ms` non ha ancora un verdetto si aprono
@@ -3385,18 +3063,25 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
 
     Ritorna i valori di (dep, gen, t_att, verdict, prebuf, pending, meta) del
     vincente."""
+
     def _peek(g, fcm, fb=None):
-        return _peek_stream(g, fcm, incl_reason, min_ch,
-                            hold_until_finish=hold,
-                            hold_idle_ms=hold_idle,
-                            hold_max_bytes=hold_maxb,
-                            first_byte=fb)
+        return _peek_stream(
+            g,
+            fcm,
+            incl_reason,
+            min_ch,
+            hold_until_finish=hold,
+            hold_idle_ms=hold_idle,
+            hold_max_bytes=hold_maxb,
+            first_byte=fb,
+        )
+
     firstA = asyncio.Event() if hold else None
     futA = asyncio.ensure_future(_peek(gen, fc_ms, firstA))
     waiter = asyncio.ensure_future(firstA.wait()) if hold else None
     done, _pending = await asyncio.wait(
-        ({futA, waiter} if waiter is not None else {futA}),
-        timeout=max(0.05, hedge_ms / 1000.0))
+        ({futA, waiter} if waiter is not None else {futA}), timeout=max(0.05, hedge_ms / 1000.0)
+    )
     if futA in done:
         if waiter is not None:
             waiter.cancel()
@@ -3416,8 +3101,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     # canario, `slow_race_ms` marca il dep "lento per la sessione". Con
     # `slow_canary_ms <= 0` il canario resta appeso alla soglia del flag
     # (storico: i due scattano insieme).
-    _canary_dl = (t_att + slow_canary_ms / 1000.0) if slow_canary_ms > 0 \
-        else _slow_dl
+    _canary_dl = (t_att + slow_canary_ms / 1000.0) if slow_canary_ms > 0 else _slow_dl
     _a_streaming = bool(waiter is not None and waiter.done())
     # con A gia' in streaming (e fuori refill) NON si aprono canary classici:
     # si arma solo il timer lento.
@@ -3432,25 +3116,35 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     _W = None
     try:
         if refill:
-            _wk = router.warm_api_keys(
-                session, profile, requested_group or dep.get("group"))
+            _wk = router.warm_api_keys(session, profile, requested_group or dep.get("group"))
             _xk = set((raced or {}).get("keys") or ()) | _wk
             _xk.add(str(dep.get("api_key") or ""))
             _ex_uniq = (raced or {}).get("uniq")
             _B = router.warm_fill_canary(
-                profile, dep, need, ctx, out_tokens, tried=tried_set,
+                profile,
+                dep,
+                need,
+                ctx,
+                out_tokens,
+                tried=tried_set,
                 requested_group=requested_group,
                 exclude_keys=_xk,
                 exclude_uniq=_ex_uniq,
-                only_zen=False)
+                only_zen=False,
+            )
             if _B is not None:
-                log.info("[refill] canario %s per %s (order=%s, chiavi warm+"
-                         "in-volo escluse=%d, out=%s)", _B["unique"],
-                         dep.get("unique"), _B.get("order"), len(_xk),
-                         out_tokens)
+                log.info(
+                    "[refill] canario %s per %s (order=%s, chiavi warm+in-volo escluse=%d, out=%s)",
+                    _B["unique"],
+                    dep.get("unique"),
+                    _B.get("order"),
+                    len(_xk),
+                    out_tokens,
+                )
             else:
-                log.info("[refill] %s: nessun canario free consegnabile "
-                         "(chiavi escluse=%d)", dep.get("unique"), len(_xk))
+                log.info(
+                    "[refill] %s: nessun canario free consegnabile (chiavi escluse=%d)", dep.get("unique"), len(_xk)
+                )
             # TERZO canario: la SVEglia. Cerca un dep dormiente da un 429 da
             # ALMENO 1h (regola utente) e prova a rimetterlo caldo.
             if int(k) > 1:
@@ -3460,21 +3154,24 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                     _exu2.add(_B["unique"])
                     _xk2.add(str(_B.get("api_key") or ""))
                 try:
-                    _age = float(getattr(
-                        router.policy,
-                        "warm_refill_wake_min_cooldown_age_sec", 3600.0)
-                        or 3600.0)
+                    _age = float(getattr(router.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
                 except Exception:
                     _age = 3600.0
                 _W = router.warm_wake_canary(
-                    profile, dep, need, ctx, out_tokens, tried=tried_set,
+                    profile,
+                    dep,
+                    need,
+                    ctx,
+                    out_tokens,
+                    tried=tried_set,
                     requested_group=requested_group,
-                    exclude_keys=_xk2, exclude_uniq=_exu2,
+                    exclude_keys=_xk2,
+                    exclude_uniq=_exu2,
                     only_zen=False,
-                    min_age_sec=_age)
+                    min_age_sec=_age,
+                )
                 if _W is not None:
-                    log.info("[refill] sveglia %s (429 in cooldown da "
-                             "almeno %.0fs)", _W["unique"], _age)
+                    log.info("[refill] sveglia %s (429 in cooldown da almeno %.0fs)", _W["unique"], _age)
                 else:
                     log.info("[refill] nessuna sveglia 429 matura")
             # CANARY ZEN DEDICATO (client opencode nativo senza zen in warm):
@@ -3490,43 +3187,61 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                         _xk3.add(str(_c.get("api_key") or ""))
                 try:
                     _Z = router.warm_fill_canary(
-                        profile, dep, need, ctx, out_tokens, tried=tried_set,
+                        profile,
+                        dep,
+                        need,
+                        ctx,
+                        out_tokens,
+                        tried=tried_set,
                         requested_group=requested_group,
-                        exclude_keys=_xk3, exclude_uniq=_exu3,
-                        only_zen=True)
-                except Exception:                      # noqa: BLE001
+                        exclude_keys=_xk3,
+                        exclude_uniq=_exu3,
+                        only_zen=True,
+                    )
+                except Exception:  # noqa: BLE001
                     _Z = None
                 if _Z is None:
                     try:
-                        _age_z = float(getattr(
-                            router.policy,
-                            "warm_refill_wake_min_cooldown_age_sec", 3600.0)
-                            or 3600.0)
-                    except Exception:                  # noqa: BLE001
+                        _age_z = float(
+                            getattr(router.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0
+                        )
+                    except Exception:  # noqa: BLE001
                         _age_z = 3600.0
                     try:
                         _Z = router.warm_wake_canary(
-                            profile, dep, need, ctx, out_tokens,
+                            profile,
+                            dep,
+                            need,
+                            ctx,
+                            out_tokens,
                             tried=tried_set,
                             requested_group=requested_group,
-                            exclude_keys=_xk3, exclude_uniq=_exu3,
-                            only_zen=True, min_age_sec=_age_z)
-                    except Exception:                  # noqa: BLE001
+                            exclude_keys=_xk3,
+                            exclude_uniq=_exu3,
+                            only_zen=True,
+                            min_age_sec=_age_z,
+                        )
+                    except Exception:  # noqa: BLE001
                         _Z = None
                 if _Z is not None:
-                    log.info("[refill] zen-wake %s (dim=%s, order=%s)",
-                             _Z["unique"], _Z.get("group"), _Z.get("order"))
+                    log.info("[refill] zen-wake %s (dim=%s, order=%s)", _Z["unique"], _Z.get("group"), _Z.get("order"))
                 else:
-                    log.info("[refill] %s: nessun canary zen consegnabile "
-                             "(ctx=%s)", dep.get("unique"), ctx)
+                    log.info("[refill] %s: nessun canary zen consegnabile (ctx=%s)", dep.get("unique"), ctx)
             cands = [c for c in (_Z, _B, _W) if c is not None]
         else:
-            _excl = (set(router._sess_deps().get(session, ()))
-                     if fresh_only else None)
+            _excl = set(router._sess_deps().get(session, ())) if fresh_only else None
             cands = router.hedge_canaries(
-                profile, dep, need, ctx, tried_set, requested_group,
-                k=max(1, int(k)), exclude=_excl, fresh_only=bool(fresh_only),
-                out_tokens=out_tokens)
+                profile,
+                dep,
+                need,
+                ctx,
+                tried_set,
+                requested_group,
+                k=max(1, int(k)),
+                exclude=_excl,
+                fresh_only=bool(fresh_only),
+                out_tokens=out_tokens,
+            )
     except Exception:
         cands = []
     if _skip_classic:
@@ -3536,8 +3251,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     # in-volo contano tutti: refill, legacy, A/loser staccati come probe).
     if refill and cands:
         try:
-            _mx = int(getattr(router.policy, "warm_refill_max_inflight", 6)
-                      or 6)
+            _mx = int(getattr(router.policy, "warm_refill_max_inflight", 6) or 6)
         except Exception:
             _mx = 6
         try:
@@ -3547,10 +3261,12 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         cands = cands[:_free] if _free > 0 else []
     if not cands:
         metrics.inc("nx_hedge_total", ("no_canary",))
-        log.debug("[hedge] %s: nessun candidato nuovo (%s)", dep.get("unique"),
-                  "warm-lento" if fresh_only else "cross-tier")
+        log.debug(
+            "[hedge] %s: nessun candidato nuovo (%s)", dep.get("unique"), "warm-lento" if fresh_only else "cross-tier"
+        )
         if _slow_dl is None and _canary_dl is None:
             return dep, gen, t_att, *await futA
+
     async def _open_canary(B, wake=False):
         """Apre un canary e ne ritorna il record (o None se non disponibile:
         in tal caso la chiave va in cooldown con le regole di sempre)."""
@@ -3560,14 +3276,16 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         inject_identity(p2, B, router=router)
 
         def _hookB(_salvaged, _u=_bu, _m=B.get("model", "")):
-            metrics.inc("nx_truncated_toolcall_total",
-                        (_u, "salvaged" if _salvaged else "dropped"))
-            repairlog.note("salvage_truncated", source="hedge",
-                           outcome="ok" if _salvaged else "fail",
-                           dep=_u, model=_m,
-                           detail="tag tool-call rotto (canary)")
-            router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
-                               reason="truncated_toolcall")
+            metrics.inc("nx_truncated_toolcall_total", (_u, "salvaged" if _salvaged else "dropped"))
+            repairlog.note(
+                "salvage_truncated",
+                source="hedge",
+                outcome="ok" if _salvaged else "fail",
+                dep=_u,
+                model=_m,
+                detail="tag tool-call rotto (canary)",
+            )
+            router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec, reason="truncated_toolcall")
 
         router.note_start(_bu, ctx)
         if refill and raced is not None:
@@ -3576,19 +3294,24 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         genB = None
         try:
             genB = await forwarder.stream_response(
-                B, p2, profile=profile or "", ctx_est=ctx,
-                client_ip=client_ip, session=session, attribution=attribution,
-                tool_repair_config=_tr_cfg, truncation_config=_tct_cfg,
+                B,
+                p2,
+                profile=profile or "",
+                ctx_est=ctx,
+                client_ip=client_ip,
+                session=session,
+                attribution=attribution,
+                tool_repair_config=_tr_cfg,
+                truncation_config=_tct_cfg,
                 truncation_hook=_hookB,
-                rate_hook=lambda u, rl: router.note_rate_limit(u, rl))
+                rate_hook=lambda u, rl: router.note_rate_limit(u, rl),
+            )
             if router.is_cooled_down(_bu):
                 router.clear_cooldown(_bu)
-            futB = asyncio.ensure_future(
-                _peek(genB, router.first_content_deadline_ms(_bu, ctx)))
+            futB = asyncio.ensure_future(_peek(genB, router.first_content_deadline_ms(_bu, ctx)))
             with contextlib.suppress(Exception):
                 router.note_probe_started(session, _bu)
-            return {"dep": B, "gen": genB, "t0": tB, "fut": futB,
-                    "wake": bool(wake)}
+            return {"dep": B, "gen": genB, "t0": tB, "fut": futB, "wake": bool(wake)}
         except asyncio.CancelledError:
             if genB is not None:
                 await _discard_stream(genB, None)
@@ -3609,15 +3332,17 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             _rk = reasoning_err_kind(str(exc))
             _qacct = 0
             with contextlib.suppress(Exception):
-                _qacct = maybe_account_quota_cooldown(
-                    router, B, getattr(exc, "status", None), str(exc))
+                _qacct = maybe_account_quota_cooldown(router, B, getattr(exc, "status", None), str(exc))
             if _qacct:
-                log.info("[hedge] canary %s: quota dell'account esaurita -> "
-                         "%d chiavi dell'account in pausa fino al reset",
-                         _bu, _qacct)
+                log.info(
+                    "[hedge] canary %s: quota dell'account esaurita -> %d chiavi dell'account in pausa fino al reset",
+                    _bu,
+                    _qacct,
+                )
             elif _rk is not None:
-                log.info("[hedge] canary %s: payload della famiglia reasoning "
-                         "(%s) (chiave sana, nessuna penale)", _bu, _rk)
+                log.info(
+                    "[hedge] canary %s: payload della famiglia reasoning (%s) (chiave sana, nessuna penale)", _bu, _rk
+                )
                 with contextlib.suppress(Exception):
                     if _rk == "needs":
                         learn_thinking_replay(router, B.get("model"))
@@ -3634,12 +3359,10 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                         except Exception:
                             _f24 = 0
                         _sec = _soft_cd(_f24)
-                    router.mark_failed(_bu, seconds=_sec,
-                                       reason="canary_error")
+                    router.mark_failed(_bu, seconds=_sec, reason="canary_error")
                 except Exception:
                     pass
-            log.info("[hedge] canary %s non disponibile (%s) -> cooldown",
-                     _bu, type(exc).__name__)
+            log.info("[hedge] canary %s non disponibile (%s) -> cooldown", _bu, type(exc).__name__)
             return None
 
     # Apertura dei canari in PARALLELO e NON bloccante: `_open_canary` fa
@@ -3652,16 +3375,18 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     canaries: list[dict] = []
     _tasks: dict = {}
     for B in cands:
-        _tasks[asyncio.ensure_future(
-            _open_canary(B, wake=bool(_W is not None and B is _W)))] = None
+        _tasks[asyncio.ensure_future(_open_canary(B, wake=bool(_W is not None and B is _W)))] = None
     if not cands:
         if _slow_dl is None and _canary_dl is None:
             metrics.inc("nx_hedge_total", ("no_canary",))
             return dep, gen, t_att, *await futA
     else:
-        log.info("[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
-                 dep.get("unique"), hedge_ms,
-                 ",".join(B.get("unique", "") for B in cands))
+        log.info(
+            "[hedge] %s: nessun contenuto dopo %dms -> gara con %s",
+            dep.get("unique"),
+            hedge_ms,
+            ",".join(B.get("unique", "") for B in cands),
+        )
     futs: dict = {futA: None}
     for c in canaries:
         futs[c["fut"]] = c
@@ -3676,10 +3401,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             _pending_dls.append(_canary_dl)
         if not _slow_marked and _slow_dl is not None:
             _pending_dls.append(_slow_dl)
-        _to = (max(0.0, min(_pending_dls) - time.monotonic())
-               if _pending_dls else None)
-        completed, pending = await asyncio.wait(
-            running, timeout=_to, return_when=asyncio.FIRST_COMPLETED)
+        _to = max(0.0, min(_pending_dls) - time.monotonic()) if _pending_dls else None
+        completed, pending = await asyncio.wait(running, timeout=_to, return_when=asyncio.FIRST_COMPLETED)
         # NB: esaminare TUTTI i completati del tick (non solo uno): se piu'
         # canari finiscono insieme, gli altri resterebbero con l'eccezione
         # non recuperata e il loro verdetto andrebbe perso.
@@ -3723,48 +3446,57 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         # ---- CANARY LENTO: timer proprio scaduto -> UN canario in piu' ----
         # INDIPENDENTE dal tetto per-sessione e dall'hedge classico: il
         # "lento" non prende nessuna penale (resta probe reale).
-        if not _canary_opened and _canary_dl is not None \
-                and _now_sr >= _canary_dl:
+        if not _canary_opened and _canary_dl is not None and _now_sr >= _canary_dl:
             _canary_opened = True
             _shown_ms = slow_canary_ms if slow_canary_ms > 0 else slow_race_ms
-            log.info("[slow-race] %s in generazione da %.0fs (> %.0fs) -> "
-                     "canario in gara", dep.get("unique"),
-                     _now_sr - t_att, _shown_ms / 1000.0)
+            log.info(
+                "[slow-race] %s in generazione da %.0fs (> %.0fs) -> canario in gara",
+                dep.get("unique"),
+                _now_sr - t_att,
+                _shown_ms / 1000.0,
+            )
             # R2: gate — il canary si apre solo se la sessione ha pochi warm
             # (need+ctx+output, prestati inclusi); a warm pieno riempirebbe
             # la lista di altri lenti.
             _allow = True
             try:
-                _allow = bool(router.slow_race_allowed(
-                    session, profile, requested_group, need, ctx,
-                    out_tokens, tried_set))
-            except Exception:                   # noqa: BLE001
+                _allow = bool(
+                    router.slow_race_allowed(session, profile, requested_group, need, ctx, out_tokens, tried_set)
+                )
+            except Exception:  # noqa: BLE001
                 _allow = True
             if not _allow:
                 metrics.inc("nx_slow_race_total", ("warm_full",))
-                log.info("[slow-race] %s: warm gia' pieno (>=%s), niente "
-                         "canario", dep.get("unique"),
-                         getattr(router.policy, "slow_race_max_warm", 6))
+                log.info(
+                    "[slow-race] %s: warm gia' pieno (>=%s), niente canario",
+                    dep.get("unique"),
+                    getattr(router.policy, "slow_race_max_warm", 6),
+                )
             else:
                 metrics.inc("nx_slow_race_total", ("open",))
                 _lc: list[dict] = []
                 with contextlib.suppress(Exception):
                     _lc = router.hedge_canaries(
-                        profile, dep, need, ctx, tried_set, requested_group,
-                        k=1, exclude=None, fresh_only=False,
-                        out_tokens=out_tokens)
+                        profile,
+                        dep,
+                        need,
+                        ctx,
+                        tried_set,
+                        requested_group,
+                        k=1,
+                        exclude=None,
+                        fresh_only=False,
+                        out_tokens=out_tokens,
+                    )
                 _xu = set((raced or {}).get("uniq") or ())
                 _xk2 = set((raced or {}).get("keys") or ())
                 for _cc in canaries:
                     _xu.add(_cc["dep"]["unique"])
                     _xk2.add(str(_cc["dep"].get("api_key") or ""))
-                _lc = [B for B in _lc
-                       if B["unique"] not in _xu
-                       and str(B.get("api_key") or "") not in _xk2]
+                _lc = [B for B in _lc if B["unique"] not in _xu and str(B.get("api_key") or "") not in _xk2]
                 if not _lc:
                     metrics.inc("nx_slow_race_total", ("no_canary",))
-                    log.info("[slow-race] %s: nessun canario libero "
-                             "(chiavi/uniq in gara escluse)", dep.get("unique"))
+                    log.info("[slow-race] %s: nessun canario libero (chiavi/uniq in gara escluse)", dep.get("unique"))
                 else:
                     # Apertura NON bloccante anche qui: il canario lento entra
                     # in gara appena arrivano le headers (task in coda).
@@ -3773,10 +3505,8 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
                     running.add(_t2)
                     if raced is not None:
                         raced.setdefault("uniq", set()).add(_lc[0]["unique"])
-                        raced.setdefault("keys", set()).add(
-                            str(_lc[0].get("api_key") or ""))
-                    log.info("[hedge] slow-race: %s in gara con A (fuori "
-                             "dal tetto)", _lc[0]["unique"])
+                        raced.setdefault("keys", set()).add(str(_lc[0].get("api_key") or ""))
+                    log.info("[hedge] slow-race: %s in gara con A (fuori dal tetto)", _lc[0]["unique"])
     if winner is None:
         # fallback: risolvi prima le aperture ancora in corso, poi attendi
         # tutti i verdetti (A compreso).
@@ -3798,6 +3528,7 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
             except BaseException:
                 results[f] = ("error", [], None, {})
         winner = futA
+
     # REGOLA UTENTE: mai bloccare in volo e mai buttare via un canary — le
     # aperture ancora in corso NON vengono annullate: restano in background e,
     # appena arrivano le headers, la loro attesa entra in gara come probe reale
@@ -3805,10 +3536,10 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
     def _handover_late(race):
         for _t in list(_tasks):
             _tasks.pop(_t, None)
-            _pt = asyncio.ensure_future(
-                _probe_late_open(_t, session, ctx, hold, race))
+            _pt = asyncio.ensure_future(_probe_late_open(_t, session, ctx, hold, race))
             _PROBE_TASKS.add(_pt)
             _pt.add_done_callback(_PROBE_TASKS.discard)
+
     # ---------------------------------------------------------- A vince ----
     if winner is futA:
         if not canaries:
@@ -3817,9 +3548,18 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         _race = (dep["unique"], max(0.0, (time.monotonic() - t_att) * 1000.0))
         _handover_late(_race)
         for c in canaries:
-            _spawn_probe(c["dep"], c["gen"], c["fut"], results.get(c["fut"]),
-                         session, ctx, hold, wake=bool(c.get("wake")),
-                         t0=c.get("t0"), race=_race)
+            _spawn_probe(
+                c["dep"],
+                c["gen"],
+                c["fut"],
+                results.get(c["fut"]),
+                session,
+                ctx,
+                hold,
+                wake=bool(c.get("wake")),
+                t0=c.get("t0"),
+                race=_race,
+            )
         _rA = results.get(futA)
         if _rA is None:
             try:
@@ -3834,26 +3574,36 @@ async def _hedge_peek(dep, gen, t_att, fc_ms, incl_reason, min_ch,
         router.note_probe_done(session, w["dep"]["unique"])
     if w.get("wake"):
         with contextlib.suppress(Exception):
-            router.clear_cooldown(w["dep"]["unique"])   # sveglia riuscita
-        log.info("[refill] sveglia riuscita: %s torna caldo (consegna la "
-                 "risposta)", w["dep"]["unique"])
+            router.clear_cooldown(w["dep"]["unique"])  # sveglia riuscita
+        log.info("[refill] sveglia riuscita: %s torna caldo (consegna la risposta)", w["dep"]["unique"])
     # A NON viene annullata: finisce la sua risposta in background come probe
     # reale (se consegna pulita entra in warm, altrimenti si scarta).
     _race = (w["dep"]["unique"], max(0.0, (time.monotonic() - w["t0"]) * 1000.0))
     _handover_late(_race)
-    _spawn_probe(dep, gen, futA, results.get(futA), session, ctx, hold,
-                 t0=t_att, race=_race)
+    _spawn_probe(dep, gen, futA, results.get(futA), session, ctx, hold, t0=t_att, race=_race)
     for c in canaries:
         if c is w:
             continue
-        _spawn_probe(c["dep"], c["gen"], c["fut"], results.get(c["fut"]),
-                     session, ctx, hold, wake=bool(c.get("wake")),
-                     t0=c.get("t0"), race=_race)
+        _spawn_probe(
+            c["dep"],
+            c["gen"],
+            c["fut"],
+            results.get(c["fut"]),
+            session,
+            ctx,
+            hold,
+            wake=bool(c.get("wake")),
+            t0=c.get("t0"),
+            race=_race,
+        )
     attempts.append(w["dep"]["unique"])
     tried_set.add(w["dep"]["unique"])
-    log.info("[hedge] vince %s (A=%s e %d altri in volo come probe, non "
-             "puniti)", w["dep"]["unique"], dep.get("unique"),
-             len(canaries) - 1)
+    log.info(
+        "[hedge] vince %s (A=%s e %d altri in volo come probe, non puniti)",
+        w["dep"]["unique"],
+        dep.get("unique"),
+        len(canaries) - 1,
+    )
     return w["dep"], w["gen"], w["t0"], *results[winner]
 
 
@@ -3885,8 +3635,7 @@ async def _drain_probe_tasks() -> int:
 
 def _probe_drain_cap_sec() -> float:
     try:
-        dd = int(getattr(router.policy.qc_json,
-                         "stream_total_deadline_ms", 180000) or 180000)
+        dd = int(getattr(router.policy.qc_json, "stream_total_deadline_ms", 180000) or 180000)
     except Exception:
         dd = 180000
     return max(120.0, dd / 1000.0 + 60.0)
@@ -3914,9 +3663,18 @@ async def _consume_probe_stream(gen) -> tuple[bool, bool]:
     return delivered, (delivered and not saw_len)
 
 
-def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
-                 hold: bool = False, wake: bool = False, t0: float | None = None,
-                 race: tuple[str, float] | None = None) -> None:
+def _spawn_probe(
+    dep: dict,
+    gen,
+    fut,
+    res,
+    session,
+    ctx,
+    hold: bool = False,
+    wake: bool = False,
+    t0: float | None = None,
+    race: tuple[str, float] | None = None,
+) -> None:
     """Stacca un perdente di gara: aspetta il verdetto pendente, consuma lo
     stream fino alla fine (probe reale, MAI cancellato) e, se ha servito, lo
     registra warm. Nota: `hold` e' solo contestuale al log/diagnosi.
@@ -3943,7 +3701,7 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
                 try:
                     r = await asyncio.wait_for(fut, timeout=cap)
                 except asyncio.CancelledError:
-                    raise                     # shutdown: non e' colpa upstream
+                    raise  # shutdown: non e' colpa upstream
                 except BaseException:
                     r = None
                     died = True
@@ -3953,10 +3711,9 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
                 with contextlib.suppress(BaseException):
                     await pend
             try:
-                delivered, _clean = await asyncio.wait_for(
-                    _consume_probe_stream(gen), timeout=cap)
+                delivered, _clean = await asyncio.wait_for(_consume_probe_stream(gen), timeout=cap)
             except asyncio.CancelledError:
-                raise                         # shutdown: nessuna penale
+                raise  # shutdown: nessuna penale
             except BaseException:
                 delivered = False
                 died = True
@@ -3964,7 +3721,7 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
             if ok:
                 if wake:
                     with contextlib.suppress(Exception):
-                        router.clear_cooldown(u)   # sveglia riuscita
+                        router.clear_cooldown(u)  # sveglia riuscita
                 router.note_warm_owner(session, u)
                 metrics.inc("nx_hedge_total", ("probe_ok",))
                 # ELEZIONE per TEMPO DI TENTATIVO (regola utente): il piu'
@@ -3977,24 +3734,21 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
                         _wu, _wd = race
                         if _wd and _d > 0 and u != _wu:
                             if _d < _wd:
-                                _cur = (router._cache_ok().get(session)
-                                        or (None, 0.0))[0]
+                                _cur = (router._cache_ok().get(session) or (None, 0.0))[0]
                                 if _cur in (None, _wu):
                                     with contextlib.suppress(Exception):
-                                        router.note_session_success(
-                                            session, u, latency_ms=_d,
-                                            ctx_est=ctx)
-                                        router._note_session_slow(
-                                            session, _wu, latency_ms=_wd,
-                                            ctx_est=ctx)
+                                        router.note_session_success(session, u, latency_ms=_d, ctx_est=ctx)
+                                        router._note_session_slow(session, _wu, latency_ms=_wd, ctx_est=ctx)
                                     log.info(
-                                        "[slow-race] holder -> %s (tentativo "
-                                        "%.0fs vs %s %.0fs)", u, _d / 1000.0,
-                                        _wu, _wd / 1000.0)
+                                        "[slow-race] holder -> %s (tentativo %.0fs vs %s %.0fs)",
+                                        u,
+                                        _d / 1000.0,
+                                        _wu,
+                                        _wd / 1000.0,
+                                    )
                             else:
                                 with contextlib.suppress(Exception):
-                                    router._note_session_slow(
-                                        session, u, latency_ms=_d, ctx_est=ctx)
+                                    router._note_session_slow(session, u, latency_ms=_d, ctx_est=ctx)
                     except Exception:
                         pass
             elif v == "timeout" or (v is None and died):
@@ -4007,28 +3761,26 @@ def _spawn_probe(dep: dict, gen, fut, res, session, ctx,
                     _f24 = router.stats_for(u).fail_count_24h
                 except Exception:
                     _f24 = 0
-                router.mark_failed(u, seconds=_soft_cd(_f24),
-                                   reason="probe_error")
+                router.mark_failed(u, seconds=_soft_cd(_f24), reason="probe_error")
                 metrics.inc("nx_hedge_total", ("probe_fail",))
             else:
                 # empty_eof/length_truncated: comportamento del modello, non
                 # colpa della chiave — SOLO qui nessuna penale, identico alla
                 # regola del tentativo servito.
                 metrics.inc("nx_hedge_total", ("probe_drop",))
-            log.info("[probe] %s: %s (verdetto=%s)", u,
-                      "in warm" if ok else "gestito di solito", v)
+            log.info("[probe] %s: %s (verdetto=%s)", u, "in warm" if ok else "gestito di solito", v)
         finally:
             with contextlib.suppress(Exception):
                 router.note_probe_done(session, u)
             with contextlib.suppress(Exception):
                 router.note_end(u, ctx)
+
     t = asyncio.ensure_future(_run())
     _PROBE_TASKS.add(t)
     t.add_done_callback(_PROBE_TASKS.discard)
 
 
-async def _probe_late_open(open_task, session, ctx, hold: bool,
-                           race: tuple[str, float] | None) -> None:
+async def _probe_late_open(open_task, session, ctx, hold: bool, race: tuple[str, float] | None) -> None:
     """Apertura di un canary conclusa DOPO la fine della gara.
 
     L'apertura era rimasta in volo (headers lente): NON la si annulla — si
@@ -4041,36 +3793,60 @@ async def _probe_late_open(open_task, session, ctx, hold: bool,
         rec = await open_task
     if not rec:
         return
-    _spawn_probe(rec["dep"], rec["gen"], rec["fut"], None, session, ctx,
-                 hold, wake=bool(rec.get("wake")), t0=rec.get("t0"),
-                 race=race)
+    _spawn_probe(
+        rec["dep"],
+        rec["gen"],
+        rec["fut"],
+        None,
+        session,
+        ctx,
+        hold,
+        wake=bool(rec.get("wake")),
+        t0=rec.get("t0"),
+        race=race,
+    )
 
 
-def _spawn_wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
-                      need, ctx, out_tokens, requested_group, session,
-                      raced: dict | None) -> None:
+def _spawn_wake_sweep(
+    payload: dict,
+    profile: str | None,
+    cur_dep: dict,
+    need,
+    ctx,
+    out_tokens,
+    requested_group,
+    session,
+    raced: dict | None,
+) -> None:
     """SVEglia in background (regola utente): fino a
     `warm_refill_wake_max_attempts` tentativi di risveglio su dep dormienti
     da 429 MATURO (>=1h), ognuno su una api_key DIVERSA da tutte le sessioni
     e diversa dagli altri tentativi. Chi risponde torna CALDO; chi fallisce
     vede RADDOPPIATO il proprio cooldown residuo. Gira staccata, mai nel
     percorso della risposta servita."""
-    t = asyncio.ensure_future(_wake_sweep(payload, profile, cur_dep, need,
-                                          ctx, out_tokens, requested_group,
-                                          session, raced))
+    t = asyncio.ensure_future(
+        _wake_sweep(payload, profile, cur_dep, need, ctx, out_tokens, requested_group, session, raced)
+    )
     _PROBE_TASKS.add(t)
     t.add_done_callback(_PROBE_TASKS.discard)
 
 
-async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
-                      need, ctx, out_tokens, requested_group, session,
-                      raced: dict | None) -> None:
+async def _wake_sweep(
+    payload: dict,
+    profile: str | None,
+    cur_dep: dict,
+    need,
+    ctx,
+    out_tokens,
+    requested_group,
+    session,
+    raced: dict | None,
+) -> None:
     try:
         _pol = router.policy
         _n = int(getattr(_pol, "warm_refill_wake_max_attempts", 10) or 0)
-        _age = float(getattr(_pol, "warm_refill_wake_min_cooldown_age_sec",
-                             3600.0) or 3600.0)
-    except Exception:                              # noqa: BLE001
+        _age = float(getattr(_pol, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
+    except Exception:  # noqa: BLE001
         return
     if _n <= 0:
         return
@@ -4081,11 +3857,18 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
     for i in range(_n):
         try:
             W = router.warm_wake_canary(
-                profile, cur_dep, need, ctx, out_tokens,
-                tried=used_uniq, requested_group=requested_group,
-                exclude_keys=used_keys, exclude_uniq=used_uniq,
-                min_age_sec=_age)
-        except Exception:                          # noqa: BLE001
+                profile,
+                cur_dep,
+                need,
+                ctx,
+                out_tokens,
+                tried=used_uniq,
+                requested_group=requested_group,
+                exclude_keys=used_keys,
+                exclude_uniq=used_uniq,
+                min_age_sec=_age,
+            )
+        except Exception:  # noqa: BLE001
             return
         if W is None:
             break
@@ -4097,13 +3880,12 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
         with contextlib.suppress(Exception):
             router.note_probe_started(session, u)
         try:
-            ok, lat, code, _body = await autoprobe._probe_one(
-                forwarder, W, 30.0)
+            ok, lat, code, _body = await autoprobe._probe_one(forwarder, W, 30.0)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 router.note_probe_done(session, u)
             raise
-        except Exception:                          # noqa: BLE001
+        except Exception:  # noqa: BLE001
             ok, code = False, 0
         with contextlib.suppress(Exception):
             router.note_probe_done(session, u)
@@ -4112,24 +3894,32 @@ async def _wake_sweep(payload: dict, profile: str | None, cur_dep: dict,
                 router.clear_cooldown(u)
                 router.note_warm_owner(session, u)
             metrics.inc("nx_wake_sweep_total", ("ok",))
-            log.info("[sveglia] %s risponde (%.0fms, order=%s) -> torna caldo "
-                     "(tentativo %d/%d)", u, lat or 0.0, W.get("order"),
-                     done, _n)
+            log.info(
+                "[sveglia] %s risponde (%.0fms, order=%s) -> torna caldo (tentativo %d/%d)",
+                u,
+                lat or 0.0,
+                W.get("order"),
+                done,
+                _n,
+            )
             return
         # KO: il dormiente ri-fallisce -> cooldown RADDOPPIATO (residuo).
         with contextlib.suppress(Exception):
-            router.mark_failed_double_residual(u, reason="wake_probe",
-                                               status=code or None)
+            router.mark_failed_double_residual(u, reason="wake_probe", status=code or None)
         metrics.inc("nx_wake_sweep_total", ("ko",))
-        log.info("[sveglia] %s KO (code=%s, order=%s) -> cooldown raddoppiato "
-                 "(tentativo %d/%d)", u, code, W.get("order"), done, _n)
+        log.info(
+            "[sveglia] %s KO (code=%s, order=%s) -> cooldown raddoppiato (tentativo %d/%d)",
+            u,
+            code,
+            W.get("order"),
+            done,
+            _n,
+        )
     metrics.inc("nx_wake_sweep_total", ("exhausted",))
     if done:
-        log.info("[sveglia] giro concluso: %d tentativi su [%s], "
-                 "nessun risveglio", done, ", ".join(tried))
+        log.info("[sveglia] giro concluso: %d tentativi su [%s], nessun risveglio", done, ", ".join(tried))
     else:
-        log.info("[sveglia] nessun dormiente maturo (429>=min_age) da "
-                 "svegliare")
+        log.info("[sveglia] nessun dormiente maturo (429>=min_age) da svegliare")
 
 
 def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
@@ -4168,11 +3958,11 @@ def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
     current = [s for s in spots if s[0] == last_msg]
     older = [s for s in spots if s[0] != last_msg]
     keep = set()
-    for s in reversed(current):                 # turno corrente, piu' recente
+    for s in reversed(current):  # turno corrente, piu' recente
         if len(keep) >= max_images:
             break
         keep.add(s)
-    for s in reversed(older):                   # poi il passato, dal piu' recente
+    for s in reversed(older):  # poi il passato, dal piu' recente
         if len(keep) >= max_images:
             break
         keep.add(s)
@@ -4183,8 +3973,7 @@ def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
         if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
             out_msgs.append(msg)
             continue
-        parts = [p for j, p in enumerate(msg["content"])
-                 if (i, j) not in drop]
+        parts = [p for j, p in enumerate(msg["content"]) if (i, j) not in drop]
         if len(parts) == len(msg["content"]):
             out_msgs.append(msg)
             continue
@@ -4194,10 +3983,9 @@ def _trim_chat_images(payload: dict, max_images: int) -> tuple[dict, int]:
     return out, len(drop)
 
 
-async def _stt_bridge_transcribe(request: Request, chunk: bytes,
-                                 profile: str | None, raw_model: str,
-                                 session_id: str | None,
-                                 used: set[str]) -> str:
+async def _stt_bridge_transcribe(
+    request: Request, chunk: bytes, profile: str | None, raw_model: str, session_id: str | None, used: set[str]
+) -> str:
     """Trascrive un chunk di audio. Ritorna "" SOLO dopo aver provato TUTTI i
     deployment con la capacita' `stt` del profilo.
 
@@ -4242,15 +4030,13 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
         # gruppo -stt direttamente, se esiste.
         grp = None
         if profile:
-            for cand in (f"{config.proxy_prefix}{profile}-stt",
-                         f"{config.proxy_prefix}{profile}-stt-fallback"):
+            for cand in (f"{config.proxy_prefix}{profile}-stt", f"{config.proxy_prefix}{profile}-stt-fallback"):
                 if cand in router.config.groups:
                     grp = cand
                     break
         if grp is None:
             return ""
-        d = router.config.deployment_by_unique(grp) \
-            or router.pick_deployment(grp, need)
+        d = router.config.deployment_by_unique(grp) or router.pick_deployment(grp, need)
         if d is None:
             return ""
         cands = [d]
@@ -4258,9 +4044,7 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
     # --- ordine: tier, poi i VIVI prima dei raffreddati, poi i liberi prima
     #     di quelli gia' presi da un altro chunk.
     def _key(d: dict):
-        return (_tier(d),
-                1 if router.is_cooled_down(d["unique"]) else 0,
-                1 if d["unique"] in used else 0)
+        return (_tier(d), 1 if router.is_cooled_down(d["unique"]) else 0, 1 if d["unique"] in used else 0)
 
     cands.sort(key=_key)
 
@@ -4281,23 +4065,39 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
         t0 = time.monotonic()
         try:
             res = await forwarder.transcribe(
-                dep, {}, chunk, "chunk.ogg", "audio/ogg",
-                path="transcriptions", profile=profile or "",
-                client_ip=_cip, session=_sess, attribution=_attr)
+                dep,
+                {},
+                chunk,
+                "chunk.ogg",
+                "audio/ogg",
+                path="transcriptions",
+                profile=profile or "",
+                client_ip=_cip,
+                session=_sess,
+                attribution=_attr,
+            )
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
             metrics.inc("nx_stt_total", (dep["group"], "ok"))
             res, _scrubbed = sttscrub.scrub_payload(res)
             if _scrubbed:
-                log.info("[stt-bridge] %s: rimosse %d allucinazioni credit",
-                         cur, _scrubbed)
-            _emit_summary(ses=session_id or "-", req=raw_model,
-                          grp=dep["group"], dep=cur, tries=len(tried),
-                          fb=len(tried) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None, usage=None,
-                          kind="stt", path="transcriptions")
+                log.info("[stt-bridge] %s: rimosse %d allucinazioni credit", cur, _scrubbed)
+            _emit_summary(
+                ses=session_id or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(tried),
+                fb=len(tried) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=None,
+                kind="stt",
+                path="transcriptions",
+            )
             if isinstance(res, dict):
                 return str(res.get("text") or "")
             return str(res or "")
@@ -4309,27 +4109,26 @@ async def _stt_bridge_transcribe(request: Request, chunk: bytes,
             if -err.status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
-                except Exception:                          # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(
-                    cur, reason=detail[:80], status=st or None)
+                router.mark_failed_double_residual(cur, reason=detail[:80], status=st or None)
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=st or None)
+                router.mark_failed(cur, seconds=err.retry_after, status=st or None)
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
             # NON si esce: si prosegue col candidato successivo. Solo a lista
             # esaurita si dichiara il fallimento (ritorno "").
     if last_err is not None:
-        log.info("[stt-bridge] esauriti %d/%d deployment stt: %s",
-                 len(tried), len(cands), (last_err.detail or "")[:100])
+        log.info(
+            "[stt-bridge] esauriti %d/%d deployment stt: %s", len(tried), len(cands), (last_err.detail or "")[:100]
+        )
     return ""
 
 
 # --- STT-BRIDGE: audio in chat -> testo, prima di ogni altra logica ---
-async def _stt_bridge(request: Request, payload: dict, auth: AuthResult,
-                       session_id: str | None, model: str,
-                       raw_model: str) -> dict:
+async def _stt_bridge(
+    request: Request, payload: dict, auth: AuthResult, session_id: str | None, model: str, raw_model: str
+) -> dict:
     """Trascrive l'audio nella history e lo sostituisce con testo.
 
     Va eseguita PRIMA di qualunque cosa che guardi la history: l'intercettore
@@ -4346,57 +4145,57 @@ async def _stt_bridge(request: Request, payload: dict, auth: AuthResult,
     # protetto", cosi' trascrizione e compattazione non possono divergere.
     boundary = None
     try:
-        from .ctxcompact import (ctxcompact_config_from_policy,
-                                 frontier_boundary)          # noqa: PLC0415
+        from .ctxcompact import ctxcompact_config_from_policy, frontier_boundary  # noqa: PLC0415
+
         _cc = ctxcompact_config_from_policy(router.policy)
-        _b = frontier_boundary(
-            payload.get("messages") or [], _cc,
-            max_in=0, boundary_floor=0)
+        _b = frontier_boundary(payload.get("messages") or [], _cc, max_in=0, boundary_floor=0)
         boundary = _b
-    except Exception:                                      # noqa: BLE001
+    except Exception:  # noqa: BLE001
         boundary = None
     used: set[str] = set()
     _prof = auth.profile or _profile_of_request(model, auth.profile)
 
     async def _one(chunk: bytes, idx: int) -> str:
-        return await _stt_bridge_transcribe(
-            request, chunk, _prof, raw_model, session_id, used)
+        return await _stt_bridge_transcribe(request, chunk, _prof, raw_model, session_id, used)
 
     try:
         out = await sttchat.resolve_audio_in_payload(
-            payload, boundary=boundary, transcript_one=_one,
-            policy=router.policy)
-    except Exception as e:                                 # noqa: BLE001
+            payload, boundary=boundary, transcript_one=_one, policy=router.policy
+        )
+    except Exception as e:  # noqa: BLE001
         log.warning("[stt-bridge] errore inatteso: %s", e)
         return payload
     if out is not payload:
-        _n = count_audio_parts(payload.get("messages") or []) \
-            - count_audio_parts(out.get("messages") or [])
+        _n = count_audio_parts(payload.get("messages") or []) - count_audio_parts(out.get("messages") or [])
         if _n:
-            log.info("[stt-bridge] %d parti audio sostituite dal testo",
-                     _n)
+            log.info("[stt-bridge] %d parti audio sostituite dal testo", _n)
             metrics.inc("nx_stt_total", (_prof or "-", "chat_bridge"))
     return out
 
 
-async def _stream_with_fallback(profile: str | None, first_dep: dict,
-                                payload: dict, need: frozenset[str] = frozenset(),
-                                hook=None, scope: str = "chain",
-                                ctx: int | None = None,
-                                ses: str | None = None,
-                                est_chars: int = 0,
-                                req: str | None = None,
-                                session: str | None = None,
-                                client_ip: str = "",
-                                request: "Request | None" = None,
-                                attribution: dict | None = None,
-                                requested_group: str | None = None,
-                                cold: bool = False,
-                                prefix_reason: str | None = None,
-                                orig_messages: list | None = None,
-                                sniffer=None,
-                                result_box: dict | None = None,
-                                client_stream: bool = True):
+async def _stream_with_fallback(
+    profile: str | None,
+    first_dep: dict,
+    payload: dict,
+    need: frozenset[str] = frozenset(),
+    hook=None,
+    scope: str = "chain",
+    ctx: int | None = None,
+    ses: str | None = None,
+    est_chars: int = 0,
+    req: str | None = None,
+    session: str | None = None,
+    client_ip: str = "",
+    request: "Request | None" = None,
+    attribution: dict | None = None,
+    requested_group: str | None = None,
+    cold: bool = False,
+    prefix_reason: str | None = None,
+    orig_messages: list | None = None,
+    sniffer=None,
+    result_box: dict | None = None,
+    client_stream: bool = True,
+):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client.
 
     `result_box`, se fornito, riceve ('dep'/'attempts'/'trail') il deployment
@@ -4412,51 +4211,59 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     # ripristinano la history (reasoning replay) continuano a vedere tutto.
     try:
         _imax = int(getattr(router.policy, "chat_images_max", 0) or 0)
-    except Exception:                                          # noqa: BLE001
+    except Exception:  # noqa: BLE001
         _imax = 0
     if _imax > 0 and count_image_parts(payload.get("messages") or []) > _imax:
         payload, _dropped = _trim_chat_images(payload, _imax)
         if _dropped:
-            metrics.inc("nx_images_total",
-                        ((dep or {}).get("group", "-"), "chat_images_trimmed"))
-            log.info("[images] tetto chat_images_max=%d: %d immagini non "
-                     "inviate all'upstream (restano nella history del client)",
-                     _imax, _dropped)
+            metrics.inc("nx_images_total", ((dep or {}).get("group", "-"), "chat_images_trimmed"))
+            log.info(
+                "[images] tetto chat_images_max=%d: %d immagini non "
+                "inviate all'upstream (restano nella history del client)",
+                _imax,
+                _dropped,
+            )
     # Gruppo ORIGINARIO della richiesta (es. -200k): serve al pin
     # escalation-winner per valere anche dopo la salita su altre dim.
     requested_group = requested_group or (first_dep or {}).get("group")
     tried = 0
     tried_set: set[str] = set()
-    _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
-    _cstr_steps: dict[str, set] = {}     # rimedi content-string per dep
-    _rsn_restored = False                # history originale gia' riprovata
-    _max_tries = int(getattr(router.policy, "max_fallback_tries",
-                            os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
-                     or 128)
+    _rsn_steps: dict[str, set] = {}  # rimedi reasoning per dep
+    _cstr_steps: dict[str, set] = {}  # rimedi content-string per dep
+    _rsn_restored = False  # history originale gia' riprovata
+    _max_tries = int(
+        getattr(router.policy, "max_fallback_tries", os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128")) or 128
+    )
     # Tool repair config per streaming
     from .toolrepair import create_tool_repair_config
-    from .fakecall import (fake_config_from_policy, is_escalation_group,
-                           looks_like_fake_tool_call, TemplateTokenStripper)
-    _tr_cfg = create_tool_repair_config({
-        "tool_repair": {
-            "enabled": router.policy.tool_repair_enabled,
-            "default_level": router.policy.tool_repair_default_level,
-            "disable_for_google": router.policy.tool_repair_disable_for_google,
-            "max_args_size": router.policy.tool_repair_max_args_size,
-        },
-    })
+    from .fakecall import fake_config_from_policy, is_escalation_group, looks_like_fake_tool_call, TemplateTokenStripper
+
+    _tr_cfg = create_tool_repair_config(
+        {
+            "tool_repair": {
+                "enabled": router.policy.tool_repair_enabled,
+                "default_level": router.policy.tool_repair_default_level,
+                "disable_for_google": router.policy.tool_repair_disable_for_google,
+                "max_args_size": router.policy.tool_repair_max_args_size,
+            },
+        }
+    )
     _fc = fake_config_from_policy(router.policy)
-    from .texttoolparse import (text_config_from_policy,
-                               parse_text_toolcalls,
-                               strip_toolid_markup,
-                               truncation_config_from_policy)
+    from .texttoolparse import (
+        text_config_from_policy,
+        parse_text_toolcalls,
+        strip_toolid_markup,
+        truncation_config_from_policy,
+    )
+
     _tt = text_config_from_policy(router.policy)
     _tct_cfg = truncation_config_from_policy(router.policy)
     from .sampling import sampling_config_from_policy
+
     _sm = sampling_config_from_policy(router.policy)
-    from .schemaout import (enforce_response,
-                            schemaout_config_from_policy)
+    from .schemaout import enforce_response, schemaout_config_from_policy
     from .forwarder import _corrective_note, _corrective_kind
+
     _so = schemaout_config_from_policy(router.policy)
     # QC di contenuto (parita' col non-stream): attivi anche in hold.
     qc = router.policy.qc_json
@@ -4464,21 +4271,20 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _synth: list[bytes] = []
     # OUTPUT STRUTTURATO in HOLD: la risposta bufferizzata viene trattata come
     # non-streaming -> pulizia/riparazione JSON prima di inviare i byte.
-    _so_corrected: set[str] = set()      # retry correttivo gia' provato per dep
-    _so_rewrite = False                  # il content va riscritto in emissione
-    _so_text = ""                        # content sanificato da inviare
+    _so_corrected: set[str] = set()  # retry correttivo gia' provato per dep
+    _so_rewrite = False  # il content va riscritto in emissione
+    _so_text = ""  # content sanificato da inviare
     t_req = time.monotonic()
     try:
-        _hedge_ms = int(getattr(router.policy.qc_json,
-                                "stream_hedge_delay_ms", 0) or 0)
+        _hedge_ms = int(getattr(router.policy.qc_json, "stream_hedge_delay_ms", 0) or 0)
     except Exception:
         _hedge_ms = 0
     attempts: list[str] = []
     # ATTEMPT TRAIL (P0): per ogni hop fallito, PERCHE' e' stato scartato
     # (classe d'errore onesta). Finisce nel body/header del 503 finale.
     trail: list = []
-    skip_hosts: set[str] = set()         # P1-5: host saltati (errore provider)
-    _lease = None                        # P2-8: lease per chiave (opt-in)
+    skip_hosts: set[str] = set()  # P1-5: host saltati (errore provider)
+    _lease = None  # P2-8: lease per chiave (opt-in)
 
     def _ret(resp):
         """Registra dep/attempts/trail finali per il chiamante (redirect
@@ -4491,7 +4297,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # vede la closure e senza questo finiva con _tr=None -> 503
                 # con attempts vuoti e nessun X-Scrocco-Trail.
                 result_box["trail"] = list(trail)
-            except Exception:                # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 pass
         return resp
 
@@ -4499,8 +4305,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         """fallback_next + P1-5: salta gli host che hanno gia' fallito a
         livello provider in QUESTA richiesta; se non ne restano, torna al
         candidato saltato (mai lasciare la richiesta senza risposta)."""
-        k.setdefault("out_tokens",
-                     refill_out_budget(payload, router.policy))
+        k.setdefault("out_tokens", refill_out_budget(payload, router.policy))
         _n = router.fallback_next(*a, **k)
         if _n is None or dep_host(_n) not in skip_hosts:
             return _n
@@ -4514,6 +4319,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 return _c
             _saved = _c
         return _saved
+
     _races_done = 0
     # WARM-REFILL a cascata: candidati gia' sonciati in QUESTA richiesta
     # (uniq + api_key) e round gia' consumati (budget per-richiesta =
@@ -4521,8 +4327,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     # sessione nel router).
     _raced: dict = {}
     _refill_rounds = 0
-    _wake_spawned = False               # la SVEglia parte una volta per richiesta
-    ttfb_ms: int | None = None          # letta da sse()/_summary via closure
+    _wake_spawned = False  # la SVEglia parte una volta per richiesta
+    ttfb_ms: int | None = None  # letta da sse()/_summary via closure
     # Clamp max_tokens GATEWAY-side dell'attempt corrente (via maxtok_hook):
     # se il modello esaurisce il NOSTRO budget ridotto, la troncatura e'
     # auto-inflitta -> il watchdog non deve punire il deployment.
@@ -4539,23 +4345,22 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         attempts.append(dep["unique"])
         tried_set.add(dep["unique"])
         _was_dormant = router.is_cooled_down(dep["unique"])
-        def _fail(u, *, seconds=None, reason=None, status=None,
-                  provenance=None, kind=None):
+
+        def _fail(u, *, seconds=None, reason=None, status=None, provenance=None, kind=None):
             if kind is not None:
                 # errore che IMPONE una strategia (es. PERMANENT_DEAD ->
                 # retirement): nessun cooldown, la decisione e' del lifecycle.
-                return router.mark_failed(u, reason=reason, status=status,
-                                          kind=kind)
+                return router.mark_failed(u, reason=reason, status=status, kind=kind)
             if _was_dormant:
                 _r = router.mark_failed_double_residual(u, reason=reason, status=status)
             else:
-                _r = router.mark_failed(u, seconds=seconds, reason=reason,
-                                        status=status, provenance=provenance)
+                _r = router.mark_failed(u, seconds=seconds, reason=reason, status=status, provenance=provenance)
             # P1-4: 3 KO dello stesso MODELLO (anche su chiavi diverse) entro
             # la finestra -> bench del modello su tutte le sue chiavi.
             with contextlib.suppress(Exception):
                 router.note_model_failure(dep)
             return _r
+
         router.note_start(dep["unique"], ctx)
         # qcp PRIMA del try: lo usano anche gli handler `except` (es.
         # stream_total_deadline_ms), quindi deve essere sempre definito anche se
@@ -4568,54 +4373,60 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # se la chiamata e' stata recuperata o scartata.
             _trunc_unique = dep["unique"]
             _trunc_was_dormant = _was_dormant
-            def _trunc_hook(_salvaged, _u=_trunc_unique,
-                            _was=_trunc_was_dormant):
-                metrics.inc("nx_truncated_toolcall_total",
-                            (_u, "salvaged" if _salvaged else "dropped"))
-                repairlog.note("salvage_truncated", source="stream",
-                               outcome="ok" if _salvaged else "fail",
-                               dep=_u, model=dep.get("model", ""),
-                               detail="tag tool-call rotto")
-                log.warning("[truncation] stream %s: tag tool-call rotto "
-                            "(%s) -> declasso %ds", _u,
-                            "salvato" if _salvaged else "scartato",
-                            _tct_cfg.cooldown_sec)
+
+            def _trunc_hook(_salvaged, _u=_trunc_unique, _was=_trunc_was_dormant):
+                metrics.inc("nx_truncated_toolcall_total", (_u, "salvaged" if _salvaged else "dropped"))
+                repairlog.note(
+                    "salvage_truncated",
+                    source="stream",
+                    outcome="ok" if _salvaged else "fail",
+                    dep=_u,
+                    model=dep.get("model", ""),
+                    detail="tag tool-call rotto",
+                )
+                log.warning(
+                    "[truncation] stream %s: tag tool-call rotto (%s) -> declasso %ds",
+                    _u,
+                    "salvato" if _salvaged else "scartato",
+                    _tct_cfg.cooldown_sec,
+                )
                 if _was:
-                    router.mark_failed_double_residual(
-                        _u, reason="truncated_toolcall")
+                    router.mark_failed_double_residual(_u, reason="truncated_toolcall")
                 else:
-                    router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec,
-                                       reason="truncated_toolcall")
+                    router.mark_failed(_u, seconds=_tct_cfg.cooldown_sec, reason="truncated_toolcall")
+
             if dep.get("thinking_replay") and orig_messages:
                 _tpr = restore_reasoning(payload, orig_messages)
                 if _tpr:
                     metrics.inc("nx_thinking_replay_total", ("proactive",))
-                    log.info("[thinking-replay] %s: %d campi reasoning "
-                             "rimessi PRIMA dell'invio (proattivo)",
-                             dep["unique"], _tpr)
-            _lease = router.key_lease_acquire(dep)   # P2-8 (opt-in)
+                    log.info(
+                        "[thinking-replay] %s: %d campi reasoning rimessi PRIMA dell'invio (proattivo)",
+                        dep["unique"],
+                        _tpr,
+                    )
+            _lease = router.key_lease_acquire(dep)  # P2-8 (opt-in)
             # HOLD (parita' col non-stream): se la risposta sara' interamente
             # bufferizzata, la riparazione tool-call NON si fa nel filtro SSE
             # incrementale ma ALLA FINE sull'output GREZZO totale (stessa
             # riparazione del percorso non-streaming). Vedi blocco HOLD sotto.
-            _defer_tr = (bool(dep.get("hold_until_finish")) or bool(
-                getattr(router.policy.qc_json,
-                        "stream_hold_until_finish", False)))
-            gen = await forwarder.stream_response(dep, payload,
-                                                  profile=profile or "",
-                                                  ctx_est=ctx,
-                                                  client_ip=client_ip,
-                                                  session=session,
-                                                  attribution=attribution,
-                                                  tool_repair_config=_tr_cfg,
-                                                  truncation_config=_tct_cfg,
-                                                   truncation_hook=_trunc_hook,
-                                                   maxtok_hook=lambda old, new:
-                                                   _maxtok.update(
-                                                       cap=new, old=old),
-                                                   rate_hook=lambda u, rl:
-                                                   router.note_rate_limit(u, rl),
-                                                  defer_tool_repair=_defer_tr)
+            _defer_tr = bool(dep.get("hold_until_finish")) or bool(
+                getattr(router.policy.qc_json, "stream_hold_until_finish", False)
+            )
+            gen = await forwarder.stream_response(
+                dep,
+                payload,
+                profile=profile or "",
+                ctx_est=ctx,
+                client_ip=client_ip,
+                session=session,
+                attribution=attribution,
+                tool_repair_config=_tr_cfg,
+                truncation_config=_tct_cfg,
+                truncation_hook=_trunc_hook,
+                maxtok_hook=lambda old, new: _maxtok.update(cap=new, old=old),
+                rate_hook=lambda u, rl: router.note_rate_limit(u, rl),
+                defer_tool_repair=_defer_tr,
+            )
             # la TTFB vera e' il tempo fino agli HEADER upstream
             # (send(stream=True) ritorna gia' col primo chunk bufferizzato:
             # misurarla sul primo yield darebbe sempre ~0ms e avvelenerebbe
@@ -4634,19 +4445,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # stalla non trattiene la richiesta per il cap; un dep lento ha un
             # margine proporzionato (mai oltre il cap). EMA ignota -> cap.
             fc_ms = router.first_content_deadline_ms(dep["unique"], ctx)
-            incl_reason = bool(getattr(qcp, "stream_commit_include_reasoning",
-                                       False))
+            incl_reason = bool(getattr(qcp, "stream_commit_include_reasoning", False))
             min_ch = int(getattr(qcp, "stream_commit_min_chars", 40) or 0)
             # HOLD-UNTIL-FINISH: attesa della chiusura PULITA dello stream
             # prima di inviare byte (per-deployment dal CSV, o globale da
             # policy). Cosi' una risposta troncata non arriva MAI al client:
             # si ruota pre-byte come per gli altri errori.
-            hold = bool(dep.get("hold_until_finish")) or bool(
-                getattr(qcp, "stream_hold_until_finish", False))
-            hold_idle = int(getattr(qcp, "stream_hold_idle_ms", 120000)
-                            or 120000)
-            hold_maxb = int(getattr(qcp, "stream_hold_max_buffer_bytes",
-                                    52428800) or 52428800)
+            hold = bool(dep.get("hold_until_finish")) or bool(getattr(qcp, "stream_hold_until_finish", False))
+            hold_idle = int(getattr(qcp, "stream_hold_idle_ms", 120000) or 120000)
+            hold_maxb = int(getattr(qcp, "stream_hold_max_buffer_bytes", 52428800) or 52428800)
             # --- peek + HEDGE (F3) + WARM-REFILL a cascata ------------------
             # La gara parte quando: (legacy) il warm non puo' aiutare —
             # catena fredda, holder lento o gia' provato; oppure (REFILL) la
@@ -4659,7 +4466,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _fresh_only = False
             _legacy = False
             _refill = False
-            _zen_hunt = False            # caccia canary zen-only (nativo)
+            _zen_hunt = False  # caccia canary zen-only (nativo)
             _pol = router.policy
             # Budget di output della richiesta: serve SEMPRE (non solo in
             # refill) — e' il criterio di "capace" per il gruppo warm (gate
@@ -4673,10 +4480,9 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 _degraded = router.degraded_active()
             except Exception:
                 _degraded = False
-            if (_degraded and not _wake_spawned):
-                _wake_spawned = True          # evita ripetizioni nel loop
-                log.info("[degraded] esplorazione sospesa per questa "
-                         "richiesta (%s)", dep.get("unique"))
+            if _degraded and not _wake_spawned:
+                _wake_spawned = True  # evita ripetizioni nel loop
+                log.info("[degraded] esplorazione sospesa per questa richiesta (%s)", dep.get("unique"))
             # Bucket di escalation (-go/-fallback): niente esplorazione
             # Solo se il gruppo RICHIESTO esplicitamente e' un bucket di
             # escalation (-go/-fallback): niente refill/canary/gara lenta/hedge
@@ -4684,15 +4490,19 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # si arriva via FALLBACK dal dim, la speculativa resta attiva per
             # tornare al caldo appena possibile.
             _esc_grp = is_escalation_group(
-                str(requested_group or ""),
-                router.config.go_suffix, router.config.fallback_suffix)
-            if (session and profile and not _degraded and not _esc_grp
-                    and not opencode_cautious_request()
-                    and bool(getattr(_pol, "warm_refill_enabled", True))
-                    and bool(getattr(_pol, "warm_pool_enabled", True))):
+                str(requested_group or ""), router.config.go_suffix, router.config.fallback_suffix
+            )
+            if (
+                session
+                and profile
+                and not _degraded
+                and not _esc_grp
+                and not opencode_cautious_request()
+                and bool(getattr(_pol, "warm_refill_enabled", True))
+                and bool(getattr(_pol, "warm_pool_enabled", True))
+            ):
                 _ready = router.warm_ready_effective(session, _pol)
-                _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
-                                            6) or 0))
+                _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight", 6) or 0))
                 try:
                     _fly = router.probes_in_flight(session)
                 except Exception:
@@ -4700,38 +4510,51 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 if _ready and _refill_rounds < _maxif and _fly < _maxif:
                     try:
                         _pool = router.warm_valid_for(
-                            session, profile,
+                            session,
+                            profile,
                             requested_group or dep.get("group"),
-                            need, ctx, _need_out, tried=tried_set,
-                            include_borrowed=True)
+                            need,
+                            ctx,
+                            _need_out,
+                            tried=tried_set,
+                            include_borrowed=True,
+                        )
                         _nv = len(_pool)
                     except Exception:
                         _pool, _nv = [], _ready
                     # Nativo opencode SENZA zen nel warm: caccia un canary
                     # zen-only anche se il conteggio MISTO basta (basta 1 zen).
-                    _zen_hunt = (router._zen_first_active()
-                                 and not any(is_opencode_zen_dep(d)
-                                             for d in _pool)
-                                 and router.hunt_allowed(session, ctx))
+                    _zen_hunt = (
+                        router._zen_first_active()
+                        and not any(is_opencode_zen_dep(d) for d in _pool)
+                        and router.hunt_allowed(session, ctx)
+                    )
                     _refill = (_nv < _ready) or _zen_hunt
                     if _zen_hunt:
                         router.note_hunt(session, ctx, gained=False)
-                        log.info("[refill] %s: 0 zen nel warm per client "
-                                 "nativo -> caccia canary zen-only",
-                                 dep.get("unique"))
+                        log.info(
+                            "[refill] %s: 0 zen nel warm per client nativo -> caccia canary zen-only", dep.get("unique")
+                        )
                     if _refill:
                         _rpm = router.session_rpm(session)
-                        log.info("[refill] %s: warm validi %d/%d, in volo "
-                                 "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
-                                 "canario extra in gara",
-                                 dep.get("unique"), _nv, _ready, _fly,
-                                 _maxif, ctx, _need_out, _rpm)
+                        log.info(
+                            "[refill] %s: warm validi %d/%d, in volo "
+                            "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
+                            "canario extra in gara",
+                            dep.get("unique"),
+                            _nv,
+                            _ready,
+                            _fly,
+                            _maxif,
+                            ctx,
+                            _need_out,
+                            _rpm,
+                        )
                         if not _wake_spawned:
                             _wake_spawned = True
-                            _spawn_wake_sweep(payload, profile, dep, need,
-                                              ctx, _need_out,
-                                              requested_group, session,
-                                              _raced)
+                            _spawn_wake_sweep(
+                                payload, profile, dep, need, ctx, _need_out, requested_group, session, _raced
+                            )
             # GARA LENTA: se A non ha ancora CONSEGNATO dopo N ms si apre 1
             # canario SENZA buttare via la risposta (regola utente): vince
             # chi consegna prima, ma per il giro successivo e' eletto chi ha
@@ -4744,29 +4567,27 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             _slow_canary_ms = 0
             if not _degraded and not _esc_grp:
                 try:
-                    _slow_ms = int(getattr(
-                        router.policy, "stream_slow_race_after_ms", 0) or 0)
+                    _slow_ms = int(getattr(router.policy, "stream_slow_race_after_ms", 0) or 0)
                 except Exception:
                     _slow_ms = 0
                 try:
-                    _slow_canary_ms = int(getattr(
-                        router.policy, "slow_canary_after_ms", 0) or 0)
+                    _slow_canary_ms = int(getattr(router.policy, "slow_canary_after_ms", 0) or 0)
                 except Exception:
                     _slow_canary_ms = 0
-            _slow_only = bool((_slow_ms > 0 or _slow_canary_ms > 0)
-                              and not _refill)
+            _slow_only = bool((_slow_ms > 0 or _slow_canary_ms > 0) and not _refill)
             if not _degraded and not _esc_grp and (_hedge_ms > 0 or _refill or _slow_only):
                 try:
                     _h_dep = router.cache_holder(need=need, ctx=ctx)
                     _h_u = _h_dep["unique"] if _h_dep else None
                 except Exception:
                     _h_u = None
-                _warm_useful = bool(_h_u and _h_u not in tried_set
-                                    and _h_u != dep["unique"])
+                _warm_useful = bool(_h_u and _h_u not in tried_set and _h_u != dep["unique"])
                 _races_max = int(getattr(qcp, "stream_hedge_max_races", 0) or 0)
-                _legacy = (not _warm_useful and (_races_max == 0
-                                                 or _races_done < _races_max)
-                           and router.hunt_allowed(session, ctx))
+                _legacy = (
+                    not _warm_useful
+                    and (_races_max == 0 or _races_done < _races_max)
+                    and router.hunt_allowed(session, ctx)
+                )
                 if _legacy or _refill or _slow_only:
                     if _refill:
                         # la cascata parte SUBITO e con il proprio picker:
@@ -4796,34 +4617,57 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     _hh_k = (
                         max(1, int(getattr(qcp, "stream_hedge_tiers", 1) or 1))
                         if bool(getattr(qcp, "stream_hedge_cross_tier", True))
-                        else 1)
+                        else 1
+                    )
                 _raced.setdefault("uniq", set()).add(dep["unique"])
-                _raced.setdefault("keys", set()).add(
-                    str(dep.get("api_key") or ""))
-                (dep, gen, t_att, verdict, prebuf, pending,
-                 meta) = await _hedge_peek(
-                    dep, gen, t_att, fc_ms, incl_reason, min_ch,
-                    hold_idle, hold_maxb, payload=payload,
-                    profile=profile, need=need, scope=scope, ctx=ctx,
-                    tried_set=tried_set, attempts=attempts,
-                    requested_group=requested_group, session=session,
-                    client_ip=client_ip, attribution=attribution,
-                    hedge_ms=_h_ms, _tr_cfg=_tr_cfg,
-                    _tct_cfg=_tct_cfg, k=_hh_k, fresh_only=_fresh_only,
-                    hold=hold, refill=_refill, zen_only=_zen_hunt,
+                _raced.setdefault("keys", set()).add(str(dep.get("api_key") or ""))
+                (dep, gen, t_att, verdict, prebuf, pending, meta) = await _hedge_peek(
+                    dep,
+                    gen,
+                    t_att,
+                    fc_ms,
+                    incl_reason,
+                    min_ch,
+                    hold_idle,
+                    hold_maxb,
+                    payload=payload,
+                    profile=profile,
+                    need=need,
+                    scope=scope,
+                    ctx=ctx,
+                    tried_set=tried_set,
+                    attempts=attempts,
+                    requested_group=requested_group,
+                    session=session,
+                    client_ip=client_ip,
+                    attribution=attribution,
+                    hedge_ms=_h_ms,
+                    _tr_cfg=_tr_cfg,
+                    _tct_cfg=_tct_cfg,
+                    k=_hh_k,
+                    fresh_only=_fresh_only,
+                    hold=hold,
+                    refill=_refill,
+                    zen_only=_zen_hunt,
                     slow_race_ms=_slow_ms,
                     slow_canary_ms=_slow_canary_ms,
-                    out_tokens=_need_out or None, raced=_raced)
+                    out_tokens=_need_out or None,
+                    raced=_raced,
+                )
                 if _legacy:
                     # backoff "il buono non esiste": solo la gara legacy
                     # consuma il budget caccia; il refill ha il suo (round).
-                    router.note_hunt(session, ctx,
-                                     gained=(dep["unique"] != _dep_before))
+                    router.note_hunt(session, ctx, gained=(dep["unique"] != _dep_before))
             else:
                 verdict, prebuf, pending, meta = await _peek_stream(
-                    gen, fc_ms, incl_reason, min_ch,
-                    hold_until_finish=hold, hold_idle_ms=hold_idle,
-                    hold_max_bytes=hold_maxb)
+                    gen,
+                    fc_ms,
+                    incl_reason,
+                    min_ch,
+                    hold_until_finish=hold,
+                    hold_idle_ms=hold_idle,
+                    hold_max_bytes=hold_maxb,
+                )
             # FIX paracadute: sulla catena -go/-fallback (ULTIMO scaglione del
             # ladder) il timeout sul primo contenuto NON deve produrre un 503:
             # li' non c'e' piu' nessuno dietro a cui ruotare, quindi si
@@ -4831,8 +4675,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # stream_parachute_no_timeout, default True). Sotto HOLD la
             # consegna e' SEMPRE bufferizzata (mai byte live): si scarta la
             # coda in volo cosi' il tool repair hold gira sul buffer parziale.
-            _pv = _parachute_verdict(verdict, qcp, dep, router.policy,
-                                     hold=hold, has_buffer=bool(prebuf))
+            _pv = _parachute_verdict(verdict, qcp, dep, router.policy, hold=hold, has_buffer=bool(prebuf))
             if hold and verdict == "timeout" and _pv == "content":
                 await _discard_stream(gen, pending)
                 pending = None
@@ -4842,8 +4685,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # parziale. Se invece il client ha chiesto max_tokens ed e' stato
             # raggiunto (stima answer_chars/4) la risposta e' voluta -> content.
             if verdict == "length_truncated":
-                _req_max = (payload.get("max_tokens")
-                            or payload.get("max_completion_tokens"))
+                _req_max = payload.get("max_tokens") or payload.get("max_completion_tokens")
                 _ans_chars = len(_buffered_answer_text(prebuf))
                 _capped = False
                 try:
@@ -4853,22 +4695,21 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     _capped = False
                 if _capped:
                     verdict = "content"
-            if (verdict == "content" and _tt.enabled
-                    and payload.get("tools")):
-                _parsed = parse_text_toolcalls(
-                    _buffered_answer_text(prebuf), payload.get("tools"),
-                    _tt)
+            if verdict == "content" and _tt.enabled and payload.get("tools"):
+                _parsed = parse_text_toolcalls(_buffered_answer_text(prebuf), payload.get("tools"), _tt)
                 if _parsed:
-                    _synth.extend(
-                        _tool_calls_sse(_parsed, dep.get("model")))
-                    metrics.inc("nx_text_toolcall_total",
-                                (dep["unique"], "parsed"))
+                    _synth.extend(_tool_calls_sse(_parsed, dep.get("model")))
+                    metrics.inc("nx_text_toolcall_total", (dep["unique"], "parsed"))
                     _quality = 0.6
-                    repairlog.note("salvage_text", source="stream",
-                                   outcome="ok", dep=dep["unique"],
-                                   model=dep.get("model", ""),
-                                   detail="tool-call resi come testo",
-                                   count=len(_parsed))
+                    repairlog.note(
+                        "salvage_text",
+                        source="stream",
+                        outcome="ok",
+                        dep=dep["unique"],
+                        model=dep.get("model", ""),
+                        detail="tool-call resi come testo",
+                        count=len(_parsed),
+                    )
                     # OPZIONE A: il tool-call va RICOSTRUITO ma il testo
                     # residuo (es. i marker <goal .../> del plugin) resta al
                     # client: si rimuove SOLO il markup del tool-call.
@@ -4877,25 +4718,28 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     if _tt_res != _tt_txt:
                         _so_text = _tt_res
                         _so_rewrite = True
-            if (verdict == "content" and _fc.enabled):
-                _pat = looks_like_fake_tool_call(
-                    _buffered_answer_text(prebuf), _fc)
+            if verdict == "content" and _fc.enabled:
+                _pat = looks_like_fake_tool_call(_buffered_answer_text(prebuf), _fc)
                 if _pat:
                     metrics.inc("nx_fake_toolcall_total", (dep["unique"], "detected"))
-                    _esc = is_escalation_group(
-                        dep.get("group"), router.config.go_suffix,
-                        router.config.fallback_suffix)
+                    _esc = is_escalation_group(dep.get("group"), router.config.go_suffix, router.config.fallback_suffix)
                     if _esc:
                         # sul bucket di escalation non c'e' dove ruotare senza
                         # loop: si logga e si lascia al sanitizzatore (strip dei
                         # marker), cosi' il client non li vede mai.
-                        log.warning("[fake-tool-call] stream %s: tool-call reso "
-                                    "come testo (pattern=%s) su bucket di "
-                                    "escalation -> strip", dep["unique"], _pat)
+                        log.warning(
+                            "[fake-tool-call] stream %s: tool-call reso "
+                            "come testo (pattern=%s) su bucket di "
+                            "escalation -> strip",
+                            dep["unique"],
+                            _pat,
+                        )
                     else:
-                        log.warning("[fake-tool-call] stream %s: tool-call reso "
-                                    "come testo (pattern=%s), escalation",
-                                    dep["unique"], _pat)
+                        log.warning(
+                            "[fake-tool-call] stream %s: tool-call reso come testo (pattern=%s), escalation",
+                            dep["unique"],
+                            _pat,
+                        )
                         _quality = 0.3
                         verdict = "fake_tool_call"
             # TOOL REPAIR (HOLD): la risposta e' INTERAMENTE bufferizzata ->
@@ -4904,10 +4748,10 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # NON gira (defer_tool_repair), quindi l'intenzione del modello e'
             # intatta; qui si assembla, si ripara e si riscrive lo stream
             # bufferizzato (content + tool_calls) prima di inviare i byte.
-            if (verdict == "content" and hold and not _synth):
+            if verdict == "content" and hold and not _synth:
                 from .protocols import sse_to_chat_obj as _sse2obj
-                from .toolrepair import (repair_tool_calls as _rep_tc,
-                                         sanitize_response as _san_resp)
+                from .toolrepair import repair_tool_calls as _rep_tc, sanitize_response as _san_resp
+
                 try:
                     _tr_obj = _sse2obj(prebuf)
                 except ValueError:
@@ -4920,44 +4764,40 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         if _tr_san:
                             _tr_c = _tr_msg.get("content")
                             if isinstance(_tr_c, str):
-                                prebuf = _collapse_sse_field(
-                                    prebuf, "content", _tr_c)
+                                prebuf = _collapse_sse_field(prebuf, "content", _tr_c)
                             _tr_rc = _tr_msg.get("reasoning_content")
                             if isinstance(_tr_rc, str):
-                                prebuf = _collapse_sse_field(
-                                    prebuf, "reasoning_content", _tr_rc)
-                            metrics.inc("nx_content_sanitized_total",
-                                        (dep["unique"],))
+                                prebuf = _collapse_sse_field(prebuf, "reasoning_content", _tr_rc)
+                            metrics.inc("nx_content_sanitized_total", (dep["unique"],))
                         if _tr_rep.get("repaired"):
                             _tr_tcs = _tr_msg.get("tool_calls")
                             if isinstance(_tr_tcs, list):
-                                prebuf = _rewrite_sse_tool_calls(
-                                    prebuf, _tr_tcs)
-                            metrics.inc("nx_tool_repair_total",
-                                        (dep["unique"], "ok"))
+                                prebuf = _rewrite_sse_tool_calls(prebuf, _tr_tcs)
+                            metrics.inc("nx_tool_repair_total", (dep["unique"], "ok"))
                             repairlog.note(
-                                "repair_args", source="stream", outcome="ok",
-                                dep=dep["unique"], model=dep.get("model", ""),
-                                detail="hold whole-output: moves=%s"
-                                % _tr_rep.get("moves"))
+                                "repair_args",
+                                source="stream",
+                                outcome="ok",
+                                dep=dep["unique"],
+                                model=dep.get("model", ""),
+                                detail="hold whole-output: moves=%s" % _tr_rep.get("moves"),
+                            )
             # OUTPUT STRUTTURATO (HOLD): la risposta e' INTERAMENTE bufferizzata
             # -> la trattiamo come non-streaming. Pulizia (A) / riparazione
             # schema-driven (D) PRIMA di inviare qualunque byte: il client non
             # vede mai il JSON sporco, e rotazione/corrective restano
             # trasparenti. Solo con HOLD attivo (senza buffer completo non e'
             # possibile) e senza tool-call sintetizzate.
-            if (verdict == "content" and hold and _so.enabled and not _synth):
+            if verdict == "content" and hold and _so.enabled and not _synth:
                 _so_txt = _buffered_answer_text(prebuf)
                 _so_tcs: list | None = None
                 for _o in _sse_data_objs(b"".join(prebuf)):
-                    for _ch in (_o.get("choices") or []) \
-                            if isinstance(_o, dict) else []:
+                    for _ch in (_o.get("choices") or []) if isinstance(_o, dict) else []:
                         _d = _ch.get("delta") if isinstance(_ch, dict) else None
                         _tc = _d.get("tool_calls") if isinstance(_d, dict) else None
                         if _tc:
                             _so_tcs = (_so_tcs or []) + list(_tc)
-                _so_data = {"choices": [{"message": {
-                    "content": _so_txt, "tool_calls": _so_tcs}}]}
+                _so_data = {"choices": [{"message": {"content": _so_txt, "tool_calls": _so_tcs}}]}
                 _so_rep = enforce_response(_so_data, payload, _so)
                 _so_st = _so_rep.get("status")
                 if _so_st in ("cleaned", "repaired"):
@@ -4965,40 +4805,49 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     if isinstance(_so_new, str) and _so_new != _so_txt:
                         _so_text = _so_new
                         _so_rewrite = True
-                    metrics.inc("nx_struct_out_total",
-                                (dep["unique"], _so_st))
+                    metrics.inc("nx_struct_out_total", (dep["unique"], _so_st))
                     log.info("[struct-out] stream %s: %s", dep["unique"], _so_st)
                     repairlog.note(
-                        "struct_cleaned" if _so_st == "cleaned"
-                        else "struct_repaired",
-                        source="stream", outcome="ok", dep=dep["unique"],
+                        "struct_cleaned" if _so_st == "cleaned" else "struct_repaired",
+                        source="stream",
+                        outcome="ok",
+                        dep=dep["unique"],
                         model=dep.get("model", ""),
-                        detail=",".join(_so_rep.get("moves") or []) or _so_st)
+                        detail=",".join(_so_rep.get("moves") or []) or _so_st,
+                    )
                 elif _so_st == "invalid":
                     _r5 = _so_rep.get("reason") or "schema"
-                    if (getattr(router.policy, "corrective_retry_enabled", True)
-                            and dep["unique"] not in _so_corrected):
+                    if getattr(router.policy, "corrective_retry_enabled", True) and dep["unique"] not in _so_corrected:
                         _so_corrected.add(dep["unique"])
                         payload.setdefault("messages", []).append(
-                            {"role": "system",
-                             "content": _corrective_note("schema")})
-                        metrics.inc("nx_corrective_retry_total",
-                                    (dep["unique"], "schema"))
-                        log.warning("[retry] stream %s contenuto non conforme "
-                                    "(%s): retry correttivo", dep["unique"], _r5)
-                        repairlog.note("struct_corrective", source="stream",
-                                       outcome="ok", dep=dep["unique"],
-                                       model=dep.get("model", ""),
-                                       detail="schema")
+                            {"role": "system", "content": _corrective_note("schema")}
+                        )
+                        metrics.inc("nx_corrective_retry_total", (dep["unique"], "schema"))
+                        log.warning(
+                            "[retry] stream %s contenuto non conforme (%s): retry correttivo", dep["unique"], _r5
+                        )
+                        repairlog.note(
+                            "struct_corrective",
+                            source="stream",
+                            outcome="ok",
+                            dep=dep["unique"],
+                            model=dep.get("model", ""),
+                            detail="schema",
+                        )
                         verdict = "struct_corrective"
                     else:
-                        metrics.inc("nx_struct_out_total",
-                                    (dep["unique"], "invalid"))
-                        log.warning("[struct-out] stream %s non conforme (%s): "
-                                    "ruoto senza cooldown", dep["unique"], _r5)
-                        repairlog.note("struct_invalid", source="stream",
-                                       outcome="fail", dep=dep["unique"],
-                                       model=dep.get("model", ""), detail=_r5)
+                        metrics.inc("nx_struct_out_total", (dep["unique"], "invalid"))
+                        log.warning(
+                            "[struct-out] stream %s non conforme (%s): ruoto senza cooldown", dep["unique"], _r5
+                        )
+                        repairlog.note(
+                            "struct_invalid",
+                            source="stream",
+                            outcome="fail",
+                            dep=dep["unique"],
+                            model=dep.get("model", ""),
+                            detail=_r5,
+                        )
                         verdict = "struct_invalid"
             # QC DI CONTENUTO (HOLD): parita' col percorso non-streaming. La
             # risposta e' INTERAMENTE bufferizzata -> si applicano check_response
@@ -5006,73 +4855,77 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # non-stream, con corrective JSON sullo stesso dep e rotazione senza
             # penale se non conforme. (D3 'meno peggio' non si applica: in hold
             # non si consegna mai un body rotto, si ruota fino al 503.)
-            if (verdict == "content" and hold and not _synth
-                    and (qc.enabled or san.enabled)):
+            if verdict == "content" and hold and not _synth and (qc.enabled or san.enabled):
                 from .qc import check_response, check_sanity
+
                 _qc_txt = _buffered_answer_text(prebuf)
                 _qc_tcs = _merge_qc_tool_calls(b"".join(prebuf)) or None
-                _qc_obj = {"choices": [{"message": {
-                    "content": _qc_txt, "tool_calls": _qc_tcs}}]}
+                _qc_obj = {"choices": [{"message": {"content": _qc_txt, "tool_calls": _qc_tcs}}]}
                 # QC solo su contenuto REALE: i casi vuoti/zero-answer (e il
                 # paracadute -go che trasmette senza contenuto) restano gestiti
                 # dalla macchina a verdict, non dalla sanity.
                 _qc_reason = None
                 if _qc_txt.strip() or _qc_tcs:
-                    _qc_reason = (check_response(_qc_obj, payload, qc)
-                                  if qc.enabled else None)
+                    _qc_reason = check_response(_qc_obj, payload, qc) if qc.enabled else None
                     if not _qc_reason and san.enabled:
                         _qc_reason = check_sanity(_qc_obj, payload, san)
                 if _qc_reason:
                     _ck = _corrective_kind(_qc_reason)
-                    if (getattr(router.policy, "corrective_retry_enabled", True)
-                            and dep["unique"] not in _so_corrected):
+                    if getattr(router.policy, "corrective_retry_enabled", True) and dep["unique"] not in _so_corrected:
                         _so_corrected.add(dep["unique"])
-                        payload.setdefault("messages", []).append(
-                            {"role": "system",
-                             "content": _corrective_note(_ck)})
-                        metrics.inc("nx_corrective_retry_total",
-                                    (dep["unique"], _ck))
-                        log.warning("[retry] stream %s contenuto non conforme "
-                                    "(%s): retry correttivo %s",
-                                    dep["unique"], _qc_reason, _ck)
-                        repairlog.note("struct_corrective", source="stream",
-                                       outcome="ok", dep=dep["unique"],
-                                       model=dep.get("model", ""),
-                                       detail=_ck)
+                        payload.setdefault("messages", []).append({"role": "system", "content": _corrective_note(_ck)})
+                        metrics.inc("nx_corrective_retry_total", (dep["unique"], _ck))
+                        log.warning(
+                            "[retry] stream %s contenuto non conforme (%s): retry correttivo %s",
+                            dep["unique"],
+                            _qc_reason,
+                            _ck,
+                        )
+                        repairlog.note(
+                            "struct_corrective",
+                            source="stream",
+                            outcome="ok",
+                            dep=dep["unique"],
+                            model=dep.get("model", ""),
+                            detail=_ck,
+                        )
                         verdict = "struct_corrective"
                     else:
-                        metrics.inc("nx_qc_discarded_total",
-                                    (dep["unique"],
-                                     str(_qc_reason).split(" ")[0]))
-                        log.warning("[qc] stream %s contenuto non conforme "
-                                    "(%s): ruoto senza cooldown",
-                                    dep["unique"], _qc_reason)
-                        repairlog.note("struct_invalid", source="stream",
-                                       outcome="fail", dep=dep["unique"],
-                                       model=dep.get("model", ""),
-                                       detail=str(_qc_reason)[:60])
+                        metrics.inc("nx_qc_discarded_total", (dep["unique"], str(_qc_reason).split(" ")[0]))
+                        log.warning(
+                            "[qc] stream %s contenuto non conforme (%s): ruoto senza cooldown",
+                            dep["unique"],
+                            _qc_reason,
+                        )
+                        repairlog.note(
+                            "struct_invalid",
+                            source="stream",
+                            outcome="fail",
+                            dep=dep["unique"],
+                            model=dep.get("model", ""),
+                            detail=str(_qc_reason)[:60],
+                        )
                         verdict = "struct_invalid"
             if verdict == "content":
                 # risposta reale in arrivo: se questo deployment ha SERVITO in
                 # salita (gruppo != richiesto), ricorda il winner come
                 # scorciatoia per le prossime richieste di QUEL bucket.
-                router.note_result(dep["unique"],
-                                   (time.monotonic() - t_att) * 1000,
-                                   quality=_quality, ctx_est=ctx,
-                                   kind="ttft")
+                router.note_result(
+                    dep["unique"], (time.monotonic() - t_att) * 1000, quality=_quality, ctx_est=ctx, kind="ttft"
+                )
                 router.record_escalation_win(requested_group, dep)
-                router.note_session_success(ses, dep["unique"],
-                                            (time.monotonic() - t_att) * 1000,
-                                            ctx_est=ctx, kind="ttft")
+                router.note_session_success(
+                    ses, dep["unique"], (time.monotonic() - t_att) * 1000, ctx_est=ctx, kind="ttft"
+                )
                 # P2-8: la gara e' decisa; la lease si libera qui (il cap
                 # serve a non FAR PARTIRE nuovi tentativi su chiave satura).
                 router.key_lease_release(_lease)
                 _lease = None
-                break                   # risposta reale in arrivo: si parte
+                break  # risposta reale in arrivo: si parte
             # --- nessun contenuto: rotazione PRE-BYTE ---
             await _discard_stream(gen, pending)
             router.note_end(dep["unique"], ctx)
-            router.key_lease_release(_lease)   # P2-8
+            router.key_lease_release(_lease)  # P2-8
             _lease = None
             # ATTEMPT TRAIL anche per i VERDETTI: senza questo hop un 503 con
             # catena esaurita per verdetti (empty_eof/length_truncated/
@@ -5080,35 +4933,43 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # nessun X-Scrocco-Trail: il client non capiva QUANTI e QUALI
             # deployment erano stati scartati, e perche'.
             try:
-                _v_cls = ("timeout" if verdict == "timeout"
-                          else ("struct_invalid"
-                                if verdict in ("struct_corrective",
-                                               "struct_invalid")
-                                else (verdict
-                                      if verdict in ("empty_eof",
-                                                     "length_truncated",
-                                                     "fake_tool_call")
-                                      else classify_error_class(502, verdict))))
-                _v_st = (504 if verdict == "timeout"
-                         else (422 if verdict in ("struct_corrective",
-                                                 "struct_invalid") else 502))
-                trail.append({
-                    "ord": len(trail) + 1,
-                    "dep": dep.get("unique"), "group": dep.get("group"),
-                    "model": dep.get("model"),
-                    "cls": _v_cls,
-                    "status": _v_st,
-                    "ms": int((time.monotonic() - t_att) * 1000)})
-            except Exception:                # noqa: BLE001
+                _v_cls = (
+                    "timeout"
+                    if verdict == "timeout"
+                    else (
+                        "struct_invalid"
+                        if verdict in ("struct_corrective", "struct_invalid")
+                        else (
+                            verdict
+                            if verdict in ("empty_eof", "length_truncated", "fake_tool_call")
+                            else classify_error_class(502, verdict)
+                        )
+                    )
+                )
+                _v_st = (
+                    504
+                    if verdict == "timeout"
+                    else (422 if verdict in ("struct_corrective", "struct_invalid") else 502)
+                )
+                trail.append(
+                    {
+                        "ord": len(trail) + 1,
+                        "dep": dep.get("unique"),
+                        "group": dep.get("group"),
+                        "model": dep.get("model"),
+                        "cls": _v_cls,
+                        "status": _v_st,
+                        "ms": int((time.monotonic() - t_att) * 1000),
+                    }
+                )
+            except Exception:  # noqa: BLE001
                 pass
             fr = meta.get("finish_reason")
-            rot_len = getattr(router.policy.qc_sanity,
-                              "rotate_on_length_empty", False)
+            rot_len = getattr(router.policy.qc_sanity, "rotate_on_length_empty", False)
             # NON ruotare (e non punire) se il modello HA prodotto reasoning o
             # ha esaurito max_tokens: non e' rotto, ruotare non cambia nulla
             # (tutto il gruppo si comporterebbe uguale) -> 503 retryable diretto.
-            no_rotate = (verdict == "empty_eof" and meta.get("no_rotate")
-                         and not rot_len)
+            no_rotate = verdict == "empty_eof" and meta.get("no_rotate") and not rot_len
             # Clamp GATEWAY-side: se il modello ha esaurito il max_tokens che
             # GLI ABBIAMO TAGLIATO NOI (fr=length + cap nostro), la troncatura
             # e' auto-inflitta: ruotare va bene (il dim dopo ha piu' spazio) ma
@@ -5119,19 +4980,23 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # finito il budget o risposto vuoto -> si ruota (ladder, poi
             # -go/-fallback) SENZA penale; la penale resta per gli stream
             # VAMENTE rotti (timeout, EOF sporco, length con mezzo answer).
-            _zero_empty = (
-                (verdict == "empty_eof" and bool(meta.get("empty_clean")))
-                or (verdict == "length_truncated"
-                    and not _buffered_answer_text(prebuf)))
+            _zero_empty = (verdict == "empty_eof" and bool(meta.get("empty_clean"))) or (
+                verdict == "length_truncated" and not _buffered_answer_text(prebuf)
+            )
             if _zero_empty:
-                log.info("[hold] %s: chiusura '%s' senza risposta (fr=%s): "
-                         "nessuna penale, ruoto su candidato piu' capace",
-                         dep["unique"], verdict, fr)
+                log.info(
+                    "[hold] %s: chiusura '%s' senza risposta (fr=%s): nessuna penale, ruoto su candidato piu' capace",
+                    dep["unique"],
+                    verdict,
+                    fr,
+                )
             elif _gw_clamp_trunc:
-                log.info("[maxtok] %s: stream vuoto perche' ha esaurito il "
-                         "clamp gateway (%s->%s): nessuna penale, ruoto",
-                         dep["unique"], _maxtok.get("old"),
-                         _maxtok.get("cap"))
+                log.info(
+                    "[maxtok] %s: stream vuoto perche' ha esaurito il clamp gateway (%s->%s): nessuna penale, ruoto",
+                    dep["unique"],
+                    _maxtok.get("old"),
+                    _maxtok.get("cap"),
+                )
             elif not no_rotate:
                 # TIMEOUT (upstream che appende): danno REALE (tempo perso) ->
                 # cooldown lungo (timeout_cooldown_mult x classico). Vuoto/
@@ -5143,104 +5008,131 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # ROTAZIONE SENZA PENALITA' (richiesta esplicita): il modello
                     # non e' rotto, ha solo reso la chiamata come testo ->
                     # nessun cooldown/streak, si ruota e basta.
-                    log.info("[fake-tool-call] %s: rotazione senza cooldown",
-                             dep["unique"])
+                    log.info("[fake-tool-call] %s: rotazione senza cooldown", dep["unique"])
                 elif verdict in ("struct_corrective", "struct_invalid"):
                     # OUTPUT STRUTTURATO (HOLD): risposta gia' completa e non
                     # conforme -> nessuna penale (no cooldown/streak): si
                     # ritenta lo stesso dep (corrective) o si ruota.
-                    log.info("[struct-out] %s: %s senza cooldown",
-                             dep["unique"], verdict)
+                    log.info("[struct-out] %s: %s senza cooldown", dep["unique"], verdict)
                 else:
-                    _fail(dep["unique"], seconds=_soft_cd(
-                        router.stats_for(dep["unique"]).fail_count_24h))
-            over_deadline = ((time.monotonic() - t_req) * 1000 >
-                             int(getattr(qcp, "stream_total_deadline_ms",
-                                         90000) or 90000))
+                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+            over_deadline = (time.monotonic() - t_req) * 1000 > int(
+                getattr(qcp, "stream_total_deadline_ms", 90000) or 90000
+            )
             if verdict == "struct_corrective":
                 # retry correttivo: STESSO deployment (la nota di sistema e'
                 # gia' stata appesa al payload).
                 nxt = dep
             elif verdict == "fake_tool_call":
-                nxt = router.force_escalation(
-                    dep, need, ctx, tried=tried_set,
-                    out_tokens=refill_out_budget(payload, router.policy)) \
-                    if profile else None
-                if (nxt is None and profile
-                        and router._is_renewal_bucket(
-                            str(dep.get("group") or ""))):
+                nxt = (
+                    router.force_escalation(
+                        dep, need, ctx, tried=tried_set, out_tokens=refill_out_budget(payload, router.policy)
+                    )
+                    if profile
+                    else None
+                )
+                if nxt is None and profile and router._is_renewal_bucket(str(dep.get("group") or "")):
                     nxt = router._free_last_resort(
-                        dep, need, ctx, tried_set,
-                        refill_out_budget(payload, router.policy),
-                        requested_group)
+                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                    )
             else:
                 # Su troncatura/risposta-vuota preferiamo un candidato PIU'
                 # CAPACE (finestra > corrente, poi intelligence), perche' il
                 # problema e'fisicamente lo spazio di output: la scala normale
                 # (dim ascendente) resta il fallback se il picker non trova di
                 # meglio.
-                _cap_pref = (verdict == "length_truncated" or _zero_empty)
-                nxt = None if (no_rotate or over_deadline) else (
-                    router.fallback_next(profile, dep, need, scope, ctx=ctx,
-                                         tried=tried_set,
-                                         requested_group=requested_group,
-                                         out_tokens=refill_out_budget(
-                                             payload, router.policy),
-                                         prefer_capable=_cap_pref)
-                    if profile else None)
-            log.warning("[fallback] stream %s pre-contenuto verdict=%s fr=%s "
-                        "no_rotate=%s -> %s", dep["unique"], verdict, fr,
-                        bool(no_rotate),
-                        nxt["unique"] if nxt else "503")
+                _cap_pref = verdict == "length_truncated" or _zero_empty
+                nxt = (
+                    None
+                    if (no_rotate or over_deadline)
+                    else (
+                        router.fallback_next(
+                            profile,
+                            dep,
+                            need,
+                            scope,
+                            ctx=ctx,
+                            tried=tried_set,
+                            requested_group=requested_group,
+                            out_tokens=refill_out_budget(payload, router.policy),
+                            prefer_capable=_cap_pref,
+                        )
+                        if profile
+                        else None
+                    )
+                )
+            log.warning(
+                "[fallback] stream %s pre-contenuto verdict=%s fr=%s no_rotate=%s -> %s",
+                dep["unique"],
+                verdict,
+                fr,
+                bool(no_rotate),
+                nxt["unique"] if nxt else "503",
+            )
             if nxt is None or tried > _max_tries:
                 # ULTIMA RISORSA: bucket -go/-fallback esaurito -> scendi ai
                 # free-dims (warm di chiunque cap-ok, poi canary, poi cooled)
                 # pur di non consegnare un 503.
                 _flr = None
-                if (nxt is None and profile and not over_deadline
-                        and router._is_renewal_bucket(
-                            str(dep.get("group") or ""))):
+                if (
+                    nxt is None
+                    and profile
+                    and not over_deadline
+                    and router._is_renewal_bucket(str(dep.get("group") or ""))
+                ):
                     _flr = router._free_last_resort(
-                        dep, need, ctx, tried_set,
-                        refill_out_budget(payload, router.policy),
-                        requested_group)
+                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                    )
                 if _flr is not None:
                     nxt = _flr
                 elif nxt is None or tried > _max_tries:
                     # nessun byte inviato al client -> errore RETRYABLE pulito
-                    _emit_summary(ses=ses or "-", req=req or "-",
-                                  grp=dep.get("group"), dep=dep.get("unique"),
-                                  tries=len(attempts),
-                                  fb=max(0, len(attempts) - 1),
-                                  dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=client_stream, qc=True, wd="chain-exhausted",
-                                  ttfb_ms=ttfb_ms, usage=None)
-                    return _ret(_exhausted(
-                        len(attempts),
-                        "%s (%s)" % (verdict, fr) if fr
-                        else verdict,
-                        prefix_reason=prefix_reason,
-                        trail=trail,
-                        retry_at_ms=_retry_at_ms(router, trail)))
+                    _emit_summary(
+                        ses=ses or "-",
+                        req=req or "-",
+                        grp=dep.get("group"),
+                        dep=dep.get("unique"),
+                        tries=len(attempts),
+                        fb=max(0, len(attempts) - 1),
+                        dur_ms=int((time.monotonic() - t_req) * 1000),
+                        stream=client_stream,
+                        qc=True,
+                        wd="chain-exhausted",
+                        ttfb_ms=ttfb_ms,
+                        usage=None,
+                    )
+                    return _ret(
+                        _exhausted(
+                            len(attempts),
+                            "%s (%s)" % (verdict, fr) if fr else verdict,
+                            prefix_reason=prefix_reason,
+                            trail=trail,
+                            retry_at_ms=_retry_at_ms(router, trail),
+                        )
+                    )
             dep = nxt
             inject_identity(payload, dep, router=router)
-            continue                    # ri-entra nel while col nuovo dep
+            continue  # ri-entra nel while col nuovo dep
         except UpstreamError as err:
-            router.note_end(dep["unique"], ctx)   # tentativo chiuso senza stream
-            router.key_lease_release(_lease)       # P2-8
+            router.note_end(dep["unique"], ctx)  # tentativo chiuso senza stream
+            router.key_lease_release(_lease)  # P2-8
             _lease = None
             detail = err.detail or ""
             # ATTEMPT TRAIL: registra l'hop fallito con la sua classe onesta
             # (anche quando il rimedio reasoning piu' sotto lo ritenta).
             try:
-                trail.append({
-                    "ord": len(trail) + 1,
-                    "dep": dep.get("unique"), "group": dep.get("group"),
-                    "model": dep.get("model"),
-                    "cls": classify_error_class(err.status, detail),
-                    "status": abs(int(err.status)) if err.status else None,
-                    "ms": int((time.monotonic() - t_att) * 1000)})
-            except Exception:                # noqa: BLE001
+                trail.append(
+                    {
+                        "ord": len(trail) + 1,
+                        "dep": dep.get("unique"),
+                        "group": dep.get("group"),
+                        "model": dep.get("model"),
+                        "cls": classify_error_class(err.status, detail),
+                        "status": abs(int(err.status)) if err.status else None,
+                        "ms": int((time.monotonic() - t_att) * 1000),
+                    }
+                )
+            except Exception:  # noqa: BLE001
                 pass
             # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/transport)
             # -> salta TUTTO l'host per questa richiesta.
@@ -5249,10 +5141,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     _h = dep_host(dep)
                     if _h and _h not in skip_hosts:
                         skip_hosts.add(_h)
-                        log.info("[skip-host] %s: errore provider-level -> "
-                                 "host %s saltato per questa richiesta",
-                                 dep["unique"], _h)
-            except Exception:                # noqa: BLE001
+                        log.info(
+                            "[skip-host] %s: errore provider-level -> host %s saltato per questa richiesta",
+                            dep["unique"],
+                            _h,
+                        )
+            except Exception:  # noqa: BLE001
                 pass
             # "does not support vision input" (llm7/Cloudflare) su richieste
             # di PURO TESTO: il proxy maschera spesso lo stesso problema del
@@ -5262,8 +5156,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # dep; se fallisce di nuovo -> cooldown (reason=model_feature).
             _media_raw = bool(media_reject_signature(detail))
             media_sig = _media_raw and media_input_needed(need)
-            _rsn_media = media_modality_signature(detail) \
-                and not media_sig and reasoning_err_kind(detail) is None
+            _rsn_media = media_modality_signature(detail) and not media_sig and reasoning_err_kind(detail) is None
             # FAMIGLIA REASONING (needs/rejects/history): un rimedio per dep,
             # poi si ritenta LO STESSO deployment. Copre il replay del campo
             # `reasoning_content` (opencode zen / deepseek thinking), il
@@ -5272,33 +5165,38 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # (Anthropic/Gemini). Ruotare non aiuta: tutte le chiavi dello
             # stesso provider rifiutano lo stesso payload.
             _steps = _rsn_steps.setdefault(dep["unique"], set())
-            _replim = int(getattr(router.policy, "repair_exempt_streak_limit",
-                                  3) or 0)
+            _replim = int(getattr(router.policy, "repair_exempt_streak_limit", 3) or 0)
             _rexb = router.repair_exempt_blocked(dep["unique"], _replim)
-            _rr = None if _rexb else repair_reasoning_error(
-                payload, detail, dep, _steps, orig_messages,
-                force_kind=("needs" if _rsn_media else None))
+            _rr = (
+                None
+                if _rexb
+                else repair_reasoning_error(
+                    payload, detail, dep, _steps, orig_messages, force_kind=("needs" if _rsn_media else None)
+                )
+            )
             if _rexb:
-                log.warning("[reasoning-exempt] %s: budget esenzione esaurito "
-                            "(%d) -> KO normale", dep["unique"], _replim)
+                log.warning(
+                    "[reasoning-exempt] %s: budget esenzione esaurito (%d) -> KO normale", dep["unique"], _replim
+                )
                 # Booking NORMALE: le classi payload/schema da sole non
                 # prevedono cooldown, quindi lo applichiamo qui (altrimenti
                 # il dep verrebbe ritentato all'infinito su ogni richiesta).
                 with contextlib.suppress(Exception):
                     _f24 = router.stats_for(dep["unique"]).fail_count_24h
                     router.mark_failed(
-                        dep["unique"], seconds=_soft_cd(_f24),
+                        dep["unique"],
+                        seconds=_soft_cd(_f24),
                         reason="repair_exempt_exhausted",
-                        status=abs(int(err.status)) if err.status else None)
+                        status=abs(int(err.status)) if err.status else None,
+                    )
             if _rr == "downgraded":
                 dep = dict(dep)
-                dep["_no_thinking"] = True      # copia locale, non il CSV
+                dep["_no_thinking"] = True  # copia locale, non il CSV
             if _rr:
                 with contextlib.suppress(Exception):
                     router.note_repair_exempt(dep["unique"])
                 metrics.inc("nx_reasoning_replay_total", (_rr,))
-                log.warning("[reasoning-%s] %s: rimedio applicato -> ritento "
-                            "lo stesso deployment", _rr, dep["unique"])
+                log.warning("[reasoning-%s] %s: rimedio applicato -> ritento lo stesso deployment", _rr, dep["unique"])
                 # IMPARA il flag corrispondente: d'ora in poi il CSV lo porta
                 # per questo modello (tutti i gemelli) e parte corretto.
                 with contextlib.suppress(Exception):
@@ -5321,33 +5219,39 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # Solo se c'e' DAVVERO qualcosa da appiattire (altrimenti il
                 # retry non aiuta: si ricade sulla rotazione piu' sotto).
                 _flat, _fn = flatten_text_content((payload or {}).get("messages"))
-                if (_fn and "flatten" not in _csteps
-                        and not dep.get("content_string")):
+                if _fn and "flatten" not in _csteps and not dep.get("content_string"):
                     _csteps.add("flatten")
                     metrics.inc("nx_content_string_total", ("learned",))
-                    log.warning("[content-string] %s: 400 schema content-array "
-                                "-> imparo content_string e ritento lo stesso "
-                                "deployment (%d messaggi)", dep["unique"], _fn)
+                    log.warning(
+                        "[content-string] %s: 400 schema content-array "
+                        "-> imparo content_string e ritento lo stesso "
+                        "deployment (%d messaggi)",
+                        dep["unique"],
+                        _fn,
+                    )
                     with contextlib.suppress(Exception):
                         learn_content_string(router, dep.get("model"))
                     dep = dict(dep)
-                    dep["content_string"] = True       # copia locale (retry)
+                    dep["content_string"] = True  # copia locale (retry)
                     continue
             # ERRORE "OSCURO" su richiesta reasoning: il taglio del reasoning
             # (histnorm) e' un'ottimizzazione di token; se il provider non ci
             # da' una firma chiara, si ritenta UNA volta lo STESSO deployment
             # con la history ORIGINALE (reasoning intatto). Se l'errore e'
             # chiaro (quota/auth/ban/schema/...) il tentativo non serve.
-            if (orig_messages is not None and not _rsn_restored
-                    and is_unclear_error(err.status, detail)):
+            if orig_messages is not None and not _rsn_restored and is_unclear_error(err.status, detail):
                 _nres = restore_reasoning(payload, orig_messages)
                 if _nres:
                     _rsn_restored = True
                     metrics.inc("nx_reasoning_replay_total", ("restored",))
-                    log.warning("[reasoning-restore] %s: errore non chiaro (%s) "
-                                "-> reasoning ripristinato (%d campi), ritento "
-                                "lo stesso deployment",
-                                dep["unique"], (detail or "")[:90], _nres)
+                    log.warning(
+                        "[reasoning-restore] %s: errore non chiaro (%s) "
+                        "-> reasoning ripristinato (%d campi), ritento "
+                        "lo stesso deployment",
+                        dep["unique"],
+                        (detail or "")[:90],
+                        _nres,
+                    )
                     continue
             # BAN/ToS dell'endpoint (ip_banned / policy_review / Terms of
             # Service): quarantena dell'HOST 24h, cosi' la rotazione non
@@ -5378,8 +5282,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # incompatibilita' col provider, NON colpa della richiesta ->
             # ruota senza cooldown, mai pass-through del 400 al client (parita'
             # col path non-stream, forwarder._UNKNOWN_FIELD_RE).
-            schema_sig = bool(_PAYLOAD_SCHEMA_RE.search(detail)
-                              or _UNKNOWN_FIELD_RE.search(detail))
+            schema_sig = bool(_PAYLOAD_SCHEMA_RE.search(detail) or _UNKNOWN_FIELD_RE.search(detail))
             # Google/Gemini 3 (anche via proxy OpenAI-compat): rifiuto della
             # COMBINAZIONE built-in tools + function calling (il flag
             # tool_config non e' passabile). Stesso trattamento dello schema:
@@ -5387,7 +5290,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # "actionable" -> 503 RETRYABLE (il client non puo' farci nulla).
             tool_combo_sig = tool_combo_signature(detail)
             if schema_sig or tool_combo_sig:
-                thought_sig = True         # riusa tutta la logica no-cooldown
+                thought_sig = True  # riusa tutta la logica no-cooldown
             # Rifiuto di MODALITA' (vision/image/audio/…): il modello non e'
             # rotto, semplicemente non accetta quel tipo di input -> ruota
             # SENZA cooldown (un altro deployment multimodale lo accetta),
@@ -5398,31 +5301,29 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # QUESTA richiesta e va in cooldown come un KO normale.
             # NB: `_media_raw`/`media_sig` sono gia' calcolati sopra (servono
             # anche al tentativo di replay reasoning).
-            prov_err = is_provider_error_body(detail)   # body {"error":...} & co.
+            prov_err = is_provider_error_body(detail)  # body {"error":...} & co.
             prov_fault = is_provider_fault_body(detail)
             # QUOTA: la firma basta da sola. Alcuni provider (Cloudflare
             # Workers AI) usano un envelope {"errors":[{...}]} che NON passa
             # `prov_err`, ma il messaggio di quota e' inequivocabile.
-            quota_exhausted = bool(_QUOTA_EXHAUSTED_RE.search(detail)) if (
-                prov_err or abs(int(err.status or 0)) == 429) else False
+            quota_exhausted = (
+                bool(_QUOTA_EXHAUSTED_RE.search(detail)) if (prov_err or abs(int(err.status or 0)) == 429) else False
+            )
             transient = bool(_PROVIDER_TRANSIENT_RE.search(detail))
             # 403 di qualsiasi tipo: chiave/progetto rifiutato dal provider ->
             # deployment-side (mai colpa della richiesta), ruota (mai al client).
-            upstream403 = (err.status == -403)
+            upstream403 = err.status == -403
             # 401 upstream: la NOSTRA chiave e' rifiutata dal provider
             # (assente/invalidata/revocata). E' SEMPRE deployment-side: il
             # client si e' gia' autenticato da noi, quindi non e' colpa sua.
             # Ruota come il 403, mai pass-through.
-            upstream401 = (err.status == -401)
-            openai_sig = ("bad_response_status_code" in detail
-                          or "openai_error" in detail)
+            upstream401 = err.status == -401
+            openai_sig = "bad_response_status_code" in detail or "openai_error" in detail
             # 4xx con body d'errore ASSENTE/illeggibile (stream appeso ->
             # _safe_aread scaduto): non c'e' alcun messaggio azionabile per il
             # client -> NON e' un errore del client, e' infrastruttura ->
             # ruota + cooldown corto, mai pass-through (503 se catena esaurita).
-            empty_body = (not detail.strip()
-                          or "body non leggibile" in detail.lower()
-                          or len(detail.strip()) < 12)
+            empty_body = not detail.strip() or "body non leggibile" in detail.lower() or len(detail.strip()) < 12
             # motivo della classificazione deployment-side (per il log)
             if isinstance(err, StreamLoopDetected):
                 reason = "loop_detected"
@@ -5471,8 +5372,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # cooldown lungo via reason=timeout (timeout_cooldown_mult x).
                 reason = "timeout"
             else:
-                reason = ("http_%s" % err.status if err.status
-                          else "network")
+                reason = "http_%s" % err.status if err.status else "network"
             if err.status is not None and err.status < 0:
                 provider_side = (
                     (router.policy.qc_json.retry_provider_4xx and openai_sig)
@@ -5490,14 +5390,21 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # un aggregatore): chiave/quota satura = deployment-side,
                     # MAI un errore della richiesta -> ruota, mai pass-through.
                     or err.status == -429
-                    or err.status == -402)
+                    or err.status == -402
+                )
                 # né thought_signature né il body d'errore provider né
                 # il 403 sono rifiuti di modalita': non alimentano l'auto-
                 # learn (hook).
-                if (provider_side and hook and not thought_sig
-                        and not prov_err and not upstream403
-                        and not upstream401 and not prov_fault
-                        and media_sig):
+                if (
+                    provider_side
+                    and hook
+                    and not thought_sig
+                    and not prov_err
+                    and not upstream403
+                    and not upstream401
+                    and not prov_fault
+                    and media_sig
+                ):
                     try:
                         hook(dep["model"], detail)
                     except Exception:
@@ -5510,15 +5417,15 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # ruotano (e per i dim espliciti la ladder sale di dim).
                     _actual = extract_requested_tokens(detail)
                     try:
-                        router.note_session_overflow(
-                            ses, _actual or 0)
-                    except Exception:            # noqa: BLE001
+                        router.note_session_overflow(ses, _actual or 0)
+                    except Exception:  # noqa: BLE001
                         pass
-                    log.warning("[fallback] stream %s context_length_exceeded "
-                                "(%.90s): alzo la soglia sessione (%s) e ruoto",
-                                dep["unique"], detail,
-                                (">=%d tok" % _actual)
-                                if _actual else "ctx-sconosciuto")
+                    log.warning(
+                        "[fallback] stream %s context_length_exceeded (%.90s): alzo la soglia sessione (%s) e ruoto",
+                        dep["unique"],
+                        detail,
+                        (">=%d tok" % _actual) if _actual else "ctx-sconosciuto",
+                    )
                 # QUALSIASI altro non-200: ruota, mai pass-through al client.
                 # (La rotazione termina solo a catena esaurita: a quel punto
                 # _actionable_upstream_error consegna lo status vero oppure 503.)
@@ -5535,9 +5442,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # dichiarato il reset ("Resets in ..."); la nostra stima
                     # (mezzanotte UTC) resta 'heuristic' -> la SVEglia puo'
                     # comunque tentare il risveglio (regola utente).
-                    _prov_q = ("authoritative"
-                               if _QUOTA_RESET_RE.search(detail or "")
-                               else "heuristic")
+                    _prov_q = "authoritative" if _QUOTA_RESET_RE.search(detail or "") else "heuristic"
                     # Rilascia dep-sticky: questa key NON tornerà prima del
                     # reset; la sessione deve ripartire su un'altra chiave.
                     if ses:
@@ -5546,8 +5451,8 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                             router.dep_sticky_release(ses)
                 elif reason in ("provider_transient", "empty_error_body"):
                     _cd = router.escalate_cooldown(
-                        fwd.PROVIDER_TRANSIENT_COOLDOWN_S,
-                        router.stats_for(dep["unique"]).fail_count_24h)
+                        fwd.PROVIDER_TRANSIENT_COOLDOWN_S, router.stats_for(dep["unique"]).fail_count_24h
+                    )
                 elif reason == "model_missing":
                     _cd = fwd.MODEL_MISSING_COOLDOWN_S
                 elif reason == "upstream_403":
@@ -5584,58 +5489,79 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         _cur = router.dep_sticky_get(ses)
                         if _cur and _cur == dep["unique"]:
                             router.dep_sticky_release(ses)
-                    _fail(dep["unique"], reason="insufficient_balance",
-                          status=402, kind=fwd.ErrorKind.PERMANENT_DEAD)
-                    log.warning("[fallback] stream %s 402 'insufficient "
-                                "balance': DEPLOYMENT RITIRATO (sblocco "
-                                "manuale)", dep["unique"])
+                    _fail(dep["unique"], reason="insufficient_balance", status=402, kind=fwd.ErrorKind.PERMANENT_DEAD)
+                    log.warning(
+                        "[fallback] stream %s 402 'insufficient balance': DEPLOYMENT RITIRATO (sblocco manuale)",
+                        dep["unique"],
+                    )
                 else:
-                    _fail(dep["unique"], seconds=_cd, reason=reason,
-                          status=abs(err.status) if err.status else None,
-                          provenance=_prov_q)
-            nxt = _next_filtered(profile, dep, need, scope, ctx=ctx,
-                                 tried=tried_set,
-                                 requested_group=requested_group) \
-                if profile else None
+                    _fail(
+                        dep["unique"],
+                        seconds=_cd,
+                        reason=reason,
+                        status=abs(err.status) if err.status else None,
+                        provenance=_prov_q,
+                    )
+            nxt = (
+                _next_filtered(profile, dep, need, scope, ctx=ctx, tried=tried_set, requested_group=requested_group)
+                if profile
+                else None
+            )
             if nxt is not None and thought_sig and nxt["unique"] in attempts:
-                nxt = None                 # gruppo/catena tutto Gemini 3
-            log.warning("[fallback] stream %s %s motivo=%s -> %s :: %.120s",
-                        dep["unique"], err.status or "conn", reason,
-                        nxt["unique"] if nxt else "nessun alternativo", detail)
+                nxt = None  # gruppo/catena tutto Gemini 3
+            log.warning(
+                "[fallback] stream %s %s motivo=%s -> %s :: %.120s",
+                dep["unique"],
+                err.status or "conn",
+                reason,
+                nxt["unique"] if nxt else "nessun alternativo",
+                detail,
+            )
             if nxt is None or tried > _max_tries:
                 # ULTIMA RISORSA free (solo se -go/-fallback esaurito).
-                _over_dl = ((time.monotonic() - t_req) * 1000 >
-                            int(getattr(qcp, "stream_total_deadline_ms",
-                                        90000) or 90000))
+                _over_dl = (time.monotonic() - t_req) * 1000 > int(
+                    getattr(qcp, "stream_total_deadline_ms", 90000) or 90000
+                )
                 _flr = None
-                if (nxt is None and profile and not _over_dl
-                        and router._is_renewal_bucket(
-                            str(dep.get("group") or ""))):
+                if nxt is None and profile and not _over_dl and router._is_renewal_bucket(str(dep.get("group") or "")):
                     _flr = router._free_last_resort(
-                        dep, need, ctx, tried_set,
-                        refill_out_budget(payload, router.policy),
-                        requested_group)
+                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                    )
                 if _flr is not None:
                     nxt = _flr
                 else:
                     # errori AZIONABILI (auth/credito/permessi/modello assente/
                     # thought_signature) -> status vero. Il resto -> 503.
                     if _actionable_upstream_error(err) and err.status:
-                        return _ret(JSONResponse(status_code=abs(err.status),
-                                                 content={
-                            "error": {"message": err.detail,
-                                      "type": "upstream_error"}}))
-                    _emit_summary(ses=ses or "-", req=req or "-",
-                                  grp=dep.get("group"), dep=dep.get("unique"),
-                                  tries=len(attempts),
-                                  fb=max(0, len(attempts) - 1),
-                                  dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=client_stream, qc=True, wd="chain-exhausted",
-                                  ttfb_ms=ttfb_ms, usage=None)
-                    return _ret(_exhausted(len(attempts), err.detail,
-                                           prefix_reason=prefix_reason,
-                                           trail=trail,
-                                           retry_at_ms=_retry_at_ms(router, trail)))
+                        return _ret(
+                            JSONResponse(
+                                status_code=abs(err.status),
+                                content={"error": {"message": err.detail, "type": "upstream_error"}},
+                            )
+                        )
+                    _emit_summary(
+                        ses=ses or "-",
+                        req=req or "-",
+                        grp=dep.get("group"),
+                        dep=dep.get("unique"),
+                        tries=len(attempts),
+                        fb=max(0, len(attempts) - 1),
+                        dur_ms=int((time.monotonic() - t_req) * 1000),
+                        stream=client_stream,
+                        qc=True,
+                        wd="chain-exhausted",
+                        ttfb_ms=ttfb_ms,
+                        usage=None,
+                    )
+                    return _ret(
+                        _exhausted(
+                            len(attempts),
+                            err.detail,
+                            prefix_reason=prefix_reason,
+                            trail=trail,
+                            retry_at_ms=_retry_at_ms(router, trail),
+                        )
+                    )
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -5651,41 +5577,50 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 router.note_end(dep["unique"], ctx)
             except Exception:
                 pass
-            _fail(dep["unique"], seconds=_soft_cd(
-                router.stats_for(dep["unique"]).fail_count_24h))
-            nxt = _next_filtered(profile, dep, need, scope, ctx=ctx,
-                                 tried=tried_set,
-                                 requested_group=requested_group) \
-                if profile else None
-            log.warning("[fallback] stream %s errore imprevisto %r -> %s",
-                        dep["unique"], exc,
-                        nxt["unique"] if nxt else "503")
+            _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+            nxt = (
+                _next_filtered(profile, dep, need, scope, ctx=ctx, tried=tried_set, requested_group=requested_group)
+                if profile
+                else None
+            )
+            log.warning(
+                "[fallback] stream %s errore imprevisto %r -> %s", dep["unique"], exc, nxt["unique"] if nxt else "503"
+            )
             if nxt is None or tried > _max_tries:
-                _over_dl = ((time.monotonic() - t_req) * 1000 >
-                            int(getattr(qcp, "stream_total_deadline_ms",
-                                        90000) or 90000))
+                _over_dl = (time.monotonic() - t_req) * 1000 > int(
+                    getattr(qcp, "stream_total_deadline_ms", 90000) or 90000
+                )
                 _flr = None
-                if (nxt is None and profile and not _over_dl
-                        and router._is_renewal_bucket(
-                            str(dep.get("group") or ""))):
+                if nxt is None and profile and not _over_dl and router._is_renewal_bucket(str(dep.get("group") or "")):
                     _flr = router._free_last_resort(
-                        dep, need, ctx, tried_set,
-                        refill_out_budget(payload, router.policy),
-                        requested_group)
+                        dep, need, ctx, tried_set, refill_out_budget(payload, router.policy), requested_group
+                    )
                 if _flr is not None:
                     nxt = _flr
                 else:
-                    _emit_summary(ses=ses or "-", req=req or "-",
-                                  grp=dep.get("group"), dep=dep.get("unique"),
-                                  tries=len(attempts),
-                                  fb=max(0, len(attempts) - 1),
-                                  dur_ms=int((time.monotonic() - t_req) * 1000),
-                                  stream=client_stream, qc=True, wd="chain-exhausted",
-                                  ttfb_ms=ttfb_ms, usage=None)
-                    return _ret(_exhausted(len(attempts), repr(exc)[:160],
-                                           prefix_reason=prefix_reason,
-                                           trail=trail,
-                                           retry_at_ms=_retry_at_ms(router, trail)))
+                    _emit_summary(
+                        ses=ses or "-",
+                        req=req or "-",
+                        grp=dep.get("group"),
+                        dep=dep.get("unique"),
+                        tries=len(attempts),
+                        fb=max(0, len(attempts) - 1),
+                        dur_ms=int((time.monotonic() - t_req) * 1000),
+                        stream=client_stream,
+                        qc=True,
+                        wd="chain-exhausted",
+                        ttfb_ms=ttfb_ms,
+                        usage=None,
+                    )
+                    return _ret(
+                        _exhausted(
+                            len(attempts),
+                            repr(exc)[:160],
+                            prefix_reason=prefix_reason,
+                            trail=trail,
+                            retry_at_ms=_retry_at_ms(router, trail),
+                        )
+                    )
             if ses:
                 router.sticky_handoff(ses, nxt)
             dep = nxt
@@ -5700,13 +5635,20 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         if _synth:
             for _b in _synth:
                 yield _b
-            _emit_summary(ses=ses or "-", req=req or "-",
-                          grp=dep["group"], dep=dep["unique"],
-                          tries=len(attempts),
-                          fb=max(0, len(attempts) - 1),
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=client_stream, qc=False, wd="text-toolcall",
-                          ttfb_ms=ttfb_ms, usage=None)
+            _emit_summary(
+                ses=ses or "-",
+                req=req or "-",
+                grp=dep["group"],
+                dep=dep["unique"],
+                tries=len(attempts),
+                fb=max(0, len(attempts) - 1),
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=client_stream,
+                qc=False,
+                wd="text-toolcall",
+                ttfb_ms=ttfb_ms,
+                usage=None,
+            )
             _note_fb_refund(router, ses, max(0, len(attempts) - 1))
             return
         sent_first = False
@@ -5717,25 +5659,34 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
         wd: str | None = None
         usage_final: dict | None = None
         sum_sent = False
-        answer_total = 0                  # solo testo risposta (D2/C)
-        req_has_input = not _payload_text_empty(payload)   # D2/C
-        finish_len = False                 # finish_reason == "length" (D2/C)
-        saw_finish_reason = False          # QUALSIASI finish_reason non nullo
+        answer_total = 0  # solo testo risposta (D2/C)
+        req_has_input = not _payload_text_empty(payload)  # D2/C
+        finish_len = False  # finish_reason == "length" (D2/C)
+        saw_finish_reason = False  # QUALSIASI finish_reason non nullo
         last_finish_reason: str | None = None  # ultimo finish_reason visto
-        had_tool_calls = False             # tool_calls visti (D2/C)
-        req_max_tokens = (payload.get("max_tokens")
-                          or payload.get("max_completion_tokens"))
+        had_tool_calls = False  # tool_calls visti (D2/C)
+        req_max_tokens = payload.get("max_tokens") or payload.get("max_completion_tokens")
 
         def _summary(dur_ms: int) -> None:
             nonlocal sum_sent
             if sum_sent:
                 return
             sum_sent = True
-            _emit_summary(ses=ses or "-", req=req or "-", grp=dep["group"],
-                          dep=dep["unique"], tries=len(attempts),
-                          fb=max(0, len(attempts) - 1), dur_ms=dur_ms,
-                          stream=client_stream, qc=False, wd=wd, ttfb_ms=ttfb_ms,
-                          fr=last_finish_reason, usage=usage_final)
+            _emit_summary(
+                ses=ses or "-",
+                req=req or "-",
+                grp=dep["group"],
+                dep=dep["unique"],
+                tries=len(attempts),
+                fb=max(0, len(attempts) - 1),
+                dur_ms=dur_ms,
+                stream=client_stream,
+                qc=False,
+                wd=wd,
+                ttfb_ms=ttfb_ms,
+                fr=last_finish_reason,
+                usage=usage_final,
+            )
             _note_fb_refund(router, ses, max(0, len(attempts) - 1))
 
         # corpo del loop fattorizzato: aggiorna lo stato watchdog ed emette
@@ -5751,20 +5702,18 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 seen_done = True
             if b'data: {"error"' in chunk:
                 seen_error = True
-            if usage_final is None and b'"usage"' in chunk and \
-                    chunks > 1:      # parse best-effort del chunk usage
+            if usage_final is None and b'"usage"' in chunk and chunks > 1:  # parse best-effort del chunk usage
                 try:
-                    line = next((ln for ln in chunk.split(b"\n")
-                                 if ln.startswith(b"data:") and
-                                 b'"usage"' in ln), None)
+                    line = next((ln for ln in chunk.split(b"\n") if ln.startswith(b"data:") and b'"usage"' in ln), None)
                     if line:
                         obj = json.loads(line[5:].strip())
                         u = obj.get("usage")
                         if isinstance(u, dict):
                             usage_final = {
-                                k: u[k] for k in
-                                ("prompt_tokens", "completion_tokens",
-                                 "total_tokens") if u.get(k) is not None}
+                                k: u[k]
+                                for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                                if u.get(k) is not None
+                            }
                             _cached = _cached_tokens_of(u)
                             if _cached is not None:
                                 usage_final["cached_tokens"] = _cached
@@ -5780,23 +5729,21 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # F14: calibrazione closed-loop dell'estimator col prompt_tokens
             # reale del provider (stream: arriva nel chunk finale di usage).
             try:
-                if isinstance(usage_final, dict) \
-                        and usage_final.get("prompt_tokens"):
-                    router.note_estimate_error(
-                        dep["unique"], ctx, usage_final["prompt_tokens"])
+                if isinstance(usage_final, dict) and usage_final.get("prompt_tokens"):
+                    router.note_estimate_error(dep["unique"], ctx, usage_final["prompt_tokens"])
                     # Stima per-sessione (stream): char REALI inviati a monte.
                     router.note_session_estimate(
                         ses,
                         est_chars,
-                        _prompt_chars(payload.get("messages"),
-                                      payload.get("tools")),
-                        usage_final["prompt_tokens"])
+                        _prompt_chars(payload.get("messages"), payload.get("tools")),
+                        usage_final["prompt_tokens"],
+                    )
                     metrics.inc("nx_sess_est_samples_total")
             except Exception:
                 pass
             for o in _sse_data_objs(chunk):
                 answer_total += _answer_chars(o)
-                for ch in (o.get("choices") or []):
+                for ch in o.get("choices") or []:
                     if not isinstance(ch, dict):
                         continue
                     fr = ch.get("finish_reason")
@@ -5809,13 +5756,13 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     if isinstance(d, dict) and d.get("tool_calls"):
                         had_tool_calls = True
             if not sent_first:
-                sent_first = True      # TTFB gia' presa agli header upstream
+                sent_first = True  # TTFB gia' presa agli header upstream
             return chunk
 
         gen_broken = False
-        gen_stall = False          # stall mid-stream rilevato (anti-stall)
-        gen_loop = False           # loop degenere rilevato in streaming
-        aborted = False            # client disconnesso durante lo stream
+        gen_stall = False  # stall mid-stream rilevato (anti-stall)
+        gen_loop = False  # loop degenere rilevato in streaming
+        aborted = False  # client disconnesso durante lo stream
         monitor: asyncio.Task | None = None
         # il task che sta eseguendo QUESTO generator (sse): e' lui che va
         # cancellato per interrompere SUBITO l'attesa upstream. asyncio
@@ -5863,8 +5810,7 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             # OUTPUT STRUTTURATO (HOLD): se il content e' stato pulito/riparato
             # prima di inviare i byte, si emette il testo sanificato al posto
             # dell'originale (finish_reason/usage/[DONE] preservati).
-            _emit_chunks = (_collapse_sse_content(prebuf, _so_text)
-                            if _so_rewrite else prebuf)
+            _emit_chunks = _collapse_sse_content(prebuf, _so_text) if _so_rewrite else prebuf
             for chunk in _emit_chunks:
                 yield _strip_sse_content(_ingest(chunk), _stripper)
             if pending is not None:
@@ -5873,20 +5819,19 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 except StopAsyncIteration:
                     finished = True
                 except Exception:
-                    gen_broken = True     # upstream rotto a meta' frame
+                    gen_broken = True  # upstream rotto a meta' frame
             if not finished and not gen_broken:
                 async for chunk in gen:
                     yield _strip_sse_content(_ingest(chunk), _stripper)
-                finished = True             # StopAsyncIteration: stream chiuso
+                finished = True  # StopAsyncIteration: stream chiuso
             if _stripper.tail:
-                log.debug("[strip-tokens] coda residua scartata a fine stream "
-                          "(len=%d)", len(_stripper.tail))
+                log.debug("[strip-tokens] coda residua scartata a fine stream (len=%d)", len(_stripper.tail))
         except (GeneratorExit, asyncio.CancelledError):
             # disconnessione client o aborted dal monitor: chiudi l'upstream e
             # non punire il deployment (e' il client che e' andato via).
             if not aborted:
                 await _discard_stream(gen, pending)
-            raise                          # disconnessione client: non punire
+            raise  # disconnessione client: non punire
         except Exception as exc:
             gen_broken = True
             # anti-stall: StreamStallError e' un asyncio.TimeoutError -> danno
@@ -5902,9 +5847,11 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                 # F1: durata TOTALE del tentativo vincente nel bucket di
                 # contesto (il commit ha gia' registrato il TTFT).
                 router.note_stream_end(
-                    dep["unique"], (time.monotonic() - t_att) * 1000, ctx,
-                    completion_tokens=(usage_final or {}).get(
-                        "completion_tokens"))
+                    dep["unique"],
+                    (time.monotonic() - t_att) * 1000,
+                    ctx,
+                    completion_tokens=(usage_final or {}).get("completion_tokens"),
+                )
             # NB (fix): il watchdog NON inietta mai nulla nello stream verso il
             # client (un `data:` non-conforme viene renderizzato come testo da
             # opencode & simili). L'unica reazione automatica e' il cooldown del
@@ -5915,33 +5862,29 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # client disconnesso a meta' stream: NON e' colpa del
                     # deployment -> nessun cooldown, solo log diagnostico.
                     wd = "client-aborted"
-                    log.info("[watchdog] client disconnesso durante lo stream "
-                             "da %s (chunks=%d)", dep["unique"], chunks)
+                    log.info("[watchdog] client disconnesso durante lo stream da %s (chunks=%d)", dep["unique"], chunks)
                 elif chunks == 0:
                     wd = "tier1-empty"
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "empty"))
-                    log.warning("[watchdog] tier1 stream VUOTO da %s "
-                                "(chunks=0): cooldown", dep["unique"])
-                    _fail(dep["unique"], seconds=_soft_cd(
-                        router.stats_for(dep["unique"]).fail_count_24h))
+                    log.warning("[watchdog] tier1 stream VUOTO da %s (chunks=0): cooldown", dep["unique"])
+                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
                 elif seen_error:
                     wd = "tier1-error"
                     metrics.inc("nx_qc_watchdog_total", (dep["unique"], "error"))
-                    log.warning("[watchdog] tier1 evento error esplicito "
-                                "da %s (chunks=%d)", dep["unique"], chunks)
-                    _fail(dep["unique"], seconds=_soft_cd(
-                        router.stats_for(dep["unique"]).fail_count_24h))
+                    log.warning("[watchdog] tier1 evento error esplicito da %s (chunks=%d)", dep["unique"], chunks)
+                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
                 elif gen_loop:
                     # loop degenere: il modello streammava output ripetitivo,
                     # il detector l'ha killato -> cooldown medio e riparti.
                     wd = "loop-detected"
-                    metrics.inc("nx_qc_watchdog_total",
-                                (dep["unique"], "loop"))
-                    log.warning("[watchdog] stream in LOOP da %s (chunks=%d): "
-                                "kill precoce, cooldown %ds",
-                                dep["unique"], chunks, fwd.STREAM_LOOP_COOLDOWN_S)
-                    _fail(dep["unique"], seconds=fwd.STREAM_LOOP_COOLDOWN_S,
-                          reason="loop_detected")
+                    metrics.inc("nx_qc_watchdog_total", (dep["unique"], "loop"))
+                    log.warning(
+                        "[watchdog] stream in LOOP da %s (chunks=%d): kill precoce, cooldown %ds",
+                        dep["unique"],
+                        chunks,
+                        fwd.STREAM_LOOP_COOLDOWN_S,
+                    )
+                    _fail(dep["unique"], seconds=fwd.STREAM_LOOP_COOLDOWN_S, reason="loop_detected")
                 elif gen_broken or (not seen_done and not saw_finish_reason):
                     # troncamento GENUINO: stream rotto a meta' oppure niente
                     # [DONE] E niente finish_reason -> il modello ha scazzato.
@@ -5949,34 +5892,38 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                         # upstream "congelato" a meta' stream (nessun byte per
                         # stream_stall_sec): danno REALE -> cooldown lungo.
                         wd = "tier2-stall"
-                        metrics.inc("nx_qc_watchdog_total",
-                                    (dep["unique"], "stall"))
-                        log.warning("[watchdog] tier2 stream in STALLO da %s "
-                                    "(chunk=%d, stall=%.0fs): cooldown",
-                                    dep["unique"], chunks,
-                                    float(getattr(router.policy,
-                                                  "stream_stall_sec", 0) or 0))
+                        metrics.inc("nx_qc_watchdog_total", (dep["unique"], "stall"))
+                        log.warning(
+                            "[watchdog] tier2 stream in STALLO da %s (chunk=%d, stall=%.0fs): cooldown",
+                            dep["unique"],
+                            chunks,
+                            float(getattr(router.policy, "stream_stall_sec", 0) or 0),
+                        )
                         _fail(dep["unique"], reason="timeout")
                     else:
                         wd = "tier2-truncated"
-                        metrics.inc("nx_qc_watchdog_total",
-                                    (dep["unique"], "truncated"))
-                        log.warning("[watchdog] tier2 stream TRONCATO da %s "
-                                    "(chunk=%d, finish_reason=%s): cooldown",
-                                    dep["unique"], chunks, saw_finish_reason)
-                        _fail(dep["unique"], seconds=_soft_cd(
-                            router.stats_for(dep["unique"]).fail_count_24h))
+                        metrics.inc("nx_qc_watchdog_total", (dep["unique"], "truncated"))
+                        log.warning(
+                            "[watchdog] tier2 stream TRONCATO da %s (chunk=%d, finish_reason=%s): cooldown",
+                            dep["unique"],
+                            chunks,
+                            saw_finish_reason,
+                        )
+                        _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
                 elif not seen_done:
                     # c'e' un finish_reason ma manca [DONE]: risposta di fatto
                     # completa, il provider omette solo il sentinel. Solo log.
                     wd = "tier2-no-done"
-                    log.info("[watchdog] tier2 %s: finish_reason presente, "
-                             "nessun [DONE] (provider senza sentinel)",
-                             dep["unique"])
-                elif (finish_len and _maxtok.get("cap")
-                      and (usage_final or {}).get("completion_tokens") is not None
-                      and int((usage_final or {}).get("completion_tokens"))
-                          >= int(_maxtok["cap"]) - 2):
+                    log.info(
+                        "[watchdog] tier2 %s: finish_reason presente, nessun [DONE] (provider senza sentinel)",
+                        dep["unique"],
+                    )
+                elif (
+                    finish_len
+                    and _maxtok.get("cap")
+                    and (usage_final or {}).get("completion_tokens") is not None
+                    and int((usage_final or {}).get("completion_tokens")) >= int(_maxtok["cap"]) - 2
+                ):
                     # Troncatura AUTO-INFLITTA: il gateway ha clampato
                     # max_tokens e il modello ha esaurito ESATTAMENTE quel
                     # budget (finish_reason=length). Non e' colpa del
@@ -5984,56 +5931,74 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                     # partiti). Serve a non far scattare il cooldown
                     # zero-answer/length-truncated su risposte monche nostre.
                     wd = "clamp-truncated"
-                    log.info("[watchdog] %s: risposta troncata dal clamp "
-                             "gateway (max_tokens %s->%s, completion=%s): "
-                             "nessuna penale", dep["unique"],
-                             _maxtok.get("old"), _maxtok["cap"],
-                             (usage_final or {}).get("completion_tokens"))
-                elif _length_truncated_should_fail(
-                        finish_len, answer_total, req_max_tokens,
+                    log.info(
+                        "[watchdog] %s: risposta troncata dal clamp "
+                        "gateway (max_tokens %s->%s, completion=%s): "
+                        "nessuna penale",
+                        dep["unique"],
+                        _maxtok.get("old"),
+                        _maxtok["cap"],
                         (usage_final or {}).get("completion_tokens"),
-                        router.policy.qc_sanity.rotate_on_length_truncated):
+                    )
+                elif _length_truncated_should_fail(
+                    finish_len,
+                    answer_total,
+                    req_max_tokens,
+                    (usage_final or {}).get("completion_tokens"),
+                    router.policy.qc_sanity.rotate_on_length_truncated,
+                ):
                     # risposta TRONCATA dal modello (finish_reason=length) ma
                     # con contenuto: come un errore -> cooldown del dep, cosi'
                     # le prossime richieste ruotano su un altro modello.
                     # (La risposta corrente e' gia' partita: non e' ritraibile.)
                     wd = "length-truncated"
-                    metrics.inc("nx_qc_watchdog_total",
-                                (dep["unique"], "length_truncated"))
-                    log.warning("[watchdog] risposta TRONCATA (finish_reason="
-                                "length) da %s (chunk=%d, answer=%d, "
-                                "completion=%s, req_max=%s): cooldown + "
-                                "rotazione", dep["unique"], chunks, answer_total,
-                                (usage_final or {}).get("completion_tokens"),
-                                req_max_tokens)
-                    _fail(dep["unique"], seconds=_soft_cd(
-                        router.stats_for(dep["unique"]).fail_count_24h))
-                elif (answer_total == 0 and req_has_input and not had_tool_calls
-                      and not (finish_len and not
-                               router.policy.qc_sanity.rotate_on_length_empty)):
+                    metrics.inc("nx_qc_watchdog_total", (dep["unique"], "length_truncated"))
+                    log.warning(
+                        "[watchdog] risposta TRONCATA (finish_reason="
+                        "length) da %s (chunk=%d, answer=%d, "
+                        "completion=%s, req_max=%s): cooldown + "
+                        "rotazione",
+                        dep["unique"],
+                        chunks,
+                        answer_total,
+                        (usage_final or {}).get("completion_tokens"),
+                        req_max_tokens,
+                    )
+                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
+                elif (
+                    answer_total == 0
+                    and req_has_input
+                    and not had_tool_calls
+                    and not (finish_len and not router.policy.qc_sanity.rotate_on_length_empty)
+                ):
                     # stream "completo" ma 0 testo di risposta con input reale:
                     # fallimento silenzioso -> cooldown (nessun artefatto verso
                     # il client: i byte, per quanto vuoti, sono gia' partiti).
                     wd = "zero-answer"
-                    metrics.inc("nx_qc_watchdog_total",
-                                (dep["unique"], "zero_answer"))
-                    log.warning("[watchdog] stream 0-answer da %s (input non "
-                                "vuoto, finish_len=%s): cooldown",
-                                dep["unique"], finish_len)
-                    _fail(dep["unique"], seconds=_soft_cd(
-                        router.stats_for(dep["unique"]).fail_count_24h))
+                    metrics.inc("nx_qc_watchdog_total", (dep["unique"], "zero_answer"))
+                    log.warning(
+                        "[watchdog] stream 0-answer da %s (input non vuoto, finish_len=%s): cooldown",
+                        dep["unique"],
+                        finish_len,
+                    )
+                    _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
             _summary(dur_ms)
             if sniffer is not None:
-                sniffer.finish_stream({
-                    "status": "success" if (finished and not gen_broken)
-                    else ("aborted" if aborted else "broken"),
-                    "wd": wd, "chunks": chunks, "answer_chars": answer_total,
-                    "had_tool_calls": had_tool_calls,
-                    "finish_reason_len": finish_len,
-                    "saw_finish_reason": saw_finish_reason,
-                    "seen_done": seen_done, "usage": usage_final,
-                    "dep_final": dep.get("unique"), "tries": len(attempts),
-                })
+                sniffer.finish_stream(
+                    {
+                        "status": "success" if (finished and not gen_broken) else ("aborted" if aborted else "broken"),
+                        "wd": wd,
+                        "chunks": chunks,
+                        "answer_chars": answer_total,
+                        "had_tool_calls": had_tool_calls,
+                        "finish_reason_len": finish_len,
+                        "saw_finish_reason": saw_finish_reason,
+                        "seen_done": seen_done,
+                        "usage": usage_final,
+                        "dep_final": dep.get("unique"),
+                        "tries": len(attempts),
+                    }
+                )
 
     return _ret(StreamingResponse(sse(), media_type="text/event-stream"))
 
@@ -6055,8 +6020,9 @@ def _public_base_url(request: Request) -> str:
     if cfg:
         return cfg.rstrip("/")
     proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
-    host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip() \
-        or (request.headers.get("host") or "").strip()
+    host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip() or (
+        request.headers.get("host") or ""
+    ).strip()
     if not proto:
         proto = "https" if request.url.scheme == "https" else "http"
     if host:
@@ -6069,12 +6035,11 @@ def _b64decode(s):
     try:
         data = str(s or "")
         return base64.b64decode(data + "=" * (-len(data) % 4))
-    except Exception:                                         # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return None
 
 
-async def _download_remote_image(url: str, *, timeout: float,
-                                 max_bytes: int) -> tuple[bytes, str] | None:
+async def _download_remote_image(url: str, *, timeout: float, max_bytes: int) -> tuple[bytes, str] | None:
     """Scarica un'immagine da un URL http(s) del provider (mirror locale).
 
     Ritorna (bytes, content_type) oppure None su errore/superamento del cap."""
@@ -6082,8 +6047,7 @@ async def _download_remote_image(url: str, *, timeout: float,
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cli:
             async with cli.stream("GET", url) as resp:
                 if resp.status_code >= 400:
-                    log.debug("[images] mirror %s: status %s", url,
-                              resp.status_code)
+                    log.debug("[images] mirror %s: status %s", url, resp.status_code)
                     return None
                 ctype = resp.headers.get("content-type") or ""
                 chunks: list[bytes] = []
@@ -6091,14 +6055,13 @@ async def _download_remote_image(url: str, *, timeout: float,
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if max_bytes and total > max_bytes:
-                        log.warning("[images] mirror %s: supera %d byte",
-                                    url, max_bytes)
+                        log.warning("[images] mirror %s: supera %d byte", url, max_bytes)
                         return None
                     chunks.append(chunk)
                 if not chunks:
                     return None
                 return b"".join(chunks), ctype
-    except Exception as exc:                                  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.warning("[images] mirror %s fallito: %s", url, exc, exc_info=True)
         return None
 
@@ -6135,8 +6098,7 @@ async def _localize_images(request: Request, items):
                 data_bytes = _b64decode(parsed[1])
         elif b64:
             data_bytes = _b64decode(b64)
-        elif mirror and isinstance(url, str) \
-                and url.startswith(("http://", "https://")):
+        elif mirror and isinstance(url, str) and url.startswith(("http://", "https://")):
             got = await _download_remote_image(url, timeout=tmo, max_bytes=rmax)
             if got:
                 data_bytes, mime = got
@@ -6168,8 +6130,11 @@ def _images_group_for_base(prof: str, need: frozenset[str]) -> str | None:
     del routing (free, poi -go, poi -fallback). Ritorna None se il profilo non
     ha quel gruppo."""
     base = f"{router.config.proxy_prefix}{prof}"
-    for suffix in ("", getattr(router.policy, "go_suffix", "-go"),
-                   getattr(router.policy, "fallback_suffix", "-fallback")):
+    for suffix in (
+        "",
+        getattr(router.policy, "go_suffix", "-go"),
+        getattr(router.policy, "fallback_suffix", "-fallback"),
+    ):
         g = f"{base}-image_gen{suffix}"
         if g in router.config.groups:
             return g
@@ -6214,16 +6179,15 @@ def _cap_chain_pick(prof: str, need: frozenset[str]) -> dict | None:
     return got[0] if got else None
 
 
-def _images_pick_dep(profile: str | None, model: str, raw_model: str,
-                     session_id: str | None, need: frozenset[str],
-                     payload: dict):
+def _images_pick_dep(
+    profile: str | None, model: str, raw_model: str, session_id: str | None, need: frozenset[str], payload: dict
+):
     """Risoluzione del primo deployment per gli endpoint immagini.
 
     Ritorna (dep, profile_effettivo, scope, error_response). `need` vuoto =
     nessun filtro capacità (routing disattivato)."""
     scope = "group" if router.is_explicit(model) else "chain"
-    prof = profile or config.profile_of_base(model.split("__")[0]) \
-        or config.profile_of_base(model)
+    prof = profile or config.profile_of_base(model.split("__")[0]) or config.profile_of_base(model)
     # Modello BASE o con suffisso DIM (`-200k`, `-262k`): il nome non porta
     # una capacita'. La risoluzione generica li manderebbe nel mondo TESTO (per
     # il sizing del contesto) e il dep scelto non genererebbe immagini. La
@@ -6232,8 +6196,7 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
     # non entra. Prima si prova la catena capability (che attraversa free/go/
     # fallback di tutte le righe image del profilo), e solo se non porta nulla
     # si ripiega sul gruppo image_gen.
-    dim_or_base = bool(prof) and model.rstrip("/").startswith(
-        f"{router.config.proxy_prefix}{prof}")
+    dim_or_base = bool(prof) and model.rstrip("/").startswith(f"{router.config.proxy_prefix}{prof}")
     if dim_or_base and need:
         dep_cap = _cap_chain_pick(prof, need)
         if dep_cap is not None:
@@ -6241,8 +6204,7 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
         _cap_g = _images_group_for_base(prof, need)
         group_or_explicit = _cap_g if _cap_g else None
     else:
-        group_or_explicit = router.resolve_group_for_request(
-            model, [], session_id, need, profile=prof)
+        group_or_explicit = router.resolve_group_for_request(model, [], session_id, need, profile=prof)
     if group_or_explicit is None:
         # Due cause diverse, due messaggi diversi:
         #  a) il MODELLO ESPLICITO esiste ma non dichiara la capacita' ->
@@ -6251,36 +6213,68 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
         #     alla configurazione e' corretto.
         _missing = router._missing_media_caps(model, need)
         if _missing:
-            return None, prof, scope, JSONResponse(
-                status_code=400, content={
+            return (
+                None,
+                prof,
+                scope,
+                JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": (
+                                f"il modello '{model}' non supporta: "
+                                f"{', '.join(_missing)}. Usa un modello "
+                                f"con capacita' {'+'.join(_missing)}."
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "model_capability_unsupported",
+                            "missing_capabilities": _missing,
+                        }
+                    },
+                ),
+            )
+        return (
+            None,
+            prof,
+            scope,
+            JSONResponse(
+                status_code=400 if need else 404,
+                content={
                     "error": {
-                        "message": (f"il modello '{model}' non supporta: "
-                                    f"{', '.join(_missing)}. Usa un modello "
-                                    f"con capacita' {'+'.join(_missing)}."),
+                        "message": (
+                            f"nessun deployment dichiara "
+                            f"{'+'.join(sorted(need)) or 'image_gen'}: configura "
+                            "capability_routing.model_capabilities in gateway.yaml"
+                            if need
+                            else f"model '{model}' not managed by {policy.service_name}"
+                        ),
                         "type": "invalid_request_error",
-                        "code": "model_capability_unsupported",
-                        "missing_capabilities": _missing}})
-        return None, prof, scope, JSONResponse(
-            status_code=400 if need else 404, content={
-                "error": {"message":
-                          (f"nessun deployment dichiara "
-                           f"{'+'.join(sorted(need)) or 'image_gen'}: configura "
-                           "capability_routing.model_capabilities in gateway.yaml"
-                           if need else
-                           f"model '{model}' not managed by {policy.service_name}"),
-                          "type": "invalid_request_error"}})
+                    }
+                },
+            ),
+        )
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
         dep = router.pick_deployment(group_or_explicit, need)
     if dep is None and prof:
-        dep = router.fallback_after(prof, None, need,
-                                    out_tokens=refill_out_budget(
-                                        payload, router.policy))
+        dep = router.fallback_after(prof, None, need, out_tokens=refill_out_budget(payload, router.policy))
     if dep is None:
-        return None, prof, scope, JSONResponse(status_code=400, content={
-            "error": {"message": (f"nessun deployment disponibile che dichiari "
-                                  f"{'+'.join(sorted(need)) or 'image_gen'}"),
-                      "type": "invalid_request_error"}})
+        return (
+            None,
+            prof,
+            scope,
+            JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": (
+                            f"nessun deployment disponibile che dichiari {'+'.join(sorted(need)) or 'image_gen'}"
+                        ),
+                        "type": "invalid_request_error",
+                    }
+                },
+            ),
+        )
     return dep, prof, scope, None
 
 
@@ -6293,19 +6287,32 @@ def _images_pick_dep(profile: str | None, model: str, raw_model: str,
 # un deployment CHAT-ONLY (image_via="chat", es. gemini-image) resta servito dal
 # motore chat. Con image_via="both" si prova la strada naturale (chat) e si
 # adatta sull'errore "only supported on /v1/images" se il provider lo segnala.
-async def _chat_via_images(request: Request, *, dep: dict, payload: dict,
-                           refs: list[str], session_id: str | None,
-                           raw_model: str, profile: str | None,
-                           model: str) -> dict | None:
+async def _chat_via_images(
+    request: Request,
+    *,
+    dep: dict,
+    payload: dict,
+    refs: list[str],
+    session_id: str | None,
+    raw_model: str,
+    profile: str | None,
+    model: str,
+) -> dict | None:
     """Chiamata nativa /images/* per un deployment image-native; ritorna il
     body chat.completion con le immagini dentro `choices[0].message.images`
     (None se l'upstream non ha restituito immagini)."""
     endpoint = "edits" if refs else "generations"
     body = images_payload_from_chat(payload, refs=refs)
     data = await forwarder.call_images(
-        dep, body, profile=profile or "", client_ip=_client_ip(request),
+        dep,
+        body,
+        profile=profile or "",
+        client_ip=_client_ip(request),
         session=_opencode_session(request) or session_id,
-        attribution=_client_attribution(request), endpoint=endpoint, refs=refs)
+        attribution=_client_attribution(request),
+        endpoint=endpoint,
+        refs=refs,
+    )
     return images_response_to_chat(data, model)
 
 
@@ -6327,18 +6334,17 @@ def _profile_of_request(model: str, auth_profile: str | None) -> str | None:
     # prova a toglierli uno a uno (dim, -go, -fallback, -C).
     base = model.split("__")[0]
     if base.startswith(config.proxy_prefix):
-        for suf in sorted(config.known_suffixes(),
-                          key=len, reverse=True) + [""]:
-            stem = base[:-len(suf)] if suf and base.endswith(suf) else base
+        for suf in sorted(config.known_suffixes(), key=len, reverse=True) + [""]:
+            stem = base[: -len(suf)] if suf and base.endswith(suf) else base
             p = config.profile_of_base(stem)
             if p:
                 return p
     return None
 
 
-async def _image_chat_intercept(request: Request, *, payload: dict,
-                                model: str, raw_model: str, auth: AuthResult,
-                                session_id: str | None):
+async def _image_chat_intercept(
+    request: Request, *, payload: dict, model: str, raw_model: str, auth: AuthResult, session_id: str | None
+):
     """Gestisce una richiesta CHAT che vuole immagini in output.
 
     Ritorna una Response JSON (chat.completion con immagini) se il deployment
@@ -6351,23 +6357,23 @@ async def _image_chat_intercept(request: Request, *, payload: dict,
     need = frozenset({"image_gen"})
     if payload.get("messages"):
         # se il client ha mandate immagini di input, serve anche image_edit
-        if any(isinstance(p, dict) and p.get("type") in ("image_url",
-                                                          "input_image")
-               for m in payload["messages"] if isinstance(m, dict)
-               for p in ((m.get("content") or [])
-                         if isinstance(m.get("content"), list) else [])):
+        if any(
+            isinstance(p, dict) and p.get("type") in ("image_url", "input_image")
+            for m in payload["messages"]
+            if isinstance(m, dict)
+            for p in ((m.get("content") or []) if isinstance(m.get("content"), list) else [])
+        ):
             need = need | {"image_edit"}
     prompt, refs = chat_prompt_and_refs(payload.get("messages") or [])
     if not prompt.strip():
-        return None                      # niente prompt: non e' una richiesta immagine
+        return None  # niente prompt: non e' una richiesta immagine
     prof = _profile_of_request(model, auth.profile)
     # Il nome richiesto e' generico o con suffisso DIM? Allora il dep va
     # cercato nella catena CAPABILITY del profilo, che attraversa free, -go e
     # -fallback: lo stesso "camaleontismo" con cui il routing sale di dim
     # quando il contesto non entra. Un modello ESPLICITO di immagine
     # (`gemini31-image`) resta invece sul suo gruppo-alias.
-    forced = bool(prof) and model.rstrip("/").startswith(
-        f"{router.config.proxy_prefix}{prof}")
+    forced = bool(prof) and model.rstrip("/").startswith(f"{router.config.proxy_prefix}{prof}")
 
     async def _serve(dep: dict, profile: str | None):
         """Serve UNA richiesta immagine sul deployment `dep`; ritorna il body
@@ -6375,40 +6381,45 @@ async def _image_chat_intercept(request: Request, *, payload: dict,
         via = dep_image_via(dep)
         if via == "images":
             return await _chat_via_images(
-                request, dep=dep, payload=payload, refs=refs,
-                session_id=session_id, raw_model=raw_model,
-                profile=profile, model=model)
+                request,
+                dep=dep,
+                payload=payload,
+                refs=refs,
+                session_id=session_id,
+                raw_model=raw_model,
+                profile=profile,
+                model=model,
+            )
         # via "chat" (modello chat-only, es. gemini/nano-banana) o "both":
         # si chiama la chat multimodale e, se il provider rimanda che il
         # modello sta solo su /images/*, si adatta al nativo.
         chat_payload = image_chat_payload(payload, raw_model, refs=refs)
         data = await forwarder.call(
-            dep, chat_payload, session=_opencode_session(request) or session_id,
+            dep,
+            chat_payload,
+            session=_opencode_session(request) or session_id,
             client_ip=_client_ip(request),
-            attribution=_client_attribution(request))
-        imgs = images_dual(extract_chat_images(data)) \
-            if isinstance(data, dict) else []
+            attribution=_client_attribution(request),
+        )
+        imgs = images_dual(extract_chat_images(data)) if isinstance(data, dict) else []
         if not imgs:
             raise UpstreamError(502, "risposta chat senza immagini")
         return images_response_to_chat({"data": imgs}, model)
 
     # --- scelta dei candidati, in ordine di rotazione ---
     if forced:
-        candidates = [d for d in (
-            _cap_chain_pick_all(prof, need) or [])]
+        candidates = [d for d in (_cap_chain_pick_all(prof, need) or [])]
         if not candidates:
-            dep, profile, scope, err = _images_pick_dep(
-                auth.profile, model, raw_model, session_id, need, payload)
+            dep, profile, scope, err = _images_pick_dep(auth.profile, model, raw_model, session_id, need, payload)
             if err:
                 return err
             candidates = [dep]
     else:
-        dep, profile, scope, err = _images_pick_dep(
-            auth.profile, model, raw_model, session_id, need, payload)
+        dep, profile, scope, err = _images_pick_dep(auth.profile, model, raw_model, session_id, need, payload)
         if err:
             return err
         if dep_image_via(dep) == "chat":
-            return None          # modello immagine esplicito: motore chat
+            return None  # modello immagine esplicito: motore chat
         candidates = [dep]
 
     last_err: UpstreamError | None = None
@@ -6437,40 +6448,53 @@ async def _image_chat_intercept(request: Request, *, payload: dict,
             # errore di DEPLOYMENT (quota, endpoint, provider assente...): si
             # segna e si prova il successivo, che e' esattamente la catena
             # capability. Non si risponde al client finche' non e' finita.
-            router.mark_failed(cur, seconds=err_.retry_after,
-                               status=abs(err_.status) if err_.status else None)
+            router.mark_failed(cur, seconds=err_.retry_after, status=abs(err_.status) if err_.status else None)
             metrics.inc("nx_images_total", (d_use["group"], "chat_adapt_error"))
             continue
-        imgs = await _localize_images(
-            request, images_dual(out.get("data") or []))
+        imgs = await _localize_images(request, images_dual(out.get("data") or []))
         out["data"] = imgs
         msg = out["choices"][0]["message"]
         # `images[]` nella forma che i modelli image-as-chat restituiscono:
         # ogni elemento e' {"type":"image_url","image_url":{url,b64_json,...}}.
         msg["images"] = [{"type": "image_url", "image_url": it} for it in imgs]
         if not msg.get("content"):
-            msg["content"] = "\n".join(str(it.get("url") or "")
-                                       for it in imgs if it.get("url")) or None
+            msg["content"] = "\n".join(str(it.get("url") or "") for it in imgs if it.get("url")) or None
         out["nx_deployment"] = cur
         out.setdefault("via", "images")
         router.note_result(cur, (time.monotonic() - t0) * 1000)
         metrics.inc("nx_images_total", (d_use["group"], "ok_chat_adapt"))
-        _emit_summary(ses=session_id or "-", req=raw_model,
-                      grp=d_use["group"], dep=cur, tries=len(tried),
-                      fb=len(tried) - 1,
-                      dur_ms=int((time.monotonic() - t_req) * 1000),
-                      stream=False, qc=False, wd=None, usage=None,
-                      kind="images", via="chat->images")
+        _emit_summary(
+            ses=session_id or "-",
+            req=raw_model,
+            grp=d_use["group"],
+            dep=cur,
+            tries=len(tried),
+            fb=len(tried) - 1,
+            dur_ms=int((time.monotonic() - t_req) * 1000),
+            stream=False,
+            qc=False,
+            wd=None,
+            usage=None,
+            kind="images",
+            via="chat->images",
+        )
         return JSONResponse(out)
 
     # nessun deployment ha prodotto un'immagine
 
 
-async def _try_native_image_edit(request: Request, *, owner: Request,
-                                 dep: dict, payload: dict,
-                                 refs: list[str], session_id: str | None,
-                                 raw_model: str, profile: str | None,
-                                 kind: str = "images") -> JSONResponse | None:
+async def _try_native_image_edit(
+    request: Request,
+    *,
+    owner: Request,
+    dep: dict,
+    payload: dict,
+    refs: list[str],
+    session_id: str | None,
+    raw_model: str,
+    profile: str | None,
+    kind: str = "images",
+) -> JSONResponse | None:
     """Tenta l'EDIT nativo OpenAI `/images/edits` (multipart) sul deployment.
 
     Ritorna la JSONResponse finale se il provider lo supporta e risponde con
@@ -6480,18 +6504,24 @@ async def _try_native_image_edit(request: Request, *, owner: Request,
     diventano un UpstreamError propagato al loop per la rotazione normale."""
     try:
         data = await forwarder.call_images(
-            dep, payload, profile=profile or "",
+            dep,
+            payload,
+            profile=profile or "",
             client_ip=_client_ip(request),
             session=_opencode_session(request) or session_id,
             attribution=_client_attribution(request),
-            endpoint="edits", refs=refs)
+            endpoint="edits",
+            refs=refs,
+        )
     except UpstreamError as err:
         detail = err.detail or ""
         status = err.status if err.status is not None else 0
-        if image_chat_fallback_signature(err.status, detail) \
-                or -status in (404, 405, 415):
-            log.info("[images] %s: /images/edits non disponibile (status=%s): "
-                     "ritento via chat", dep["unique"], -status or "?")
+        if image_chat_fallback_signature(err.status, detail) or -status in (404, 405, 415):
+            log.info(
+                "[images] %s: /images/edits non disponibile (status=%s): ritento via chat",
+                dep["unique"],
+                -status or "?",
+            )
             return None
         raise
     if not isinstance(data, dict) or not isinstance(data.get("data"), list):
@@ -6500,19 +6530,40 @@ async def _try_native_image_edit(request: Request, *, owner: Request,
     data["nx_deployment"] = dep["unique"]
     data.setdefault("via", "images")
     metrics.inc("nx_images_total", (dep["group"], "ok_native_edit"))
-    _emit_summary(ses=session_id or "-", req=raw_model, grp=dep["group"],
-                  dep=dep["unique"], tries=1, fb=0, dur_ms=0,
-                  stream=False, qc=False, wd=None, usage=None,
-                  kind=kind, via="images_edits")
+    _emit_summary(
+        ses=session_id or "-",
+        req=raw_model,
+        grp=dep["group"],
+        dep=dep["unique"],
+        tries=1,
+        fb=0,
+        dur_ms=0,
+        stream=False,
+        qc=False,
+        wd=None,
+        usage=None,
+        kind=kind,
+        via="images_edits",
+    )
     router.note_result(dep["unique"], 0.0)
     return JSONResponse(data)
 
 
-async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
-                            raw_model: str, model: str, need: frozenset[str],
-                            scope: str, dep: dict, profile: str | None,
-                            session_id: str | None, kind: str = "images",
-                            endpoint: str = "generations"):
+async def _images_chat_loop(
+    request: Request,
+    *,
+    payload: dict,
+    refs: list[str],
+    raw_model: str,
+    model: str,
+    need: frozenset[str],
+    scope: str,
+    dep: dict,
+    profile: str | None,
+    session_id: str | None,
+    kind: str = "images",
+    endpoint: str = "generations",
+):
     """Generazione/editing immagini via chat multimodale, con rotazione.
 
     Usata sia da /v1/images/edits sia da /v1/images/generations quando il body
@@ -6523,9 +6574,14 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
     _attr = _client_attribution(request)
     hard_max = int(getattr(router.policy, "image_refs_hard_max", 16) or 16)
     metrics.inc("nx_images_total", (dep["group"], "attempt"))
-    log.info("[images] %s -> %s (%s, prompt=%d chars, refs=%d)", model,
-             dep["unique"], endpoint, len(str(payload.get("prompt") or "")),
-             len(refs))
+    log.info(
+        "[images] %s -> %s (%s, prompt=%d chars, refs=%d)",
+        model,
+        dep["unique"],
+        endpoint,
+        len(str(payload.get("prompt") or "")),
+        len(refs),
+    )
     tried: set[str] = set()
     # Marker "nativo gia' tentato" SEPARATO da `tried`: non consuma il budget
     # di tentativi del deployment (si prova nativo -> chat sullo stesso dep).
@@ -6541,8 +6597,7 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
         router.note_start(cur)
         t0 = time.monotonic()
         try:
-            declared = router.policy.caps_for(dep.get("model", "")) \
-                | (dep.get("caps") or frozenset())
+            declared = router.policy.caps_for(dep.get("model", "")) | (dep.get("caps") or frozenset())
             use_refs = truncate_refs(refs, refs_max_for(declared, hard_max))
             # PROVIDER-AGNOSTICO: l'ordine dei tentativi dipende da COME il
             # provider espone i modelli immagine (colonna `image_via`):
@@ -6560,30 +6615,46 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
             if _via != "chat" and _native_try:
                 native_tried.add(cur)
                 _nres = await _try_native_image_edit(
-                    request, owner=request, dep=dep, payload=payload,
-                    refs=use_refs, session_id=session_id, raw_model=raw_model,
-                    profile=profile, kind=kind)
+                    request,
+                    owner=request,
+                    dep=dep,
+                    payload=payload,
+                    refs=use_refs,
+                    session_id=session_id,
+                    raw_model=raw_model,
+                    profile=profile,
+                    kind=kind,
+                )
                 if _nres is not None:
                     return _nres
-            data = await forwarder.call(dep, chat_payload, session=_sess,
-                                        client_ip=_cip, attribution=_attr)
-            imgs = await _localize_images(
-                request, images_dual(extract_chat_images(data))) \
-                if isinstance(data, dict) else []
+            data = await forwarder.call(dep, chat_payload, session=_sess, client_ip=_cip, attribution=_attr)
+            imgs = (
+                await _localize_images(request, images_dual(extract_chat_images(data)))
+                if isinstance(data, dict)
+                else []
+            )
             if not imgs:
                 raise UpstreamError(502, "risposta chat senza immagini")
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
-            out = {"created": int(time.time()), "data": imgs, "via": "chat",
-                   "nx_deployment": cur}
+            out = {"created": int(time.time()), "data": imgs, "via": "chat", "nx_deployment": cur}
             metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
-            _emit_summary(ses=session_id or "-", req=raw_model,
-                          grp=dep["group"], dep=cur, tries=len(attempts),
-                          fb=len(attempts) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None, usage=None,
-                          kind=kind, via="chat")
+            _emit_summary(
+                ses=session_id or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(attempts),
+                fb=len(attempts) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=None,
+                kind=kind,
+                via="chat",
+            )
             return JSONResponse(out)
         except UpstreamError as err:
             router.note_end(cur)
@@ -6605,14 +6676,15 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
                 or _MODEL_MISSING_RE.search(detail)
                 or chat_only_image_error(detail)
                 or image_chat_fallback_signature(err.status, detail)
-                or (-status == 400 and ("openai_error" in detail
-                                        or "bad_response_status_code" in detail)))
+                or (-status == 400 and ("openai_error" in detail or "bad_response_status_code" in detail))
+            )
             if not deployment_side:
                 metrics.inc("nx_images_total", (dep["group"], "client_error"))
                 st = abs(status) if status else 502
-                return JSONResponse(status_code=st if st >= 400 else 502,
-                                    content={"error": {"message": err.detail,
-                                                       "type": "upstream_error"}})
+                return JSONResponse(
+                    status_code=st if st >= 400 else 502,
+                    content={"error": {"message": err.detail, "type": "upstream_error"}},
+                )
             if -status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
@@ -6620,16 +6692,18 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
                     pass
             if _was_dormant:
                 router.mark_failed_double_residual(
-                    cur, reason=str(err.detail or "")[:80],
-                    status=abs(err.status) if err.status else None)
+                    cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
+                )
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=abs(err.status) if err.status else None)
+                router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_images_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(
-                profile, dep, need, scope, tried=tried,
-                out_tokens=refill_out_budget(payload, router.policy)) \
-                if profile else None
+            nxt = (
+                router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, router.policy)
+                )
+                if profile
+                else None
+            )
             if nxt is None:
                 break
             dep = nxt
@@ -6637,11 +6711,15 @@ async def _images_chat_loop(request: Request, *, payload: dict, refs: list[str],
             if cur in tried:
                 router.note_end(cur)
     status = abs(last_err.status) if last_err and last_err.status else 502
-    return JSONResponse(status_code=status if status >= 400 else 502,
-                        content={"error": {
-                            "message": (last_err.detail if last_err
-                                        else "nessun deployment image disponibile"),
-                            "type": "upstream_error"}})
+    return JSONResponse(
+        status_code=status if status >= 400 else 502,
+        content={
+            "error": {
+                "message": (last_err.detail if last_err else "nessun deployment image disponibile"),
+                "type": "upstream_error",
+            }
+        },
+    )
 
 
 @app.post("/v1/images/generations")
@@ -6656,14 +6734,15 @@ async def images_generations(request: Request):
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "invalid JSON body", "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
+        )
 
     raw_model = payload.get("model") or ""
     if not str(payload.get("prompt") or "").strip():
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'prompt' è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "'prompt' è obbligatorio", "type": "invalid_request_error"}}
+        )
 
     model = policy.canonicalize(raw_model)
 
@@ -6684,41 +6763,52 @@ async def images_generations(request: Request):
     # Con immagini di riferimento la generazione va SEMPRE via chat multimodale:
     # i modelli image-edit (Gemini/nano-banana) ricevono la reference solo così.
     if refs:
-        dep, profile, scope, err = _images_pick_dep(
-            auth.profile, model, raw_model, session_id, need, payload)
+        dep, profile, scope, err = _images_pick_dep(auth.profile, model, raw_model, session_id, need, payload)
         if err:
             return err
         custom_key = router.resolve_alias_key(raw_model, model)
         if custom_key:
             dep = {**dep, "api_key": custom_key}
         return await _images_chat_loop(
-            request, payload=payload, refs=refs, raw_model=raw_model,
-            model=model, need=need, scope=scope, dep=dep, profile=profile,
-            session_id=session_id)
+            request,
+            payload=payload,
+            refs=refs,
+            raw_model=raw_model,
+            model=model,
+            need=need,
+            scope=scope,
+            dep=dep,
+            profile=profile,
+            session_id=session_id,
+        )
 
-    group_or_explicit = router.resolve_group_for_request(model, [], session_id,
-                                                         need,
-                                                         profile=auth.profile)
+    group_or_explicit = router.resolve_group_for_request(model, [], session_id, need, profile=auth.profile)
     if group_or_explicit is None:
-        return JSONResponse(status_code=400 if need else 404, content={
-            "error": {"message":
-                      ("nessun deployment dichiara image_gen: configura "
-                       "capability_routing.model_capabilities in gateway.yaml"
-                       if need else
-                       f"model '{model}' not managed by {policy.service_name}"),
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400 if need else 404,
+            content={
+                "error": {
+                    "message": (
+                        "nessun deployment dichiara image_gen: configura "
+                        "capability_routing.model_capabilities in gateway.yaml"
+                        if need
+                        else f"model '{model}' not managed by {policy.service_name}"
+                    ),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
 
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
         dep = router.pick_deployment(group_or_explicit, need)
     if dep is None and auth.profile:
-        dep = router.fallback_after(auth.profile, None, need,
-                                    out_tokens=refill_out_budget(
-                                        payload, router.policy))
+        dep = router.fallback_after(auth.profile, None, need, out_tokens=refill_out_budget(payload, router.policy))
     if dep is None:
-        return JSONResponse(status_code=503, content={
-            "error": {"message": "nessun deployment disponibile per image_gen",
-                      "type": "server_error"}})
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "nessun deployment disponibile per image_gen", "type": "server_error"}},
+        )
 
     custom_key = router.resolve_alias_key(raw_model, model)
     if custom_key:
@@ -6728,12 +6818,10 @@ async def images_generations(request: Request):
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
 
-    profile = auth.profile or config.profile_of_base(model.split("__")[0]) \
-        or config.profile_of_base(model)
+    profile = auth.profile or config.profile_of_base(model.split("__")[0]) or config.profile_of_base(model)
 
     metrics.inc("nx_images_total", (dep["group"], "attempt"))
-    log.info("[images] %s -> %s (prompt=%d chars)", model, dep["unique"],
-             len(str(payload.get("prompt") or "")))
+    log.info("[images] %s -> %s (prompt=%d chars)", model, dep["unique"], len(str(payload.get("prompt") or "")))
 
     tried: set[str] = set()
     # Marker "chat gia' tentata" SEPARATI da `tried`: cosi' non consumano il
@@ -6752,8 +6840,7 @@ async def images_generations(request: Request):
         supportato") sia come PRIMA scelta quando `image_via="chat"` dice che
         il provider espone il modello solo in chat."""
         chat_payload = image_chat_payload(payload, raw_model)
-        data = await forwarder.call(dep, chat_payload, session=_sess,
-                                    client_ip=_cip, attribution=_attr)
+        data = await forwarder.call(dep, chat_payload, session=_sess, client_ip=_cip, attribution=_attr)
         router.note_result(cur, (time.monotonic() - t0) * 1000)
         metrics.inc("nx_images_total", (dep["group"], "ok_chat"))
         # normalizza: estrae le immagini dal messaggio se presenti
@@ -6763,19 +6850,27 @@ async def images_generations(request: Request):
             out = dict(data)
             out["nx_deployment"] = cur
             out["via"] = "chat"
-            imgs = await _localize_images(
-                request, images_dual(extract_chat_images(data)))
+            imgs = await _localize_images(request, images_dual(extract_chat_images(data)))
             if imgs:
                 out["data"] = imgs
                 out.setdefault("created", int(time.time()))
             else:
-                log.warning("[images] chat su %s: nessuna immagine "
-                            "riconosciuta nella risposta", cur)
-        _emit_summary(ses=session_id or "-", req=raw_model, grp=dep["group"],
-                      dep=cur, tries=len(attempts), fb=len(attempts) - 1,
-                      dur_ms=int((time.monotonic() - t_req) * 1000),
-                      stream=False, qc=False, wd=None, usage=None,
-                      kind="images", via="chat")
+                log.warning("[images] chat su %s: nessuna immagine riconosciuta nella risposta", cur)
+        _emit_summary(
+            ses=session_id or "-",
+            req=raw_model,
+            grp=dep["group"],
+            dep=cur,
+            tries=len(attempts),
+            fb=len(attempts) - 1,
+            dur_ms=int((time.monotonic() - t_req) * 1000),
+            stream=False,
+            qc=False,
+            wd=None,
+            usage=None,
+            kind="images",
+            via="chat",
+        )
         return out
 
     while dep is not None and len(tried) < 64:
@@ -6797,38 +6892,46 @@ async def images_generations(request: Request):
                 last_err = chat_err
                 router.note_end(cur)
                 router.mark_failed(
-                    cur, seconds=chat_err.retry_after,
-                    status=abs(chat_err.status) if chat_err.status else None)
+                    cur, seconds=chat_err.retry_after, status=abs(chat_err.status) if chat_err.status else None
+                )
                 metrics.inc("nx_images_total", (dep["group"], "retry"))
-                nxt = router.fallback_next(profile, dep, need, scope,
-                                           tried=tried,
-                                           out_tokens=refill_out_budget(
-                                               payload, router.policy)) \
-                    if profile else None
+                nxt = (
+                    router.fallback_next(
+                        profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, router.policy)
+                    )
+                    if profile
+                    else None
+                )
                 if nxt is None:
                     break
                 dep = nxt
                 continue
         try:
-            data = await forwarder.call_images(dep, payload,
-                                           profile=profile or "",
-                                           client_ip=_cip, session=_sess,
-                                           attribution=_attr)
+            data = await forwarder.call_images(
+                dep, payload, profile=profile or "", client_ip=_cip, session=_sess, attribution=_attr
+            )
             if isinstance(data, dict) and isinstance(data.get("data"), list):
-                data["data"] = await _localize_images(
-                    request, images_dual(data["data"]))
+                data["data"] = await _localize_images(request, images_dual(data["data"]))
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
             metrics.inc("nx_images_total", (dep["group"], "ok"))
             if isinstance(data, dict):
                 data["nx_deployment"] = cur
-            _emit_summary(ses=session_id or "-", req=raw_model,
-                          grp=dep["group"], dep=cur,
-                          tries=len(attempts), fb=len(attempts) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None, usage=None,
-                          kind="images")
+            _emit_summary(
+                ses=session_id or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(attempts),
+                fb=len(attempts) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=None,
+                kind="images",
+            )
             return data
         except UpstreamError as err:
             router.note_end(cur)
@@ -6836,7 +6939,7 @@ async def images_generations(request: Request):
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
             deployment_side = (
-                status > 0                       # retryable (429/5xx/timeout)
+                status > 0  # retryable (429/5xx/timeout)
                 # chiave senza crediti / chiave rifiutata (401) / progetto
                 # negato / endpoint o schema non gestiti: condizioni del
                 # DEPLOYMENT, non del client -> ruota (la catena porta al
@@ -6844,59 +6947,64 @@ async def images_generations(request: Request):
                 # pagamento). 401 = deployment-side perche' il client si e'
                 # gia' autenticato verso il gateway (vedi TTS/video).
                 or -status in (401, 402, 403, 404, 405, 415, 422)
-                or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
+                or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
                 # "unknown provider/model for model X": il deployment non ha
                 # l'account o il modello (es. cli-proxy-api senza login) -> e'
                 # una condizione del DEPLOYMENT, quindi si RUOTA verso il
                 # successivo provider che serve lo stesso modello.
                 or router.policy.images_chat_fallback
-                    and (image_chat_fallback_signature(err.status, detail)
-                         or chat_only_image_error(detail))
-                or (router.policy.images_chat_fallback
+                and (image_chat_fallback_signature(err.status, detail) or chat_only_image_error(detail))
+                or (
+                    router.policy.images_chat_fallback
                     and -status == 400
-                    and ("openai_error" in detail
-                         or "bad_response_status_code" in detail)))
+                    and ("openai_error" in detail or "bad_response_status_code" in detail)
+                )
+            )
             if not deployment_side:
                 metrics.inc("nx_images_total", (dep["group"], "client_error"))
                 st = abs(status) if status else 502
-                return JSONResponse(status_code=st if st >= 400 else 502,
-                                    content={"error": {"message": err.detail,
-                                                       "type": "upstream_error"}})
+                return JSONResponse(
+                    status_code=st if st >= 400 else 502,
+                    content={"error": {"message": err.detail, "type": "upstream_error"}},
+                )
             # images.chat_fallback: prova via chat SOLO quando l'errore indica
             # che l'endpoint nativo e' assente o lo schema non e' riconosciuto.
             # Un 403/402 (permessi/crediti) non migliora via chat: ruota e basta.
             _chat_useful = (
                 chat_only_image_error(detail)
                 or image_chat_fallback_signature(err.status, detail)
-                or (-status in (400, 403)
-                    and ("openai_error" in detail
-                         or "bad_response_status_code" in detail)))
-            if (router.policy.images_chat_fallback and _chat_useful
-                    and cur not in chat_tried):
+                or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
+            )
+            if router.policy.images_chat_fallback and _chat_useful and cur not in chat_tried:
                 chat_tried.add(cur)
-                log.info("[images] %s: /images/generations non disponibile "
-                         "(status=%s): ritenta via chat", cur, -status or "?")
+                log.info(
+                    "[images] %s: /images/generations non disponibile (status=%s): ritenta via chat",
+                    cur,
+                    -status or "?",
+                )
                 try:
                     return await _attempt_via_chat(cur, t0)
                 except UpstreamError as chat_err:
-                    log.warning("[images] fallback chat su %s fallito: %s",
-                                cur, chat_err.detail[:120])
+                    log.warning("[images] fallback chat su %s fallito: %s", cur, chat_err.detail[:120])
             if -status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
-                                                    status=abs(err.status) if err.status else None)
+                router.mark_failed_double_residual(
+                    cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
+                )
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=abs(err.status) if err.status else None)
+                router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_images_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
-                                       out_tokens=refill_out_budget(
-                                           payload, router.policy)) \
-                if profile else None
+            nxt = (
+                router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, router.policy)
+                )
+                if profile
+                else None
+            )
             if nxt is None:
                 break
             dep = nxt
@@ -6905,11 +7013,15 @@ async def images_generations(request: Request):
                 router.note_end(cur)
 
     status = abs(last_err.status) if last_err and last_err.status else 502
-    return JSONResponse(status_code=status if status >= 400 else 502,
-                        content={"error": {
-                            "message": (last_err.detail if last_err
-                                        else "nessun deployment image_gen disponibile"),
-                            "type": "upstream_error"}})
+    return JSONResponse(
+        status_code=status if status >= 400 else 502,
+        content={
+            "error": {
+                "message": (last_err.detail if last_err else "nessun deployment image_gen disponibile"),
+                "type": "upstream_error",
+            }
+        },
+    )
 
 
 # --------------------------------------------------------------- image edits
@@ -6928,14 +7040,14 @@ async def images_edits(request: Request):
     ctype = (request.headers.get("content-type") or "").lower()
     payload: dict = {}
     refs: list[str] = []
-    if "multipart/form-data" in ctype \
-            or "application/x-www-form-urlencoded" in ctype:
+    if "multipart/form-data" in ctype or "application/x-www-form-urlencoded" in ctype:
         try:
             form = await request.form()
         except Exception:
-            return JSONResponse(status_code=400, content={
-                "error": {"message": "multipart/form-data non valido",
-                          "type": "invalid_request_error"}})
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": "multipart/form-data non valido", "type": "invalid_request_error"}},
+            )
         payload["prompt"] = str(form.get("prompt") or "")
         if form.get("model"):
             payload["model"] = str(form.get("model"))
@@ -6951,16 +7063,14 @@ async def images_edits(request: Request):
         mask_up = form.get("mask")
         if mask_up is not None:
             if isinstance(mask_up, str) and mask_up.strip():
-                payload["mask"] = mask_up.strip()      # data-URI/URL
+                payload["mask"] = mask_up.strip()  # data-URI/URL
             else:
                 try:
                     mraw = await mask_up.read()
                 except Exception:
                     mraw = b""
                 if mraw:
-                    payload["mask"] = _data_uri(
-                        mraw,
-                        getattr(mask_up, "content_type", "") or "")
+                    payload["mask"] = _data_uri(mraw, getattr(mask_up, "content_type", "") or "")
                 else:
                     log.warning("[images] campo 'mask' presente ma vuoto")
         for field in ("image", "image[]", "images"):
@@ -6974,26 +7084,31 @@ async def images_edits(request: Request):
                 except Exception:
                     raw = b""
                 if raw:
-                    refs.append(_data_uri(
-                        raw, getattr(up, "content_type", "") or ""))
+                    refs.append(_data_uri(raw, getattr(up, "content_type", "") or ""))
     else:
         try:
             payload = await request.json()
         except Exception:
-            return JSONResponse(status_code=400, content={
-                "error": {"message": "invalid JSON body",
-                          "type": "invalid_request_error"}})
+            return JSONResponse(
+                status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
+            )
         refs = image_refs_from_payload(payload)
 
     raw_model = payload.get("model") or ""
     if not str(payload.get("prompt") or "").strip():
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'prompt' è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "'prompt' è obbligatorio", "type": "invalid_request_error"}}
+        )
     if not refs:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'image' (immagine di riferimento) è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "'image' (immagine di riferimento) è obbligatorio",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
 
     model = policy.canonicalize(raw_model)
     auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
@@ -7002,21 +7117,28 @@ async def images_edits(request: Request):
     if not authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
-    need = frozenset({"image_gen", "image_edit"}) \
-        if router.policy.routing_active() else frozenset()
+    need = frozenset({"image_gen", "image_edit"}) if router.policy.routing_active() else frozenset()
     _set_opencode_gate(request)
     session_id = _session_id(request, payload)
-    dep, profile, scope, err = _images_pick_dep(
-        auth.profile, model, raw_model, session_id, need, payload)
+    dep, profile, scope, err = _images_pick_dep(auth.profile, model, raw_model, session_id, need, payload)
     if err:
         return err
     custom_key = router.resolve_alias_key(raw_model, model)
     if custom_key:
         dep = {**dep, "api_key": custom_key}
     return await _images_chat_loop(
-        request, payload=payload, refs=refs, raw_model=raw_model, model=model,
-        need=need, scope=scope, dep=dep, profile=profile,
-        session_id=session_id, endpoint="edits")
+        request,
+        payload=payload,
+        refs=refs,
+        raw_model=raw_model,
+        model=model,
+        need=need,
+        scope=scope,
+        dep=dep,
+        profile=profile,
+        session_id=session_id,
+        endpoint="edits",
+    )
 
 
 @app.get("/v1/images/files/{file_id}")
@@ -7027,54 +7149,72 @@ async def images_files(file_id: str):
     unguessable e la entry scade col TTL della policy `images.store_ttl_sec`."""
     got = imagestore.get(file_id)
     if not got:
-        return JSONResponse(status_code=404, content={
-            "error": {"message": "immagine non trovata o scaduta",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"message": "immagine non trovata o scaduta", "type": "invalid_request_error"}},
+        )
     content, mime = got
     ext = imagestore.ext_for_mime(mime)
     return Response(
-        content=content, media_type=mime,
+        content=content,
+        media_type=mime,
         headers={
             "Cache-Control": f"private, max-age={max(0, imagestore.ttl_sec())}",
             "Content-Disposition": f'inline; filename="image.{ext}"',
-        })
+        },
+    )
 
 
 # ----------------------------------------------------------------- audio TTS
-def _audio_route(profile: str | None, model: str, raw_model: str,
-                 session_id: str | None, need: frozenset[str]):
+def _audio_route(profile: str | None, model: str, raw_model: str, session_id: str | None, need: frozenset[str]):
     """Routing condiviso degli endpoint audio: risolve il primo deployment
     capace (o explicit pass-through) oppure ritorna una JSONResponse d'errore.
     Ritorna (dep, profile, error_response)."""
-    group_or_explicit = router.resolve_group_for_request(model, [], session_id,
-                                                         need,
-                                                         profile=profile)
+    group_or_explicit = router.resolve_group_for_request(model, [], session_id, need, profile=profile)
     if group_or_explicit is None:
         capname = sorted(need)[0] if need else model
         for c in sorted(need):
             metrics.inc("nx_caps_unroutable_total", (c,))
-        return None, profile, JSONResponse(
-            status_code=400 if need else 404,
-            content={"error": {"message":
-                               (f"nessun deployment dichiara la capacità "
-                                f"'{capname}': configura "
-                                f"capability_routing.model_capabilities in "
-                                f"gateway.yaml" if need else
-                                f"model '{model}' not managed by "
-                                f"{policy.service_name}"),
-                               "type": "invalid_request_error"}})
+        return (
+            None,
+            profile,
+            JSONResponse(
+                status_code=400 if need else 404,
+                content={
+                    "error": {
+                        "message": (
+                            f"nessun deployment dichiara la capacità "
+                            f"'{capname}': configura "
+                            f"capability_routing.model_capabilities in "
+                            f"gateway.yaml"
+                            if need
+                            else f"model '{model}' not managed by {policy.service_name}"
+                        ),
+                        "type": "invalid_request_error",
+                    }
+                },
+            ),
+        )
 
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
         dep = router.pick_deployment(group_or_explicit, need)
     if dep is None and profile:
-        dep = router.fallback_after(profile, None, need,
-                                    out_tokens=refill_out_budget(
-                                        {}, router.policy))
+        dep = router.fallback_after(profile, None, need, out_tokens=refill_out_budget({}, router.policy))
     if dep is None:
-        return None, profile, JSONResponse(status_code=503, content={
-            "error": {"message": f"nessun deployment disponibile per {sorted(need) or model}",
-                      "type": "server_error"}})
+        return (
+            None,
+            profile,
+            JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": f"nessun deployment disponibile per {sorted(need) or model}",
+                        "type": "server_error",
+                    }
+                },
+            ),
+        )
 
     custom_key = router.resolve_alias_key(raw_model, model)
     if custom_key:
@@ -7088,13 +7228,14 @@ async def audio_speech(request: Request):
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "invalid JSON body", "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
+        )
     raw_model = payload.get("model") or ""
     if not str(payload.get("input") or "").strip():
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'input' è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "'input' è obbligatorio", "type": "invalid_request_error"}}
+        )
     model = policy.canonicalize(raw_model)
     auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
@@ -7105,14 +7246,12 @@ async def audio_speech(request: Request):
     need = frozenset({"tts"}) if router.policy.routing_active() else frozenset()
     scope = "group" if router.is_explicit(model) else "chain"
     _set_opencode_gate(request)
-    dep, profile, err = _audio_route(auth.profile, model, raw_model,
-                                     _session_id(request, payload), need)
+    dep, profile, err = _audio_route(auth.profile, model, raw_model, _session_id(request, payload), need)
     if err:
         return err
 
     metrics.inc("nx_tts_total", (dep["group"], "attempt"))
-    log.info("[tts] %s -> %s (input=%d chars)", model, dep["unique"],
-             len(str(payload.get("input") or "")))
+    log.info("[tts] %s -> %s (input=%d chars)", model, dep["unique"], len(str(payload.get("input") or "")))
 
     tried: set[str] = set()
     attempts: list[str] = []
@@ -7131,20 +7270,29 @@ async def audio_speech(request: Request):
         t0 = time.monotonic()
         try:
             content, ctype = await forwarder.call_speech(
-                dep, payload, profile=profile or "",
-                client_ip=_cip, session=_sess, attribution=_attr)
+                dep, payload, profile=profile or "", client_ip=_cip, session=_sess, attribution=_attr
+            )
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
             metrics.inc("nx_tts_total", (dep["group"], "ok"))
-            _emit_summary(ses=session_id or "-", req=raw_model,
-                          grp=dep["group"], dep=cur,
-                          tries=len(attempts), fb=len(attempts) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None, usage=None,
-                          kind="tts", bytes=len(content), ctype=ctype)
-            return Response(content=content, media_type=ctype,
-                            headers={"x-nx-deployment": cur})
+            _emit_summary(
+                ses=session_id or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(attempts),
+                fb=len(attempts) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=None,
+                kind="tts",
+                bytes=len(content),
+                ctype=ctype,
+            )
+            return Response(content=content, media_type=ctype, headers={"x-nx-deployment": cur})
         except UpstreamError as err:
             router.note_end(cur)
             last_err = err
@@ -7156,43 +7304,51 @@ async def audio_speech(request: Request):
                 # gateway), quindi si RUOTA come il 403/404/402. Criterio
                 # gia' presente e testato sul path chat
                 # (tests/test_upstream_401.py).
-                status > 0 or -status in (401, 402, 404)
-                or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
-                or (-status in (400, 403)
-                    and ("openai_error" in detail
-                         or "bad_response_status_code" in detail)))
+                status > 0
+                or -status in (401, 402, 404)
+                or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
+                or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
+            )
             if not deployment_side:
                 metrics.inc("nx_tts_total", (dep["group"], "client_error"))
                 st = abs(status) if status else 502
-                return JSONResponse(status_code=st if st >= 400 else 502,
-                                    content={"error": {"message": err.detail,
-                                                       "type": "upstream_error"}})
+                return JSONResponse(
+                    status_code=st if st >= 400 else 502,
+                    content={"error": {"message": err.detail, "type": "upstream_error"}},
+                )
             if -status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
-                                                    status=abs(err.status) if err.status else None)
+                router.mark_failed_double_residual(
+                    cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
+                )
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=abs(err.status) if err.status else None)
+                router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_tts_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
-                                       out_tokens=refill_out_budget(
-                                           payload, router.policy)) \
-                if profile else None
+            nxt = (
+                router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, router.policy)
+                )
+                if profile
+                else None
+            )
             if nxt is None:
                 break
             dep = nxt
 
     status = abs(last_err.status) if last_err and last_err.status else 502
-    return JSONResponse(status_code=status if status >= 400 else 502,
-                        content={"error": {
-                            "message": (last_err.detail if last_err
-                                        else "nessun deployment tts disponibile"),
-                            "type": "upstream_error"}})
+    return JSONResponse(
+        status_code=status if status >= 400 else 502,
+        content={
+            "error": {
+                "message": (last_err.detail if last_err else "nessun deployment tts disponibile"),
+                "type": "upstream_error",
+            }
+        },
+    )
 
 
 # --------------------------------------------------------- systemone (Jev)
@@ -7208,23 +7364,27 @@ async def systemone(request: Request):
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "invalid JSON body",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
+        )
     if not isinstance(payload, dict):
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "il body deve essere un oggetto JSON",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "il body deve essere un oggetto JSON", "type": "invalid_request_error"}},
+        )
     raw_model = payload.get("model") or ""
     if "state" not in payload:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'state' è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "'state' è obbligatorio", "type": "invalid_request_error"}}
+        )
     questions = payload.get("questions")
     if not isinstance(questions, dict) or not questions:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'questions' deve essere un oggetto non vuoto",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {"message": "'questions' deve essere un oggetto non vuoto", "type": "invalid_request_error"}
+            },
+        )
 
     model = policy.canonicalize(raw_model)
     auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
@@ -7239,22 +7399,27 @@ async def systemone(request: Request):
     session_id = _session_id(request, payload)
     # Ruota anche con master key: il profilo si ricava dal nome richiesto,
     # altrimenti la rotazione resterebbe spenta (bug dei path audio).
-    _prof = auth.profile or config.profile_of_base(model.split("__")[0]) \
-        or config.profile_of_base(model)
+    _prof = auth.profile or config.profile_of_base(model.split("__")[0]) or config.profile_of_base(model)
 
-    group_or_explicit = router.resolve_group_for_request(
-        model, [], session_id, need, profile=_prof)
+    group_or_explicit = router.resolve_group_for_request(model, [], session_id, need, profile=_prof)
     if group_or_explicit is None:
         for c in sorted(need):
             metrics.inc("nx_caps_unroutable_total", (c,))
-        return JSONResponse(status_code=400 if need else 404, content={
-            "error": {"message":
-                      ("nessun deployment dichiara la capacità 'decision': "
-                       "configura capability_routing.model_capabilities o la "
-                       "colonna caps" if need
-                       else f"model '{model}' non gestito da "
-                       f"{policy.service_name}"),
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400 if need else 404,
+            content={
+                "error": {
+                    "message": (
+                        "nessun deployment dichiara la capacità 'decision': "
+                        "configura capability_routing.model_capabilities o la "
+                        "colonna caps"
+                        if need
+                        else f"model '{model}' non gestito da {policy.service_name}"
+                    ),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
 
     explicit_req = router.is_explicit(model)
     dep = router.config.deployment_by_unique(group_or_explicit)
@@ -7265,21 +7430,21 @@ async def systemone(request: Request):
     if dep is None and _cap is not None and not explicit_req:
         dep = _cap_chain_pick(_prof, need)
     if dep is None:
-        dep = router.initial_pick(_prof, group_or_explicit,
-                                  None if explicit_req else need,
-                                  out_tokens=refill_out_budget(payload, policy))
+        dep = router.initial_pick(
+            _prof, group_or_explicit, None if explicit_req else need, out_tokens=refill_out_budget(payload, policy)
+        )
     if dep is None and _prof and not explicit_req:
         dep = _cap_chain_pick(_prof, need) or router.fallback_after(
-            _prof, None, need,
-            out_tokens=refill_out_budget(payload, router.policy))
+            _prof, None, need, out_tokens=refill_out_budget(payload, router.policy)
+        )
     if dep is None:
-        return JSONResponse(status_code=503, content={
-            "error": {"message": "nessun deployment systemone disponibile",
-                      "type": "server_error"}})
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "nessun deployment systemone disponibile", "type": "server_error"}},
+        )
 
     metrics.inc("nx_systemone_total", (dep["group"], "attempt"))
-    log.info("[systemone] %s -> %s (questions=%d)", model, dep["unique"],
-             len(questions))
+    log.info("[systemone] %s -> %s (questions=%d)", model, dep["unique"], len(questions))
 
     tried: set[str] = set()
     attempts: list[str] = []
@@ -7298,33 +7463,37 @@ async def systemone(request: Request):
         t0 = time.monotonic()
         try:
             out = await forwarder.call_systemone(
-                dep, payload, profile=_prof or "",
-                client_ip=_cip, session=_sess, attribution=_attr)
+                dep, payload, profile=_prof or "", client_ip=_cip, session=_sess, attribution=_attr
+            )
             # QC: ogni chiave richiesta in `questions` deve comparire in
             # `answers`; una risposta incompleta e' un problema del deployment
             # -> rotazione (502 positivo = ritriabile).
             _answers = out.get("answers") if isinstance(out, dict) else None
-            _missing = [k for k in questions
-                        if not (isinstance(_answers, dict) and k in _answers)]
+            _missing = [k for k in questions if not (isinstance(_answers, dict) and k in _answers)]
             if _missing:
-                raise UpstreamError(
-                    502, f"risposta systemone incompleta: chiavi mancanti "
-                         f"{_missing}")
+                raise UpstreamError(502, f"risposta systemone incompleta: chiavi mancanti {_missing}")
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
             metrics.inc("nx_systemone_total", (dep["group"], "ok"))
-            _emit_summary(ses=session_id or "-", req=raw_model,
-                          grp=dep["group"], dep=cur,
-                          tries=len(attempts), fb=len(attempts) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None,
-                          usage=_usage_of(out), kind="systemone")
+            _emit_summary(
+                ses=session_id or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(attempts),
+                fb=len(attempts) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=_usage_of(out),
+                kind="systemone",
+            )
             result = dict(out)
             result["nx_deployment"] = cur
             result["nx_provider"] = dep.get("provider")
-            return JSONResponse(result,
-                                headers={"x-nx-deployment": cur})
+            return JSONResponse(result, headers={"x-nx-deployment": cur})
         except UpstreamError as err:
             last_err = err
             detail = err.detail or ""
@@ -7335,19 +7504,26 @@ async def systemone(request: Request):
                 status >= 0
                 or -status in (401, 402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)
-                or _PROVIDER_TRANSIENT_RE.search(detail))
-            trail.append({"ord": len(trail) + 1, "dep": cur,
-                          "group": dep.get("group"), "model": dep.get("model"),
-                          "cls": classify_error_class(
-                              abs(status) if status else 0, detail),
-                          "status": abs(status) if status else None,
-                          "ms": int((time.monotonic() - t0) * 1000)})
+                or _PROVIDER_TRANSIENT_RE.search(detail)
+            )
+            trail.append(
+                {
+                    "ord": len(trail) + 1,
+                    "dep": cur,
+                    "group": dep.get("group"),
+                    "model": dep.get("model"),
+                    "cls": classify_error_class(abs(status) if status else 0, detail),
+                    "status": abs(status) if status else None,
+                    "ms": int((time.monotonic() - t0) * 1000),
+                }
+            )
             if not deployment_side:
                 metrics.inc("nx_systemone_total", (dep["group"], "client_error"))
                 st = abs(status) if status else 502
-                return JSONResponse(status_code=st if st >= 400 else 502,
-                                    content={"error": {"message": err.detail,
-                                                       "type": "upstream_error"}})
+                return JSONResponse(
+                    status_code=st if st >= 400 else 502,
+                    content={"error": {"message": err.detail, "type": "upstream_error"}},
+                )
             if -status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
@@ -7355,25 +7531,27 @@ async def systemone(request: Request):
                     pass
             if _was_dormant:
                 router.mark_failed_double_residual(
-                    cur, reason=str(err.detail or "")[:80],
-                    status=abs(err.status) if err.status else None)
+                    cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
+                )
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=abs(err.status) if err.status else None)
+                router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_systemone_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(_prof, dep, need, scope, tried=tried,
-                                       out_tokens=refill_out_budget(
-                                           payload, router.policy)) \
-                if _prof else None
+            nxt = (
+                router.fallback_next(
+                    _prof, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, router.policy)
+                )
+                if _prof
+                else None
+            )
             if nxt is None:
                 break
             dep = nxt
         finally:
             router.note_end(cur)
 
-    return _exhausted(len(attempts),
-                      last_err.detail if last_err else None,
-                      trail=trail, retry_at_ms=_retry_at_ms(router, trail))
+    return _exhausted(
+        len(attempts), last_err.detail if last_err else None, trail=trail, retry_at_ms=_retry_at_ms(router, trail)
+    )
 
 
 # ----------------------------------------------------------------- audio STT
@@ -7387,31 +7565,35 @@ async def _audio_transcribe(request: Request, path: str):
     try:
         form = await request.form()
     except Exception:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "multipart/form-data non valido",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "multipart/form-data non valido", "type": "invalid_request_error"}},
+        )
 
     upload = form.get("file")
     if upload is None or isinstance(upload, str):
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'file' (audio) è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "'file' (audio) è obbligatorio", "type": "invalid_request_error"}},
+        )
     filename = getattr(upload, "filename", "") or "audio"
     fcontent = getattr(upload, "content_type", "") or "application/octet-stream"
     try:
         file_bytes = await upload.read()
     except Exception:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "lettura del file fallita",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "lettura del file fallita", "type": "invalid_request_error"}}
+        )
     if not file_bytes:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "file audio vuoto",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "file audio vuoto", "type": "invalid_request_error"}}
+        )
 
-    data_fields = {k: v for k in ("language", "prompt", "response_format",
-                                  "temperature", "hotwords", "vad_filter")
-                   if (v := form.get(k)) is not None}
+    data_fields = {
+        k: v
+        for k in ("language", "prompt", "response_format", "temperature", "hotwords", "vad_filter")
+        if (v := form.get(k)) is not None
+    }
     raw_model = str(form.get("model") or "")
     response_format = str(data_fields.get("response_format") or "json").lower()
 
@@ -7426,14 +7608,12 @@ async def _audio_transcribe(request: Request, path: str):
     scope = "group" if router.is_explicit(model) else "chain"
     _set_opencode_gate(request)
     session_id = _session_id(request, {})
-    dep, profile, err = _audio_route(auth.profile, model, raw_model,
-                                     session_id, need)
+    dep, profile, err = _audio_route(auth.profile, model, raw_model, session_id, need)
     if err:
         return err
 
     metrics.inc("nx_stt_total", (dep["group"], "attempt"))
-    log.info("[stt] %s -> %s (%s, %d bytes, via /%s)", model, dep["unique"],
-             filename, len(file_bytes), path)
+    log.info("[stt] %s -> %s (%s, %d bytes, via /%s)", model, dep["unique"], filename, len(file_bytes), path)
 
     tried: set[str] = set()
     attempts: list[str] = []
@@ -7450,32 +7630,46 @@ async def _audio_transcribe(request: Request, path: str):
         router.note_start(cur)
         t0 = time.monotonic()
         try:
-            result = await forwarder.transcribe(dep, data_fields, file_bytes,
-                                                filename, fcontent, path=path,
-                                                profile=profile or "",
-                                                client_ip=_cip, session=_sess,
-                                                attribution=_attr)
+            result = await forwarder.transcribe(
+                dep,
+                data_fields,
+                file_bytes,
+                filename,
+                fcontent,
+                path=path,
+                profile=profile or "",
+                client_ip=_cip,
+                session=_sess,
+                attribution=_attr,
+            )
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
             metrics.inc("nx_stt_total", (dep["group"], "ok"))
-            _emit_summary(ses=_session_id(request, {}) or "-", req=raw_model,
-                          grp=dep["group"], dep=cur,
-                          tries=len(attempts), fb=len(attempts) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None, usage=None,
-                          kind="stt", path=path)
+            _emit_summary(
+                ses=_session_id(request, {}) or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(attempts),
+                fb=len(attempts) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=None,
+                kind="stt",
+                path=path,
+            )
             result, _scrubbed = sttscrub.scrub_payload(result)
             if _scrubbed:
-                log.info("[stt-scrub] %s: rimosse %d allucinazioni credit",
-                         cur, _scrubbed)
+                log.info("[stt-scrub] %s: rimosse %d allucinazioni credit", cur, _scrubbed)
                 metrics.inc("nx_stt_scrubbed_total", (dep["group"],))
             if isinstance(result, dict):
                 result.setdefault("nx_deployment", cur)
                 return JSONResponse(result)
             # formati text/srt/vtt: passthrough testo + header di disclosure
-            return PlainTextResponse(result,
-                                     headers={"x-nx-deployment": cur})
+            return PlainTextResponse(result, headers={"x-nx-deployment": cur})
         except UpstreamError as err:
             router.note_end(cur)
             last_err = err
@@ -7487,43 +7681,51 @@ async def _audio_transcribe(request: Request, path: str):
                 # gateway), quindi si RUOTA come il 403/404/402. Criterio
                 # gia' presente e testato sul path chat
                 # (tests/test_upstream_401.py).
-                status > 0 or -status in (401, 402, 404)
-                or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
-                or (-status in (400, 403)
-                    and ("openai_error" in detail
-                         or "bad_response_status_code" in detail)))
+                status > 0
+                or -status in (401, 402, 404)
+                or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
+                or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
+            )
             if not deployment_side:
                 metrics.inc("nx_stt_total", (dep["group"], "client_error"))
                 st = abs(status) if status else 502
-                return JSONResponse(status_code=st if st >= 400 else 502,
-                                    content={"error": {"message": err.detail,
-                                                       "type": "upstream_error"}})
+                return JSONResponse(
+                    status_code=st if st >= 400 else 502,
+                    content={"error": {"message": err.detail, "type": "upstream_error"}},
+                )
             if -status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
-                                                    status=abs(err.status) if err.status else None)
+                router.mark_failed_double_residual(
+                    cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
+                )
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=abs(err.status) if err.status else None)
+                router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
-                                       out_tokens=refill_out_budget(
-                                           {}, router.policy)) \
-                if profile else None
+            nxt = (
+                router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget({}, router.policy)
+                )
+                if profile
+                else None
+            )
             if nxt is None:
                 break
             dep = nxt
 
     status = abs(last_err.status) if last_err and last_err.status else 502
-    return JSONResponse(status_code=status if status >= 400 else 502,
-                        content={"error": {
-                            "message": (last_err.detail if last_err
-                                        else "nessun deployment stt disponibile"),
-                            "type": "upstream_error"}})
+    return JSONResponse(
+        status_code=status if status >= 400 else 502,
+        content={
+            "error": {
+                "message": (last_err.detail if last_err else "nessun deployment stt disponibile"),
+                "type": "upstream_error",
+            }
+        },
+    )
 
 
 @app.post("/v1/audio/transcriptions")
@@ -7549,13 +7751,14 @@ async def videos_generations(request: Request):
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "invalid JSON body", "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
+        )
     raw_model = payload.get("model") or ""
     if not str(payload.get("prompt") or "").strip():
-        return JSONResponse(status_code=400, content={
-            "error": {"message": "'prompt' è obbligatorio",
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400, content={"error": {"message": "'prompt' è obbligatorio", "type": "invalid_request_error"}}
+        )
 
     model = policy.canonicalize(raw_model)
     auth: AuthResult = authn.authenticate(request.headers.get("authorization"))
@@ -7574,48 +7777,56 @@ async def videos_generations(request: Request):
     session_id = _session_id(request, payload)
 
     group_or_explicit = router.resolve_group_for_request(
-        model, [], session_id,
-        need | {"vision"} if (need and (payload.get("frame_images")
-                                        or payload.get("input_references")))
-        else need,
-        profile=auth.profile)
+        model,
+        [],
+        session_id,
+        need | {"vision"} if (need and (payload.get("frame_images") or payload.get("input_references"))) else need,
+        profile=auth.profile,
+    )
     if group_or_explicit is None:
         for c in sorted(need or {"video_gen"}):
             metrics.inc("nx_caps_unroutable_total", (c,))
-        return JSONResponse(status_code=400 if need else 404, content={
-            "error": {"message":
-                      ("nessun deployment dichiara 'video_gen': configura "
-                       "capability_routing.model_capabilities / colonna caps"
-                       if need else f"model '{model}' non gestito"),
-                      "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400 if need else 404,
+            content={
+                "error": {
+                    "message": (
+                        "nessun deployment dichiara 'video_gen': configura "
+                        "capability_routing.model_capabilities / colonna caps"
+                        if need
+                        else f"model '{model}' non gestito"
+                    ),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
 
     explicit_req = router.is_explicit(model)
     dep = router.config.deployment_by_unique(group_or_explicit)
     if dep is None:
-        dep = router.initial_pick(auth.profile, group_or_explicit,
-                                  None if explicit_req else need,
-                                  out_tokens=refill_out_budget(payload,
-                                                               policy))
+        dep = router.initial_pick(
+            auth.profile,
+            group_or_explicit,
+            None if explicit_req else need,
+            out_tokens=refill_out_budget(payload, policy),
+        )
     if dep is None and auth.profile and not explicit_req:
-        dep = router.fallback_after(auth.profile, None, need,
-                                    out_tokens=refill_out_budget(
-                                        payload, router.policy))
+        dep = router.fallback_after(auth.profile, None, need, out_tokens=refill_out_budget(payload, router.policy))
     if dep is None:
-        return JSONResponse(status_code=503, content={
-            "error": {"message": "nessun deployment video_gen disponibile",
-                      "type": "server_error"}})
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "nessun deployment video_gen disponibile", "type": "server_error"}},
+        )
 
     metrics.inc("nx_videos_total", (dep["group"], "attempt"))
-    log.info("[videos] %s -> %s (prompt=%d chars)", model, dep["unique"],
-             len(str(payload.get("prompt") or "")))
+    log.info("[videos] %s -> %s (prompt=%d chars)", model, dep["unique"], len(str(payload.get("prompt") or "")))
 
     tried: set[str] = set()
     attempts: list[str] = []
     _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
-    _prof = auth.profile or config.profile_of_base(model.split("__")[0]) \
-        or config.profile_of_base(model)
+    _prof = auth.profile or config.profile_of_base(model.split("__")[0]) or config.profile_of_base(model)
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
@@ -7627,27 +7838,30 @@ async def videos_generations(request: Request):
         t0 = time.monotonic()
         try:
             envelope = await forwarder.submit_video(
-                dep, payload, profile=_prof or "",
-                client_ip=_cip, session=_sess, attribution=_attr)
+                dep, payload, profile=_prof or "", client_ip=_cip, session=_sess, attribution=_attr
+            )
             router.note_result(cur, (time.monotonic() - t0) * 1000)
             if _was_dormant:
                 router.clear_cooldown(cur)
             metrics.inc("nx_videos_total", (dep["group"], "ok"))
             job_id = str(envelope.get("id") or "")
             _videos_jobs[job_id] = {
-                "api_base": dep["api_base"], "api_key": dep["api_key"],
-                "group": dep["group"], "created": time.time(), "_sess": _sess,
-                "_cip": _cip, "_prof": _prof or ""}
+                "api_base": dep["api_base"],
+                "api_key": dep["api_key"],
+                "group": dep["group"],
+                "created": time.time(),
+                "_sess": _sess,
+                "_cip": _cip,
+                "_prof": _prof or "",
+            }
             qm = f"?model={urllib.parse.quote(raw_model)}"
             out = dict(envelope)
             out["nx_deployment"] = cur
             out["eta_seconds"] = 90
             # ENVELOPE AUTO-DESCRIBENTE per agenti: le URL portano il model
             # embedded -> poll/content STATELESS, sopravvivono ai restart
-            out["poll"] = {"url": f"/v1/videos/generations/{job_id}{qm}",
-                           "interval_s": 15}
-            out["content"] = {"url":
-                              f"/v1/videos/generations/{job_id}/content{qm}"}
+            out["poll"] = {"url": f"/v1/videos/generations/{job_id}{qm}", "interval_s": 15}
+            out["content"] = {"url": f"/v1/videos/generations/{job_id}/content{qm}"}
             out["polling_url"] = out["poll"]["url"]
             out["content_url"] = out["content"]["url"]
 
@@ -7660,35 +7874,47 @@ async def videos_generations(request: Request):
                     await asyncio.sleep(5)
                     try:
                         st = await forwarder.poll_video(
-                            dep, job_id,
+                            dep,
+                            job_id,
                             profile=_prof or _videos_jobs.get(job_id, {}).get("_prof", ""),
                             client_ip=_cip or _videos_jobs.get(job_id, {}).get("_cip", ""),
                             session=_sess or _videos_jobs.get(job_id, {}).get("_sess"),
-                            attribution=_attr)
-                        log.debug("[video-wait] job=%s t=%ds status=%s",
-                                  job_id, wait_s - int(deadline - time.time()),
-                                  st.get("status"))
+                            attribution=_attr,
+                        )
+                        log.debug(
+                            "[video-wait] job=%s t=%ds status=%s",
+                            job_id,
+                            wait_s - int(deadline - time.time()),
+                            st.get("status"),
+                        )
                     except UpstreamError:
-                        continue          # blip upstream: riprova fino a deadline
+                        continue  # blip upstream: riprova fino a deadline
                     if st.get("status") == "completed":
-                        out.update({"status": "completed",
-                                    "usage": st.get("usage"),
-                                    "unsigned_urls": st.get("unsigned_urls")})
+                        out.update(
+                            {"status": "completed", "usage": st.get("usage"), "unsigned_urls": st.get("unsigned_urls")}
+                        )
                         break
                     if st.get("status") in ("failed", "cancelled", "expired"):
-                        out.update({"status": st.get("status"),
-                                    "error": st.get("error")})
+                        out.update({"status": st.get("status"), "error": st.get("error")})
                         break
                 else:
-                    out["note"] = ("wait_seconds esaurito col job ancora in "
-                                   "corso: prosegui con poll.url")
-            _emit_summary(ses=_session_id(request, {}) or "-",
-                          req=raw_model, grp=dep["group"], dep=cur,
-                          tries=len(attempts), fb=len(attempts) - 1,
-                          dur_ms=int((time.monotonic() - t_req) * 1000),
-                          stream=False, qc=False, wd=None,
-                          usage=_usage_of(out), kind="videos",
-                          job=job_id, status=out.get("status"))
+                    out["note"] = "wait_seconds esaurito col job ancora in corso: prosegui con poll.url"
+            _emit_summary(
+                ses=_session_id(request, {}) or "-",
+                req=raw_model,
+                grp=dep["group"],
+                dep=cur,
+                tries=len(attempts),
+                fb=len(attempts) - 1,
+                dur_ms=int((time.monotonic() - t_req) * 1000),
+                stream=False,
+                qc=False,
+                wd=None,
+                usage=_usage_of(out),
+                kind="videos",
+                job=job_id,
+                status=out.get("status"),
+            )
             return JSONResponse(out)
         except UpstreamError as err:
             router.note_end(cur)
@@ -7701,45 +7927,55 @@ async def videos_generations(request: Request):
                 # gateway), quindi si RUOTA come il 403/404/402. Criterio
                 # gia' presente e testato sul path chat
                 # (tests/test_upstream_401.py).
-                status > 0 or -status in (401, 402, 404)
-                or _MODEL_MISSING_RE.search(detail)   # "No such model" stile CF
-                or (-status in (400, 403)
-                    and ("openai_error" in detail
-                         or "bad_response_status_code" in detail)))
+                status > 0
+                or -status in (401, 402, 404)
+                or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
+                or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
+            )
             if not deployment_side:
                 metrics.inc("nx_videos_total", (dep["group"], "client_error"))
                 st = abs(status) if status else 502
-                return JSONResponse(status_code=st if st >= 400 else 502,
-                                    content={"error": {"message": err.detail,
-                                                       "type": "upstream_error"}})
+                return JSONResponse(
+                    status_code=st if st >= 400 else 502,
+                    content={"error": {"message": err.detail, "type": "upstream_error"}},
+                )
             if -status in (400, 403) and media_reject_signature(detail):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
                     pass
             if _was_dormant:
-                router.mark_failed_double_residual(cur, reason=str(err.detail or "")[:80],
-                                                    status=abs(err.status) if err.status else None)
+                router.mark_failed_double_residual(
+                    cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
+                )
             else:
-                router.mark_failed(cur, seconds=err.retry_after,
-                                   status=abs(err.status) if err.status else None)
+                router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
             metrics.inc("nx_videos_total", (dep["group"], "retry"))
-            nxt = router.fallback_next(profile, dep, need, scope, tried=tried,
-                                       out_tokens=refill_out_budget(
-                                           payload, router.policy)) \
-                if (profile := auth.profile or
-                    config.profile_of_base(model.split("__")[0])
-                    or config.profile_of_base(model)) else None
+            nxt = (
+                router.fallback_next(
+                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, router.policy)
+                )
+                if (
+                    profile := auth.profile
+                    or config.profile_of_base(model.split("__")[0])
+                    or config.profile_of_base(model)
+                )
+                else None
+            )
             if nxt is None:
                 break
             dep = nxt
 
     status = abs(last_err.status) if last_err and last_err.status else 502
-    return JSONResponse(status_code=status if status >= 400 else 502,
-                        content={"error": {
-                            "message": (last_err.detail if last_err
-                                        else "nessun deployment video_gen disponibile"),
-                            "type": "upstream_error"}})
+    return JSONResponse(
+        status_code=status if status >= 400 else 502,
+        content={
+            "error": {
+                "message": (last_err.detail if last_err else "nessun deployment video_gen disponibile"),
+                "type": "upstream_error",
+            }
+        },
+    )
 
 
 def _job_deps(job_id: str, model: str | None):
@@ -7755,44 +7991,53 @@ def _job_deps(job_id: str, model: str | None):
         deps = router.video_gen_candidates(canonical)
         if deps:
             return deps, None
-        return None, JSONResponse(status_code=404, content={
-            "error": {"message":
-                      f"nessun gruppo video_gen per '{model}' "
-                      "(colonna caps / capability_groups)",
-                      "type": "invalid_request_error"}})
+        return None, JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": f"nessun gruppo video_gen per '{model}' (colonna caps / capability_groups)",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
     snap = _videos_jobs.get(job_id)
     if snap is None:
-        return None, JSONResponse(status_code=404, content={
-            "error": {"message":
-                      f"job '{job_id}' sconosciuto o scaduto (TTL 24h / "
-                      f"restart): ripassa ?model=<modello> per il lookup "
-                      f"stateless, oppure rifai la submit",
-                      "type": "invalid_request_error"}})
-    return [{"api_base": snap["api_base"], "api_key": snap["api_key"],
-             "model": "", "unique": job_id}], None
+        return None, JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": f"job '{job_id}' sconosciuto o scaduto (TTL 24h / "
+                    f"restart): ripassa ?model=<modello> per il lookup "
+                    f"stateless, oppure rifai la submit",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+    return [{"api_base": snap["api_base"], "api_key": snap["api_key"], "model": "", "unique": job_id}], None
 
 
 @app.get("/v1/videos/generations/{job_id}")
-async def videos_status(job_id: str, request: Request,
-                        model: str | None = None):
+async def videos_status(job_id: str, request: Request, model: str | None = None):
     auth = authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
-    _prof = (model or request.query_params.get("model") or "")
+    _prof = model or request.query_params.get("model") or ""
     _prof = config.profile_of_base(_prof.split("__")[0]) or ""
     try:
-        status = await forwarder.poll_video_any(deps, job_id,
-                                                profile=_prof,
-                                                client_ip=_client_ip(request),
-                                                session=_opencode_session(request),
-                                                attribution=_client_attribution(request))
+        status = await forwarder.poll_video_any(
+            deps,
+            job_id,
+            profile=_prof,
+            client_ip=_client_ip(request),
+            session=_opencode_session(request),
+            attribution=_client_attribution(request),
+        )
     except UpstreamError as e:
         st = abs(e.status) if e.status and e.status > 0 else 502
-        return JSONResponse(status_code=st if st >= 400 else 502,
-                            content={"error": {"message": e.detail}})
+        return JSONResponse(status_code=st if st >= 400 else 502, content={"error": {"message": e.detail}})
     st_val = status.get("status") if isinstance(status, dict) else "?"
     if st_val in ("completed", "failed", "cancelled", "expired"):
         log.info("[video-poll] job=%s -> %s", job_id, st_val)
@@ -7800,45 +8045,44 @@ async def videos_status(job_id: str, request: Request,
         log.debug("[video-poll] job=%s status=%s", job_id, st_val)
     qm = request.query_params.get("model")
     if isinstance(status, dict):
-        status.setdefault("polling_url",
-                          f"/v1/videos/generations/{job_id}"
-                          + (f"?model={qm}" if qm else ""))
+        status.setdefault("polling_url", f"/v1/videos/generations/{job_id}" + (f"?model={qm}" if qm else ""))
         if status.get("unsigned_urls"):
-            status["content_url"] = (f"/v1/videos/generations/{job_id}/content"
-                                     + (f"?model={qm}" if qm else ""))
+            status["content_url"] = f"/v1/videos/generations/{job_id}/content" + (f"?model={qm}" if qm else "")
     return JSONResponse(status)
 
 
 @app.get("/v1/videos/generations/{job_id}/content")
-async def videos_content(job_id: str, request: Request,
-                         model: str | None = None):
+async def videos_content(job_id: str, request: Request, model: str | None = None):
     auth = authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
         return _unauthorized(auth.error)
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
-    _prof = (model or request.query_params.get("model") or "")
+    _prof = model or request.query_params.get("model") or ""
     _prof = config.profile_of_base(_prof.split("__")[0]) or ""
     try:
         t_dl = time.monotonic()
         content, ctype = await forwarder.download_video_any(
-            deps, job_id,
+            deps,
+            job_id,
             profile=_prof,
             client_ip=_client_ip(request),
             session=_opencode_session(request),
-            attribution=_client_attribution(request))
-        log.info("[video-content] job=%s bytes=%d ctype=%s dur=%.1fs",
-                 job_id, len(content), ctype, time.monotonic() - t_dl)
+            attribution=_client_attribution(request),
+        )
+        log.info(
+            "[video-content] job=%s bytes=%d ctype=%s dur=%.1fs", job_id, len(content), ctype, time.monotonic() - t_dl
+        )
     except UpstreamError as e:
         st = abs(e.status) if e.status and e.status > 0 else 502
-        return JSONResponse(status_code=st if st >= 400 else 502,
-                            content={"error": {"message": e.detail}})
+        return JSONResponse(status_code=st if st >= 400 else 502, content={"error": {"message": e.detail}})
     return Response(content=content, media_type=ctype)
 
 
 def main() -> None:  # pragma: no cover
     import uvicorn
+
     uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
 
 
