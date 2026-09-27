@@ -345,10 +345,14 @@ def _apply_misc_policy(pol) -> None:
     set_video_job_ttl_sec(getattr(pol, "video_job_ttl_sec", None))
     set_coalesce_cache_max(getattr(pol, "coalesce_cache_max", None))
     try:
+        # Persistenza su disco: senza, gli URL /v1/images/files/{id} gia'
+        # consegnati ai client vanno in 404 al riavvio del processo (restart,
+        # deploy, reload) o con worker multipli.
         imagestore.configure(
             ttl_sec=getattr(pol, "images_store_ttl_sec", None),
             max_items=getattr(pol, "images_store_max_items", None),
-            max_bytes=getattr(pol, "images_store_max_bytes", None))
+            max_bytes=getattr(pol, "images_store_max_bytes", None),
+            storage_dir=Path(VAR_DIR) / "images")
     except Exception:                                  # noqa: BLE001
         pass
     try:

@@ -27,7 +27,10 @@ _B64 = base64.b64encode(_PNG).decode()
 # --------------------------------------------------------------- unit: store
 def _reset_store(**kw):
     imagestore.clear()
-    imagestore.configure(ttl_sec=3600, max_items=500, max_bytes=536870912)
+    # storage_dir="" -> disattiva la persistenza su disco: i test unitari
+    # devono restare isolati dalla tmp del test precedente.
+    imagestore.configure(ttl_sec=3600, max_items=500, max_bytes=536870912,
+                         storage_dir="")
     if kw:
         imagestore.configure(**kw)
 
@@ -65,6 +68,105 @@ def test_store_eviction_max_bytes():
     imagestore.put(_PNG, "image/png")
     imagestore.put(_PNG, "image/png")
     assert imagestore.stats()["bytes"] <= len(_PNG) + 1
+
+
+def test_store_disk_persistence_survives_restart(tmp_path):
+    """Gli URL gia' consegnati NON devono morire al riavvio.
+
+    Prima del fix lo store era solo in memoria: bastava un restart/redeploy
+    (o un worker diverso) per far rispondere 404 a un download gia' valido,
+    con TTL pieno. Con storage_dir configurato l'immagine sopravvive.
+    """
+    d = tmp_path / "images"
+    imagestore.configure(ttl_sec=3600, max_items=500, max_bytes=536870912,
+                         storage_dir=d)
+    try:
+        assert d.is_dir()
+        fid = imagestore.put(_PNG, "image/png")
+        assert fid
+        # i due file su disco
+        assert (d / f"{fid}.bin").read_bytes() == _PNG
+        assert (d / f"{fid}.json").exists()
+
+        # --- restart: sparisce solo la memoria, il disco resta -----------
+        imagestore._ITEMS.clear()
+
+        assert imagestore.get(fid) == (_PNG, "image/png")
+        # ricaricato in memoria per le letture successive
+        assert fid in imagestore._ITEMS
+    finally:
+        imagestore.clear()
+        imagestore.configure(storage_dir="")
+
+
+def test_store_disk_expired_after_restart_is_dropped(tmp_path):
+    """Il TTL e' rivalutato sul ts ORIGINALE: ricaricare NON proroga."""
+    d = tmp_path / "images"
+    imagestore.configure(ttl_sec=60, storage_dir=d)
+    try:
+        fid = imagestore.put(_PNG, "image/png")
+        # invecchia l'entry su disco, poi "riavvia"
+        import json as _json
+        meta = _json.loads((d / f"{fid}.json").read_text())
+        meta["ts"] -= 10_000
+        (d / f"{fid}.json").write_text(_json.dumps(meta))
+        imagestore._ITEMS.clear()
+
+        assert imagestore.get(fid) is None
+        # e i file scaduti vengono liberati, non lasciati occupare spazio
+        assert not (d / f"{fid}.json").exists()
+        assert not (d / f"{fid}.bin").exists()
+    finally:
+        imagestore.clear()
+        imagestore.configure(storage_dir="")
+
+
+def test_store_disk_disabled_is_memory_only(tmp_path):
+    """Senza storage_dir il comportamento resta quello storico (in-memory)."""
+    imagestore.clear()
+    imagestore.configure(storage_dir="")
+    assert imagestore._STORAGE_DIR is None
+    fid = imagestore.put(_PNG, "image/png")
+    assert fid
+    imagestore._ITEMS.clear()
+    assert imagestore.get(fid) is None      # 404, come prima del fix
+
+
+def test_store_sweep_cleans_disk_orphans(tmp_path):
+    """sweep() pulisce anche i .json/.bin mai caricati in memoria."""
+    d = tmp_path / "images"
+    imagestore.configure(ttl_sec=60, storage_dir=d)
+    try:
+        fid = imagestore.put(_PNG, "image/png")
+        import json as _json
+        meta = _json.loads((d / f"{fid}.json").read_text())
+        meta["ts"] -= 10_000
+        (d / f"{fid}.json").write_text(_json.dumps(meta))
+        imagestore._ITEMS.clear()            # restart: orfano su disco
+
+        imagestore.sweep()
+
+        assert list(d.glob("*.json")) == []
+        assert list(d.glob("*.bin")) == []
+    finally:
+        imagestore.clear()
+        imagestore.configure(storage_dir="")
+
+
+def test_store_eviction_removes_disk_files(tmp_path):
+    """L'eviction deve liberare anche il disco (niente accumulo)."""
+    d = tmp_path / "images"
+    imagestore.configure(max_items=2, storage_dir=d)
+    try:
+        ids = [imagestore.put(_PNG, "image/png") for _ in range(3)]
+        assert imagestore.stats()["items"] == 2
+        assert not (d / f"{ids[0]}.bin").exists()   # il piu' vecchio
+        assert not (d / f"{ids[0]}.json").exists()
+        for keep in ids[1:]:
+            assert (d / f"{keep}.bin").exists()
+    finally:
+        imagestore.clear()
+        imagestore.configure(storage_dir="")
 
 
 def test_ext_for_mime():
@@ -228,6 +330,34 @@ def test_url_base_da_forwarded_headers(client, monkeypatch):
         files={"image": ("ref.png", _PNG, "image/png")})
     assert r.json()["data"][0]["url"].startswith(
         "https://gw.example.net/v1/images/files/")
+
+
+def test_files_200_dopo_restart_processo(client, tmp_path):
+    """E2E del fix: il download torna 200 dopo che la memoria si e' svuotata.
+
+    Copre l'incrocio dei due pezzi (storage_dir da _apply_misc_policy +
+    fallback su disco in imagestore.get): il test unitario prova lo store,
+    qui si prova l'endpoint pubblico che il client chiama davvero.
+    """
+    c, m = client
+    d = tmp_path / "images"
+    imagestore.configure(storage_dir=d)
+    try:
+        fid = imagestore.put(_PNG, "image/png")
+        assert fid
+        assert (d / f"{fid}.bin").exists()
+
+        # restart: il worker riparte con la cache vuota
+        imagestore._ITEMS.clear()
+        imagestore._TOTAL_BYTES = 0
+
+        r = c.get(f"/v1/images/files/{fid}")     # nessun header di auth
+        assert r.status_code == 200, r.text
+        assert r.content == _PNG
+        assert r.headers["content-type"].startswith("image/png")
+    finally:
+        imagestore.clear()
+        imagestore.configure(storage_dir="")
 
 
 def test_store_disabilitato_url_provider_intatto(client, monkeypatch):
