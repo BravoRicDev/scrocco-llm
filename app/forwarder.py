@@ -56,6 +56,7 @@ from typing import AsyncIterator
 import httpx
 
 from . import metrics
+from .bgtasks import spawn
 from . import repairlog
 from . import protocols as proto
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
@@ -3081,7 +3082,7 @@ class Forwarder:
         except RuntimeError:
             return
         for cli in old:
-            loop.create_task(cli.aclose())
+            spawn(loop, cli.aclose())
 
     def _client_for(self, url: str, key: str = "") -> httpx.AsyncClient:
         """Client persistente per API-KEY, creato lazy e riusato.

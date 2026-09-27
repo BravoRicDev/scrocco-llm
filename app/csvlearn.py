@@ -16,6 +16,7 @@ import threading
 from pathlib import Path
 
 from . import csv_store, journal, metrics
+from .bgtasks import spawn
 from .config import THINKING_REPLAY_HEADER
 
 log = logging.getLogger("nx.csvlearn")
@@ -100,9 +101,7 @@ def learn_flag(router_or_config, model: str | None,
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return n                              # fuori da un loop: solo memoria
-    t = loop.create_task(_persist_bg(config, csv_path, var_dir, model, flag))
-    _TASKS.add(t)
-    t.add_done_callback(_TASKS.discard)
+    spawn(loop, _persist_bg(config, csv_path, var_dir, model, flag), registry=_TASKS)
     return n
 
 

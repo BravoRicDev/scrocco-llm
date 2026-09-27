@@ -35,6 +35,7 @@ import re
 import time
 from collections import deque
 
+from .bgtasks import spawn
 from .forwarder import _MODEL_MISSING_RE, maybe_quarantine_ban
 from . import protocols as proto
 from .caution import background_cautious_enabled
@@ -375,7 +376,7 @@ def maybe_spawn_retired(router, forwarder) -> None:
     except RuntimeError:
         return
     _retired_day = day
-    _retired_task = loop.create_task(_retired_pass(router, forwarder))
+    _retired_task = spawn(loop, _retired_pass(router, forwarder))
 
 
 def _schedule(policy) -> str:
@@ -401,7 +402,7 @@ def maybe_spawn(router, forwarder, profile: str) -> None:
     except RuntimeError:
         _running = False
         return
-    loop.create_task(_probe_pass(router, forwarder, profile))
+    spawn(loop, _probe_pass(router, forwarder, profile))
 
 
 def spawn_hotreload_probe(router, forwarder, uniques) -> None:
@@ -418,7 +419,7 @@ def spawn_hotreload_probe(router, forwarder, uniques) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(_hotreload_pass(router, forwarder, _u))
+    spawn(loop, _hotreload_pass(router, forwarder, _u))
 
 
 def _is_fresh(router, unique: str, now: float, fresh_age: float) -> bool:

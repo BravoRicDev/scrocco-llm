@@ -93,3 +93,57 @@ def test_rotate_segments_and_append(tmp_path):
     append_jsonl(p, [{"c": 3}])
     assert rotate_segments(p, 1, 2) is True
     assert (tmp_path / "x.jsonl.2").exists() and (tmp_path / "x.jsonl.1").exists()
+
+
+# ------------------------------------------------ atomic_store (snapshot)
+def test_encode_json_matches_json_dump():
+    import io
+
+    from app.atomic_store import encode_json
+    obj = {"a": [1, 2.5, None, True], "é": {"n": float("inf")}, 3: "x"}
+    for indent in (None, 1):
+        buf = io.StringIO()
+        json.dump(obj, buf, indent=indent)
+        assert encode_json(obj, indent=indent) == buf.getvalue()
+
+
+def test_stale_snapshot_never_overwrites_newer(tmp_path):
+    from app.atomic_store import freeze_json, load_json, save_json_text
+    p = tmp_path / "s.json"
+    old = freeze_json({"v": 1})           # fotografia presa PRIMA
+    new = freeze_json({"v": 2})
+    assert save_json_text(p, new)
+    assert save_json_text(p, old)         # arriva tardi: ignorato
+    assert load_json(p) == {"v": 2}
+
+
+def test_unencodable_snapshot_fails_like_save_json(tmp_path):
+    from app.atomic_store import freeze_json, save_json, save_json_text
+    p = tmp_path / "bad.json"
+    assert save_json_text(p, freeze_json({"s": {1}})) is False
+    assert save_json(p, {"s": {1}}) is False
+    assert not p.exists() and not (tmp_path / "bad.json.tmp").exists()
+
+
+# ------------------------------------------------------------- bgtasks
+def test_spawn_keeps_reference_until_done():
+    import asyncio
+
+    from app import bgtasks
+
+    async def main():
+        reg: set = set()
+        done = asyncio.Event()
+
+        async def job():
+            await done.wait()
+            return 42
+
+        t = bgtasks.spawn(asyncio.get_running_loop(), job(), registry=reg)
+        assert t in reg
+        done.set()
+        assert await t == 42
+        await asyncio.sleep(0)            # callback di completamento
+        assert t not in reg
+
+    asyncio.run(main())
