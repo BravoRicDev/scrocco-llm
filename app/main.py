@@ -2528,7 +2528,13 @@ async def chat_completions(request: Request, response: Response):
             ).get("error", {}).get("message")
         except Exception:                    # noqa: BLE001
             _detail = None
-        raise UpstreamError(_st, _detail or "upstream error (redirect stream)")
+        # Il trail (quali hop e con quale classe) arriva da _ret() nel
+        # result_box: senza questo l'handler non-stream ricostruiva un
+        # UpstreamError SENZA trail e il 503 finale usciva con attempts=[].
+        _err = UpstreamError(
+            _st, _detail or "upstream error (redirect stream)")
+        _err.trail = _meta.get("trail")
+        raise _err
 
     try:
         if _redirect:
@@ -3270,7 +3276,11 @@ def _exhausted(n_tries: int, detail: str | None = None,
         "attempts": _tr}}
     if retry_at_ms:
         body["error"]["retry_at_ms"] = int(retry_at_ms)
-    headers = {"Retry-After": "2", "X-Scrocco-Attempts": str(len(_tr))}
+    # Gli header devono raccontare i tentativi REALI. Se il trail e' vuoto ma
+    # la catena ha comunque provato n>0 deployment (es. il chiamante non ha
+    # propagato il trail), "0" e' una bugia: il client leggeva 0 tentativi.
+    _n_att = len(_tr) if _tr else max(1, int(n_tries or 1))
+    headers = {"Retry-After": "2", "X-Scrocco-Attempts": str(_n_att)}
     if _tr:
         headers["X-Scrocco-Trail"] = ",".join(
             "%s:%s" % (t.get("dep", "?"), t.get("cls", "?")) for t in _tr)
@@ -4389,10 +4399,12 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
                                 client_stream: bool = True):
     """Streaming SSE con fallback PRIMA del primo byte inviato al client.
 
-    `result_box`, se fornito, riceve ('dep'/'attempts') il deployment finale e
-    i tentativi: serve al redirect non-stream->stream sotto hold per la
-    post-elaborazione non-stream. `client_stream=False` etichetta summary/sniff
-    come non-stream (il client reale ha chiesto non-stream)."""
+    `result_box`, se fornito, riceve ('dep'/'attempts'/'trail') il deployment
+    finale, i tentativi e l'attempt trail (quali hop e con quale classe):
+    serve al redirect non-stream->stream sotto hold per la post-elaborazione
+    non-stream e per propagare la provenienza al suo 503.
+    `client_stream=False` etichetta summary/sniff come non-stream (il client
+    reale ha chiesto non-stream)."""
     dep = first_dep
     # Tetto immagini: una volta sola, prima di qualsiasi tentativo, cosi' vale
     # per TUTTA la catena di fallback (niente righe per-deployment e nessuna
@@ -4469,12 +4481,16 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
     _lease = None                        # P2-8: lease per chiave (opt-in)
 
     def _ret(resp):
-        """Registra dep/attempts finali per il chiamante (redirect non-stream)
-        e ritorna la risposta invariata."""
+        """Registra dep/attempts/trail finali per il chiamante (redirect
+        non-stream) e ritorna la risposta invariata."""
         if result_box is not None:
             try:
                 result_box["dep"] = dep
                 result_box["attempts"] = list(attempts)
+                # il trail DEVE passare da qui: il redirect non-stream non
+                # vede la closure e senza questo finiva con _tr=None -> 503
+                # con attempts vuoti e nessun X-Scrocco-Trail.
+                result_box["trail"] = list(trail)
             except Exception:                # noqa: BLE001
                 pass
         return resp
@@ -5058,6 +5074,33 @@ async def _stream_with_fallback(profile: str | None, first_dep: dict,
             router.note_end(dep["unique"], ctx)
             router.key_lease_release(_lease)   # P2-8
             _lease = None
+            # ATTEMPT TRAIL anche per i VERDETTI: senza questo hop un 503 con
+            # catena esaurita per verdetti (empty_eof/length_truncated/
+            # timeout/fake_tool_call/struct_invalid) riportava attempts=[] e
+            # nessun X-Scrocco-Trail: il client non capiva QUANTI e QUALI
+            # deployment erano stati scartati, e perche'.
+            try:
+                _v_cls = ("timeout" if verdict == "timeout"
+                          else ("struct_invalid"
+                                if verdict in ("struct_corrective",
+                                               "struct_invalid")
+                                else (verdict
+                                      if verdict in ("empty_eof",
+                                                     "length_truncated",
+                                                     "fake_tool_call")
+                                      else classify_error_class(502, verdict))))
+                _v_st = (504 if verdict == "timeout"
+                         else (422 if verdict in ("struct_corrective",
+                                                 "struct_invalid") else 502))
+                trail.append({
+                    "ord": len(trail) + 1,
+                    "dep": dep.get("unique"), "group": dep.get("group"),
+                    "model": dep.get("model"),
+                    "cls": _v_cls,
+                    "status": _v_st,
+                    "ms": int((time.monotonic() - t_att) * 1000)})
+            except Exception:                # noqa: BLE001
+                pass
             fr = meta.get("finish_reason")
             rot_len = getattr(router.policy.qc_sanity,
                               "rotate_on_length_empty", False)

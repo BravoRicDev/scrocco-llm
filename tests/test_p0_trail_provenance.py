@@ -75,6 +75,103 @@ def test_exhausted_trail_cappata_a_dieci():
     assert r.headers.get("x-scrocco-attempts") == "10"
 
 
+# ------------------- P0-1b: il trail registra ANCHE i hop per VERDETTO
+# Prima del fix un 503 con catena esaurita per verdetti (empty_eof,
+# length_truncated, timeout, fake_tool_call, struct_invalid) restituiva
+# attempts=[] e nessun X-Scrocco-Trail: il client non sapeva quante/quali
+# deployment erano stati scartati.
+
+# una entry per ogni verdetto, con la classe e lo status che il trail deve
+# riportare (stessa mappa usata dal ciclo di fallback)
+_VERDICT_TRAIL = [
+    {"ord": 1, "dep": "v1", "group": BASE, "model": "m/a",
+     "cls": "empty_eof", "status": 502, "ms": 30},
+    {"ord": 2, "dep": "v2", "group": BASE, "model": "m/b",
+     "cls": "length_truncated", "status": 502, "ms": 40},
+    {"ord": 3, "dep": "v3", "group": BASE, "model": "m/c",
+     "cls": "timeout", "status": 504, "ms": 5000},
+    {"ord": 4, "dep": "v4", "group": BASE, "model": "m/d",
+     "cls": "fake_tool_call", "status": 502, "ms": 60},
+    {"ord": 5, "dep": "v5", "group": BASE, "model": "m/e",
+     "cls": "struct_invalid", "status": 422, "ms": 70},
+]
+
+
+def test_exhausted_trail_di_verdetti_e_valido():
+    r = main._exhausted(5, "empty_eof", trail=_VERDICT_TRAIL)
+    body = json.loads(bytes(r.body).decode())
+    assert r.status_code == 503
+    # attempts NON vuoto: e' la lista dei deployment scartati
+    assert body["error"]["attempts"] == _VERDICT_TRAIL
+    assert r.headers.get("x-scrocco-attempts") == "5"
+    # l'header elenca ogni hop con la sua classe di verdetto
+    assert r.headers.get("x-scrocco-trail") == (
+        "v1:empty_eof,v2:length_truncated,v3:timeout,"
+        "v4:fake_tool_call,v5:struct_invalid")
+
+
+def test_exhausted_attempts_non_mai_zero():
+    """Con trail vuoto ma n_tries>0 l'header non puo' dire "0" tentativi."""
+    r = main._exhausted(3, "boom", trail=[])
+    assert r.headers.get("x-scrocco-attempts") == "3"
+    assert "x-scrocco-trail" not in r.headers        # niente trail da mostrare
+    # nemmeno con n_tries=0 (o None): resta almeno 1, mai 0
+    assert main._exhausted(0, "b").headers.get(
+        "x-scrocco-attempts") == "1"
+    assert main._exhausted(None, "b").headers.get(
+        "x-scrocco-attempts") == "1"
+
+
+def test_trail_campione_per_verdetto_generato():
+    """Il ciclo di fallback registra davvero l'hop di verdetto.
+
+    Non basta il test su _exhausted (riceverebbe qualunque trail): qui si
+    verifica che il codice del ciclo mappi ogni verdetto sulla classe e sullo
+    status attesi, e che appenda al trail.
+    """
+    import inspect
+
+    src = inspect.getsource(main._stream_with_fallback)
+    # append al trail con classe e status, non un recordon generico
+    assert '"cls": _v_cls' in src and '"status": _v_st' in src
+    assert "trail.append({" in src
+    # e la mappa deve coprire i verdetti citati nel contratto
+    for v in ("timeout", "struct_invalid", "empty_eof", "length_truncated",
+              "fake_tool_call"):
+        assert f'"{v}"' in src, f"verdetto {v} non mappato nel trail"
+    # timeout e' un 504, la struttura non conforme un 422, il resto 502
+    assert '504 if verdict == "timeout"' in src
+    assert '"struct_corrective",' in src and '"struct_invalid"' in src
+    assert "else 502" in src
+
+
+def test_ret_popola_il_trail_nel_result_box():
+    """Criterio 3 (il percorso dati): _ret consegna il trail al chiamante."""
+    import inspect
+
+    src = inspect.getsource(main._stream_with_fallback)
+    ret_src = src[src.index("def _ret(resp):"):]
+    ret_src = ret_src[:ret_src.index("\n    def ")]
+    assert 'result_box["trail"] = list(trail)' in ret_src
+    # insieme a dep/attempts, che il redirect non-stream gia' usava
+    assert 'result_box["dep"]' in ret_src
+    assert 'result_box["attempts"]' in ret_src
+
+
+def test_redirect_nonstream_trasporta_il_trail():
+    """Criterio 3: il redirect non-stream passa il trail da result_box
+    all'UpstreamError, cosi' il 503 finale non e' piu' anonimo."""
+    from app.forwarder import UpstreamError
+
+    err = UpstreamError(503, "chain esaurita")
+    assert getattr(err, "trail", None) is None
+    # il tratto di codice che collega i due: la firma deve accettere il trail
+    import inspect as _i
+    src = _i.getsource(main.chat_completions)
+    assert '_err.trail = _meta.get("trail")' in src
+    assert "_ret(" in src
+
+
 def test_retry_at_ms_dal_cooldown_residuo(r):
     d = _dep(r, "K-B")
     r.mark_failed(d["unique"], seconds=1800, reason="http_429", status=429)
