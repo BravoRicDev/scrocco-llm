@@ -24,11 +24,12 @@ automatic clearing on successful probe.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 
-from .atomic_store import load_json, save_json
+from .atomic_store import freeze_json, load_json, save_json, save_json_text
 
 log = logging.getLogger("nx.keyhealth")
 
@@ -76,6 +77,12 @@ class KeyHealth:
 
     def save(self) -> None:
         save_json(self.path, self.data, indent=1)
+
+    async def save_async(self) -> None:
+        """Come `save`, ma solo la codifica resta sull'event loop (snapshot
+        coerente): la scrittura su disco gira su un thread."""
+        text = freeze_json(self.data, indent=1)
+        await asyncio.to_thread(save_json_text, self.path, text)
 
     # ------------------------------------------------------------ observe --
     def observe(self, unique: str, *, fail_streak: int,

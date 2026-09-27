@@ -34,11 +34,16 @@ import json
 import os
 import random
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from . import autoprobe, imagestore, audiostore, metrics, repairlog, sniff
 from . import forwarder as fwd
-from .atomic_store import load_json as _load_json, save_json as _save_json
+from .atomic_store import JsonSnapshot
+from .atomic_store import freeze_json as _freeze_json
+from .atomic_store import load_json as _load_json
+from .atomic_store import save_json_text as _save_json_text
 from .caution import background_cautious_enabled
 from .config import csv_mtime_ns, maybe_reload
 from .forwarder import (
@@ -318,36 +323,67 @@ def _load_thought_sigs() -> None:
         M.log.warning("[thought_sig] load fallito (%s): riparto pulito", exc)
 
 
-def _maybe_save_thought_sigs(force: bool = False) -> None:
+class _PendingWrite(NamedTuple):
+    """Uno snapshot di stato GIA' codificato (sull'event loop) in attesa di
+    essere scritto su disco; `on_fail(exc)` registra il fallimento."""
+
+    path: Path
+    text: JsonSnapshot
+    on_fail: Callable[[BaseException | None], None]
+
+
+def _run_writes(writes: list[_PendingWrite]) -> None:
+    """Scrive gli snapshot in ordine. Sincrona: allo shutdown gira sul
+    chiamante, nel watcher su un thread (l'I/O non ferma l'event loop)."""
+    for w in writes:
+        try:
+            ok, exc = _save_json_text(w.path, w.text), None
+        except Exception as e:  # noqa: BLE001 - una scrittura non blocca le altre
+            ok, exc = False, e
+        if not ok:
+            w.on_fail(exc)
+
+
+def _dispatch(writes: list[_PendingWrite], defer: bool) -> list[_PendingWrite]:
+    """defer=False: scrive subito (comportamento storico) e ritorna [].
+    defer=True: ritorna gli snapshot, che il chiamante scrivera' con
+    `_run_writes` (il watcher lo fa su un thread)."""
+    if defer:
+        return writes
+    _run_writes(writes)
+    return []
+
+
+def _maybe_save_thought_sigs(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
     """Salvataggio atomico throttled (max ogni 60s) delle firme Gemini."""
     import app.main as M
 
     if not M.PERSIST_STATS:
-        return
+        return []
     now = time.time()
     if not force and now - M._last_stats_save < 60:
-        return
+        return []
     from .thought_sig import THOUGHT_SIGS
 
-    if not _save_json(M._thought_sigs_file, THOUGHT_SIGS.dump()):
-        M.log.warning("[thought_sig] save fallito")
+    return _dispatch([_PendingWrite(M._thought_sigs_file, _freeze_json(THOUGHT_SIGS.dump()),
+                                    lambda _exc: M.log.warning("[thought_sig] save fallito"))], defer)
 
 
-def _maybe_save_adaptive_stats(force: bool = False) -> None:
+def _maybe_save_adaptive_stats(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
     """Salvataggio atomico throttled (max ogni 60s) delle stats adattive."""
     import app.main as M
 
     if not M.PERSIST_STATS:
-        return
+        return []
     now = time.time()
     if not force and now - M._last_stats_save < 60:
-        return
+        return []
     M._last_stats_save = now
-    if not _save_json(M._stats_file, M.router.dump_stats()):
-        M.log.error("[stats] save fallito")
+    return _dispatch([_PendingWrite(M._stats_file, _freeze_json(M.router.dump_stats()),
+                                    lambda _exc: M.log.error("[stats] save fallito"))], defer)
 
 
-def _maybe_save_all(force: bool = False) -> None:
+def _maybe_save_all(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
     """F26: stats adattive (EMA per bucket, prefill-rate, calibration) e stato
     di routing (holder/sticky/warm/frontier) sono due viste DELLO STESSO
     istante. Salvandole con timer indipendenti, un crash nel mezzo lasciava
@@ -357,11 +393,12 @@ def _maybe_save_all(force: bool = False) -> None:
 
     now = time.time()
     if not force and now - min(M._last_stats_save, M._last_routing_save) < 60:
-        return
+        return []
     M._last_stats_save = now
     M._last_routing_save = now
-    _maybe_save_adaptive_stats(force=True)
-    _maybe_save_routing_state(force=True)
+    writes = _maybe_save_adaptive_stats(force=True, defer=True)
+    writes += _maybe_save_routing_state(force=True, defer=True)
+    return _dispatch(writes, defer)
 
 
 def _load_cooldowns() -> None:
@@ -379,31 +416,35 @@ def _load_cooldowns() -> None:
         M.log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
 
 
-def _maybe_save_routing_state(force: bool = False) -> None:
+def _routing_save_failed(exc: BaseException | None) -> None:
+    """save_json() e' best-effort: non solleva, logga gia' l'errore REALE con
+    traceback in atomic_store. Qui registriamo il fatto (stato di routing
+    perso -> warm pool perso al restart). Un solo call site per snapshot e
+    scrittura: `exc_info` riceve l'eccezione VERA quando c'e', altrimenti
+    False (non None!) -> niente "NoneType: None", che e' un'evidenza falsa in
+    on-call."""
+    import app.main as M
+
+    M.log.error("[warmstart] save fallito", exc_info=exc or False)
+
+
+def _maybe_save_routing_state(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
     """Snapshot throttled (max ogni 60s + force allo shutdown) dello stato di
     routing legato alle sessioni: il restart non deve azzerare il pool caldo."""
     import app.main as M
 
     if not M.PERSIST_ROUTING:
-        return
+        return []
     now = time.time()
     if not force and now - M._last_routing_save < 60:
-        return
+        return []
     M._last_routing_save = now
-    _exc: BaseException | None = None
     try:
-        ok = _save_json(M._routing_file, M.router.dump_routing_state())
+        text = _freeze_json(M.router.dump_routing_state())
     except Exception as e:  # noqa: BLE001 - mai bloccare lo shutdown
-        ok = False
-        _exc = e
-    if not ok:
-        # save_json() e' best-effort: non solleva, logga gia' l'errore REALE
-        # con traceback in atomic_store. Qui registriamo il fatto (stato di
-        # routing perso -> warm pool perso al restart). Un solo call site per
-        # i due rami: `exc_info` riceve l'eccezione VERA quando c'e', altrimenti
-        # False (non None!) -> niente "NoneType: None", che e' un'evidenza
-        # falsa in on-call.
-        M.log.error("[warmstart] save fallito", exc_info=_exc or False)
+        _routing_save_failed(e)
+        return []
+    return _dispatch([_PendingWrite(M._routing_file, text, _routing_save_failed)], defer)
 
 
 def _load_routing_state() -> None:
@@ -447,18 +488,18 @@ def _bootstrap_runtime_from_logs() -> None:
         M.log.info("[bootstrap] finestre 24h da log: %d tentativi, %d probe", len(usage), len(probes))
 
 
-def _maybe_save_cooldowns(force: bool = False) -> None:
+def _maybe_save_cooldowns(force: bool = False, *, defer: bool = False) -> list[_PendingWrite]:
     """Salvataggio atomico throttled (max ogni 60s) dei cooldown attivi."""
     import app.main as M
 
     if not M.PERSIST_STATS:
-        return
+        return []
     now = time.time()
     if not force and now - M._last_cooldown_save < 60:
-        return
+        return []
     M._last_cooldown_save = now
-    if not _save_json(M._cooldown_file, M.router.save_cooldowns()):
-        M.log.error("[cooldown] save fallito")
+    return _dispatch([_PendingWrite(M._cooldown_file, _freeze_json(M.router.save_cooldowns()),
+                                    lambda _exc: M.log.error("[cooldown] save fallito"))], defer)
 
 
 def _all_uniques() -> set:
@@ -504,13 +545,17 @@ async def _watcher(interval: float) -> None:
         try:
             M.router.purge_expired()  # igiene: sticky/cooldown scaduti
             M.router.purge_draining()  # draining scaduti oltre il TTL
-            _maybe_save_all()  # F26: stats+routing, stesso istante
+            # Snapshot sull'event loop (stato coerente), scritture su disco
+            # su un thread: l'I/O non ferma le richieste in volo.
+            writes = _maybe_save_all(defer=True)  # F26: stats+routing, stesso istante
             # giro giornaliero sui RITIRATI: parte al primo tick dopo
             # mezzanotte e li sonda con calma (un probe riuscito riabilita)
             if not background_cautious_enabled():  # cautela: nessun probe automatico
                 autoprobe.maybe_spawn_retired(M.router, M.forwarder)
-            _maybe_save_cooldowns()  # cooldown attivi su disco
-            _maybe_save_thought_sigs()  # firme Gemini: persistite su disco
+            writes += _maybe_save_cooldowns(defer=True)  # cooldown attivi su disco
+            writes += _maybe_save_thought_sigs(defer=True)  # firme Gemini: persistite su disco
+            if writes:
+                await asyncio.to_thread(_run_writes, writes)
             await M.LEDGER.flush_async()  # ledger usage: offload su thread
             await repairlog.flush_async()  # ledger riparazioni: idem
             # keyhealth: osserva TUTTI i deployment con stats e aggiorna
@@ -532,7 +577,7 @@ async def _watcher(interval: float) -> None:
                     M.log.warning(
                         "[keyhealth] %d chiavi passate RETIRED: %s", len(new_retired), ", ".join(new_retired[:5])
                     )
-                M.KEYHEALTH.save()
+                await M.KEYHEALTH.save_async()
             except Exception:  # analytics non deve mai mordere
                 M.log.warning("[keyhealth] tick error", exc_info=True)
             # purge job video scaduti (mapping in memoria, TTL 24h)
