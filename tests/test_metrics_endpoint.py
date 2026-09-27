@@ -48,9 +48,30 @@ def _clean_metrics():
     yield
 
 
+def _all_route_paths(app_obj) -> list[str]:
+    """Path di TUTTE le route, incluse quelle dentro un router incluso.
+
+    Da C2 (Round 4) `/healthz`, `/metrics` e `/v1/models` vivono in
+    `app/models_and_health.py` e vengono montate con `include_router`, quindi
+    `app.routes` le contiene come router annidati e non come Route con `path`
+    proprio. Contare solo le route di primo livello darebbe 0 e non
+    controllerebbe piu' nulla: qui si attraversa `original_router`.
+    """
+    out: list[str] = []
+    for r in app_obj.routes:
+        p = getattr(r, "path", None)
+        if p:
+            out.append(p)
+            continue
+        sub = getattr(r, "original_router", None)
+        if sub is not None:
+            out.extend(x.path for x in sub.routes if getattr(x, "path", None))
+    return out
+
+
 def test_single_metrics_route(client):
     _c, m = client
-    routes = [r for r in m.app.routes if getattr(r, "path", "") == "/metrics"]
+    routes = [p for p in _all_route_paths(m.app) if p == "/metrics"]
     assert len(routes) == 1, f"attese 1 route /metrics, trovate {len(routes)}"
 
 
