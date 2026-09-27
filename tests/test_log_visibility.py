@@ -226,7 +226,7 @@ _RECOVERABLE_WARNING = [
     ("main.py", "[keyhealth] tick error"),
     ("main.py", "[images] sweep error"),
     ("main.py", "[thought_sig] save fallito"),
-    ("main.py", "[images] mirror %s fallito: %s"),
+    ("image_helpers.py", "[images] mirror %s fallito: %s"),
     ("forwarder.py", "[max-input] note_discovered fallito per %s"),
     ("forwarder.py", "[strike] hook error: %s"),
     ("routing/failure.py", "[lifecycle] retire %s fallito"),
