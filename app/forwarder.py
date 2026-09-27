@@ -56,6 +56,7 @@ from typing import AsyncIterator
 import httpx
 
 from . import metrics
+from .suppressed import report_suppressed
 from .bgtasks import spawn
 from . import repairlog
 from . import protocols as proto
@@ -242,7 +243,7 @@ def clamp_max_tokens(body: dict, dep: dict, hook=None) -> None:
             try:
                 metrics.inc("nx_max_tokens_clamped", ())
             except Exception:
-                pass
+                report_suppressed("forwarder.clamp_max_tokens.metrics")
             log.info("[maxtok] %s clamp %s %d->%d (ctx=%d max_in=%d "
                      "riserva_reasoning=%d sicurezza=%d)",
                      dep.get("unique", "?"), key, mt, new_mt, ctx, mi,
@@ -251,7 +252,7 @@ def clamp_max_tokens(body: dict, dep: dict, hook=None) -> None:
                 try:
                     hook(mt, new_mt)
                 except Exception:                   # mai rompere la richiesta
-                    pass
+                    report_suppressed("forwarder.clamp_max_tokens.hook")
 
 
 # Logger dedicato: OGNI body upstream che contiene "error" ci finisce (handler
@@ -403,7 +404,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                         u, (time.monotonic() - t0) * 1000, ctx_est=ctx)
                     router.note_warm_owner(ses, u)
                 except Exception:
-                    pass
+                    report_suppressed("forwarder._run@406")
                 metrics.inc("nx_hedge_total", ("probe_ok",))
                 # ELEZIONE per TEMPO DI TENTATIVO: se questo probe ha
                 # generato in MENO tempo del vincitore della gara diventa
@@ -464,7 +465,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                         else:
                             router.mark_failed(u, reason="probe_error")
                     except Exception:
-                        pass
+                        report_suppressed("forwarder._run@467")
                     metrics.inc("nx_hedge_total", ("probe_fail",))
             elif delivered:
                 # Canary che ha CONSEGNATO ma troncato (finish_reason=length):
@@ -481,11 +482,11 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
             try:
                 router.note_probe_done(ses, u)
             except Exception:
-                pass
+                report_suppressed("forwarder._run@484")
             try:
                 router.note_end(u, ctx)
             except Exception:
-                pass
+                report_suppressed("forwarder._run@488")
     _t = asyncio.ensure_future(_run())
     _NS_PROBES.add(_t)
     _t.add_done_callback(_NS_PROBES.discard)
@@ -580,7 +581,7 @@ def _timeout_for(dep: dict, ctx_est=None) -> httpx.Timeout | None:
         if base.read is not None and abs(read - float(base.read)) < 0.5:
             return None                        # identico al default
     except Exception:
-        pass
+        report_suppressed("forwarder._timeout_for")
     log.debug("[timeout-adaptive] %s avg=%.0fms -> read=%.0fs",
               dep.get("unique", "?"), float(ms), read)
     return httpx.Timeout(connect=base.connect, read=read, write=base.write,
@@ -663,7 +664,7 @@ def _note_nonstream(dep: dict) -> None:
     try:
         _NONSTREAM_HOOK(dep.get("unique"))
     except Exception:                          # mai rompere lo stream
-        pass
+        report_suppressed("forwarder._note_nonstream")
 
 
 def set_stall_bucket(*, multiplier=None, max_sec=None) -> None:
@@ -2148,7 +2149,7 @@ def _emit_rate_hint(unique: str | None, rl: dict, hook) -> None:
     try:
         hook(unique, rl)
     except Exception:                        # noqa: BLE001
-        pass
+        report_suppressed("forwarder._emit_rate_hint")
 
 
 def _openrouter_attribution(dep: dict,
@@ -2197,7 +2198,7 @@ def _openrouter_attribution(dep: dict,
                     title = title or (getattr(pol, "openrouter_app_title",
                                               "") or "")
             except Exception:                   # mai bloccare il routing
-                pass
+                report_suppressed("forwarder._openrouter_attribution")
         ref = ref or "https://opencode.ai"
         title = title or "opencode"
     out: dict[str, str] = {}
@@ -4116,7 +4117,7 @@ truncation_hook=None,
                                 ses, profile,
                                 requested_group or dep.get("group"))
                         except Exception:
-                            pass
+                            report_suppressed("forwarder.call_with_fallback@4119")
                         _op = _open_canary("refill", zen_only=False)
                         if _op is None:
                             log.info("[refill] ns %s: nessun canario free "
@@ -4733,7 +4734,7 @@ truncation_hook=None,
                     if isinstance(_msg, dict) and sanitize_message(_msg):
                         metrics.inc("nx_template_tokens_stripped_total", (cur,))
                 except Exception:
-                    pass
+                    report_suppressed("forwarder.call_with_fallback@4736")
                 log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", cur, len(tried), time.monotonic() - _t0)
                 _q = 0.6 if _text_parsed else (
                     0.7 if tr_result.get("repaired") else 1.0)
@@ -4748,7 +4749,7 @@ truncation_hook=None,
                             cur, (data.get("usage") or {}).get(
                                 "completion_tokens"))
                     except Exception:
-                        pass
+                        report_suppressed("forwarder.call_with_fallback@4751")
                 router.record_escalation_win(requested_group, dep)
                 router.note_session_success(ses, dep["unique"],
                                             (time.monotonic() - t0) * 1000,
@@ -4774,7 +4775,7 @@ truncation_hook=None,
                         "status": abs(int(err.status)) if err.status else None,
                         "ms": int((time.monotonic() - t0) * 1000)})
                 except Exception:            # noqa: BLE001
-                    pass
+                    report_suppressed("forwarder.call_with_fallback@4777")
                 # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/
                 # transport) -> salta TUTTO l'host per questa richiesta invece
                 # di bruciare un hop per ogni chiave che ci vive sopra.
@@ -4787,7 +4788,7 @@ truncation_hook=None,
                                      "-> host %s saltato per questa richiesta",
                                      cur, _h)
                 except Exception:            # noqa: BLE001
-                    pass
+                    report_suppressed("forwarder.call_with_fallback@4790")
                 # BAN/ToS dell'endpoint? quarantena l'host 24h PRIMA di
                 # ruotare (altrimenti bruciamo una chiave dietro l'altra).
                 maybe_quarantine_ban(router, dep, err.status, detail)
@@ -5216,7 +5217,7 @@ truncation_hook=None,
                                 router.note_session_overflow(
                                     current_session(), _actual)
                             except Exception:           # noqa: BLE001
-                                pass
+                                report_suppressed("forwarder.call_with_fallback@5219")
                         last_err = err
                         log.warning("[fallback] %s context_length_exceeded "
                                     "(%.90s): alzo la soglia sessione (%s) e "

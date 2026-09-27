@@ -44,6 +44,7 @@ from collections import deque
 from typing import Any
 
 from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST, ORDER_LAST
+from .suppressed import report_suppressed
 from .policy import Policy
 from .capabilities import count_image_parts
 from .effort import get_effort
@@ -1044,7 +1045,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                 if _div and _div > 0:
                     est = max(est, int(_prompt_chars(messages, tools) / _div * max(1.0, margin)))
             except Exception:  # noqa: BLE001
-                pass
+                report_suppressed("router.estimate_for_session")
         return est, used
 
     def _note_latency_sample(self, unique: str, latency_ms: float, ctx_est, kind: str, alpha: float) -> None:
@@ -1530,7 +1531,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             try:
                 metrics.inc("nx_go_refund_total", ("fb",))
             except Exception:  # noqa: BLE001
-                pass
+                report_suppressed("router.note_request_fallbacks")
         return got
 
     # ---- caccia al sostituto: budget/backoff (anti-spreco) ---------------
@@ -2256,7 +2257,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                     self.mark_failed(d["unique"], seconds=cd, reason="model_unhealthy")
                     n += 1
                 except Exception:  # noqa: BLE001
-                    pass
+                    report_suppressed("router.note_model_failure")
         self._model_fail_win().pop(model, None)
         try:
             log.warning(
@@ -2276,7 +2277,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             if m:
                 self._model_fail_win().pop(m, None)
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("router.note_model_success")
 
     # ------------------------------------------------------- DEGRADED MODE (P1)
     # "Rete degradata": se la quota di HOST sani scende sotto
@@ -2320,7 +2321,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                         if self.is_draining(u):
                             continue
                     except Exception:  # noqa: BLE001
-                        pass
+                        report_suppressed("router.hosts_health")
                     ok.add(h)
         except Exception:  # noqa: BLE001
             return 0, 0
@@ -5505,14 +5506,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                         continue
                     out.add(str(u))
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("router._in_use_deps.probes")
         # 3) CHIAMATE REALI IN CORSO.
         try:
             for u, s in list(self._stats.items()):
                 if int(getattr(s, "inflight", 0) or 0) > 0:
                     out.add(str(u))
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("router._in_use_deps.inflight")
         return out
 
     def initial_pick(

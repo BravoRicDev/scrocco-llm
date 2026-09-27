@@ -17,6 +17,7 @@ import re
 from starlette.requests import Request
 
 from . import journal, metrics
+from .suppressed import report_suppressed
 from .forwarder import _client_attribution
 from .opencode_gate import (
     client_can_use_opencode_zen,
@@ -204,7 +205,7 @@ def _sniff_headers(request: Request, *, logger, body_size: int = 0, session_id: 
             json.dumps(picked, ensure_ascii=False, default=str),
         )
     except Exception:
-        pass
+        report_suppressed("chat_helpers._sniff_headers")
 
 
 def _emit_summary(**f) -> None:
@@ -230,7 +231,7 @@ def _emit_summary(**f) -> None:
                 f["via"] = base
         M.log.info("[summary] %s", json.dumps(f, ensure_ascii=False, separators=(",", ":"), default=str))
     except Exception:  # mai bloccare la risposta per un log
-        pass
+        report_suppressed("chat_helpers._emit_summary.log")
     try:
         grp = str(f.get("grp") or "")
         prof = f.get("profile")
@@ -268,7 +269,7 @@ def _emit_summary(**f) -> None:
             upstream_model=model,
         )
     except Exception:  # analytics non deve mai mordere
-        pass
+        report_suppressed("chat_helpers._emit_summary.ledger")
 
 
 def _cached_tokens_of(u: dict) -> int | None:
@@ -399,7 +400,7 @@ def _note_fb_refund(router, session_id: str | None, fb: int) -> None:
     try:
         router.note_request_fallbacks(session_id, fb)
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("chat_helpers._note_fb_refund")
 
 
 def _apply_go_refund(
@@ -421,7 +422,7 @@ def _apply_go_refund(
     try:
         metrics.inc("nx_go_refund_total", ("redirect",))
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("chat_helpers._apply_go_refund")
     _st = {}
     if hasattr(router, "go_refund_status"):
         try:

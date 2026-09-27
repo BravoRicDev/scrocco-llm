@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from .jsonl_store import rotate_segments
+from .suppressed import report_suppressed
 
 # FIX: rotazione per DIMENSIONE del journal (prima cresceva senza limiti).
 # Configurabili via ambiente (come LEDGER_MAX_BYTES/LEDGER_KEEP in ledger.py).
@@ -68,7 +69,7 @@ def record(var_dir: str | Path, op: str, details: dict | None = None) -> None:
         with open(jpath, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:                        # noqa: BLE001
-        pass
+        report_suppressed("journal.record")
 
 
 def _rotate_if_needed(jpath: Path) -> None:
@@ -77,7 +78,7 @@ def _rotate_if_needed(jpath: Path) -> None:
     try:
         rotate_segments(jpath, JOURNAL_MAX_BYTES, JOURNAL_KEEP)
     except Exception:                        # noqa: BLE001
-        pass
+        report_suppressed("journal._rotate_if_needed")
 
 
 def history(var_dir: str | Path, limit: int = 50) -> dict:

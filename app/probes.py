@@ -15,6 +15,7 @@ import contextlib
 import time
 
 from . import autoprobe
+from .suppressed import report_suppressed
 from . import metrics
 
 
@@ -158,7 +159,7 @@ def _spawn_probe(
                                 with contextlib.suppress(Exception):
                                     M.router._note_session_slow(session, u, latency_ms=_d, ctx_est=ctx)
                     except Exception:
-                        pass
+                        report_suppressed("probes._run@160")
             elif v == "timeout" or (v is None and died):
                 # muto/fallito come il tentativo servito: cooldown lungo.
                 M.router.mark_failed(u, reason="timeout")

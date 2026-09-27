@@ -47,6 +47,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .admin import admin_api
+from .suppressed import report_suppressed
 from .bootstrap import bootstrap_api
 from .auth import AuthManager, AuthResult, gateway_env
 from . import metrics
@@ -280,7 +281,7 @@ def _note_json_fallback(_u):
         if _u:
             router.stats_for(_u).json_fallback += 1
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("main._note_json_fallback")
 
 
 set_nonstream_hook(_note_json_fallback)
@@ -424,7 +425,7 @@ async def lifespan(_app: FastAPI):
             elif _infl:
                 log.info("[shutdown] drain completato")
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("main.lifespan.drain")
         # Task di background (canary/probe/sveglie): vanno cancellati PRIMA di
         # chiudere il client httpx, altrimenti i probe in volo esplodono sul
         # client chiuso, sporcano lo shutdown e possono far saltare il
@@ -434,7 +435,7 @@ async def lifespan(_app: FastAPI):
             if _np:
                 log.info("[shutdown] cancel di %d probe/sveglie in volo", _np)
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("main.lifespan.probe_tasks")
         await forwarder.aclose()
         _maybe_save_all(force=True)  # F26: stats+routing insieme
         _maybe_save_cooldowns(force=True)  # cooldown: salva allo shutdown
@@ -1222,7 +1223,7 @@ async def chat_completions(request: Request, response: Response):
                 apply_sampling_defaults(_sp, dep, _sm)
             maybe_inject_response_format(_sp, dep, _so)
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("main._redirect_once@1225")
         _meta: dict = {}
         _sresp = await _stream_with_fallback(
             profile,
@@ -1368,7 +1369,7 @@ async def chat_completions(request: Request, response: Response):
                 )
                 metrics.inc("nx_sess_est_samples_total")
         except Exception:
-            pass
+            report_suppressed("main.chat_completions")
         _emit_summary(
             ses=session_id or "-",
             req=raw_model,
@@ -1762,7 +1763,7 @@ async def _hedge_peek(
                         _sec = _soft_cd(_f24)
                     router.mark_failed(_bu, seconds=_sec, reason="canary_error")
                 except Exception:
-                    pass
+                    report_suppressed("main._open_canary@1765")
             log.info("[hedge] canary %s non disponibile (%s) -> cooldown", _bu, type(exc).__name__)
             return None
 
@@ -2207,7 +2208,7 @@ async def _stt_bridge_transcribe(
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:  # noqa: BLE001
-                    pass
+                    report_suppressed("main._stt_bridge_transcribe@2210")
             if _was_dormant:
                 router.mark_failed_double_residual(cur, reason=detail[:80], status=st or None)
             else:
@@ -2395,7 +2396,7 @@ async def _stream_with_fallback(
                 # con attempts vuoti e nessun X-Scrocco-Trail.
                 result_box["trail"] = list(trail)
             except Exception:  # noqa: BLE001
-                pass
+                report_suppressed("main._ret@2398")
         return resp
 
     def _next_filtered(*a, **k):
@@ -3060,7 +3061,7 @@ async def _stream_with_fallback(
                     }
                 )
             except Exception:  # noqa: BLE001
-                pass
+                report_suppressed("main._stream_with_fallback@3063")
             fr = meta.get("finish_reason")
             rot_len = getattr(router.policy.qc_sanity, "rotate_on_length_empty", False)
             # NON ruotare (e non punire) se il modello HA prodotto reasoning o
@@ -3230,7 +3231,7 @@ async def _stream_with_fallback(
                     }
                 )
             except Exception:  # noqa: BLE001
-                pass
+                report_suppressed("main._stream_with_fallback@3233")
             # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/transport)
             # -> salta TUTTO l'host per questa richiesta.
             try:
@@ -3244,7 +3245,7 @@ async def _stream_with_fallback(
                             _h,
                         )
             except Exception:  # noqa: BLE001
-                pass
+                report_suppressed("main._stream_with_fallback@3247")
             # "does not support vision input" (llm7/Cloudflare) su richieste
             # di PURO TESTO: il proxy maschera spesso lo stesso problema del
             # reasoning mancante (i payload reali hanno decine di assistant
@@ -3505,7 +3506,7 @@ async def _stream_with_fallback(
                     try:
                         hook(dep["model"], detail)
                     except Exception:
-                        pass
+                        report_suppressed("main._stream_with_fallback@3508")
                 if _looks_context_limit(-err.status, detail):
                     # CONTEXT LENGTH: NON passiamo il 400 al client. Alziamo la
                     # soglia minima della sessione (le richieste successive
@@ -3516,7 +3517,7 @@ async def _stream_with_fallback(
                     try:
                         router.note_session_overflow(ses, _actual or 0)
                     except Exception:  # noqa: BLE001
-                        pass
+                        report_suppressed("main._stream_with_fallback@3519")
                     log.warning(
                         "[fallback] stream %s context_length_exceeded (%.90s): alzo la soglia sessione (%s) e ruoto",
                         dep["unique"],
@@ -3673,7 +3674,7 @@ async def _stream_with_fallback(
             try:
                 router.note_end(dep["unique"], ctx)
             except Exception:
-                pass
+                report_suppressed("main._stream_with_fallback@3676")
             _fail(dep["unique"], seconds=_soft_cd(router.stats_for(dep["unique"]).fail_count_24h))
             nxt = (
                 _next_filtered(profile, dep, need, scope, ctx=ctx, tried=tried_set, requested_group=requested_group)
@@ -3837,7 +3838,7 @@ async def _stream_with_fallback(
                     )
                     metrics.inc("nx_sess_est_samples_total")
             except Exception:
-                pass
+                report_suppressed("main._ingest")
             for o in _sse_data_objs(chunk):
                 answer_total += _answer_chars(o)
                 for ch in o.get("choices") or []:
@@ -3894,7 +3895,7 @@ async def _stream_with_fallback(
             except asyncio.CancelledError:
                 raise
             except Exception:
-                pass
+                report_suppressed("main._watch_disconnect")
 
         try:
             monitor = asyncio.create_task(_watch_disconnect())

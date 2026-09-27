@@ -15,6 +15,7 @@ import time
 import httpx
 
 from .forwarder import is_embedded_provider_error
+from .suppressed import report_suppressed
 
 log = logging.getLogger("nx.sse_utils")
 
@@ -109,7 +110,7 @@ def _strip_sse_content(chunk: bytes, stripper) -> bytes:
                         obj["choices"][0].setdefault("delta", {})["content"] = flushed
                         hit = True
                     except Exception:
-                        pass
+                        report_suppressed("sse_utils._strip_sse_content")
         if hit:
             out_lines.append(b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8"))
             changed = True
@@ -172,7 +173,7 @@ def _collapse_sse_field(chunks, field: str, text):
             synth = {"choices": [{"index": 0, "delta": {field: text}, "finish_reason": None}]}
             out.insert(0, b"data: " + json.dumps(synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("sse_utils._collapse_sse_field")
     return out
 
 
@@ -242,7 +243,7 @@ def _rewrite_sse_tool_calls(chunks, tool_calls):
             synth = {"choices": [{"index": 0, "delta": {"tool_calls": tcs}, "finish_reason": None}]}
             out.insert(0, b"data: " + json.dumps(synth, ensure_ascii=False).encode("utf-8") + b"\n\n")
         except Exception:  # noqa: BLE001
-            pass
+            report_suppressed("sse_utils._rewrite_sse_tool_calls")
     return out
 
 

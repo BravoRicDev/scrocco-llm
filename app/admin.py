@@ -33,6 +33,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import csv_store, journal, logview, metrics
+from .suppressed import report_suppressed
 from . import protocols as proto
 from .config import MODEL_HEADER, PROVIDER_HEADER, DATA_HEADER, _classify
 from .capabilities import canonical_family
@@ -201,7 +202,7 @@ def _commit_csv(header: list[str], rows: list[dict]) -> None:
         try:
             gw.router.apply_quirks()
         except Exception:
-            pass
+            report_suppressed("admin._commit_csv")
         log.info("[config] CSV aggiornato via admin: profili=%s deployment=%d",
                  ",".join(gw.config.profiles),
                  sum(len(v) for v in gw.config.groups.values()))
@@ -746,7 +747,7 @@ async def reload_gateway(request: Request):
         try:
             gw.router.apply_quirks()
         except Exception:
-            pass
+            report_suppressed("admin.reload_gateway")
         return {"ok": True, "message": "configurazione ricaricata"}
     except Exception as exc:
         return _err(500, f"reload failed: {exc}")
@@ -2839,7 +2840,7 @@ async def admin_playground(request: Request):
                         router.mark_failed(cur, seconds=_cd)
                         trace[-1]["reason"] = "timeout+penalized"
                     except Exception:            # noqa: BLE001
-                        pass
+                        report_suppressed("admin.admin_playground")
                 nxt = router.fallback_next(profile, dep, need, scope, ctx=ctx,
                                            requested_group=requested_group)
                 if nxt is not None and nxt["unique"] not in tried:
@@ -3164,7 +3165,7 @@ async def session_detail(request: Request, session_id: str,
             if (row.get("ts") or 0) >= cutoff:
                 rows.append(row)
     except Exception:                            # noqa: BLE001
-        pass
+        report_suppressed("admin.session_detail")
 
     ranking = _rank_rows_by_deployment(rows, gw.config)
     successful = [r for r in ranking if r["ok"] > 0]
@@ -3284,7 +3285,7 @@ async def stats_sessions(request: Request, window: str = "7d",
                 continue
             by_ses.setdefault(sid, []).append(row)
     except Exception:                            # noqa: BLE001
-        pass
+        report_suppressed("admin.stats_sessions")
 
     sessions = []
     for sid, rows in by_ses.items():
@@ -3340,7 +3341,7 @@ async def stats_summary(request: Request):
             if ts >= cutoff_24h:
                 ledger_rows_24h.append(row)
     except Exception:
-        pass
+        report_suppressed("admin.stats_summary")
 
     def aggregate_rows(rows):
         total = {
@@ -3500,7 +3501,7 @@ async def stats_tokens(request: Request, window: str = "24h"):
             if row.get("ts", 0) >= cutoff:
                 rows.append(row)
     except Exception:
-        pass
+        report_suppressed("admin.stats_tokens")
 
     # Aggrega per modello
     by_model = {}
@@ -3642,7 +3643,7 @@ async def stats_models(request: Request, window: str = "7d"):
             if row.get("ts", 0) >= cutoff:
                 rows.append(row)
     except Exception:
-        pass
+        report_suppressed("admin.stats_models")
 
     # Aggrega per modello
     by_model = {}

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import imagestore, metrics
+from .suppressed import report_suppressed
 from .auth import AuthResult
 from .chat_helpers import (
     _client_attribution,
@@ -310,7 +311,7 @@ async def images_generations(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    pass
+                    report_suppressed("images_api.images_generations@312")
             if _was_dormant:
                 M.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from . import metrics, sttscrub
+from .suppressed import report_suppressed
 from .auth import AuthResult
 from .chat_helpers import (
     _client_attribution,
@@ -195,7 +196,7 @@ async def audio_speech(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    pass
+                    report_suppressed("audio_api.audio_speech@197")
             if _was_dormant:
                 M.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
@@ -405,7 +406,7 @@ async def systemone(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    pass
+                    report_suppressed("audio_api.systemone@407")
             if _was_dormant:
                 M.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
@@ -576,7 +577,7 @@ async def _audio_transcribe(request: Request, path: str):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    pass
+                    report_suppressed("audio_api._audio_transcribe@578")
             if _was_dormant:
                 M.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None

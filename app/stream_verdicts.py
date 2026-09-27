@@ -8,6 +8,7 @@ livello di modulo non esisterebbero ancora, e main.py importa questo modulo.
 import time
 from fastapi.responses import JSONResponse
 from . import metrics
+from .suppressed import report_suppressed
 from .forwarder import (
     _MODEL_MISSING_RE,
     _PAYLOAD_SCHEMA_RE,
@@ -95,7 +96,7 @@ def _exhausted(
     try:
         metrics.inc("nx_chain_503_total", (lab,))
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("stream_verdicts._exhausted")
     if lab != "clean":
         M.log.warning(
             "[cache-audit] 503 catena esaurita dopo prefisso MUTATO "

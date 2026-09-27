@@ -193,3 +193,22 @@ def test_rolling_usage_matches_full_resum():
         assert r.output_tokens_window("u", now=probe) == sum(n for _t, n in ref_o)
         if rng.random() < 0.01:          # finestra svuotata: si riparte
             now = probe
+
+
+# ------------------------------------------------------------ suppressed
+def test_report_suppressed_is_rate_limited(caplog, monkeypatch):
+    import logging
+
+    from app import suppressed
+
+    monkeypatch.setattr(suppressed, "_counts", {})
+    monkeypatch.setattr(suppressed, "_last_report", {})
+    caplog.set_level(logging.WARNING, logger="nx.suppressed")
+    for _ in range(5):
+        try:
+            raise RuntimeError("boom")
+        except Exception:
+            suppressed.report_suppressed("test.site")
+    recs = [r for r in caplog.records if r.name == "nx.suppressed"]
+    assert len(recs) == 1 and recs[0].exc_info is not None
+    assert suppressed.suppressed_counts() == {"test.site": 5}

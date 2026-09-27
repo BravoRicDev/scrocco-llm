@@ -13,6 +13,7 @@ import logging
 import time
 
 from ..config import ORDER_LAST
+from ..suppressed import report_suppressed
 from ..opencode_gate import (dep_usable as _dep_usable,
                              is_opencode_zen_dep,
                              opencode_cautious_request)
@@ -81,7 +82,7 @@ class CanaryMixin:
             try:
                 ex |= set(self._sess_deps().get(current_session(), ()))
             except Exception:                  # noqa: BLE001
-                pass
+                report_suppressed("canary.hedge_canaries@83")
         floor = 0
         if requested_group:
             try:

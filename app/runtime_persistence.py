@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import autoprobe, imagestore, audiostore, metrics, repairlog, sniff
+from .suppressed import report_suppressed
 from . import forwarder as fwd
 from .atomic_store import JsonSnapshot
 from .atomic_store import freeze_json as _freeze_json
@@ -104,14 +105,14 @@ def _apply_misc_policy(pol) -> None:
             storage_dir=Path(M.VAR_DIR) / "images",
         )
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.images")
     try:
         # Cache delle trascrizioni STT: TTL dalla policy, gli altri limiti
         # restano quelli del modulo (il budget e' in caratteri di testo, che
         # non ha un equivalente nella policy delle immagini).
         audiostore.configure(ttl_sec=getattr(pol, "stt_chat_cache_ttl_sec", None))
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.stt_cache")
     try:
         sniff.set_sniff_caps(
             max_b64_chars=getattr(pol, "sniff_max_b64_chars", None),
@@ -119,7 +120,7 @@ def _apply_misc_policy(pol) -> None:
             max_sse_bytes=getattr(pol, "sniff_max_sse_bytes", None),
         )
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.sniff")
     try:
         from .keyhealth import set_health_thresholds
 
@@ -128,19 +129,19 @@ def _apply_misc_policy(pol) -> None:
             success_ema_floor=getattr(pol, "keyhealth_success_ema_floor", None),
         )
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.keyhealth")
     try:
         from .ctxcompact import set_min_protected_msgs
 
         set_min_protected_msgs(getattr(pol, "ctxcompact_min_protected_msgs", None))
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.ctxcompact")
     try:
         from .toolrepair import set_max_unwrap_depth
 
         set_max_unwrap_depth(getattr(pol, "toolrepair_max_unwrap_depth", None))
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.toolrepair")
     try:
         fwd.set_upstream_http(
             connect=getattr(pol, "upstream_connect_timeout_sec", None),
@@ -154,7 +155,7 @@ def _apply_misc_policy(pol) -> None:
         fwd.set_retryable_status(getattr(pol, "retryable_status_codes", None))
         fwd.set_effort_incompatible_hosts(getattr(pol, "effort_incompatible_hosts", None))
     except Exception:  # noqa: BLE001
-        pass
+        report_suppressed("runtime_persistence._apply_misc_policy.upstream_http")
 
 
 def _coalesce_cache_take(key: str, now: float):
@@ -602,7 +603,7 @@ async def _watcher(interval: float) -> None:
                     try:
                         M.router.apply_quirks()  # flag in-memory (P2-9)
                     except Exception:
-                        pass
+                        report_suppressed("runtime_persistence._watcher")
                     # Probe immediato dei deployment appena aggiunti: scoprono lo
                     # stato di salute PRIMA del traffico reale (vedi autoprobe).
                     _added = sorted(_all_uniques() - _prev_uniques)

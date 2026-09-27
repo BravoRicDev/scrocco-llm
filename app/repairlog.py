@@ -39,6 +39,7 @@ import time
 from collections import defaultdict
 
 from . import metrics
+from .suppressed import report_suppressed
 from .jsonl_store import append_jsonl, rotate_segments
 
 log = logging.getLogger("nx.repair")
@@ -108,7 +109,7 @@ class RepairLog:
                 metrics.inc("nx_repair_events_total",
                             (family, kind, outcome), float(n))
             except Exception:                       # noqa: BLE001
-                pass
+                report_suppressed("repairlog.note")
             entry = {
                 "ts": int(time.time()),
                 "kind": kind, "family": family, "source": source,

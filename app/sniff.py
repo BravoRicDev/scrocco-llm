@@ -28,6 +28,8 @@ import threading
 import time
 from logging.handlers import TimedRotatingFileHandler
 
+from .suppressed import report_suppressed
+
 _logger: logging.Logger | None = None
 _index_logger: logging.Logger | None = None
 _lock = threading.Lock()
@@ -127,7 +129,7 @@ def _emit_locked(lg: logging.Logger | None, rec: dict) -> None:
     try:
         lg.info(json.dumps(rec, ensure_ascii=False, default=str))
     except Exception:                              # noqa: BLE001
-        pass
+        report_suppressed("sniff._emit_locked")
 
 
 def _write(rec: dict) -> None:
