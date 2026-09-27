@@ -1222,7 +1222,7 @@ async def chat_completions(request: Request, response: Response):
                 apply_sampling_defaults(_sp, dep, _sm)
             maybe_inject_response_format(_sp, dep, _so)
         except Exception:  # noqa: BLE001
-            report_suppressed("main._redirect_once@1225")
+            report_suppressed("main.chat_completions._redirect_once")
         _meta: dict = {}
         _sresp = await _stream_with_fallback(
             profile,
@@ -1762,7 +1762,7 @@ async def _hedge_peek(
                         _sec = _soft_cd(_f24)
                     gw_state.router.mark_failed(_bu, seconds=_sec, reason="canary_error")
                 except Exception:
-                    report_suppressed("main._open_canary@1765")
+                    report_suppressed("main._hedge_peek._open_canary")
             log.info("[hedge] canary %s non disponibile (%s) -> cooldown", _bu, type(exc).__name__)
             return None
 
@@ -2207,7 +2207,7 @@ async def _stt_bridge_transcribe(
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:  # noqa: BLE001
-                    report_suppressed("main._stt_bridge_transcribe@2210")
+                    report_suppressed("main._stt_bridge_transcribe")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(cur, reason=detail[:80], status=st or None)
             else:
@@ -2403,7 +2403,7 @@ class _ClientRelay:
         except asyncio.CancelledError:
             raise
         except Exception:
-            report_suppressed("main._watch_disconnect")
+            report_suppressed("main._ClientRelay._watch_disconnect")
 
     # corpo del loop fattorizzato: aggiorna lo stato watchdog ed emette
     # il chunk invariato. Condiviso da prebuffer e dal flusso residuo.
@@ -2456,7 +2456,7 @@ class _ClientRelay:
                 )
                 metrics.inc("nx_sess_est_samples_total")
         except Exception:
-            report_suppressed("main._ingest")
+            report_suppressed("main._ClientRelay._ingest")
         for o in _sse_data_objs(chunk):
             self.answer_total += _answer_chars(o)
             for ch in o.get("choices") or []:
@@ -3547,7 +3547,7 @@ class _StreamFallback:
                 }
             )
         except Exception:  # noqa: BLE001
-            report_suppressed("main._stream_with_fallback@3063")
+            report_suppressed("main._StreamFallback._record_verdict_trail")
 
     def _penalize_rejected_verdict(self):
         """Penale del deployment per il verdetto scartato: nessuna per chiusure pulite,
@@ -3713,7 +3713,7 @@ class _StreamFallback:
                 }
             )
         except Exception:  # noqa: BLE001
-            report_suppressed("main._stream_with_fallback@3233")
+            report_suppressed("main._StreamFallback._try_reasoning_repairs#1")
         # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/transport)
         # -> salta TUTTO l'host per questa richiesta.
         try:
@@ -3727,7 +3727,7 @@ class _StreamFallback:
                         self._h,
                     )
         except Exception:  # noqa: BLE001
-            report_suppressed("main._stream_with_fallback@3247")
+            report_suppressed("main._StreamFallback._try_reasoning_repairs#2")
         # "does not support vision input" (llm7/Cloudflare) su richieste
         # di PURO TESTO: il proxy maschera spesso lo stesso problema del
         # reasoning mancante (i payload reali hanno decine di assistant
@@ -4010,7 +4010,7 @@ class _StreamFallback:
                 try:
                     self.hook(self.dep["model"], self.detail)
                 except Exception:
-                    report_suppressed("main._stream_with_fallback@3508")
+                    report_suppressed("main._StreamFallback._classify_negative_status#1")
             if _looks_context_limit(-self.err.status, self.detail):
                 # CONTEXT LENGTH: NON passiamo il 400 al client. Alziamo la
                 # soglia minima della sessione (le richieste successive
@@ -4021,7 +4021,7 @@ class _StreamFallback:
                 try:
                     gw_state.router.note_session_overflow(self.ses, self._actual or 0)
                 except Exception:  # noqa: BLE001
-                    report_suppressed("main._stream_with_fallback@3519")
+                    report_suppressed("main._StreamFallback._classify_negative_status#2")
                 log.warning(
                     "[fallback] stream %s context_length_exceeded (%.90s): alzo la soglia sessione (%s) e ruoto",
                     self.dep["unique"],
@@ -4181,7 +4181,7 @@ class _StreamFallback:
         try:
             gw_state.router.note_end(self.dep["unique"], self.ctx)
         except Exception:
-            report_suppressed("main._stream_with_fallback@3676")
+            report_suppressed("main._StreamFallback._on_unexpected_exception")
         self._fail(self.dep["unique"], seconds=_soft_cd(gw_state.router.stats_for(self.dep["unique"]).fail_count_24h))
         self.nxt = (
             self._next_filtered(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried_set, requested_group=self.requested_group)
@@ -4277,7 +4277,7 @@ class _StreamFallback:
                 # con attempts vuoti e nessun X-Scrocco-Trail.
                 self.result_box["trail"] = list(self.trail)
             except Exception:  # noqa: BLE001
-                report_suppressed("main._ret@2398")
+                report_suppressed("main._StreamFallback._ret")
         return resp
 
     def sse(self):

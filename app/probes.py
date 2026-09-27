@@ -159,7 +159,7 @@ def _spawn_probe(
                                 with contextlib.suppress(Exception):
                                     gw_state.router._note_session_slow(session, u, latency_ms=_d, ctx_est=ctx)
                     except Exception:
-                        report_suppressed("probes._run@160")
+                        report_suppressed("probes._spawn_probe._run")
             elif v == "timeout" or (v is None and died):
                 # muto/fallito come il tentativo servito: cooldown lungo.
                 gw_state.router.mark_failed(u, reason="timeout")

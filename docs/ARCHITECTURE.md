@@ -53,7 +53,9 @@ cools down failing ones.
    `pick_deployment` / `_walk_ladder_resilient` (dims ladder) or `_walk_chain`
    (capability chains). Every candidate passes `opencode_gate.dep_usable`,
    cooldown and circuit-breaker checks.
-5. **Forwarding with fallback** — `main._stream_with_fallback`:
+5. **Forwarding with fallback** — `main._stream_with_fallback` (delegates to the
+   method object `main._StreamFallback`, whose `run()` reads as the attempt loop;
+   the client-side SSE relay is `main._ClientRelay`):
    `_peek_stream` streams one attempt upstream via `forwarder.stream_response`;
    speculative helpers (warm refill, slow-race, hedge canaries) may run in
    parallel when enabled. On failure it asks the router for the next candidate
@@ -67,7 +69,8 @@ cools down failing ones.
 ### Non-streaming
 
 Same stages 1–4, then `main._forward_coalesced` (in-flight coalescing + short
-response cache) → `forwarder.call_with_fallback` → per-attempt `forwarder.call`
+response cache) → `forwarder.call_with_fallback` (method object
+`forwarder._NonStreamFallback`) → per-attempt `forwarder.call`
 (with `clamp_max_tokens` and adaptive timeout) → `router.fallback_after` on
 failure → 503 with `Retry-After` only once the ladder is exhausted.
 

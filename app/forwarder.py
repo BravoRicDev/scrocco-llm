@@ -64,7 +64,7 @@ from . import protocols as proto
 from .csvlearn import (learn_thinking_replay, learn_strip_reasoning,
                        learn_no_thinking, learn_content_string)
 from .policy import refill_out_budget
-from .qc import check_response
+from .qc import check_response, check_sanity
 from .router import inject_identity, ErrorKind, estimate_tokens
 from .session_ctx import current_session
 from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
@@ -405,7 +405,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                         u, (time.monotonic() - t0) * 1000, ctx_est=ctx)
                     router.note_warm_owner(ses, u)
                 except Exception:
-                    report_suppressed("forwarder._run@406")
+                    report_suppressed("forwarder._spawn_ns_probe._run#1")
                 metrics.inc("nx_hedge_total", ("probe_ok",))
                 # ELEZIONE per TEMPO DI TENTATIVO: se questo probe ha
                 # generato in MENO tempo del vincitore della gara diventa
@@ -466,7 +466,7 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
                         else:
                             router.mark_failed(u, reason="probe_error")
                     except Exception:
-                        report_suppressed("forwarder._run@467")
+                        report_suppressed("forwarder._spawn_ns_probe._run#2")
                     metrics.inc("nx_hedge_total", ("probe_fail",))
             elif delivered:
                 # Canary che ha CONSEGNATO ma troncato (finish_reason=length):
@@ -483,11 +483,11 @@ def _spawn_ns_probe(router, dep: dict, fut, t0: float, ctx, ses,
             try:
                 router.note_probe_done(ses, u)
             except Exception:
-                report_suppressed("forwarder._run@484")
+                report_suppressed("forwarder._spawn_ns_probe._run#3")
             try:
                 router.note_end(u, ctx)
             except Exception:
-                report_suppressed("forwarder._run@488")
+                report_suppressed("forwarder._spawn_ns_probe._run#4")
     _t = asyncio.ensure_future(_run())
     _NS_PROBES.add(_t)
     _t.add_done_callback(_NS_PROBES.discard)
@@ -3053,6 +3053,1612 @@ def is_provider_level(cls: str | None) -> bool:
     return (cls or "") in PROVIDER_LEVEL_CLASSES
 
 
+# Sentinella dei passi di _NonStreamFallback: "prosegui col prossimo tentativo"
+# (il `continue` del ciclo di fallback), distinta da None (= passo concluso) e
+# dal risultato finale (tupla) che chiude la chiamata.
+_RETRY = object()
+
+
+class _NonStreamFallback:
+    """Method object di `Forwarder.call_with_fallback` (Replace Method with
+    Method Object): lo stato di UNA chiamata non-stream con fallback vive
+    negli attributi (`self.fwd` e' il Forwarder), cosi' la catena e' divisa
+    in metodi. Il comportamento e' quello del metodo originale."""
+
+    def __init__(self, fwd, router, profile, first_dep, payload, collect_qc_failures, media_strike_hook, need, scope, ctx, attempts_box, session, ses, client_ip, attribution, requested_group, orig_messages):
+        self.fwd = fwd
+        self.router = router
+        self.profile = profile
+        self.first_dep = first_dep
+        self.payload = payload
+        self.collect_qc_failures = collect_qc_failures
+        self.media_strike_hook = media_strike_hook
+        self.need = need
+        self.scope = scope
+        self.ctx = ctx
+        self.attempts_box = attempts_box
+        self.session = session
+        self.ses = ses
+        self.client_ip = client_ip
+        self.attribution = attribution
+        self.requested_group = requested_group
+        self.orig_messages = orig_messages
+
+    async def run(self):
+        self._init_call_state()
+        # Gemini 3 tool replay: una history con tool_call prive di firma rende
+        # Gemini inutilizzabile. L'esclusione avviene A MONTE nel router
+        # (set_avoid_gemini in chat_completions -> _gemini_blocked in
+        # pick_deployment/_walk_chain): qui non serve alcun salto/tentativo.
+        while (self.dep is not None and len(self.tried) < self._max_tries
+               and (not self._deadline_ms
+                    or (time.monotonic() - self._t0) * 1000 < self._deadline_ms)):
+            self._begin_attempt()
+            try:
+                self._plan_attempt()
+                await self._await_response()
+                self._repair_response()
+
+                if self._handle_text_tool_calls():
+                    continue
+                self._check_structure_and_loops()
+
+                _resp = self._quality_check()
+                if _resp is _RETRY:
+                    continue
+                if _resp is not None:
+                    return _resp
+                if self._retry_structured_output():
+                    continue
+                if self._on_generation_loop():
+                    continue
+                if self._on_fake_tool_call():
+                    continue
+                if self._rotate_truncated_on_hold():
+                    continue
+                self._record_success()
+                return (self.data, self.dep, self.qc_failed) if self.collect_qc_failures \
+                    else (self.data, self.dep)
+            except UpstreamError as _err_exc:
+                self.err = _err_exc
+                if getattr(self.err, "final", False):
+                    raise                    # decisione definitiva: non ruotare
+                self._classify_upstream_error()
+                if self._try_payload_repairs():
+                    continue
+                self._kind_default = classify_error(self.err.status, None, self.detail)
+                if self._on_quota_or_balance():
+                    continue
+                if self._on_negative_status():
+                    continue
+                self._fail_and_pick_next()
+            finally:
+                self.router.key_lease_release(self._lease)   # P2-8
+                self.router.note_end(self.cur, self.ctx)   # SEMPRE il tentativo corrente
+        # catena finita dopo fallimenti QC: consegna l'ultimo broken (D3) SE ha
+        # contenuto; se e' vuoto -> errore RETRYABLE (mai un turno vuoto/finto).
+        if self.collect_qc_failures and self.qc_failed and self.last_broken is not None:
+            self.data0 = self.last_broken[0]
+            if not _looks_empty(self.data0):
+                return self.data0, self.last_broken[1], self.qc_failed
+        if self.last_err is not None and self.trail:
+            with contextlib.suppress(Exception):
+                self.last_err.trail = self.trail
+        raise self.last_err or UpstreamError(503, "nessun deployment disponibile",
+                                        final=True)
+
+    def _init_call_state(self):
+        """Snapshot di policy e stato iniziale della chiamata (trail, tentativi, warm-refill, history)."""
+        self.qc = self.router.policy.qc_json          # snapshot per questa chiamata
+        self.san = self.router.policy.qc_sanity       # sanity generica (vuoto/trivial)
+        self.tr_cfg = create_tool_repair_config({
+            "tool_repair": {
+                "enabled": self.router.policy.tool_repair_enabled,
+                "default_level": self.router.policy.tool_repair_default_level,
+                "disable_for_google": self.router.policy.tool_repair_disable_for_google,
+                "max_args_size": self.router.policy.tool_repair_max_args_size,
+                "annotate_reasoning": self.router.policy.tool_repair_annotate_reasoning,
+            },
+        })
+        self._fc = fake_config_from_policy(self.router.policy)
+        self.fake_escalations = 0
+        self._hn = hist_config_from_policy(self.router.policy)
+        self._sm = sampling_config_from_policy(self.router.policy)
+        self._so = schemaout_config_from_policy(self.router.policy)
+        self._tt = text_config_from_policy(self.router.policy)
+        self._corrected: set[str] = set()
+        self._rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
+        self._cstr_steps: dict[str, set] = {}     # rimedi content-string per dep
+        self.trail: list = []                     # ATTEMPT TRAIL (P0) per il 503
+        self.skip_hosts: set[str] = set()         # P1-5: host saltati (provider KO)
+        self._rsn_restored = False                # history originale gia' riprovata
+        self.dep = self.first_dep
+        self.requested_group = self.requested_group or (self.first_dep or {}).get("group")
+        # HOLD-UNTIL-FINISH (parita' col path streaming): con hold attivo la
+        # risposta non-streaming (gia' interamente bufferizzata) non deve MAI
+        # consegnare un moncone troncato dal modello. Stesso interruttore dello
+        # stream: colonna CSV per-deployment OR policy qc_json.
+        self.hold = bool((self.first_dep or {}).get("hold_until_finish")) or bool(
+            getattr(self.router.policy.qc_json, "stream_hold_until_finish", False))
+        self.last_err: UpstreamError | None = None
+        self.tried: set[str] = set()
+        self.qc_failed: list[tuple[str, str]] = []
+        self.last_broken: tuple[dict, dict] | None = None
+        self._max_tries = int(getattr(self.router.policy, "max_fallback_tries",
+                                 os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
+                         or 128)
+        self._deadline_ms = int(getattr(self.router.policy.qc_json,
+                                   "stream_total_deadline_ms", 180000) or 0)
+        self._t0 = time.monotonic()
+        self._kind_default: str | None = None
+        # ---- WARM-REFILL a cascata (non-streaming): finche' la sessione ha
+        # meno di warm_ready_min caldi "deliverable" (need + ctx + output
+        # assicurato), ogni tentativo corsia UN canary nuovo in parallelo
+        # (2 alla volta, free-only, api_key diversa, libero da ogni sessione):
+        # consegna il piu' veloce, l'altro finisce come probe reale -> warm.
+        self._pol = self.router.policy
+        self._refill_on = (bool(getattr(self._pol, "warm_refill_enabled", True))
+                      and bool(getattr(self._pol, "warm_pool_enabled", True))
+                      and bool(self.ses) and bool(self.profile))
+        self._ready_min = self.router.warm_ready_effective(self.ses, self._pol)
+        self._maxif = max(0, int(getattr(self._pol, "warm_refill_max_inflight",
+                                     6) or 0))
+        self._raced: set[str] = set()
+        self._raced_keys: set[str] = set()
+        self._refill_rounds = 0
+        self._zen_hunt = False                # caccia canary zen-only (nativo)
+        try:
+            self._outb = refill_out_budget(self.payload, self._pol)
+        except Exception:
+            self._outb = 4096
+
+        # ---- L1 #1: normalizzazione STRUTTURALE della history (coda) ----
+        if self._hn.enabled:
+            self._new_msgs, self._hn_rep = normalize_messages(
+                (self.payload or {}).get("messages"), self._hn,
+                tail_floor=self.router.ctx_boundary_floor(self.ses))
+            if self._hn_rep.get("changed"):
+                self.payload["messages"] = self._new_msgs
+                metrics.inc("nx_histnorm_total", ("changed",))
+                log.info("[histnorm] coda normalizzata: orphan=%d "
+                         "dangling=%d empty=%d dupsys=%d",
+                         self._hn_rep.get("shown_orphan_tool", 0),
+                         self._hn_rep.get("dangling_tool_calls", 0),
+                         self._hn_rep.get("empty_assistant", 0),
+                         self._hn_rep.get("dup_system", 0))
+
+    def _begin_attempt(self):
+        """Apre il tentativo sul deployment corrente: identita', thinking replay, inflight e lease."""
+        self.cur = self.dep["unique"]             # il deployment DEL TENTATIVO:
+        log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(self.tried), self._max_tries, self.cur, self.dep.get("group", "?"))
+        self._was_dormant = self.router.is_cooled_down(self.cur)
+        # Solo se il gruppo RICHIESTO esplicitamente e' un bucket di
+        # escalation (-go/-fallback): niente refill/canary/gara lenta
+        # (i bucket a pagamento non usano il caldo). Se ci si arriva via
+        # FALLBACK dal dim, la speculativa resta attiva.
+        self._esc_grp = is_escalation_group(
+            str(self.requested_group or ""),
+            self.router.config.go_suffix, self.router.config.fallback_suffix)
+        self.tried.add(self.cur)                  # note_end deve riferirsi a QUESTO,
+        if self.attempts_box is not None:
+            self.attempts_box.append(self.cur)    # osservabilità summary per-richiesta
+        # l'identità DEVE riflettere il deployment CHE PROVA ORA: dopo un
+        # fallback il system message nominerebbe il modello sbagliato.
+        inject_identity(self.payload, self.dep)
+        self._tp = apply_thinking_replay(self.payload, self.dep, self.orig_messages)
+        if self._tp:
+            log.info("[thinking-replay] %s: %d campi reasoning rimessi "
+                     "PRIMA dell'invio (proattivo)", self.cur, self._tp)
+        self.router.note_start(self.cur, self.ctx)     # rotazione adattiva (peso token)
+        self.t0 = time.monotonic()
+        self._lease = self.router.key_lease_acquire(self.dep)   # P2-8 (opt-in)
+
+    def _plan_attempt(self):
+        """Default di sampling/struttura e piano di gara: canary warm-refill, deadline slow/canary."""
+        if self._sm.enabled:
+            self._applied = apply_sampling_defaults(self.payload, self.dep, self._sm)
+            if self._applied:
+                log.debug("[sampling] %s: default %s",
+                          self.cur, self._applied)
+            if (self._so.enabled and maybe_inject_response_format(
+                    self.payload, self.dep, self._so)):
+                metrics.inc("nx_resp_format_injected_total",
+                            (self.cur,))
+        self._fB = None
+        self._B = None
+        self._wake_b = False
+        self._tB = self.t0
+        self._fZ = None
+        self._BZ = None
+        self._wake_z = False
+        self._tZ = self.t0
+        try:
+            self._fly = self.router.probes_in_flight(self.ses)
+        except Exception:
+            self._fly = 0
+        # DEGRADED (P1-6): in blackout upstream niente speculativo
+        # (cascata/canary/sveglia): brucia rate-limit senza costrutto.
+        try:
+            self._degraded = self.router.degraded_active()
+        except Exception:
+            self._degraded = False
+
+        self._open_refill_canaries()
+        self.futA = None
+        # GARA LENTA (non-stream): soglia misurata dall'inizio del
+        # TENTATIVO di A. Vale SEMPRE, anche quando un canario di
+        # refill e' gia' in volo (il timer lento e' indipendente dal
+        # tetto per-sessione e non applica penali al lento).
+        self._ns_slow = 0
+        self._ns_canary = 0
+        if not self._degraded and not self._esc_grp:
+            try:
+                self._ns_slow = int(getattr(
+                    self._pol, "nonstream_slow_race_after_ms", 0) or 0)
+            except Exception:
+                self._ns_slow = 0
+            try:
+                self._ns_canary = int(getattr(
+                    self._pol, "slow_canary_after_ms", 0) or 0)
+            except Exception:
+                self._ns_canary = 0
+        self._slow_dl = ((self.t0 + self._ns_slow / 1000.0) if self._ns_slow > 0
+                    else None)
+        # TIMING DEL CANARY separato dal FLAG lento: `slow_canary_ms`
+        # apre il canario, `slow_race_ms` marca il dep "lento per la
+        # sessione". Con `slow_canary_ms <= 0` il canario resta appeso
+        # alla soglia del flag (storico: i due scattano insieme).
+        self._canary_dl = ((self.t0 + self._ns_canary / 1000.0) if self._ns_canary > 0
+                      else self._slow_dl)
+        self._flag_marked = False
+
+    def _open_refill_canaries(self):
+        """Warm-refill a cascata: apre i canary verso i candidati caldi della sessione."""
+        if (self._refill_on and self._ready_min and not self._degraded
+                and not self._esc_grp
+                and not _opencode_cautious_request()
+                and self._refill_rounds < self._maxif
+                and self._fly < self._maxif
+                and (not self._deadline_ms
+                     or (time.monotonic() - self._t0) * 1000
+                     < self._deadline_ms)):
+            try:
+                self._pool = self.router.warm_valid_for(
+                    self.ses, self.profile,
+                    self.requested_group or self.dep.get("group"),
+                    self.need, self.ctx, self._outb, tried=self.tried | self._raced,
+                    include_borrowed=True)
+                self._nv = len(self._pool)
+            except Exception:
+                self._pool, self._nv = [], self._ready_min
+            # Nativo opencode SENZA zen nel warm: caccia un canary
+            # zen-only anche se il conteggio MISTO basta (basta 1 zen).
+            self._zen_hunt = (self.router._zen_first_active()
+                         and not any(is_opencode_zen_dep(d)
+                                     for d in self._pool)
+                         and self.router.hunt_allowed(self.ses, self.ctx))
+            if (self._nv < self._ready_min) or self._zen_hunt:
+                if self._zen_hunt:
+                    self.router.note_hunt(self.ses, self.ctx, gained=False)
+                    log.info("[refill] ns %s: 0 zen nel warm per client "
+                             "nativo -> caccia canary zen-only", self.cur)
+                self._refill_rounds += 1
+                self._rpm = self.router.session_rpm(self.ses)
+                log.info("[refill] ns %s: warm validi %d/%d, in volo "
+                         "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
+                         "2 alla volta",
+                         self.cur, self._nv, self._ready_min, self._fly, self._maxif, self.ctx,
+                         self._outb, self._rpm)
+                self._raced.add(self.cur)
+                self._raced_keys.add(str(self.dep.get("api_key") or ""))
+                # chiavi gia' rappresentate nel warm: non si rimette
+                # alla prova la STESSA api_key di un caldo
+                try:
+                    self._raced_keys |= self.router.warm_api_keys(
+                        self.ses, self.profile,
+                        self.requested_group or self.dep.get("group"))
+                except Exception:
+                    report_suppressed("forwarder._NonStreamFallback._open_refill_canaries")
+                self._op = self._open_canary("refill", zen_only=False)
+                if self._op is None:
+                    log.info("[refill] ns %s: nessun canario free "
+                             "consegnabile (chiavi escluse=%d)",
+                             self.cur, len(self._raced_keys))
+                else:
+                    self._B, self._fB, self._tB, self._wake_b = self._op
+                # CANARY ZEN DEDICATO (nativo senza zen in warm):
+                # affianca il canary normale e cerca gli zen in TUTTE
+                # le dim del profilo, non solo in quella richiesta.
+                if self._zen_hunt:
+                    try:
+                        self._room = (self.router.probes_in_flight(self.ses)
+                                 < self._maxif)
+                    except Exception:          # noqa: BLE001
+                        self._room = True
+                    if self._room:
+                        self._opz = self._open_canary("zen-wake", zen_only=True)
+                        if self._opz is None:
+                            log.info("[refill] ns %s: nessun canary "
+                                     "zen consegnabile (ctx=%s)",
+                                     self.cur, self.ctx)
+                        else:
+                            self._BZ, self._fZ, self._tZ, self._wake_z = self._opz
+
+    def _open_canary(self, label: str, zen_only: bool = False):
+        """Apre UN canario (o sveglia un cooldown 429 maturo) e lo
+        mette in volo accanto ad A. Ritorna (dep, fut, t0, wake)
+        oppure None. Usata dal gate refill e dalla GARA LENTA."""
+        _age = 3600.0
+        try:
+            _age = float(getattr(
+                self._pol, "warm_refill_wake_min_cooldown_age_sec",
+                3600.0) or 3600.0)
+        except Exception:
+            _age = 3600.0
+        _b = None
+        _wake = False
+        try:
+            _b = self.router.warm_fill_canary(
+                self.profile, self.dep, self.need, self.ctx, self._outb,
+                tried=self.tried | self._raced,
+                requested_group=self.requested_group,
+                exclude_keys=self._raced_keys, exclude_uniq=self._raced,
+                only_zen=zen_only)
+        except Exception:
+            _b = None
+        if _b is None:
+            try:
+                _b = self.router.warm_wake_canary(
+                    self.profile, self.dep, self.need, self.ctx, self._outb,
+                    tried=self.tried | self._raced,
+                    requested_group=self.requested_group,
+                    exclude_keys=self._raced_keys, exclude_uniq=self._raced,
+                    only_zen=zen_only,
+                    min_age_sec=_age)
+            except Exception:
+                _b = None
+            if _b is not None:
+                _wake = True
+                log.info("[refill] ns: sveglia %s (429 maturo)",
+                         _b["unique"])
+        if _b is None:
+            return None
+        log.info("[%s] ns: canario %s (order=%s, chiavi "
+                 "warm+in-volo escluse=%d)", label, _b["unique"],
+                 _b.get("order"), len(self._raced_keys))
+        self._raced.add(_b["unique"])
+        self._raced_keys.add(str(_b.get("api_key") or ""))
+        _pb = dict(self.payload)
+        inject_identity(_pb, _b)
+        self.router.note_start(_b["unique"], self.ctx)
+        _tb = time.monotonic()
+        _fb = asyncio.ensure_future(self.fwd.call(
+            _b, _pb, profile=self.profile or "", ctx_est=self.ctx,
+            client_ip=self.client_ip, session=self.session,
+            attribution=self.attribution,
+            rate_hook=lambda u2, rl:
+            self.router.note_rate_limit(u2, rl)))
+        with contextlib.suppress(Exception):
+            self.router.note_probe_started(self.ses, _b["unique"])
+        return _b, _fb, _tb, _wake
+
+    async def _await_response(self):
+        """Attende la risposta: chiamata singola oppure gara coi canary (vince la prima valida)."""
+        await self._call_single()
+        await self._race_canaries()
+
+    async def _call_single(self):
+        """Nessuna gara: chiamata diretta al deployment (hedge solo con deadline)."""
+        if self._fB is None and self._fZ is None:
+            # Se il primo tentativo sta ancora generando oltre la
+            # soglia si apre UN canario e si tiene per buono il PRIMO
+            # che consegna; A resta in volo (e se ha generato in MENO
+            # tempo diventa holder).
+            self.data = None
+            self._A = self.dep
+            self._tA = self.t0
+            if self._canary_dl is not None:
+                self.futA = asyncio.ensure_future(self.fwd.call(
+                    self._A, self.payload, profile=self.profile or "",
+                    ctx_est=self.ctx, client_ip=self.client_ip,
+                    session=self.session, attribution=self.attribution,
+                    rate_hook=lambda u4, rl:
+                    self.router.note_rate_limit(u4, rl)))
+                self._d_s, self._ = await asyncio.wait(
+                    {self.futA}, timeout=max(
+                        0.0, self._canary_dl - time.monotonic()))
+                if self.futA in self._d_s:
+                    self.data = self.futA.result()
+                    self.futA = None
+                    # A ha consegnato: se ha superato la soglia del
+                    # FLAG (e il canary non e' ancora scattato) marchia
+                    # comunque il lento.
+                    if self._slow_dl is not None and not self._flag_marked \
+                            and time.monotonic() >= self._slow_dl:
+                        with contextlib.suppress(Exception):
+                            self.router.mark_session_slow(self.ses, self.cur)
+                        self._flag_marked = True
+                else:
+                    log.info("[slow-race] ns %s in generazione da "
+                             "%.0fs (> %.0fs) -> canario in gara",
+                             self.cur, time.monotonic() - self._tA,
+                             (self._ns_canary if self._ns_canary > 0
+                              else self._ns_slow) / 1000.0)
+                    # FLAG LENTO: indipendente dal canary. Se la sua
+                    # soglia e' gia' scaduta marca subito; se scade
+                    # DOPO la apre il race loop.
+                    if self._slow_dl is not None \
+                            and time.monotonic() >= self._slow_dl:
+                        with contextlib.suppress(Exception):
+                            self.router.mark_session_slow(self.ses, self.cur)
+                        self._flag_marked = True
+                    # R2: gate — solo se la sessione ha pochi warm.
+                    self._op = None
+                    try:
+                        self._allow = bool(self.router.slow_race_allowed(
+                            self.ses, self.profile, self.dep.get("group"), self.need,
+                            self.ctx, self._outb, self.tried))
+                    except Exception:       # noqa: BLE001
+                        self._allow = True
+                    if self._allow:
+                        self._raced.add(self.cur)
+                        self._raced_keys.add(
+                            str(self.dep.get("api_key") or ""))
+                        self._op = self._open_canary("slow-race")
+                    else:
+                        metrics.inc("nx_slow_race_total",
+                                    ("warm_full",))
+                        log.info("[slow-race] ns %s: warm gia' pieno "
+                                 "(>=%s), niente canario", self.cur,
+                                 getattr(self._pol, "slow_race_max_warm",
+                                         6))
+                    if self._op is None:
+                        # Nessun canario: si attende A, ma il FLAG
+                        # lento scatta comunque alla sua soglia.
+                        if self._slow_dl is not None and not self._flag_marked:
+                            self._d_f, self._ = await asyncio.wait(
+                                {self.futA}, timeout=max(
+                                    0.0, self._slow_dl - time.monotonic()))
+                            if self.futA not in self._d_f:
+                                with contextlib.suppress(Exception):
+                                    self.router.mark_session_slow(self.ses, self.cur)
+                                self._flag_marked = True
+                        self.data = await self.futA
+                        self.futA = None
+                    else:
+                        self._B, self._fB, self._tB, self._wake_b = self._op
+            if self._fB is None and self._fZ is None and self.data is None:
+                self.data = await self.fwd.call(self.dep, self.payload,
+                               profile=self.profile or "",
+                               ctx_est=self.ctx,
+                               client_ip=self.client_ip, session=self.session,
+                               attribution=self.attribution,
+                               rate_hook=lambda u, rl: self.router.note_rate_limit(
+                                   u, rl))
+
+    async def _race_canaries(self):
+        """Gara A + canary (refill/zen/lento): vince la prima risposta valida, gli altri restano probe."""
+        if self._fB is not None or self._fZ is not None:
+            # GARA (A + canario refill, eventualmente + canario
+            # LENTO): vince chi risponde PER PRIMO con successo; gli
+            # altri restano in volo come probe (mai cancellati) e se
+            # consegnano entrano in warm.
+            self._A = self.dep
+            self._tA = self.t0
+            if self.futA is None:
+                self.futA = asyncio.ensure_future(self.fwd.call(
+                    self._A, self.payload, profile=self.profile or "",
+                    ctx_est=self.ctx, client_ip=self.client_ip,
+                    session=self.session, attribution=self.attribution,
+                    rate_hook=lambda u3, rl:
+                    self.router.note_rate_limit(u3, rl)))
+            self._parts: list[dict] = [
+                {"fut": self.futA, "dep": self._A, "t": self._tA,
+                 "wake": False, "a": True}]
+            if self._fB is not None:
+                self._parts.append({"fut": self._fB, "dep": self._B, "t": self._tB,
+                               "wake": self._wake_b, "a": False})
+            if self._fZ is not None:
+                self._parts.append({"fut": self._fZ, "dep": self._BZ, "t": self._tZ,
+                               "wake": self._wake_z, "a": False})
+            self._pending = {p["fut"] for p in self._parts}
+            self._canary_opened = self._canary_dl is None
+            self._slow_marked = self._slow_dl is None or self._flag_marked
+            self._errs: list[BaseException] = []
+            self.data = None
+            self._win = None
+            while self._pending:
+                self._now_ns = time.monotonic()
+                self._pending_dls = []
+                if not self._canary_opened and self._canary_dl is not None:
+                    self._pending_dls.append(self._canary_dl)
+                if not self._slow_marked and self._slow_dl is not None:
+                    self._pending_dls.append(self._slow_dl)
+                self._to = (max(0.0, min(self._pending_dls) - self._now_ns)
+                       if self._pending_dls else None)
+                self._cmp, self._rest = await asyncio.wait(
+                    self._pending, timeout=self._to,
+                    return_when=asyncio.FIRST_COMPLETED)
+                self._pending = set(self._rest)
+                # NB: bisogna esaminare TUTTI i future completati in
+                # questo giro, non solo uno: scartare gli altri
+                # lascerebbe la loro eccezione non recuperata (e il
+                # probe del loser non partirebbe -> nessuna penale).
+                for self._f in self._cmp:
+                    try:
+                        self._r = self._f.result()
+                    except BaseException as _exc_exc:
+                        self.exc = _exc_exc
+                        self._errs.append(self.exc)
+                        continue
+                    self.data = self._r
+                    self._win = self._f
+                    break
+                if self.data is not None:
+                    break
+                self._now_ns = time.monotonic()
+                # FLAG LENTO (timer proprio, indipendente dal canary)
+                if not self._slow_marked and self._slow_dl is not None \
+                        and self._now_ns >= self._slow_dl:
+                    self._slow_marked = True
+                    with contextlib.suppress(Exception):
+                        self.router.mark_session_slow(self.ses, self.cur)
+                # CANARY LENTO (timer proprio)
+                if not self._canary_opened and self._canary_dl is not None \
+                        and self._now_ns >= self._canary_dl:
+                    self._canary_opened = True
+                    log.info("[slow-race] ns %s in generazione da "
+                             "%.0fs (> %.0fs) -> canario in gara",
+                             self.cur, self._now_ns - self._tA,
+                             (self._ns_canary if self._ns_canary > 0
+                              else self._ns_slow) / 1000.0)
+                    # R2: gate — solo se la sessione ha pochi warm.
+                    self._op = None
+                    try:
+                        self._allow = bool(self.router.slow_race_allowed(
+                            self.ses, self.profile, self.dep.get("group"), self.need,
+                            self.ctx, self._outb, self.tried))
+                    except Exception:       # noqa: BLE001
+                        self._allow = True
+                    if self._allow:
+                        self._raced.add(self.cur)
+                        self._raced_keys.add(
+                            str(self.dep.get("api_key") or ""))
+                        self._op = self._open_canary("slow-race")
+                    else:
+                        metrics.inc("nx_slow_race_total",
+                                    ("warm_full",))
+                        log.info("[slow-race] ns %s: warm gia' pieno "
+                                 "(>=%s), niente canario", self.cur,
+                                 getattr(self._pol, "slow_race_max_warm",
+                                         6))
+                    if self._op is not None:
+                        self._C, self._fC, self._tC, self._wake_c = self._op
+                        self._parts.append({"fut": self._fC, "dep": self._C,
+                                       "t": self._tC, "wake": self._wake_c,
+                                       "a": False})
+                        self._pending.add(self._fC)
+                        log.info("[hedge] slow-race: %s in gara con "
+                                 "A (fuori dal tetto)", self._C["unique"])
+            if self.data is None:
+                # Nessuno ha consegnato: A finisce nell'handler errori
+                # esistente (penali solite); gli altri ricevono la
+                # loro da probe (future gia' completati con
+                # l'eccezione).
+                for self.p in self._parts:
+                    if self.p["a"]:
+                        continue
+                    _spawn_ns_probe(self.router, self.p["dep"], self.p["fut"],
+                                    self.p["t"], self.ctx, self.ses, wake=self.p["wake"])
+                raise (self._errs[0] if self._errs else UpstreamError(
+                    -503, "gara non-stream: nessun consegnato"))
+            self._wd = next(p for p in self._parts if p["fut"] is self._win)
+            self._race = (self._wd["dep"]["unique"], max(
+                0.0, (time.monotonic() - self._wd["t"]) * 1000.0))
+            for self.p in self._parts:
+                if self.p["fut"] is self._win:
+                    continue
+                _spawn_ns_probe(self.router, self.p["dep"], self.p["fut"], self.p["t"],
+                                self.ctx, self.ses, wake=self.p["wake"],
+                                race=self._race)
+            if not self._wd["a"]:
+                log.info("[refill] consegna %s (piu' veloce di %s, "
+                         "che finisce come probe senza penale)",
+                         self._wd["dep"]["unique"], self.cur)
+                with contextlib.suppress(Exception):
+                    self.router.note_probe_done(self.ses, self._wd["dep"]["unique"])
+                self.dep = self._wd["dep"]
+                self.cur = self._wd["dep"]["unique"]
+                self.t0 = self._wd["t"]
+                self._was_dormant = False
+                if self._wd["wake"]:
+                    with contextlib.suppress(Exception):
+                        self.router.clear_cooldown(self.cur)   # sveglia ok
+                    log.info("[refill] ns: sveglia riuscita, %s "
+                             "torna caldo", self.cur)
+                if self.attempts_box is not None:
+                    self.attempts_box.append(self.cur)
+
+    def _repair_response(self):
+        """Riparazione delle tool call e sanificazione della risposta."""
+        if self._was_dormant:
+            self.router.clear_cooldown(self.cur)
+            metrics.observe_latency_ms(self.cur, (time.monotonic() - self.t0) * 1000)
+            metrics.inc("nx_upstream_calls_total", (self.cur, "ok"))
+
+            # ---- TOOL REPAIR (prima del QC) ----
+        self.tr_result = repair_tool_calls(self.data, self.payload, self.dep, self.tr_cfg)
+        if self.tr_result["repaired"]:
+            metrics.inc("nx_tool_repair_total", (self.cur, "ok"))
+        # PULIZIA CONTENUTO: artefatti di ragionamento interni nel
+        # testo di risposta (es. <previous_reasoning_empty/>Done.).
+        # Vale anche senza tools: e' pulizia del contenuto.
+        if sanitize_response(self.data):
+            metrics.inc("nx_content_sanitized_total", (self.cur,))
+
+    def _handle_text_tool_calls(self):
+        """Tool call scritte come testo: convertite; se non recuperabili si ruota (True)."""
+        # ---- L2 #6: recupero tool-call resi come testo ----
+        self._text_parsed = False
+        if self._tt.enabled and self.payload.get("tools"):
+            try:
+                self._tc_info = apply_to_message(
+                    ((self.data.get("choices") or [{}])[0].get(
+                        "message") or {}),
+                    self.payload.get("tools"), self._tt,
+                    preserve_residual=True)
+            except Exception:
+                self._tc_info = None
+            if self._tc_info:
+                self._text_parsed = True
+                metrics.inc("nx_text_toolcall_total",
+                            (self.cur, "parsed"))
+                repairlog.note("salvage_text", source="nostream",
+                               outcome="ok", dep=self.cur,
+                               model=self.dep.get("model", ""),
+                               detail="tool-call resi come testo",
+                               count=len(self._tc_info))
+        # ---- TOOLCALL TRUNCATION: tag aperto mai chiuso ----
+        if (self._tt.enabled and self.payload.get("tools") and not self._text_parsed
+                and getattr(self.router.policy,
+                            "toolcall_truncation_enabled", True)):
+            self._msg0 = ((self.data.get("choices") or [{}])[0].get(
+                "message") or {})
+            self._ctxt = self._msg0.get("content")
+            if isinstance(self._ctxt, list):
+                self._ctxt = "".join(
+                    p.get("text", "") for p in self._ctxt
+                    if isinstance(p, dict)
+                    and isinstance(p.get("text"), str))
+            if isinstance(self._ctxt, str) and has_unclosed_toolcall(self._ctxt):
+                self._salv = None
+                try:
+                    self._salv = salvage_truncated_toolcall(
+                        self._ctxt, self.payload.get("tools"), self._tt)
+                except Exception:
+                    self._salv = None
+                self._cd = int(getattr(
+                    self.router.policy,
+                    "toolcall_truncation_cooldown_sec", 30) or 30)
+                if self._salv:
+                    self._msg0["tool_calls"] = self._salv
+                    self._msg0["content"] = ""
+                    self._text_parsed = True
+                    metrics.inc("nx_truncated_toolcall_total",
+                                (self.cur, "salvaged"))
+                    repairlog.note("salvage_truncated",
+                                   source="nostream", outcome="ok",
+                                   dep=self.cur,
+                                   model=self.dep.get("model", ""),
+                                   detail="tag tool-call rotto",
+                                   count=len(self._salv))
+                else:
+                    metrics.inc("nx_truncated_toolcall_total",
+                                (self.cur, "rotate"))
+                    repairlog.note("salvage_truncated",
+                                   source="nostream", outcome="fail",
+                                   dep=self.cur,
+                                   model=self.dep.get("model", ""),
+                                   detail="tag tool-call non salvabile")
+                    log.warning("[truncation] %s: tag tool-call rotto "
+                                "non salvabile -> ruoto (cooldown "
+                                "%ds)", self.cur, self._cd)
+                    self._fail_cur(seconds=self._cd, reason="truncated_toolcall")
+                    self.last_broken = (self.data, self.dep)
+                    self.dep = self._pick(
+                        self.profile, self.dep, self.need, self.scope, ctx=self.ctx,
+                        tried=self.tried, requested_group=self.requested_group)
+                    return True
+
+    def _check_structure_and_loops(self):
+        """Output strutturato (pulizia/riparazione) e rilevamento dei loop di generazione."""
+        # ---- L2 #5: output strutturato (A/B/D) ----
+        self._so_rep = enforce_response(self.data, self.payload, self._so) \
+            if (self._so.enabled and not self._text_parsed) \
+            else {"status": "skip"}
+        if self._so_rep.get("status") in ("cleaned", "repaired"):
+            metrics.inc("nx_struct_out_total",
+                        (self.cur, self._so_rep.get("status")))
+            log.info("[struct-out] %s: %s", self.cur,
+                     self._so_rep.get("status"))
+            repairlog.note(
+                "struct_cleaned"
+                if self._so_rep.get("status") == "cleaned"
+                else "struct_repaired",
+                source="nostream", outcome="ok", dep=self.cur,
+                model=self.dep.get("model", ""),
+                detail=",".join(self._so_rep.get("moves") or [])
+                or self._so_rep.get("status"))
+        # ---- L1 #2B: loop detector ----
+        self._loop_reason = None
+        if self._sm.loop.enabled and not self._text_parsed:
+            self._loop_reason = response_loop_reason(self.data, self._sm)
+
+    def _quality_check(self):
+        """QC del contenuto: scarta e ruota (_RETRY) oppure, a catena esaurita, consegna il
+        meno peggio (risultato finale)."""
+        # ---- QC del contenuto (solo percorso non-streaming) ----
+        if self.collect_qc_failures and (self.qc.enabled or self.san.enabled):
+            self.reason = check_response(self.data, self.payload, self.qc) \
+                if self.qc.enabled else None
+            if not self.reason:
+                self.reason = check_sanity(self.data, self.payload, self.san)
+                if self.reason:
+                    # contenuto vuoto ma il modello HA ragionato o ha
+                    # esaurito max_tokens (finish_reason=length): NON e'
+                    # rotto, ruotare la catena non cambia nulla (tutto
+                    # il gruppo si comporterebbe uguale) e raffredda
+                    # chiavi sane. NON consegnare vuoto (blocca gli
+                    # agenti): risposta "notice" subito, un solo tentativo.
+                    self._ch0 = (self.data.get("choices") or [{}])[0]
+                    self.fr = self._ch0.get("finish_reason")
+                    self._rc = (self._ch0.get("message") or {}).get(
+                        "reasoning_content") or (
+                        self._ch0.get("message") or {}).get("reasoning")
+                    # HOLD (parita' col path streaming): zero-answer da
+                    # budget esaurito (finish_reason=length) NON e'
+                    # colpa del deployment -> si ruota SENZA penale
+                    # verso il candidato piu' capace; 503 solo a catena
+                    # esaurita. (Nello stream hold: verdict
+                    # 'length_truncated' a 0 char, nessuna penale.)
+                    if self.hold and self.fr == "length" and _looks_empty(self.data):
+                        log.info("[hold] ns %s: finish_reason=length "
+                                 "senza risposta -> ruoto senza penale "
+                                 "(capace)", self.cur)
+                        self.last_broken = (self.data, self.dep)
+                        self.nxt = self._pick(
+                            self.profile, self.dep, self.need, self.scope, ctx=self.ctx,
+                            tried=self.tried,
+                            requested_group=self.requested_group,
+                            prefer_capable=True)
+                        if self.nxt is not None and len(self.tried) < self._max_tries:
+                            self.dep = self.nxt
+                            return _RETRY
+                        raise UpstreamError(
+                            503, "catena esaurita, nessun output utile",
+                            final=True)
+                    self.no_rotate = ((self.fr == "length"
+                                  or (isinstance(self._rc, str) and self._rc.strip()))
+                                 and not getattr(
+                                     self.san, "rotate_on_length_empty", False))
+                    if self.no_rotate:
+                        # il modello ha esaurito il budget / ha solo
+                        # ragionato: ruotare non aiuta -> errore
+                        # RETRYABLE al client (mai un turno finto).
+                        raise UpstreamError(
+                            503, "empty output (fr=%s) da %s"
+                                 % (self.fr, self.cur), final=True)
+            if self.reason:
+                self._ck = _corrective_kind(self.reason)
+                if (getattr(self.router.policy,
+                            "corrective_retry_enabled", True)
+                        and self.cur not in self._corrected
+                        and not self.reason.lower().startswith(
+                            "timeout")):
+                    self._corrected.add(self.cur)
+                    self.payload.setdefault("messages", []).append(
+                        {"role": "system",
+                         "content": _corrective_note(self._ck)})
+                    metrics.inc("nx_corrective_retry_total",
+                                (self.cur, self._ck))
+                    log.warning("[retry] %s contenuto non "
+                                "valido (%s): retry correttivo",
+                                self.cur, self.reason)
+                    repairlog.note("struct_corrective",
+                                   source="nostream", outcome="ok",
+                                   dep=self.cur,
+                                   model=self.dep.get("model", ""),
+                                   detail=self._ck)
+                    return _RETRY
+                self.qc_failed.append((self.cur, self.reason))
+                metrics.inc("nx_qc_discarded_total",
+                            (self.cur, self.reason.split(" ")[0]))
+                self.last_broken = (self.data, self.dep)
+                if len(self.qc_failed) <= self.qc.max_attempts:
+                    log.warning("[qc] %s JSON non valido (%s): "
+                                "provo il successivo", self.cur, self.reason)
+                    self._fail_cur()
+                    self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+                    return _RETRY        # finally chiude il TENTATIVO
+                # tentativi esauriti: consegna l'ultimo se ha contenuto,
+                # altrimenti errore RETRYABLE (mai un turno vuoto/finto).
+                if _looks_empty(self.data):
+                    raise UpstreamError(
+                        503, "catena esaurita, nessun output utile",
+                         final=True)
+                self.router.note_result(self.cur, (time.monotonic() - self.t0) * 1000,
+                                   quality=0.5, ctx_est=self.ctx)
+                return self.data, self.dep, self.qc_failed
+
+    def _retry_structured_output(self):
+        """Output non conforme allo schema: retry correttivo sullo stesso dep o rotazione (True)."""
+        # ---- L2 #5 non conforme: retry correttivo/rotazione ----
+        if self._so_rep.get("status") == "invalid" \
+                and not self._text_parsed:
+            self._r5 = self._so_rep.get("reason") or "schema"
+            if (getattr(self.router.policy,
+                        "corrective_retry_enabled", True)
+                    and self.cur not in self._corrected):
+                self._corrected.add(self.cur)
+                self.payload.setdefault("messages", []).append(
+                    {"role": "system",
+                     "content": _corrective_note("schema")})
+                metrics.inc("nx_corrective_retry_total",
+                            (self.cur, "schema"))
+                log.warning("[retry] %s contenuto non "
+                            "conforme (%s): retry correttivo",
+                            self.cur, self._r5)
+                repairlog.note("struct_corrective",
+                               source="nostream", outcome="ok",
+                               dep=self.cur, model=self.dep.get("model", ""),
+                               detail="schema")
+                return True
+            metrics.inc("nx_struct_out_total", (self.cur, "invalid"))
+            log.warning("[struct-out] %s non conforme (%s): "
+                        "ruoto", self.cur, self._r5)
+            repairlog.note("struct_invalid", source="nostream",
+                           outcome="fail", dep=self.cur,
+                           model=self.dep.get("model", ""), detail=self._r5)
+            self._fail_cur()
+            self.last_broken = (self.data, self.dep)
+            self.qc_failed.append((self.cur, "schema"))
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                       requested_group=
+                                       self.requested_group)
+            return True
+
+    def _on_generation_loop(self):
+        """Loop di generazione rilevato: cooldown e dim successiva (True)."""
+        # ---- L1 #2B loop rilevato: dim successiva ----
+        if self._loop_reason:
+            metrics.inc("nx_loop_detected_total",
+                        (self.cur, self._loop_reason))
+            log.warning("[loop] %s: %s -> dim successiva",
+                        self.cur, self._loop_reason)
+            self._fail_cur(reason="loop")
+            self.last_broken = (self.data, self.dep)
+            self.nxt = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                       requested_group=
+                                       self.requested_group)
+            if self.nxt is not None and len(self.tried) < self._max_tries:
+                self.dep = self.nxt
+                return True
+            raise UpstreamError(
+                503, "loop rilevato, catena esaurita",
+                final=True)
+
+    def _on_fake_tool_call(self):
+        """Tool call finta nel testo: escalation verso un candidato capace (True)."""
+        # ---- FAKE TOOL-CALL: tool-call reso come testo ----
+        if self._fc.enabled and not self._text_parsed:
+            self._pat = message_fake_pattern(self.data, self.payload, self._fc)
+            if self._pat:
+                metrics.inc("nx_fake_toolcall_total", (self.cur, "detected"))
+                self._esc = is_escalation_group(
+                    self.dep.get("group"), self.router.config.go_suffix,
+                    self.router.config.fallback_suffix)
+                if self._esc:
+                    # sul bucket di escalation non c'e' dove ruotare:
+                    # si logga e si lascia al sanitizzatore (strip).
+                    log.warning("[fake-tool-call] %s: tool-call reso come "
+                                "testo (pattern=%s) su bucket di "
+                                "escalation -> strip", self.cur, self._pat)
+                else:
+                    log.warning("[fake-tool-call] %s: tool-call reso come "
+                                "testo (pattern=%s), escalation", self.cur, self._pat)
+                    # ROTAZIONE SENZA PENALITA': nessun _fail_cur
+                    # (il modello ha solo reso la chiamata come testo).
+                    self.last_broken = (self.data, self.dep)
+                    self.fake_escalations += 1
+                    if self.fake_escalations <= self._fc.max_escalations:
+                        self.nxt = self.router.force_escalation(
+                            self.dep, self.need, self.ctx, tried=self.tried,
+                            out_tokens=self._outb) \
+                            if self.profile else None
+                        if (self.nxt is None and self.profile
+                                and self.router._is_renewal_bucket(
+                                    str(self.dep.get("group") or ""))):
+                            self.nxt = self.router._free_last_resort(
+                                self.dep, self.need, self.ctx, self.tried, self._outb,
+                                self.requested_group)
+                        if self.nxt is not None:
+                            self.dep = self.nxt
+                            return True
+                    raise UpstreamError(
+                        503, "fake tool-call: catena di escalation "
+                             "esaurita", final=True)
+
+    def _rotate_truncated_on_hold(self):
+        """Hold: risposta troncata dal modello (finish_reason=length) -> si ruota prima della consegna (True)."""
+        # ---- HOLD (parita' col path streaming): finish_reason=length
+        # con contenuto -> risposta TRONCATA dal modello (non dal cap
+        # del client): si ruota PRE-CONSEGNA su un candidato piu'
+        # capace, mai il moncone. Soft cooldown come nello stream.
+        if self.hold and not self._text_parsed:
+            self._ch0h = (self.data.get("choices") or [{}])[0] \
+                if isinstance(self.data, dict) else {}
+            self._frh = self._ch0h.get("finish_reason") \
+                if isinstance(self._ch0h, dict) else None
+            if self._frh == "length":
+                self._req_maxh = (self.payload.get("max_tokens")
+                             or self.payload.get("max_completion_tokens"))
+                self._cth = (self.data.get("usage") or {}).get(
+                    "completion_tokens") \
+                    if isinstance(self.data, dict) else None
+                if _length_truncated_should_fail(
+                        True, len(_answer_text(self.data)), self._req_maxh,
+                        self._cth, True):
+                    log.warning("[hold] ns %s: finish_reason=length con "
+                                "contenuto (answer=%d, req_max=%s, "
+                                "completion=%s) -> ruoto (capace)",
+                                self.cur, len(_answer_text(self.data)), self._req_maxh,
+                                self._cth)
+                    self._fail_cur(seconds=_soft_cooldown_sec(self.router, self.cur),
+                              reason="length_truncated")
+                    self.last_broken = (self.data, self.dep)
+                    self.nxt = self._pick(
+                        self.profile, self.dep, self.need, self.scope, ctx=self.ctx,
+                        tried=self.tried, requested_group=self.requested_group,
+                        prefer_capable=True)
+                    if self.nxt is not None and len(self.tried) < self._max_tries:
+                        self.dep = self.nxt
+                        return True
+                    raise UpstreamError(
+                        503, "catena esaurita, risposta troncata",
+                        final=True)
+
+    def _record_success(self):
+        """Successo: metriche, qualita', vincitore di escalation e sessione."""
+        # successo pulito: se siamo atterrati su un gruppo piu' alto
+        # rispetto a quello richiesto, ricorda il winner (scorciatoia
+        # per le prossime richieste su QUEL bucket richiesto).
+        # STRIP dei marker di template (Nemotron/Ling): non devono mai
+        # comparire nel content consegnato (nemmeno su -go/-fallback).
+        try:
+            self._msg = ((self.data or {}).get("choices") or [{}])[0].get(
+                "message") if isinstance(self.data, dict) else None
+            if isinstance(self._msg, dict) and sanitize_message(self._msg):
+                metrics.inc("nx_template_tokens_stripped_total", (self.cur,))
+        except Exception:
+            report_suppressed("forwarder._NonStreamFallback._record_success#1")
+        log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", self.cur, len(self.tried), time.monotonic() - self._t0)
+        self._q = 0.6 if self._text_parsed else (
+            0.7 if self.tr_result.get("repaired") else 1.0)
+        if self.collect_qc_failures and self.qc_failed:
+            self._q = min(self._q, 0.5)
+        self.router.note_result(self.cur, (time.monotonic() - self.t0) * 1000,
+                           quality=self._q, ctx_est=self.ctx)
+        # Bilanciamento -go: consumo di OUTPUT del deployment (non-stream).
+        if isinstance(self.data, dict):
+            try:
+                self.router.note_output_tokens(
+                    self.cur, (self.data.get("usage") or {}).get(
+                        "completion_tokens"))
+            except Exception:
+                report_suppressed("forwarder._NonStreamFallback._record_success#2")
+        self.router.record_escalation_win(self.requested_group, self.dep)
+        self.router.note_session_success(self.ses, self.dep["unique"],
+                                    (time.monotonic() - self.t0) * 1000,
+                                    ctx_est=self.ctx)
+
+    def _classify_upstream_error(self):
+        """Classificazione dell'errore: trail, quarantene/cooldown di host e contesto."""
+        self.detail = self.err.detail or ""
+        # QUOTA DI ACCOUNT: la quota e' dell'account (non della
+        # chiave) -> pausa fino al reset TUTTE le chiavi sorelle.
+        with contextlib.suppress(Exception):
+            maybe_account_quota_cooldown(self.router, self.dep, self.err.status,
+                                         self.detail)
+        # ATTEMPT TRAIL (P0): un record per hop fallito, con la classe
+        # d'errore onesta (finisce nel body del 503 finale).
+        try:
+            self.trail.append({
+                "ord": len(self.trail) + 1, "dep": self.cur,
+                "group": self.dep.get("group"), "model": self.dep.get("model"),
+                "cls": classify_error_class(self.err.status, self.detail),
+                "status": abs(int(self.err.status)) if self.err.status else None,
+                "ms": int((time.monotonic() - self.t0) * 1000)})
+        except Exception:            # noqa: BLE001
+            report_suppressed("forwarder._NonStreamFallback._classify_upstream_error#1")
+        # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/
+        # transport) -> salta TUTTO l'host per questa richiesta invece
+        # di bruciare un hop per ogni chiave che ci vive sopra.
+        try:
+            if is_provider_level(classify_error_class(self.err.status, self.detail)):
+                self._h = dep_host(self.dep)
+                if self._h and self._h not in self.skip_hosts:
+                    self.skip_hosts.add(self._h)
+                    log.info("[skip-host] %s: errore provider-level "
+                             "-> host %s saltato per questa richiesta",
+                             self.cur, self._h)
+        except Exception:            # noqa: BLE001
+            report_suppressed("forwarder._NonStreamFallback._classify_upstream_error#2")
+        # BAN/ToS dell'endpoint? quarantena l'host 24h PRIMA di
+        # ruotare (altrimenti bruciamo una chiave dietro l'altra).
+        maybe_quarantine_ban(self.router, self.dep, self.err.status, self.detail)
+        maybe_host_transient_cooldown(self.router, self.dep, self.err.status, self.detail)
+        # 413/400 context-length: ridimensiona al vero max_input
+        note_context_limit(self.router, self.dep, self.err.status, self.detail, self.ctx)
+
+    def _try_payload_repairs(self):
+        """Rimedi sul payload che ritentano lo STESSO deployment (reasoning, content array,
+        history originale). True = ritenta."""
+        # FAMIGLIA REASONING (needs/rejects/history): un rimedio per
+        # dep, poi si ritenta LO STESSO deployment. Vale anche per il
+        # falso "does not support vision input" (llm7/Cloudflare) su
+        # richieste SENZA media: il proxy maschera lo stesso problema
+        # del reasoning mancante -> si forza il rimedio "needs".
+        self._media_raw = bool(media_reject_signature(self.detail))
+        self._rsn_media = media_modality_signature(self.detail) \
+            and not media_input_needed(self.need) \
+            and reasoning_err_kind(self.detail) is None
+        self._steps = self._rsn_steps.setdefault(self.cur, set())
+        self._replim = int(getattr(self.router.policy,
+                              "repair_exempt_streak_limit", 3) or 0)
+        self._rexb = self.router.repair_exempt_blocked(self.cur, self._replim)
+        self._rr = None if self._rexb else repair_reasoning_error(
+            self.payload, self.detail, self.dep, self._steps, self.orig_messages,
+            force_kind=("needs" if self._rsn_media else None))
+        if self._rexb:
+            log.warning("[reasoning-exempt] %s: budget esenzione "
+                        "esaurito (%d) -> KO normale", self.cur, self._replim)
+            # Booking NORMALE: cooldown esplicito (le classi payload/
+            # schema da sole non lo prevedono) per non ritentare il
+            # dep all'infinito su ogni richiesta.
+            self._fail_cur(seconds=None,
+                      reason="repair_exempt_exhausted",
+                      status=abs(int(self.err.status)) if self.err.status else None)
+        if self._rr == "downgraded":
+            self.dep = dict(self.dep)
+            self.dep["_no_thinking"] = True      # copia locale, non il CSV
+        if self._rr:
+            with contextlib.suppress(Exception):
+                self.router.note_repair_exempt(self.cur)
+            metrics.inc("nx_reasoning_replay_total", (self._rr,))
+            log.warning("[reasoning-%s] %s: rimedio applicato -> "
+                        "ritento lo stesso deployment", self._rr, self.cur)
+            # IMPARA il flag corrispondente: d'ora in poi il CSV lo
+            # porta per questo modello (tutti i gemelli) e la richiesta
+            # parte corretta senza errori continui.
+            with contextlib.suppress(Exception):
+                if self._rr == "repaired":
+                    learn_thinking_replay(self.router, self.dep.get("model"))
+                elif self._rr == "stripped":
+                    learn_strip_reasoning(self.router, self.dep.get("model"))
+                elif self._rr == "downgraded":
+                    learn_no_thinking(self.router, self.dep.get("model"))
+            return True
+        # CONTENT ARRAY -> STRING (provider schema stretto, es.
+        # Cloudflare Workers AI): 400 "'array' not in 'string'" /
+        # "required properties ... 'role,content'". Il payload e'
+        # RIPARABILE: impariamo `content_string` (gemelli del modello)
+        # e ritentiamo LO STESSO deployment col payload appiattito
+        # (media-safe). Se la bonifica non basta (array con media) o il
+        # flag c'e' gia', si ricade sulla rotazione di _PAYLOAD_SCHEMA_RE.
+        if _CONTENT_ARRAY_RE.search(self.detail):
+            self._csteps = self._cstr_steps.setdefault(self.cur, set())
+            # Solo se c'e' DAVVERO qualcosa da appiattire: se il
+            # payload e' gia' di sole stringhe (o di soli media) il
+            # retry non aiuterebbe -> si ricade sulla rotazione.
+            self._flat, self._fn = flatten_text_content(
+                (self.payload or {}).get("messages"))
+            if (self._fn and "flatten" not in self._csteps
+                    and not self.dep.get("content_string")):
+                self._csteps.add("flatten")
+                metrics.inc("nx_content_string_total", ("learned",))
+                log.warning("[content-string] %s: 400 schema "
+                            "content-array -> imparo content_string e "
+                            "ritento lo stesso deployment (%d messaggi)",
+                            self.cur, self._fn)
+                with contextlib.suppress(Exception):
+                    learn_content_string(self.router, self.dep.get("model"))
+                self.dep = dict(self.dep)
+                self.dep["content_string"] = True     # copia locale (retry)
+                return True
+        # ERRORE "OSCURO" su richiesta reasoning: il taglio del
+        # reasoning (histnorm) e' un'ottimizzazione di token; senza una
+        # firma chiara si ritenta UNA volta lo STESSO deployment con la
+        # history ORIGINALE (reasoning intatto).
+        if (self.orig_messages is not None and not self._rsn_restored
+                and is_unclear_error(self.err.status, self.detail)):
+            self._nres = restore_reasoning(self.payload, self.orig_messages)
+            if self._nres:
+                self._rsn_restored = True
+                metrics.inc("nx_reasoning_replay_total", ("restored",))
+                log.warning("[reasoning-restore] %s: errore non chiaro "
+                            "(%s) -> reasoning ripristinato (%d campi), "
+                            "ritento lo stesso deployment", self.cur,
+                            (self.detail or "")[:90], self._nres)
+                return True
+
+    def _on_quota_or_balance(self):
+        """Credito esaurito o quota di account: cooldown fino al reset e rotazione (True)."""
+        # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
+        # "usage limit reached" / "Resets in N days"), a prescindere
+        # dallo status HTTP (429 o 4xx provider-side): la key NON torna
+        # prima del reset. Cooldown = tempo al reset (non escalation) +
+        # rilascio dep-sticky, così la sessione riparte su un'altra
+        # chiave e la catena non spreca tentativi su altre key soggette
+        # allo stesso limite. Parità col percorso streaming
+        # (main._stream_with_fallback).
+        if is_insufficient_balance(self.detail):
+            # BILANCIO ESAURITO ("insufficient balance"): condizione
+            # dell'account -> ritira il DEPLOYMENT (sblocco manuale),
+            # NON cooldown. Priorita' sulla quota: i body la
+            # accompagnano con "type":"insufficient_quota".
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "insufficient_balance"))
+            self.last_err = self.err
+            if self.ses:
+                self._st = self.router.dep_sticky_get(self.ses)
+                if self._st and self._st == self.cur:
+                    self.router.dep_sticky_release(self.ses)
+            self.router.mark_failed(self.cur, reason="insufficient_balance",
+                               status=402,
+                               kind=ErrorKind.PERMANENT_DEAD)
+            log.warning("[fallback] %s 402 'insufficient balance': "
+                        "DEPLOYMENT RITIRATO (sblocco manuale)", self.cur)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx,
+                        tried=self.tried,
+                        requested_group=self.requested_group)
+            return True
+        if _QUOTA_EXHAUSTED_RE.search(self.detail):
+            self._qcd = (parse_quota_reset_seconds(self.detail)
+                    or QUOTA_MIN_COOLDOWN_S)
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "quota_exhausted"))
+            self.last_err = self.err
+            if self.ses:
+                self._st = self.router.dep_sticky_get(self.ses)
+                if self._st and self._st == self.cur:
+                    self.router.dep_sticky_release(self.ses)
+            log.warning("[fallback] %s quota esaurita (%.90s): "
+                        "cooldown %.0fs al reset, ruoto",
+                        self.cur, self.detail, self._qcd)
+            self._fail_cur(seconds=self._qcd, reason="quota_exhausted",
+                      status=abs(self.err.status) if self.err.status else None,
+                      provenance=("authoritative"
+                                  if _QUOTA_RESET_RE.search(self.detail or "")
+                                  else "heuristic"))
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+            return True
+
+    def _on_negative_status(self):
+        """Status negativo (4xx del provider): rimedi mirati, errore della richiesta o del
+        deployment (True = prossimo tentativo)."""
+        # QUALSIASI non-200 ruota (regola utente): mai pass-through al
+        # client. I rami sotto sono solo classi di cooldown/ragione
+        # diverse; se nessuno matcha, si ruota comunque (last_err) e
+        # l'ultimo errore viene consegnato solo a catena esaurita.
+        if self.err.status is not None and self.err.status < 0:
+            # errore TRANSITORIO del provider/router a monte (upstream
+            # giu', nessun endpoint valido ora, 5xx del provider): NON
+            # e' un problema della richiesta -> ruota con cooldown
+            # CORTO (e' transitorio, non bruciare la chiave per ore).
+            if self._rotate_on_provider_transient():
+                return True
+            if -self.err.status == 404:
+                metrics.inc("nx_upstream_calls_total", (self.cur, "not_found"))
+                log.warning("[fallback] %s 404 upstream (modello "
+                            "inesistente su questo provider): "
+                            "ritento sul successivo", self.cur)
+                self._fail_cur(reason="not_found",
+                          status=-self.err.status if self.err.status else None)
+                self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+                return True
+            # alcuni provider (es. cloudflare) rispondono 400 con
+            # "No such model"/code propri invece di 404 e senza firme
+            # litellm ("openai_error"): un deployment col modello
+            # sbagliato non deve MAI passare l'errore al client — è un
+            # problema del deployment, ruotiamo.
+            if _MODEL_MISSING_RE.search(self.detail):
+                metrics.inc("nx_upstream_calls_total", (self.cur, "not_found"))
+                log.warning("[fallback] %s modello inesistente/giu' sul "
+                            "provider (%.80s): fermo 24h, ritento sul "
+                            "successivo", self.cur, self.detail)
+                self._fail_cur( seconds=MODEL_MISSING_COOLDOWN_S,
+                                   reason="not_found",
+                                   status=-self.err.status if self.err.status else None)
+                self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+                return True
+            if self._rotate_on_thought_signature():
+                return True
+            if self._rotate_on_payload_schema():
+                return True
+            if self._rotate_on_provider_4xx():
+                return True
+            # ENVELOPE D'ERRORE PROVIDER: qualsiasi body {"type":"error",
+            # "error":{"type":"XxxError","message":...}} (AuthError
+            # "Invalid API key", ModelError, CreditsError, RegionError,
+            # ...). Non e' MAI contenuto reale del modello -> e' un
+            # problema del DEPLOYMENT: ruota SEMPRE, mai al client.
+            # (Se un giorno un modello restituisse davvero quella forma
+            # come contenuto, la rotazione fa rispondere un altro
+            # modello in modo diverso: nessun danno.)
+            if is_provider_error_body(self.detail):
+                metrics.inc("nx_upstream_calls_total", (self.cur, "provider_error"))
+                self.last_err = self.err     # consegna l'errore vero se la catena si esaurisce
+                log.warning("[fallback] %s %s body errore provider "
+                            "(%.100s): ritento sul successivo",
+                            self.cur, -self.err.status, self.detail)
+                self._fail_cur(reason="provider_error",
+                          status=-self.err.status if self.err.status else None)
+                self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+                return True
+            if self._rotate_on_empty_4xx():
+                return True
+            # 403 di qualsiasi tipo (permission denied, project banned,
+            # access denied, key disabled...): e' SEMPRE un errore di
+            # deployment/chiave, NON della richiesta -> ruota con
+            # cooldown lungo (la key non torna presto), mai al client
+            # (a catena esaurita -> 503 retryable).
+            if -self.err.status == 403:
+                metrics.inc("nx_upstream_calls_total",
+                            (self.cur, "upstream_403"))
+                self.last_err = self.err
+                log.warning("[fallback] %s 403 upstream: "
+                            "key/progetto rifiutato, cd %.0fs: "
+                            "ritento sul successivo",
+                            self.cur, PERMISSION_DENIED_COOLDOWN_S)
+                self._fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
+                           reason="upstream_403",
+                           status=abs(self.err.status) if self.err.status else None)
+                self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+                return True
+            # 401 upstream: la NOSTRA chiave e' rifiutata dal provider
+            # (assente/invalidata/revocata). SEMPRE deployment-side (il
+            # client si e' gia' autenticato da noi) -> ruota come il
+            # 403, mai pass-through.
+            if -self.err.status == 401:
+                metrics.inc("nx_upstream_calls_total",
+                            (self.cur, "upstream_401"))
+                self.last_err = self.err
+                log.warning("[fallback] %s 401 upstream: "
+                            "chiave rifiutata/assente, cd %.0fs: "
+                            "ritento sul successivo",
+                            self.cur, PERMISSION_DENIED_COOLDOWN_S)
+                self._fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
+                           reason="upstream_401",
+                           status=abs(self.err.status) if self.err.status else None)
+                self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+                return True
+            if self._rotate_on_provider_fault():
+                return True
+            if self._rotate_on_media_reject():
+                return True
+            if self._rotate_on_context_limit():
+                return True
+            # QUALSIASI altro non-200 (4xx/5xx non riconosciuto): ruota
+            # comunque, mai pass-through. L'ultimo errore viene
+            # consegnato al client solo a catena esaurita (raise
+            # last_err in fondo al loop).
+            self.last_err = self.err
+
+    def _rotate_on_provider_transient(self):
+        """Errore transitorio del provider mascherato da 4xx: cooldown corto e rotazione."""
+        if _PROVIDER_TRANSIENT_RE.search(self.detail):
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "provider_transient"))
+            self.last_err = self.err
+            log.warning("[fallback] %s errore transitorio provider "
+                        "(%.80s): ritento sul successivo (cd corto)",
+                        self.cur, self.detail)
+            self._fail_cur(
+                                seconds=self.router.escalate_cooldown(
+                                    PROVIDER_TRANSIENT_COOLDOWN_S,
+                                    self.router.stats_for(self.cur).fail_count_24h),
+                                reason="provider_transient",
+                                status=abs(self.err.status) if self.err.status else None)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                              requested_group=self.requested_group)
+            return True
+
+    def _rotate_on_thought_signature(self):
+        """Thought signature Gemini mancante: rotazione su un deployment non-Gemini."""
+        if _THOUGHT_SIG_RE.search(self.detail):
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "provider_4xx"))
+            self.last_err = self.err        # per la consegna a catena esaurita
+            self.nxt = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                              requested_group=self.requested_group)
+            if self.nxt is not None and self.nxt["unique"] in self.tried:
+                self.nxt = None        # gruppo/catena tutto Gemini 3
+            if self.nxt is None:
+                log.warning("[fallback] %s 400 thought_signature: "
+                            "nessun deployment alternativo, "
+                            "consegno il 400 al client", self.cur)
+                raise
+            log.warning("[fallback] %s 400 thought_signature "
+                        "(Gemini 3 tool replay): ritento su %s "
+                        "senza cooldown", self.cur, self.nxt["unique"])
+            self.dep = self.nxt
+            return True
+
+    def _rotate_on_payload_schema(self):
+        """Schema del payload o mix di tool rifiutato dal provider: rotazione senza penale."""
+        if _PAYLOAD_SCHEMA_RE.search(self.detail) or \
+                tool_combo_signature(self.detail) or \
+                _UNKNOWN_FIELD_RE.search(self.detail):
+            # CF Workers AI & co.: rifiuto di SCHEMA della richiesta
+            # (content array vs string, messaggio senza content).
+            # Google/Gemini 3 (anche via proxy): rifiuto della
+            # COMBINAZIONE built-in tools + function calling
+            # (tool_config flag non passabile via OpenAI-compat).
+            # Non e' il modello rotto: ruota SENZA cooldown, un
+            # provider OpenAI-compatibile accetta lo stesso payload.
+            self._tc = tool_combo_signature(self.detail)
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "tool_combo" if self._tc else "provider_4xx"))
+            self.last_err = self.err        # consegna il 400 se catena esaurita
+            self.nxt = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                              requested_group=self.requested_group)
+            if self.nxt is not None and self.nxt["unique"] in self.tried:
+                self.nxt = None
+            if self.nxt is None:
+                log.warning("[fallback] %s 400 %s: nessuna "
+                            "alternativa, consegno l'errore", self.cur,
+                            "tool mix built-in+function"
+                            if self._tc else "schema payload")
+                raise
+            log.warning("[fallback] %s 400 %s incompatibile col "
+                        "provider: ritento su %s senza cooldown",
+                        self.cur,
+                        "tool mix built-in+function" if self._tc
+                        else "schema payload", self.nxt["unique"])
+            self.dep = self.nxt
+            return True
+
+    def _rotate_on_provider_4xx(self):
+        """4xx OpenAI-compat del provider (o 402): colpa del deployment, rotazione."""
+        if (self.qc.retry_provider_4xx and (
+                "bad_response_status_code" in self.detail
+                or "openai_error" in self.detail)) \
+                or -self.err.status == 402:
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "provider_4xx"))
+            if self.media_strike_hook and media_reject_signature(self.detail) \
+                    and media_input_needed(self.need):
+                try:
+                    self.media_strike_hook(self.dep["model"], self.detail)
+                except Exception as _exc_exc:   # mai bloccare il fallback
+                        self.exc = _exc_exc
+                        log.warning("[strike] hook error: %s", self.exc,
+                                    exc_info=True)
+            log.warning("[fallback] %s 400 provider-side "
+                        "(firma openai_error): ritento sul "
+                        "successivo", self.cur)
+            self.router.mark_failed(
+                self.cur,
+                reason="no_credits" if -self.err.status == 402
+                else "provider_400",
+                status=abs(self.err.status) if self.err.status else None)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                              requested_group=self.requested_group)
+            return True
+
+    def _rotate_on_empty_4xx(self):
+        """4xx senza body utile: infrastruttura, cooldown corto e rotazione."""
+        # 4xx con body ASSENTE/illeggibile: nessun messaggio
+        # azionabile per il client -> infrastruttura, non colpa
+        # della richiesta. Ruota (cooldown corto); se la catena si
+        # esaurisce -> 503 retryable, mai un 4xx nudo senza spiega.
+        if (not self.detail.strip()
+                or "body non leggibile" in self.detail.lower()
+                or len(self.detail.strip()) < 12):
+            metrics.inc("nx_upstream_calls_total", (self.cur, "empty_4xx"))
+            self.last_err = self.err
+            log.warning("[fallback] %s %s body d'errore vuoto: "
+                        "ritento sul successivo (cd corto)",
+                        self.cur, -self.err.status)
+            self._fail_cur(
+                                seconds=self.router.escalate_cooldown(
+                                    PROVIDER_TRANSIENT_COOLDOWN_S,
+                                    self.router.stats_for(self.cur).fail_count_24h),
+                                reason="empty_error_body",
+                                status=-self.err.status if self.err.status else None)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                              requested_group=self.requested_group)
+            return True
+
+    def _rotate_on_provider_fault(self):
+        """Il provider non ha saputo leggere la richiesta: rotazione."""
+        if is_provider_fault_body(self.detail):
+            # Il provider non e' riuscito a leggere/parsare la
+            # richiesta (envelope OpenAI {"error":{...}}): non e'
+            # un rifiuto del contenuto -> un altro deployment
+            # accetta lo stesso payload. Ruota (cd corto), mai
+            # pass-through del 400 al client.
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "provider_fault"))
+            self.last_err = self.err
+            log.warning("[fallback] %s %s body d'errore provider "
+                        "(lettura richiesta): ritento sul "
+                        "successivo", self.cur, -self.err.status)
+            self._fail_cur(
+                seconds=self.router.escalate_cooldown(
+                    PROVIDER_TRANSIENT_COOLDOWN_S,
+                    self.router.stats_for(self.cur).fail_count_24h),
+                reason="provider_fault",
+                status=-self.err.status if self.err.status else None)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope,
+                                       ctx=self.ctx, tried=self.tried,
+                                       requested_group=self.requested_group)
+            return True
+
+    def _rotate_on_media_reject(self):
+        """Rifiuto di modalita' (vision/audio...): strike di capacita' e rotazione sui capaci."""
+        # Rifiuto di MODALITA' (vision/image/audio/…): il modello
+        # non e' rotto, un altro deployment multimodale accetta lo
+        # stesso payload -> ruota (strike per l'auto-learn), mai
+        # pass-through del 400 al client.
+        if media_reject_signature(self.detail):
+            self.last_err = self.err
+            if media_input_needed(self.need):
+                metrics.inc("nx_upstream_calls_total",
+                            (self.cur, "media_reject"))
+                if self.media_strike_hook:
+                    try:
+                        self.media_strike_hook(self.dep["model"], self.detail)
+                    except Exception as _exc_exc:
+                        self.exc = _exc_exc
+                        log.warning("[strike] hook error: %s", self.exc,
+                                    exc_info=True)
+                self.nxt = self._pick(self.profile, self.dep, self.need, self.scope,
+                                           ctx=self.ctx, tried=self.tried,
+                                           requested_group=self.requested_group)
+                if self.nxt is None:
+                    log.warning("[fallback] %s %s rifiuto modalita': "
+                                "nessuna alternativa -> 503",
+                                self.cur, -self.err.status)
+                    raise
+                log.warning("[fallback] %s %s rifiuto modalita' -> %s",
+                            self.cur, -self.err.status, self.nxt["unique"])
+                self.dep = self.nxt
+                return True
+            # FALSO rifiuto di modalita': la richiesta NON ha media
+            # (caso llm7/Cloudflare che risponde "does not support
+            # vision input" a puro testo). Il modello e' rotto per
+            # QUESTA richiesta -> cooldown normale + rotazione, cosi'
+            # non viene ritentato a ogni richiesta.
+            metrics.inc("nx_upstream_calls_total",
+                        (self.cur, "model_feature"))
+            log.warning("[fallback] %s %s 'vision' ma la richiesta "
+                        "non ha media -> cooldown normale",
+                        self.cur, -self.err.status)
+            self._fail_cur(seconds=self.err.retry_after,
+                      reason="model_feature",
+                      status=abs(self.err.status) if self.err.status else None)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx,
+                        tried=self.tried,
+                        requested_group=self.requested_group)
+            return True
+
+    def _rotate_on_context_limit(self):
+        """Context length superato: alza la soglia della sessione e ruota (mai il 400 al client)."""
+        # CONTEXT LENGTH (400/413): il payload non entra nel modello.
+        # NON e' un errore del deployment: ruota su un dep con
+        # max_input maggiore (la ladder sale di dim) e alza la
+        # soglia di sessione. Mai pass-through.
+        if _looks_context_limit(-self.err.status, self.detail):
+            metrics.inc("nx_upstream_calls_total", (self.cur, "ctx_limit"))
+            self._actual = extract_requested_tokens(self.detail)
+            if self._actual:
+                try:
+                    self.router.note_session_overflow(
+                        current_session(), self._actual)
+                except Exception:           # noqa: BLE001
+                    report_suppressed("forwarder._NonStreamFallback._rotate_on_context_limit")
+            self.last_err = self.err
+            log.warning("[fallback] %s context_length_exceeded "
+                        "(%.90s): alzo la soglia sessione (%s) e "
+                        "ruoto sul successivo", self.cur, self.detail,
+                        (">=%d tok" % self._actual) if self._actual
+                        else "ctx-sconosciuto")
+            self._fail_cur(reason="ctx_limit",
+                      status=abs(self.err.status) if self.err.status else None)
+            self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx,
+                        tried=self.tried,
+                        requested_group=self.requested_group)
+            return True
+
+    def _fail_and_pick_next(self):
+        """Errore generico: cooldown del deployment e scelta del prossimo."""
+        metrics.inc("nx_upstream_calls_total", (self.cur, "error"))
+        self.last_err = self.err
+        log.warning("[fallback] %s fallito (status=%s): provo il successivo",
+                    self.cur, self.err.status or "connessione")
+        if self.err.status is None and "upstream timeout" in self.detail.lower():
+            # TIMEOUT (upstream che appende): danno reale -> cooldown
+            # lungo (timeout_cooldown_mult x classico).
+            self._reason = "timeout"
+        elif self.err.status and self.err.status > 0:
+            self._reason = "http_%s" % self.err.status
+        else:
+            self._reason = "network"
+        self._fail_cur( seconds=self.err.retry_after,
+                            reason=self._reason,
+                            status=abs(self.err.status) if self.err.status else None)
+        self.dep = self._pick(self.profile, self.dep, self.need, self.scope, ctx=self.ctx, tried=self.tried,
+                                                  requested_group=self.requested_group)
+
+    def _fail_cur(self, seconds=None, reason=None, status=None, kind=None,
+                  provenance=None):
+        _k = kind if kind is not None else self._kind_default
+        if self._was_dormant and _k != ErrorKind.PERMANENT_DEAD:
+            _r = self.router.mark_failed_double_residual(
+                self.cur, reason=reason, status=status)
+        else:
+            _r = self.router.mark_failed(
+                self.cur, seconds=seconds, reason=reason, status=status,
+                kind=_k, provenance=provenance)
+        # P1-4: KO ripetuti dello stesso MODELLO -> bench cross-chiave.
+        with contextlib.suppress(Exception):
+            self.router.note_model_failure(self.dep)
+        return _r
+
+    def _pick(self, *a, **k):
+        # Fallback + warm sticky handoff: se il prossimo deployment e' della
+        # stessa famiglia dello sticky corrente, sposta lo sticky su di lui
+        # (la sessione riparte warm invece che fredda).
+        k.setdefault("out_tokens", self._outb)
+        _n = self.router.fallback_next(*a, **k)
+        if _n is None:
+            return None
+        if dep_host(_n) not in self.skip_hosts:
+            self.router.sticky_handoff(self.ses, _n)
+            return _n
+        # P1-5 skipPlatforms: l'host ha gia' fallito a livello provider in
+        # QUESTA richiesta -> provo un altro host; se non ne restano, torno
+        # al candidato saltato (mai lasciare la richiesta senza risposta).
+        _saved = _n
+        for _ in range(8):
+            self.tried.add(_saved["unique"])
+            cand = self.router.fallback_next(*a, **k)
+            if cand is None:
+                self.router.sticky_handoff(self.ses, _saved)
+                return _saved
+            if dep_host(cand) not in self.skip_hosts:
+                self.router.sticky_handoff(self.ses, cand)
+                return cand
+            _saved = cand
+        self.router.sticky_handoff(self.ses, _saved)
+        return _saved
+
+
 class Forwarder:
     def __init__(self, client: httpx.AsyncClient | None = None,
                  keepalive_pool: bool = False):
@@ -3838,1431 +5444,4 @@ truncation_hook=None,
         richiesta vision/video/audio NON cade mai su un modello text-only.
         scope="group" (richieste esplicite) ruota SOLO nello stesso gruppo.
         """
-        qc = router.policy.qc_json          # snapshot per questa chiamata
-        san = router.policy.qc_sanity       # sanity generica (vuoto/trivial)
-        tr_cfg = create_tool_repair_config({
-            "tool_repair": {
-                "enabled": router.policy.tool_repair_enabled,
-                "default_level": router.policy.tool_repair_default_level,
-                "disable_for_google": router.policy.tool_repair_disable_for_google,
-                "max_args_size": router.policy.tool_repair_max_args_size,
-                "annotate_reasoning": router.policy.tool_repair_annotate_reasoning,
-            },
-        })
-        _fc = fake_config_from_policy(router.policy)
-        fake_escalations = 0
-        _hn = hist_config_from_policy(router.policy)
-        _sm = sampling_config_from_policy(router.policy)
-        _so = schemaout_config_from_policy(router.policy)
-        _tt = text_config_from_policy(router.policy)
-        _corrected: set[str] = set()
-        _rsn_steps: dict[str, set] = {}      # rimedi reasoning per dep
-        _cstr_steps: dict[str, set] = {}     # rimedi content-string per dep
-        trail: list = []                     # ATTEMPT TRAIL (P0) per il 503
-        skip_hosts: set[str] = set()         # P1-5: host saltati (provider KO)
-        _rsn_restored = False                # history originale gia' riprovata
-        dep = first_dep
-        requested_group = requested_group or (first_dep or {}).get("group")
-        # HOLD-UNTIL-FINISH (parita' col path streaming): con hold attivo la
-        # risposta non-streaming (gia' interamente bufferizzata) non deve MAI
-        # consegnare un moncone troncato dal modello. Stesso interruttore dello
-        # stream: colonna CSV per-deployment OR policy qc_json.
-        hold = bool((first_dep or {}).get("hold_until_finish")) or bool(
-            getattr(router.policy.qc_json, "stream_hold_until_finish", False))
-        last_err: UpstreamError | None = None
-        tried: set[str] = set()
-        qc_failed: list[tuple[str, str]] = []
-        last_broken: tuple[dict, dict] | None = None
-        _max_tries = int(getattr(router.policy, "max_fallback_tries",
-                                 os.environ.get("GATEWAY_MAX_FALLBACK_TRIES", "128"))
-                         or 128)
-        _deadline_ms = int(getattr(router.policy.qc_json,
-                                   "stream_total_deadline_ms", 180000) or 0)
-        _t0 = time.monotonic()
-        _kind_default: str | None = None
-        # ---- WARM-REFILL a cascata (non-streaming): finche' la sessione ha
-        # meno di warm_ready_min caldi "deliverable" (need + ctx + output
-        # assicurato), ogni tentativo corsia UN canary nuovo in parallelo
-        # (2 alla volta, free-only, api_key diversa, libero da ogni sessione):
-        # consegna il piu' veloce, l'altro finisce come probe reale -> warm.
-        _pol = router.policy
-        _refill_on = (bool(getattr(_pol, "warm_refill_enabled", True))
-                      and bool(getattr(_pol, "warm_pool_enabled", True))
-                      and bool(ses) and bool(profile))
-        _ready_min = router.warm_ready_effective(ses, _pol)
-        _maxif = max(0, int(getattr(_pol, "warm_refill_max_inflight",
-                                     6) or 0))
-        _raced: set[str] = set()
-        _raced_keys: set[str] = set()
-        _refill_rounds = 0
-        _zen_hunt = False                # caccia canary zen-only (nativo)
-        try:
-            _outb = refill_out_budget(payload, _pol)
-        except Exception:
-            _outb = 4096
-
-        def _pick(*a, **k):
-            # Fallback + warm sticky handoff: se il prossimo deployment e' della
-            # stessa famiglia dello sticky corrente, sposta lo sticky su di lui
-            # (la sessione riparte warm invece che fredda).
-            k.setdefault("out_tokens", _outb)
-            _n = router.fallback_next(*a, **k)
-            if _n is None:
-                return None
-            if dep_host(_n) not in skip_hosts:
-                router.sticky_handoff(ses, _n)
-                return _n
-            # P1-5 skipPlatforms: l'host ha gia' fallito a livello provider in
-            # QUESTA richiesta -> provo un altro host; se non ne restano, torno
-            # al candidato saltato (mai lasciare la richiesta senza risposta).
-            _saved = _n
-            for _ in range(8):
-                tried.add(_saved["unique"])
-                cand = router.fallback_next(*a, **k)
-                if cand is None:
-                    router.sticky_handoff(ses, _saved)
-                    return _saved
-                if dep_host(cand) not in skip_hosts:
-                    router.sticky_handoff(ses, cand)
-                    return cand
-                _saved = cand
-            router.sticky_handoff(ses, _saved)
-            return _saved
-        # ---- L1 #1: normalizzazione STRUTTURALE della history (coda) ----
-        if _hn.enabled:
-            _new_msgs, _hn_rep = normalize_messages(
-                (payload or {}).get("messages"), _hn,
-                tail_floor=router.ctx_boundary_floor(ses))
-            if _hn_rep.get("changed"):
-                payload["messages"] = _new_msgs
-                metrics.inc("nx_histnorm_total", ("changed",))
-                log.info("[histnorm] coda normalizzata: orphan=%d "
-                         "dangling=%d empty=%d dupsys=%d",
-                         _hn_rep.get("shown_orphan_tool", 0),
-                         _hn_rep.get("dangling_tool_calls", 0),
-                         _hn_rep.get("empty_assistant", 0),
-                         _hn_rep.get("dup_system", 0))
-        # Gemini 3 tool replay: una history con tool_call prive di firma rende
-        # Gemini inutilizzabile. L'esclusione avviene A MONTE nel router
-        # (set_avoid_gemini in chat_completions -> _gemini_blocked in
-        # pick_deployment/_walk_chain): qui non serve alcun salto/tentativo.
-        while (dep is not None and len(tried) < _max_tries
-               and (not _deadline_ms
-                    or (time.monotonic() - _t0) * 1000 < _deadline_ms)):
-            cur = dep["unique"]             # il deployment DEL TENTATIVO:
-            log.debug("[chain] tentativo %d/%d: %s (group=%s)", len(tried), _max_tries, cur, dep.get("group", "?"))
-            _was_dormant = router.is_cooled_down(cur)
-            # Solo se il gruppo RICHIESTO esplicitamente e' un bucket di
-            # escalation (-go/-fallback): niente refill/canary/gara lenta
-            # (i bucket a pagamento non usano il caldo). Se ci si arriva via
-            # FALLBACK dal dim, la speculativa resta attiva.
-            _esc_grp = is_escalation_group(
-                str(requested_group or ""),
-                router.config.go_suffix, router.config.fallback_suffix)
-            def _fail_cur(seconds=None, reason=None, status=None, kind=None,
-                          provenance=None):
-                _k = kind if kind is not None else _kind_default
-                if _was_dormant and _k != ErrorKind.PERMANENT_DEAD:
-                    _r = router.mark_failed_double_residual(
-                        cur, reason=reason, status=status)
-                else:
-                    _r = router.mark_failed(
-                        cur, seconds=seconds, reason=reason, status=status,
-                        kind=_k, provenance=provenance)
-                # P1-4: KO ripetuti dello stesso MODELLO -> bench cross-chiave.
-                with contextlib.suppress(Exception):
-                    router.note_model_failure(dep)
-                return _r
-            tried.add(cur)                  # note_end deve riferirsi a QUESTO,
-            if attempts_box is not None:
-                attempts_box.append(cur)    # osservabilità summary per-richiesta
-            # l'identità DEVE riflettere il deployment CHE PROVA ORA: dopo un
-            # fallback il system message nominerebbe il modello sbagliato.
-            inject_identity(payload, dep)
-            _tp = apply_thinking_replay(payload, dep, orig_messages)
-            if _tp:
-                log.info("[thinking-replay] %s: %d campi reasoning rimessi "
-                         "PRIMA dell'invio (proattivo)", cur, _tp)
-            router.note_start(cur, ctx)     # rotazione adattiva (peso token)
-            t0 = time.monotonic()
-            _lease = router.key_lease_acquire(dep)   # P2-8 (opt-in)
-            try:
-                # ---- L1 #2A: default di sampling (client vince) ----
-                if _sm.enabled:
-                    _applied = apply_sampling_defaults(payload, dep, _sm)
-                    if _applied:
-                        log.debug("[sampling] %s: default %s",
-                                  cur, _applied)
-                    if (_so.enabled and maybe_inject_response_format(
-                            payload, dep, _so)):
-                        metrics.inc("nx_resp_format_injected_total",
-                                    (cur,))
-                _fB = None
-                _B = None
-                _wake_b = False
-                _tB = t0
-                _fZ = None
-                _BZ = None
-                _wake_z = False
-                _tZ = t0
-                try:
-                    _fly = router.probes_in_flight(ses)
-                except Exception:
-                    _fly = 0
-                # DEGRADED (P1-6): in blackout upstream niente speculativo
-                # (cascata/canary/sveglia): brucia rate-limit senza costrutto.
-                try:
-                    _degraded = router.degraded_active()
-                except Exception:
-                    _degraded = False
-                def _open_canary(label: str, zen_only: bool = False):
-                    """Apre UN canario (o sveglia un cooldown 429 maturo) e lo
-                    mette in volo accanto ad A. Ritorna (dep, fut, t0, wake)
-                    oppure None. Usata dal gate refill e dalla GARA LENTA."""
-                    _age = 3600.0
-                    try:
-                        _age = float(getattr(
-                            _pol, "warm_refill_wake_min_cooldown_age_sec",
-                            3600.0) or 3600.0)
-                    except Exception:
-                        _age = 3600.0
-                    _b = None
-                    _wake = False
-                    try:
-                        _b = router.warm_fill_canary(
-                            profile, dep, need, ctx, _outb,
-                            tried=tried | _raced,
-                            requested_group=requested_group,
-                            exclude_keys=_raced_keys, exclude_uniq=_raced,
-                            only_zen=zen_only)
-                    except Exception:
-                        _b = None
-                    if _b is None:
-                        try:
-                            _b = router.warm_wake_canary(
-                                profile, dep, need, ctx, _outb,
-                                tried=tried | _raced,
-                                requested_group=requested_group,
-                                exclude_keys=_raced_keys, exclude_uniq=_raced,
-                                only_zen=zen_only,
-                                min_age_sec=_age)
-                        except Exception:
-                            _b = None
-                        if _b is not None:
-                            _wake = True
-                            log.info("[refill] ns: sveglia %s (429 maturo)",
-                                     _b["unique"])
-                    if _b is None:
-                        return None
-                    log.info("[%s] ns: canario %s (order=%s, chiavi "
-                             "warm+in-volo escluse=%d)", label, _b["unique"],
-                             _b.get("order"), len(_raced_keys))
-                    _raced.add(_b["unique"])
-                    _raced_keys.add(str(_b.get("api_key") or ""))
-                    _pb = dict(payload)
-                    inject_identity(_pb, _b)
-                    router.note_start(_b["unique"], ctx)
-                    _tb = time.monotonic()
-                    _fb = asyncio.ensure_future(self.call(
-                        _b, _pb, profile=profile or "", ctx_est=ctx,
-                        client_ip=client_ip, session=session,
-                        attribution=attribution,
-                        rate_hook=lambda u2, rl:
-                        router.note_rate_limit(u2, rl)))
-                    with contextlib.suppress(Exception):
-                        router.note_probe_started(ses, _b["unique"])
-                    return _b, _fb, _tb, _wake
-
-                if (_refill_on and _ready_min and not _degraded
-                        and not _esc_grp
-                        and not _opencode_cautious_request()
-                        and _refill_rounds < _maxif
-                        and _fly < _maxif
-                        and (not _deadline_ms
-                             or (time.monotonic() - _t0) * 1000
-                             < _deadline_ms)):
-                    try:
-                        _pool = router.warm_valid_for(
-                            ses, profile,
-                            requested_group or dep.get("group"),
-                            need, ctx, _outb, tried=tried | _raced,
-                            include_borrowed=True)
-                        _nv = len(_pool)
-                    except Exception:
-                        _pool, _nv = [], _ready_min
-                    # Nativo opencode SENZA zen nel warm: caccia un canary
-                    # zen-only anche se il conteggio MISTO basta (basta 1 zen).
-                    _zen_hunt = (router._zen_first_active()
-                                 and not any(is_opencode_zen_dep(d)
-                                             for d in _pool)
-                                 and router.hunt_allowed(ses, ctx))
-                    if (_nv < _ready_min) or _zen_hunt:
-                        if _zen_hunt:
-                            router.note_hunt(ses, ctx, gained=False)
-                            log.info("[refill] ns %s: 0 zen nel warm per client "
-                                     "nativo -> caccia canary zen-only", cur)
-                        _refill_rounds += 1
-                        _rpm = router.session_rpm(ses)
-                        log.info("[refill] ns %s: warm validi %d/%d, in volo "
-                                 "%d/%d (ctx=%s, out=%s, rpm=%.1f) -> "
-                                 "2 alla volta",
-                                 cur, _nv, _ready_min, _fly, _maxif, ctx,
-                                 _outb, _rpm)
-                        _raced.add(cur)
-                        _raced_keys.add(str(dep.get("api_key") or ""))
-                        # chiavi gia' rappresentate nel warm: non si rimette
-                        # alla prova la STESSA api_key di un caldo
-                        try:
-                            _raced_keys |= router.warm_api_keys(
-                                ses, profile,
-                                requested_group or dep.get("group"))
-                        except Exception:
-                            report_suppressed("forwarder.call_with_fallback@4119")
-                        _op = _open_canary("refill", zen_only=False)
-                        if _op is None:
-                            log.info("[refill] ns %s: nessun canario free "
-                                     "consegnabile (chiavi escluse=%d)",
-                                     cur, len(_raced_keys))
-                        else:
-                            _B, _fB, _tB, _wake_b = _op
-                        # CANARY ZEN DEDICATO (nativo senza zen in warm):
-                        # affianca il canary normale e cerca gli zen in TUTTE
-                        # le dim del profilo, non solo in quella richiesta.
-                        if _zen_hunt:
-                            try:
-                                _room = (router.probes_in_flight(ses)
-                                         < _maxif)
-                            except Exception:          # noqa: BLE001
-                                _room = True
-                            if _room:
-                                _opz = _open_canary("zen-wake", zen_only=True)
-                                if _opz is None:
-                                    log.info("[refill] ns %s: nessun canary "
-                                             "zen consegnabile (ctx=%s)",
-                                             cur, ctx)
-                                else:
-                                    _BZ, _fZ, _tZ, _wake_z = _opz
-                futA = None
-                # GARA LENTA (non-stream): soglia misurata dall'inizio del
-                # TENTATIVO di A. Vale SEMPRE, anche quando un canario di
-                # refill e' gia' in volo (il timer lento e' indipendente dal
-                # tetto per-sessione e non applica penali al lento).
-                _ns_slow = 0
-                _ns_canary = 0
-                if not _degraded and not _esc_grp:
-                    try:
-                        _ns_slow = int(getattr(
-                            _pol, "nonstream_slow_race_after_ms", 0) or 0)
-                    except Exception:
-                        _ns_slow = 0
-                    try:
-                        _ns_canary = int(getattr(
-                            _pol, "slow_canary_after_ms", 0) or 0)
-                    except Exception:
-                        _ns_canary = 0
-                _slow_dl = ((t0 + _ns_slow / 1000.0) if _ns_slow > 0
-                            else None)
-                # TIMING DEL CANARY separato dal FLAG lento: `slow_canary_ms`
-                # apre il canario, `slow_race_ms` marca il dep "lento per la
-                # sessione". Con `slow_canary_ms <= 0` il canario resta appeso
-                # alla soglia del flag (storico: i due scattano insieme).
-                _canary_dl = ((t0 + _ns_canary / 1000.0) if _ns_canary > 0
-                              else _slow_dl)
-                _flag_marked = False
-                if _fB is None and _fZ is None:
-                    # Se il primo tentativo sta ancora generando oltre la
-                    # soglia si apre UN canario e si tiene per buono il PRIMO
-                    # che consegna; A resta in volo (e se ha generato in MENO
-                    # tempo diventa holder).
-                    data = None
-                    _A = dep
-                    _tA = t0
-                    if _canary_dl is not None:
-                        futA = asyncio.ensure_future(self.call(
-                            _A, payload, profile=profile or "",
-                            ctx_est=ctx, client_ip=client_ip,
-                            session=session, attribution=attribution,
-                            rate_hook=lambda u4, rl:
-                            router.note_rate_limit(u4, rl)))
-                        _d_s, _ = await asyncio.wait(
-                            {futA}, timeout=max(
-                                0.0, _canary_dl - time.monotonic()))
-                        if futA in _d_s:
-                            data = futA.result()
-                            futA = None
-                            # A ha consegnato: se ha superato la soglia del
-                            # FLAG (e il canary non e' ancora scattato) marchia
-                            # comunque il lento.
-                            if _slow_dl is not None and not _flag_marked \
-                                    and time.monotonic() >= _slow_dl:
-                                with contextlib.suppress(Exception):
-                                    router.mark_session_slow(ses, cur)
-                                _flag_marked = True
-                        else:
-                            log.info("[slow-race] ns %s in generazione da "
-                                     "%.0fs (> %.0fs) -> canario in gara",
-                                     cur, time.monotonic() - _tA,
-                                     (_ns_canary if _ns_canary > 0
-                                      else _ns_slow) / 1000.0)
-                            # FLAG LENTO: indipendente dal canary. Se la sua
-                            # soglia e' gia' scaduta marca subito; se scade
-                            # DOPO la apre il race loop.
-                            if _slow_dl is not None \
-                                    and time.monotonic() >= _slow_dl:
-                                with contextlib.suppress(Exception):
-                                    router.mark_session_slow(ses, cur)
-                                _flag_marked = True
-                            # R2: gate — solo se la sessione ha pochi warm.
-                            _op = None
-                            try:
-                                _allow = bool(router.slow_race_allowed(
-                                    ses, profile, dep.get("group"), need,
-                                    ctx, _outb, tried))
-                            except Exception:       # noqa: BLE001
-                                _allow = True
-                            if _allow:
-                                _raced.add(cur)
-                                _raced_keys.add(
-                                    str(dep.get("api_key") or ""))
-                                _op = _open_canary("slow-race")
-                            else:
-                                metrics.inc("nx_slow_race_total",
-                                            ("warm_full",))
-                                log.info("[slow-race] ns %s: warm gia' pieno "
-                                         "(>=%s), niente canario", cur,
-                                         getattr(_pol, "slow_race_max_warm",
-                                                 6))
-                            if _op is None:
-                                # Nessun canario: si attende A, ma il FLAG
-                                # lento scatta comunque alla sua soglia.
-                                if _slow_dl is not None and not _flag_marked:
-                                    _d_f, _ = await asyncio.wait(
-                                        {futA}, timeout=max(
-                                            0.0, _slow_dl - time.monotonic()))
-                                    if futA not in _d_f:
-                                        with contextlib.suppress(Exception):
-                                            router.mark_session_slow(ses, cur)
-                                        _flag_marked = True
-                                data = await futA
-                                futA = None
-                            else:
-                                _B, _fB, _tB, _wake_b = _op
-                    if _fB is None and _fZ is None and data is None:
-                        data = await self.call(dep, payload,
-                                       profile=profile or "",
-                                       ctx_est=ctx,
-                                       client_ip=client_ip, session=session,
-                                       attribution=attribution,
-                                       rate_hook=lambda u, rl: router.note_rate_limit(
-                                           u, rl))
-                if _fB is not None or _fZ is not None:
-                    # GARA (A + canario refill, eventualmente + canario
-                    # LENTO): vince chi risponde PER PRIMO con successo; gli
-                    # altri restano in volo come probe (mai cancellati) e se
-                    # consegnano entrano in warm.
-                    _A = dep
-                    _tA = t0
-                    if futA is None:
-                        futA = asyncio.ensure_future(self.call(
-                            _A, payload, profile=profile or "",
-                            ctx_est=ctx, client_ip=client_ip,
-                            session=session, attribution=attribution,
-                            rate_hook=lambda u3, rl:
-                            router.note_rate_limit(u3, rl)))
-                    _parts: list[dict] = [
-                        {"fut": futA, "dep": _A, "t": _tA,
-                         "wake": False, "a": True}]
-                    if _fB is not None:
-                        _parts.append({"fut": _fB, "dep": _B, "t": _tB,
-                                       "wake": _wake_b, "a": False})
-                    if _fZ is not None:
-                        _parts.append({"fut": _fZ, "dep": _BZ, "t": _tZ,
-                                       "wake": _wake_z, "a": False})
-                    _pending = {p["fut"] for p in _parts}
-                    _canary_opened = _canary_dl is None
-                    _slow_marked = _slow_dl is None or _flag_marked
-                    _errs: list[BaseException] = []
-                    data = None
-                    _win = None
-                    while _pending:
-                        _now_ns = time.monotonic()
-                        _pending_dls = []
-                        if not _canary_opened and _canary_dl is not None:
-                            _pending_dls.append(_canary_dl)
-                        if not _slow_marked and _slow_dl is not None:
-                            _pending_dls.append(_slow_dl)
-                        _to = (max(0.0, min(_pending_dls) - _now_ns)
-                               if _pending_dls else None)
-                        _cmp, _rest = await asyncio.wait(
-                            _pending, timeout=_to,
-                            return_when=asyncio.FIRST_COMPLETED)
-                        _pending = set(_rest)
-                        # NB: bisogna esaminare TUTTI i future completati in
-                        # questo giro, non solo uno: scartare gli altri
-                        # lascerebbe la loro eccezione non recuperata (e il
-                        # probe del loser non partirebbe -> nessuna penale).
-                        for _f in _cmp:
-                            try:
-                                _r = _f.result()
-                            except BaseException as exc:
-                                _errs.append(exc)
-                                continue
-                            data = _r
-                            _win = _f
-                            break
-                        if data is not None:
-                            break
-                        _now_ns = time.monotonic()
-                        # FLAG LENTO (timer proprio, indipendente dal canary)
-                        if not _slow_marked and _slow_dl is not None \
-                                and _now_ns >= _slow_dl:
-                            _slow_marked = True
-                            with contextlib.suppress(Exception):
-                                router.mark_session_slow(ses, cur)
-                        # CANARY LENTO (timer proprio)
-                        if not _canary_opened and _canary_dl is not None \
-                                and _now_ns >= _canary_dl:
-                            _canary_opened = True
-                            log.info("[slow-race] ns %s in generazione da "
-                                     "%.0fs (> %.0fs) -> canario in gara",
-                                     cur, _now_ns - _tA,
-                                     (_ns_canary if _ns_canary > 0
-                                      else _ns_slow) / 1000.0)
-                            # R2: gate — solo se la sessione ha pochi warm.
-                            _op = None
-                            try:
-                                _allow = bool(router.slow_race_allowed(
-                                    ses, profile, dep.get("group"), need,
-                                    ctx, _outb, tried))
-                            except Exception:       # noqa: BLE001
-                                _allow = True
-                            if _allow:
-                                _raced.add(cur)
-                                _raced_keys.add(
-                                    str(dep.get("api_key") or ""))
-                                _op = _open_canary("slow-race")
-                            else:
-                                metrics.inc("nx_slow_race_total",
-                                            ("warm_full",))
-                                log.info("[slow-race] ns %s: warm gia' pieno "
-                                         "(>=%s), niente canario", cur,
-                                         getattr(_pol, "slow_race_max_warm",
-                                                 6))
-                            if _op is not None:
-                                _C, _fC, _tC, _wake_c = _op
-                                _parts.append({"fut": _fC, "dep": _C,
-                                               "t": _tC, "wake": _wake_c,
-                                               "a": False})
-                                _pending.add(_fC)
-                                log.info("[hedge] slow-race: %s in gara con "
-                                         "A (fuori dal tetto)", _C["unique"])
-                    if data is None:
-                        # Nessuno ha consegnato: A finisce nell'handler errori
-                        # esistente (penali solite); gli altri ricevono la
-                        # loro da probe (future gia' completati con
-                        # l'eccezione).
-                        for p in _parts:
-                            if p["a"]:
-                                continue
-                            _spawn_ns_probe(router, p["dep"], p["fut"],
-                                            p["t"], ctx, ses, wake=p["wake"])
-                        raise (_errs[0] if _errs else UpstreamError(
-                            -503, "gara non-stream: nessun consegnato"))
-                    _wd = next(p for p in _parts if p["fut"] is _win)
-                    _race = (_wd["dep"]["unique"], max(
-                        0.0, (time.monotonic() - _wd["t"]) * 1000.0))
-                    for p in _parts:
-                        if p["fut"] is _win:
-                            continue
-                        _spawn_ns_probe(router, p["dep"], p["fut"], p["t"],
-                                        ctx, ses, wake=p["wake"],
-                                        race=_race)
-                    if not _wd["a"]:
-                        log.info("[refill] consegna %s (piu' veloce di %s, "
-                                 "che finisce come probe senza penale)",
-                                 _wd["dep"]["unique"], cur)
-                        with contextlib.suppress(Exception):
-                            router.note_probe_done(ses, _wd["dep"]["unique"])
-                        dep = _wd["dep"]
-                        cur = _wd["dep"]["unique"]
-                        t0 = _wd["t"]
-                        _was_dormant = False
-                        if _wd["wake"]:
-                            with contextlib.suppress(Exception):
-                                router.clear_cooldown(cur)   # sveglia ok
-                            log.info("[refill] ns: sveglia riuscita, %s "
-                                     "torna caldo", cur)
-                        if attempts_box is not None:
-                            attempts_box.append(cur)
-                if _was_dormant:
-                    router.clear_cooldown(cur)
-                    metrics.observe_latency_ms(cur, (time.monotonic() - t0) * 1000)
-                    metrics.inc("nx_upstream_calls_total", (cur, "ok"))
-    
-                    # ---- TOOL REPAIR (prima del QC) ----
-                tr_result = repair_tool_calls(data, payload, dep, tr_cfg)
-                if tr_result["repaired"]:
-                    metrics.inc("nx_tool_repair_total", (cur, "ok"))
-                # PULIZIA CONTENUTO: artefatti di ragionamento interni nel
-                # testo di risposta (es. <previous_reasoning_empty/>Done.).
-                # Vale anche senza tools: e' pulizia del contenuto.
-                if sanitize_response(data):
-                    metrics.inc("nx_content_sanitized_total", (cur,))
-
-                # ---- L2 #6: recupero tool-call resi come testo ----
-                _text_parsed = False
-                if _tt.enabled and payload.get("tools"):
-                    try:
-                        _tc_info = apply_to_message(
-                            ((data.get("choices") or [{}])[0].get(
-                                "message") or {}),
-                            payload.get("tools"), _tt,
-                            preserve_residual=True)
-                    except Exception:
-                        _tc_info = None
-                    if _tc_info:
-                        _text_parsed = True
-                        metrics.inc("nx_text_toolcall_total",
-                                    (cur, "parsed"))
-                        repairlog.note("salvage_text", source="nostream",
-                                       outcome="ok", dep=cur,
-                                       model=dep.get("model", ""),
-                                       detail="tool-call resi come testo",
-                                       count=len(_tc_info))
-                # ---- TOOLCALL TRUNCATION: tag aperto mai chiuso ----
-                if (_tt.enabled and payload.get("tools") and not _text_parsed
-                        and getattr(router.policy,
-                                    "toolcall_truncation_enabled", True)):
-                    _msg0 = ((data.get("choices") or [{}])[0].get(
-                        "message") or {})
-                    _ctxt = _msg0.get("content")
-                    if isinstance(_ctxt, list):
-                        _ctxt = "".join(
-                            p.get("text", "") for p in _ctxt
-                            if isinstance(p, dict)
-                            and isinstance(p.get("text"), str))
-                    if isinstance(_ctxt, str) and has_unclosed_toolcall(_ctxt):
-                        _salv = None
-                        try:
-                            _salv = salvage_truncated_toolcall(
-                                _ctxt, payload.get("tools"), _tt)
-                        except Exception:
-                            _salv = None
-                        _cd = int(getattr(
-                            router.policy,
-                            "toolcall_truncation_cooldown_sec", 30) or 30)
-                        if _salv:
-                            _msg0["tool_calls"] = _salv
-                            _msg0["content"] = ""
-                            _text_parsed = True
-                            metrics.inc("nx_truncated_toolcall_total",
-                                        (cur, "salvaged"))
-                            repairlog.note("salvage_truncated",
-                                           source="nostream", outcome="ok",
-                                           dep=cur,
-                                           model=dep.get("model", ""),
-                                           detail="tag tool-call rotto",
-                                           count=len(_salv))
-                        else:
-                            metrics.inc("nx_truncated_toolcall_total",
-                                        (cur, "rotate"))
-                            repairlog.note("salvage_truncated",
-                                           source="nostream", outcome="fail",
-                                           dep=cur,
-                                           model=dep.get("model", ""),
-                                           detail="tag tool-call non salvabile")
-                            log.warning("[truncation] %s: tag tool-call rotto "
-                                        "non salvabile -> ruoto (cooldown "
-                                        "%ds)", cur, _cd)
-                            _fail_cur(seconds=_cd, reason="truncated_toolcall")
-                            last_broken = (data, dep)
-                            dep = _pick(
-                                profile, dep, need, scope, ctx=ctx,
-                                tried=tried, requested_group=requested_group)
-                            continue
-                # ---- L2 #5: output strutturato (A/B/D) ----
-                _so_rep = enforce_response(data, payload, _so) \
-                    if (_so.enabled and not _text_parsed) \
-                    else {"status": "skip"}
-                if _so_rep.get("status") in ("cleaned", "repaired"):
-                    metrics.inc("nx_struct_out_total",
-                                (cur, _so_rep.get("status")))
-                    log.info("[struct-out] %s: %s", cur,
-                             _so_rep.get("status"))
-                    repairlog.note(
-                        "struct_cleaned"
-                        if _so_rep.get("status") == "cleaned"
-                        else "struct_repaired",
-                        source="nostream", outcome="ok", dep=cur,
-                        model=dep.get("model", ""),
-                        detail=",".join(_so_rep.get("moves") or [])
-                        or _so_rep.get("status"))
-                # ---- L1 #2B: loop detector ----
-                _loop_reason = None
-                if _sm.loop.enabled and not _text_parsed:
-                    _loop_reason = response_loop_reason(data, _sm)
-
-                # ---- QC del contenuto (solo percorso non-streaming) ----
-                if collect_qc_failures and (qc.enabled or san.enabled):
-                    reason = check_response(data, payload, qc) \
-                        if qc.enabled else None
-                    if not reason:
-                        from .qc import check_sanity
-                        reason = check_sanity(data, payload, san)
-                        if reason:
-                            # contenuto vuoto ma il modello HA ragionato o ha
-                            # esaurito max_tokens (finish_reason=length): NON e'
-                            # rotto, ruotare la catena non cambia nulla (tutto
-                            # il gruppo si comporterebbe uguale) e raffredda
-                            # chiavi sane. NON consegnare vuoto (blocca gli
-                            # agenti): risposta "notice" subito, un solo tentativo.
-                            _ch0 = (data.get("choices") or [{}])[0]
-                            fr = _ch0.get("finish_reason")
-                            _rc = (_ch0.get("message") or {}).get(
-                                "reasoning_content") or (
-                                _ch0.get("message") or {}).get("reasoning")
-                            # HOLD (parita' col path streaming): zero-answer da
-                            # budget esaurito (finish_reason=length) NON e'
-                            # colpa del deployment -> si ruota SENZA penale
-                            # verso il candidato piu' capace; 503 solo a catena
-                            # esaurita. (Nello stream hold: verdict
-                            # 'length_truncated' a 0 char, nessuna penale.)
-                            if hold and fr == "length" and _looks_empty(data):
-                                log.info("[hold] ns %s: finish_reason=length "
-                                         "senza risposta -> ruoto senza penale "
-                                         "(capace)", cur)
-                                last_broken = (data, dep)
-                                nxt = _pick(
-                                    profile, dep, need, scope, ctx=ctx,
-                                    tried=tried,
-                                    requested_group=requested_group,
-                                    prefer_capable=True)
-                                if nxt is not None and len(tried) < _max_tries:
-                                    dep = nxt
-                                    continue
-                                raise UpstreamError(
-                                    503, "catena esaurita, nessun output utile",
-                                    final=True)
-                            no_rotate = ((fr == "length"
-                                          or (isinstance(_rc, str) and _rc.strip()))
-                                         and not getattr(
-                                             san, "rotate_on_length_empty", False))
-                            if no_rotate:
-                                # il modello ha esaurito il budget / ha solo
-                                # ragionato: ruotare non aiuta -> errore
-                                # RETRYABLE al client (mai un turno finto).
-                                raise UpstreamError(
-                                    503, "empty output (fr=%s) da %s"
-                                         % (fr, cur), final=True)
-                    if reason:
-                        _ck = _corrective_kind(reason)
-                        if (getattr(router.policy,
-                                    "corrective_retry_enabled", True)
-                                and cur not in _corrected
-                                and not reason.lower().startswith(
-                                    "timeout")):
-                            _corrected.add(cur)
-                            payload.setdefault("messages", []).append(
-                                {"role": "system",
-                                 "content": _corrective_note(_ck)})
-                            metrics.inc("nx_corrective_retry_total",
-                                        (cur, _ck))
-                            log.warning("[retry] %s contenuto non "
-                                        "valido (%s): retry correttivo",
-                                        cur, reason)
-                            repairlog.note("struct_corrective",
-                                           source="nostream", outcome="ok",
-                                           dep=cur,
-                                           model=dep.get("model", ""),
-                                           detail=_ck)
-                            continue
-                        qc_failed.append((cur, reason))
-                        metrics.inc("nx_qc_discarded_total",
-                                    (cur, reason.split(" ")[0]))
-                        last_broken = (data, dep)
-                        if len(qc_failed) <= qc.max_attempts:
-                            log.warning("[qc] %s JSON non valido (%s): "
-                                        "provo il successivo", cur, reason)
-                            _fail_cur()
-                            dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                            continue        # finally chiude il TENTATIVO
-                        # tentativi esauriti: consegna l'ultimo se ha contenuto,
-                        # altrimenti errore RETRYABLE (mai un turno vuoto/finto).
-                        if _looks_empty(data):
-                            raise UpstreamError(
-                                503, "catena esaurita, nessun output utile",
-                                 final=True)
-                        router.note_result(cur, (time.monotonic() - t0) * 1000,
-                                           quality=0.5, ctx_est=ctx)
-                        return data, dep, qc_failed
-                # ---- L2 #5 non conforme: retry correttivo/rotazione ----
-                if _so_rep.get("status") == "invalid" \
-                        and not _text_parsed:
-                    _r5 = _so_rep.get("reason") or "schema"
-                    if (getattr(router.policy,
-                                "corrective_retry_enabled", True)
-                            and cur not in _corrected):
-                        _corrected.add(cur)
-                        payload.setdefault("messages", []).append(
-                            {"role": "system",
-                             "content": _corrective_note("schema")})
-                        metrics.inc("nx_corrective_retry_total",
-                                    (cur, "schema"))
-                        log.warning("[retry] %s contenuto non "
-                                    "conforme (%s): retry correttivo",
-                                    cur, _r5)
-                        repairlog.note("struct_corrective",
-                                       source="nostream", outcome="ok",
-                                       dep=cur, model=dep.get("model", ""),
-                                       detail="schema")
-                        continue
-                    metrics.inc("nx_struct_out_total", (cur, "invalid"))
-                    log.warning("[struct-out] %s non conforme (%s): "
-                                "ruoto", cur, _r5)
-                    repairlog.note("struct_invalid", source="nostream",
-                                   outcome="fail", dep=cur,
-                                   model=dep.get("model", ""), detail=_r5)
-                    _fail_cur()
-                    last_broken = (data, dep)
-                    qc_failed.append((cur, "schema"))
-                    dep = _pick(profile, dep, need, scope,
-                                               ctx=ctx, tried=tried,
-                                               requested_group=
-                                               requested_group)
-                    continue
-                # ---- L1 #2B loop rilevato: dim successiva ----
-                if _loop_reason:
-                    metrics.inc("nx_loop_detected_total",
-                                (cur, _loop_reason))
-                    log.warning("[loop] %s: %s -> dim successiva",
-                                cur, _loop_reason)
-                    _fail_cur(reason="loop")
-                    last_broken = (data, dep)
-                    nxt = _pick(profile, dep, need, scope,
-                                               ctx=ctx, tried=tried,
-                                               requested_group=
-                                               requested_group)
-                    if nxt is not None and len(tried) < _max_tries:
-                        dep = nxt
-                        continue
-                    raise UpstreamError(
-                        503, "loop rilevato, catena esaurita",
-                        final=True)
-                # ---- FAKE TOOL-CALL: tool-call reso come testo ----
-                if _fc.enabled and not _text_parsed:
-                    _pat = message_fake_pattern(data, payload, _fc)
-                    if _pat:
-                        metrics.inc("nx_fake_toolcall_total", (cur, "detected"))
-                        _esc = is_escalation_group(
-                            dep.get("group"), router.config.go_suffix,
-                            router.config.fallback_suffix)
-                        if _esc:
-                            # sul bucket di escalation non c'e' dove ruotare:
-                            # si logga e si lascia al sanitizzatore (strip).
-                            log.warning("[fake-tool-call] %s: tool-call reso come "
-                                        "testo (pattern=%s) su bucket di "
-                                        "escalation -> strip", cur, _pat)
-                        else:
-                            log.warning("[fake-tool-call] %s: tool-call reso come "
-                                        "testo (pattern=%s), escalation", cur, _pat)
-                            # ROTAZIONE SENZA PENALITA': nessun _fail_cur
-                            # (il modello ha solo reso la chiamata come testo).
-                            last_broken = (data, dep)
-                            fake_escalations += 1
-                            if fake_escalations <= _fc.max_escalations:
-                                nxt = router.force_escalation(
-                                    dep, need, ctx, tried=tried,
-                                    out_tokens=_outb) \
-                                    if profile else None
-                                if (nxt is None and profile
-                                        and router._is_renewal_bucket(
-                                            str(dep.get("group") or ""))):
-                                    nxt = router._free_last_resort(
-                                        dep, need, ctx, tried, _outb,
-                                        requested_group)
-                                if nxt is not None:
-                                    dep = nxt
-                                    continue
-                            raise UpstreamError(
-                                503, "fake tool-call: catena di escalation "
-                                     "esaurita", final=True)
-                # ---- HOLD (parita' col path streaming): finish_reason=length
-                # con contenuto -> risposta TRONCATA dal modello (non dal cap
-                # del client): si ruota PRE-CONSEGNA su un candidato piu'
-                # capace, mai il moncone. Soft cooldown come nello stream.
-                if hold and not _text_parsed:
-                    _ch0h = (data.get("choices") or [{}])[0] \
-                        if isinstance(data, dict) else {}
-                    _frh = _ch0h.get("finish_reason") \
-                        if isinstance(_ch0h, dict) else None
-                    if _frh == "length":
-                        _req_maxh = (payload.get("max_tokens")
-                                     or payload.get("max_completion_tokens"))
-                        _cth = (data.get("usage") or {}).get(
-                            "completion_tokens") \
-                            if isinstance(data, dict) else None
-                        if _length_truncated_should_fail(
-                                True, len(_answer_text(data)), _req_maxh,
-                                _cth, True):
-                            log.warning("[hold] ns %s: finish_reason=length con "
-                                        "contenuto (answer=%d, req_max=%s, "
-                                        "completion=%s) -> ruoto (capace)",
-                                        cur, len(_answer_text(data)), _req_maxh,
-                                        _cth)
-                            _fail_cur(seconds=_soft_cooldown_sec(router, cur),
-                                      reason="length_truncated")
-                            last_broken = (data, dep)
-                            nxt = _pick(
-                                profile, dep, need, scope, ctx=ctx,
-                                tried=tried, requested_group=requested_group,
-                                prefer_capable=True)
-                            if nxt is not None and len(tried) < _max_tries:
-                                dep = nxt
-                                continue
-                            raise UpstreamError(
-                                503, "catena esaurita, risposta troncata",
-                                final=True)
-                # successo pulito: se siamo atterrati su un gruppo piu' alto
-                # rispetto a quello richiesto, ricorda il winner (scorciatoia
-                # per le prossime richieste su QUEL bucket richiesto).
-                # STRIP dei marker di template (Nemotron/Ling): non devono mai
-                # comparire nel content consegnato (nemmeno su -go/-fallback).
-                try:
-                    _msg = ((data or {}).get("choices") or [{}])[0].get(
-                        "message") if isinstance(data, dict) else None
-                    if isinstance(_msg, dict) and sanitize_message(_msg):
-                        metrics.inc("nx_template_tokens_stripped_total", (cur,))
-                except Exception:
-                    report_suppressed("forwarder.call_with_fallback@4736")
-                log.info("[chain] %s successo dopo %d tentativi (durata=%.1fs)", cur, len(tried), time.monotonic() - _t0)
-                _q = 0.6 if _text_parsed else (
-                    0.7 if tr_result.get("repaired") else 1.0)
-                if collect_qc_failures and qc_failed:
-                    _q = min(_q, 0.5)
-                router.note_result(cur, (time.monotonic() - t0) * 1000,
-                                   quality=_q, ctx_est=ctx)
-                # Bilanciamento -go: consumo di OUTPUT del deployment (non-stream).
-                if isinstance(data, dict):
-                    try:
-                        router.note_output_tokens(
-                            cur, (data.get("usage") or {}).get(
-                                "completion_tokens"))
-                    except Exception:
-                        report_suppressed("forwarder.call_with_fallback@4751")
-                router.record_escalation_win(requested_group, dep)
-                router.note_session_success(ses, dep["unique"],
-                                            (time.monotonic() - t0) * 1000,
-                                            ctx_est=ctx)
-                return (data, dep, qc_failed) if collect_qc_failures \
-                    else (data, dep)
-            except UpstreamError as err:
-                if getattr(err, "final", False):
-                    raise                    # decisione definitiva: non ruotare
-                detail = err.detail or ""
-                # QUOTA DI ACCOUNT: la quota e' dell'account (non della
-                # chiave) -> pausa fino al reset TUTTE le chiavi sorelle.
-                with contextlib.suppress(Exception):
-                    maybe_account_quota_cooldown(router, dep, err.status,
-                                                 detail)
-                # ATTEMPT TRAIL (P0): un record per hop fallito, con la classe
-                # d'errore onesta (finisce nel body del 503 finale).
-                try:
-                    trail.append({
-                        "ord": len(trail) + 1, "dep": cur,
-                        "group": dep.get("group"), "model": dep.get("model"),
-                        "cls": classify_error_class(err.status, detail),
-                        "status": abs(int(err.status)) if err.status else None,
-                        "ms": int((time.monotonic() - t0) * 1000)})
-                except Exception:            # noqa: BLE001
-                    report_suppressed("forwarder.call_with_fallback@4777")
-                # P1-5 skipPlatforms: errore PROVIDER-level (5xx/timeout/
-                # transport) -> salta TUTTO l'host per questa richiesta invece
-                # di bruciare un hop per ogni chiave che ci vive sopra.
-                try:
-                    if is_provider_level(classify_error_class(err.status, detail)):
-                        _h = dep_host(dep)
-                        if _h and _h not in skip_hosts:
-                            skip_hosts.add(_h)
-                            log.info("[skip-host] %s: errore provider-level "
-                                     "-> host %s saltato per questa richiesta",
-                                     cur, _h)
-                except Exception:            # noqa: BLE001
-                    report_suppressed("forwarder.call_with_fallback@4790")
-                # BAN/ToS dell'endpoint? quarantena l'host 24h PRIMA di
-                # ruotare (altrimenti bruciamo una chiave dietro l'altra).
-                maybe_quarantine_ban(router, dep, err.status, detail)
-                maybe_host_transient_cooldown(router, dep, err.status, detail)
-                # 413/400 context-length: ridimensiona al vero max_input
-                note_context_limit(router, dep, err.status, detail, ctx)
-                # FAMIGLIA REASONING (needs/rejects/history): un rimedio per
-                # dep, poi si ritenta LO STESSO deployment. Vale anche per il
-                # falso "does not support vision input" (llm7/Cloudflare) su
-                # richieste SENZA media: il proxy maschera lo stesso problema
-                # del reasoning mancante -> si forza il rimedio "needs".
-                _media_raw = bool(media_reject_signature(detail))
-                _rsn_media = media_modality_signature(detail) \
-                    and not media_input_needed(need) \
-                    and reasoning_err_kind(detail) is None
-                _steps = _rsn_steps.setdefault(cur, set())
-                _replim = int(getattr(router.policy,
-                                      "repair_exempt_streak_limit", 3) or 0)
-                _rexb = router.repair_exempt_blocked(cur, _replim)
-                _rr = None if _rexb else repair_reasoning_error(
-                    payload, detail, dep, _steps, orig_messages,
-                    force_kind=("needs" if _rsn_media else None))
-                if _rexb:
-                    log.warning("[reasoning-exempt] %s: budget esenzione "
-                                "esaurito (%d) -> KO normale", cur, _replim)
-                    # Booking NORMALE: cooldown esplicito (le classi payload/
-                    # schema da sole non lo prevedono) per non ritentare il
-                    # dep all'infinito su ogni richiesta.
-                    _fail_cur(seconds=None,
-                              reason="repair_exempt_exhausted",
-                              status=abs(int(err.status)) if err.status else None)
-                if _rr == "downgraded":
-                    dep = dict(dep)
-                    dep["_no_thinking"] = True      # copia locale, non il CSV
-                if _rr:
-                    with contextlib.suppress(Exception):
-                        router.note_repair_exempt(cur)
-                    metrics.inc("nx_reasoning_replay_total", (_rr,))
-                    log.warning("[reasoning-%s] %s: rimedio applicato -> "
-                                "ritento lo stesso deployment", _rr, cur)
-                    # IMPARA il flag corrispondente: d'ora in poi il CSV lo
-                    # porta per questo modello (tutti i gemelli) e la richiesta
-                    # parte corretta senza errori continui.
-                    with contextlib.suppress(Exception):
-                        if _rr == "repaired":
-                            learn_thinking_replay(router, dep.get("model"))
-                        elif _rr == "stripped":
-                            learn_strip_reasoning(router, dep.get("model"))
-                        elif _rr == "downgraded":
-                            learn_no_thinking(router, dep.get("model"))
-                    continue
-                # CONTENT ARRAY -> STRING (provider schema stretto, es.
-                # Cloudflare Workers AI): 400 "'array' not in 'string'" /
-                # "required properties ... 'role,content'". Il payload e'
-                # RIPARABILE: impariamo `content_string` (gemelli del modello)
-                # e ritentiamo LO STESSO deployment col payload appiattito
-                # (media-safe). Se la bonifica non basta (array con media) o il
-                # flag c'e' gia', si ricade sulla rotazione di _PAYLOAD_SCHEMA_RE.
-                if _CONTENT_ARRAY_RE.search(detail):
-                    _csteps = _cstr_steps.setdefault(cur, set())
-                    # Solo se c'e' DAVVERO qualcosa da appiattire: se il
-                    # payload e' gia' di sole stringhe (o di soli media) il
-                    # retry non aiuterebbe -> si ricade sulla rotazione.
-                    _flat, _fn = flatten_text_content(
-                        (payload or {}).get("messages"))
-                    if (_fn and "flatten" not in _csteps
-                            and not dep.get("content_string")):
-                        _csteps.add("flatten")
-                        metrics.inc("nx_content_string_total", ("learned",))
-                        log.warning("[content-string] %s: 400 schema "
-                                    "content-array -> imparo content_string e "
-                                    "ritento lo stesso deployment (%d messaggi)",
-                                    cur, _fn)
-                        with contextlib.suppress(Exception):
-                            learn_content_string(router, dep.get("model"))
-                        dep = dict(dep)
-                        dep["content_string"] = True     # copia locale (retry)
-                        continue
-                # ERRORE "OSCURO" su richiesta reasoning: il taglio del
-                # reasoning (histnorm) e' un'ottimizzazione di token; senza una
-                # firma chiara si ritenta UNA volta lo STESSO deployment con la
-                # history ORIGINALE (reasoning intatto).
-                if (orig_messages is not None and not _rsn_restored
-                        and is_unclear_error(err.status, detail)):
-                    _nres = restore_reasoning(payload, orig_messages)
-                    if _nres:
-                        _rsn_restored = True
-                        metrics.inc("nx_reasoning_replay_total", ("restored",))
-                        log.warning("[reasoning-restore] %s: errore non chiaro "
-                                    "(%s) -> reasoning ripristinato (%d campi), "
-                                    "ritento lo stesso deployment", cur,
-                                    (detail or "")[:90], _nres)
-                        continue
-                _kind_default = classify_error(err.status, None, detail)
-                # QUOTA ESAURITA (abbonamento flat: "GoUsageLimitError" /
-                # "usage limit reached" / "Resets in N days"), a prescindere
-                # dallo status HTTP (429 o 4xx provider-side): la key NON torna
-                # prima del reset. Cooldown = tempo al reset (non escalation) +
-                # rilascio dep-sticky, così la sessione riparte su un'altra
-                # chiave e la catena non spreca tentativi su altre key soggette
-                # allo stesso limite. Parità col percorso streaming
-                # (main._stream_with_fallback).
-                if is_insufficient_balance(detail):
-                    # BILANCIO ESAURITO ("insufficient balance"): condizione
-                    # dell'account -> ritira il DEPLOYMENT (sblocco manuale),
-                    # NON cooldown. Priorita' sulla quota: i body la
-                    # accompagnano con "type":"insufficient_quota".
-                    metrics.inc("nx_upstream_calls_total",
-                                (cur, "insufficient_balance"))
-                    last_err = err
-                    if ses:
-                        _st = router.dep_sticky_get(ses)
-                        if _st and _st == cur:
-                            router.dep_sticky_release(ses)
-                    router.mark_failed(cur, reason="insufficient_balance",
-                                       status=402,
-                                       kind=ErrorKind.PERMANENT_DEAD)
-                    log.warning("[fallback] %s 402 'insufficient balance': "
-                                "DEPLOYMENT RITIRATO (sblocco manuale)", cur)
-                    dep = _pick(profile, dep, need, scope, ctx=ctx,
-                                tried=tried,
-                                requested_group=requested_group)
-                    continue
-                if _QUOTA_EXHAUSTED_RE.search(detail):
-                    _qcd = (parse_quota_reset_seconds(detail)
-                            or QUOTA_MIN_COOLDOWN_S)
-                    metrics.inc("nx_upstream_calls_total",
-                                (cur, "quota_exhausted"))
-                    last_err = err
-                    if ses:
-                        _st = router.dep_sticky_get(ses)
-                        if _st and _st == cur:
-                            router.dep_sticky_release(ses)
-                    log.warning("[fallback] %s quota esaurita (%.90s): "
-                                "cooldown %.0fs al reset, ruoto",
-                                cur, detail, _qcd)
-                    _fail_cur(seconds=_qcd, reason="quota_exhausted",
-                              status=abs(err.status) if err.status else None,
-                              provenance=("authoritative"
-                                          if _QUOTA_RESET_RE.search(detail or "")
-                                          else "heuristic"))
-                    dep = _pick(profile, dep, need, scope,
-                                               ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                    continue
-                # QUALSIASI non-200 ruota (regola utente): mai pass-through al
-                # client. I rami sotto sono solo classi di cooldown/ragione
-                # diverse; se nessuno matcha, si ruota comunque (last_err) e
-                # l'ultimo errore viene consegnato solo a catena esaurita.
-                if err.status is not None and err.status < 0:
-                    # errore TRANSITORIO del provider/router a monte (upstream
-                    # giu', nessun endpoint valido ora, 5xx del provider): NON
-                    # e' un problema della richiesta -> ruota con cooldown
-                    # CORTO (e' transitorio, non bruciare la chiave per ore).
-                    if _PROVIDER_TRANSIENT_RE.search(detail):
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "provider_transient"))
-                        last_err = err
-                        log.warning("[fallback] %s errore transitorio provider "
-                                    "(%.80s): ritento sul successivo (cd corto)",
-                                    cur, detail)
-                        _fail_cur(
-                                            seconds=router.escalate_cooldown(
-                                                PROVIDER_TRANSIENT_COOLDOWN_S,
-                                                router.stats_for(cur).fail_count_24h),
-                                            reason="provider_transient",
-                                            status=abs(err.status) if err.status else None)
-                        dep = _pick(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    if -err.status == 404:
-                        metrics.inc("nx_upstream_calls_total", (cur, "not_found"))
-                        log.warning("[fallback] %s 404 upstream (modello "
-                                    "inesistente su questo provider): "
-                                    "ritento sul successivo", cur)
-                        _fail_cur(reason="not_found",
-                                  status=-err.status if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    # alcuni provider (es. cloudflare) rispondono 400 con
-                    # "No such model"/code propri invece di 404 e senza firme
-                    # litellm ("openai_error"): un deployment col modello
-                    # sbagliato non deve MAI passare l'errore al client — è un
-                    # problema del deployment, ruotiamo.
-                    if _MODEL_MISSING_RE.search(detail):
-                        metrics.inc("nx_upstream_calls_total", (cur, "not_found"))
-                        log.warning("[fallback] %s modello inesistente/giu' sul "
-                                    "provider (%.80s): fermo 24h, ritento sul "
-                                    "successivo", cur, detail)
-                        _fail_cur( seconds=MODEL_MISSING_COOLDOWN_S,
-                                           reason="not_found",
-                                           status=-err.status if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    if _THOUGHT_SIG_RE.search(detail):
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "provider_4xx"))
-                        last_err = err        # per la consegna a catena esaurita
-                        nxt = _pick(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        if nxt is not None and nxt["unique"] in tried:
-                            nxt = None        # gruppo/catena tutto Gemini 3
-                        if nxt is None:
-                            log.warning("[fallback] %s 400 thought_signature: "
-                                        "nessun deployment alternativo, "
-                                        "consegno il 400 al client", cur)
-                            raise
-                        log.warning("[fallback] %s 400 thought_signature "
-                                    "(Gemini 3 tool replay): ritento su %s "
-                                    "senza cooldown", cur, nxt["unique"])
-                        dep = nxt
-                        continue
-                    if _PAYLOAD_SCHEMA_RE.search(detail) or \
-                            tool_combo_signature(detail) or \
-                            _UNKNOWN_FIELD_RE.search(detail):
-                        # CF Workers AI & co.: rifiuto di SCHEMA della richiesta
-                        # (content array vs string, messaggio senza content).
-                        # Google/Gemini 3 (anche via proxy): rifiuto della
-                        # COMBINAZIONE built-in tools + function calling
-                        # (tool_config flag non passabile via OpenAI-compat).
-                        # Non e' il modello rotto: ruota SENZA cooldown, un
-                        # provider OpenAI-compatibile accetta lo stesso payload.
-                        _tc = tool_combo_signature(detail)
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "tool_combo" if _tc else "provider_4xx"))
-                        last_err = err        # consegna il 400 se catena esaurita
-                        nxt = _pick(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        if nxt is not None and nxt["unique"] in tried:
-                            nxt = None
-                        if nxt is None:
-                            log.warning("[fallback] %s 400 %s: nessuna "
-                                        "alternativa, consegno l'errore", cur,
-                                        "tool mix built-in+function"
-                                        if _tc else "schema payload")
-                            raise
-                        log.warning("[fallback] %s 400 %s incompatibile col "
-                                    "provider: ritento su %s senza cooldown",
-                                    cur,
-                                    "tool mix built-in+function" if _tc
-                                    else "schema payload", nxt["unique"])
-                        dep = nxt
-                        continue
-                    if (qc.retry_provider_4xx and (
-                            "bad_response_status_code" in detail
-                            or "openai_error" in detail)) \
-                            or -err.status == 402:
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "provider_4xx"))
-                        if media_strike_hook and media_reject_signature(detail) \
-                                and media_input_needed(need):
-                            try:
-                                media_strike_hook(dep["model"], detail)
-                            except Exception as exc:   # mai bloccare il fallback
-                                    log.warning("[strike] hook error: %s", exc,
-                                                exc_info=True)
-                        log.warning("[fallback] %s 400 provider-side "
-                                    "(firma openai_error): ritento sul "
-                                    "successivo", cur)
-                        router.mark_failed(
-                            cur,
-                            reason="no_credits" if -err.status == 402
-                            else "provider_400",
-                            status=abs(err.status) if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    # ENVELOPE D'ERRORE PROVIDER: qualsiasi body {"type":"error",
-                    # "error":{"type":"XxxError","message":...}} (AuthError
-                    # "Invalid API key", ModelError, CreditsError, RegionError,
-                    # ...). Non e' MAI contenuto reale del modello -> e' un
-                    # problema del DEPLOYMENT: ruota SEMPRE, mai al client.
-                    # (Se un giorno un modello restituisse davvero quella forma
-                    # come contenuto, la rotazione fa rispondere un altro
-                    # modello in modo diverso: nessun danno.)
-                    if is_provider_error_body(detail):
-                        metrics.inc("nx_upstream_calls_total", (cur, "provider_error"))
-                        last_err = err     # consegna l'errore vero se la catena si esaurisce
-                        log.warning("[fallback] %s %s body errore provider "
-                                    "(%.100s): ritento sul successivo",
-                                    cur, -err.status, detail)
-                        _fail_cur(reason="provider_error",
-                                  status=-err.status if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    # 4xx con body ASSENTE/illeggibile: nessun messaggio
-                    # azionabile per il client -> infrastruttura, non colpa
-                    # della richiesta. Ruota (cooldown corto); se la catena si
-                    # esaurisce -> 503 retryable, mai un 4xx nudo senza spiega.
-                    if (not detail.strip()
-                            or "body non leggibile" in detail.lower()
-                            or len(detail.strip()) < 12):
-                        metrics.inc("nx_upstream_calls_total", (cur, "empty_4xx"))
-                        last_err = err
-                        log.warning("[fallback] %s %s body d'errore vuoto: "
-                                    "ritento sul successivo (cd corto)",
-                                    cur, -err.status)
-                        _fail_cur(
-                                            seconds=router.escalate_cooldown(
-                                                PROVIDER_TRANSIENT_COOLDOWN_S,
-                                                router.stats_for(cur).fail_count_24h),
-                                            reason="empty_error_body",
-                                            status=-err.status if err.status else None)
-                        dep = _pick(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    # 403 di qualsiasi tipo (permission denied, project banned,
-                    # access denied, key disabled...): e' SEMPRE un errore di
-                    # deployment/chiave, NON della richiesta -> ruota con
-                    # cooldown lungo (la key non torna presto), mai al client
-                    # (a catena esaurita -> 503 retryable).
-                    if -err.status == 403:
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "upstream_403"))
-                        last_err = err
-                        log.warning("[fallback] %s 403 upstream: "
-                                    "key/progetto rifiutato, cd %.0fs: "
-                                    "ritento sul successivo",
-                                    cur, PERMISSION_DENIED_COOLDOWN_S)
-                        _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
-                                   reason="upstream_403",
-                                   status=abs(err.status) if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    # 401 upstream: la NOSTRA chiave e' rifiutata dal provider
-                    # (assente/invalidata/revocata). SEMPRE deployment-side (il
-                    # client si e' gia' autenticato da noi) -> ruota come il
-                    # 403, mai pass-through.
-                    if -err.status == 401:
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "upstream_401"))
-                        last_err = err
-                        log.warning("[fallback] %s 401 upstream: "
-                                    "chiave rifiutata/assente, cd %.0fs: "
-                                    "ritento sul successivo",
-                                    cur, PERMISSION_DENIED_COOLDOWN_S)
-                        _fail_cur(seconds=PERMISSION_DENIED_COOLDOWN_S,
-                                   reason="upstream_401",
-                                   status=abs(err.status) if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-                        continue
-                    if is_provider_fault_body(detail):
-                        # Il provider non e' riuscito a leggere/parsare la
-                        # richiesta (envelope OpenAI {"error":{...}}): non e'
-                        # un rifiuto del contenuto -> un altro deployment
-                        # accetta lo stesso payload. Ruota (cd corto), mai
-                        # pass-through del 400 al client.
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "provider_fault"))
-                        last_err = err
-                        log.warning("[fallback] %s %s body d'errore provider "
-                                    "(lettura richiesta): ritento sul "
-                                    "successivo", cur, -err.status)
-                        _fail_cur(
-                            seconds=router.escalate_cooldown(
-                                PROVIDER_TRANSIENT_COOLDOWN_S,
-                                router.stats_for(cur).fail_count_24h),
-                            reason="provider_fault",
-                            status=-err.status if err.status else None)
-                        dep = _pick(profile, dep, need, scope,
-                                                   ctx=ctx, tried=tried,
-                                                   requested_group=requested_group)
-                        continue
-                    # Rifiuto di MODALITA' (vision/image/audio/…): il modello
-                    # non e' rotto, un altro deployment multimodale accetta lo
-                    # stesso payload -> ruota (strike per l'auto-learn), mai
-                    # pass-through del 400 al client.
-                    if media_reject_signature(detail):
-                        last_err = err
-                        if media_input_needed(need):
-                            metrics.inc("nx_upstream_calls_total",
-                                        (cur, "media_reject"))
-                            if media_strike_hook:
-                                try:
-                                    media_strike_hook(dep["model"], detail)
-                                except Exception as exc:
-                                    log.warning("[strike] hook error: %s", exc,
-                                                exc_info=True)
-                            nxt = _pick(profile, dep, need, scope,
-                                                       ctx=ctx, tried=tried,
-                                                       requested_group=requested_group)
-                            if nxt is None:
-                                log.warning("[fallback] %s %s rifiuto modalita': "
-                                            "nessuna alternativa -> 503",
-                                            cur, -err.status)
-                                raise
-                            log.warning("[fallback] %s %s rifiuto modalita' -> %s",
-                                        cur, -err.status, nxt["unique"])
-                            dep = nxt
-                            continue
-                        # FALSO rifiuto di modalita': la richiesta NON ha media
-                        # (caso llm7/Cloudflare che risponde "does not support
-                        # vision input" a puro testo). Il modello e' rotto per
-                        # QUESTA richiesta -> cooldown normale + rotazione, cosi'
-                        # non viene ritentato a ogni richiesta.
-                        metrics.inc("nx_upstream_calls_total",
-                                    (cur, "model_feature"))
-                        log.warning("[fallback] %s %s 'vision' ma la richiesta "
-                                    "non ha media -> cooldown normale",
-                                    cur, -err.status)
-                        _fail_cur(seconds=err.retry_after,
-                                  reason="model_feature",
-                                  status=abs(err.status) if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx,
-                                    tried=tried,
-                                    requested_group=requested_group)
-                        continue
-                    # CONTEXT LENGTH (400/413): il payload non entra nel modello.
-                    # NON e' un errore del deployment: ruota su un dep con
-                    # max_input maggiore (la ladder sale di dim) e alza la
-                    # soglia di sessione. Mai pass-through.
-                    if _looks_context_limit(-err.status, detail):
-                        metrics.inc("nx_upstream_calls_total", (cur, "ctx_limit"))
-                        _actual = extract_requested_tokens(detail)
-                        if _actual:
-                            try:
-                                router.note_session_overflow(
-                                    current_session(), _actual)
-                            except Exception:           # noqa: BLE001
-                                report_suppressed("forwarder.call_with_fallback@5219")
-                        last_err = err
-                        log.warning("[fallback] %s context_length_exceeded "
-                                    "(%.90s): alzo la soglia sessione (%s) e "
-                                    "ruoto sul successivo", cur, detail,
-                                    (">=%d tok" % _actual) if _actual
-                                    else "ctx-sconosciuto")
-                        _fail_cur(reason="ctx_limit",
-                                  status=abs(err.status) if err.status else None)
-                        dep = _pick(profile, dep, need, scope, ctx=ctx,
-                                    tried=tried,
-                                    requested_group=requested_group)
-                        continue
-                    # QUALSIASI altro non-200 (4xx/5xx non riconosciuto): ruota
-                    # comunque, mai pass-through. L'ultimo errore viene
-                    # consegnato al client solo a catena esaurita (raise
-                    # last_err in fondo al loop).
-                    last_err = err
-                metrics.inc("nx_upstream_calls_total", (cur, "error"))
-                last_err = err
-                log.warning("[fallback] %s fallito (status=%s): provo il successivo",
-                            cur, err.status or "connessione")
-                if err.status is None and "upstream timeout" in detail.lower():
-                    # TIMEOUT (upstream che appende): danno reale -> cooldown
-                    # lungo (timeout_cooldown_mult x classico).
-                    _reason = "timeout"
-                elif err.status and err.status > 0:
-                    _reason = "http_%s" % err.status
-                else:
-                    _reason = "network"
-                _fail_cur( seconds=err.retry_after,
-                                    reason=_reason,
-                                    status=abs(err.status) if err.status else None)
-                dep = _pick(profile, dep, need, scope, ctx=ctx, tried=tried,
-                                                          requested_group=requested_group)
-            finally:
-                router.key_lease_release(_lease)   # P2-8
-                router.note_end(cur, ctx)   # SEMPRE il tentativo corrente
-        # catena finita dopo fallimenti QC: consegna l'ultimo broken (D3) SE ha
-        # contenuto; se e' vuoto -> errore RETRYABLE (mai un turno vuoto/finto).
-        if collect_qc_failures and qc_failed and last_broken is not None:
-            data0 = last_broken[0]
-            if not _looks_empty(data0):
-                return data0, last_broken[1], qc_failed
-        if last_err is not None and trail:
-            with contextlib.suppress(Exception):
-                last_err.trail = trail
-        raise last_err or UpstreamError(503, "nessun deployment disponibile",
-                                        final=True)
+        return await _NonStreamFallback(self, router=router, profile=profile, first_dep=first_dep, payload=payload, collect_qc_failures=collect_qc_failures, media_strike_hook=media_strike_hook, need=need, scope=scope, ctx=ctx, attempts_box=attempts_box, session=session, ses=ses, client_ip=client_ip, attribution=attribution, requested_group=requested_group, orig_messages=orig_messages).run()

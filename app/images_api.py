@@ -316,7 +316,7 @@ async def images_generations(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    report_suppressed("images_api.images_generations@312")
+                    report_suppressed("images_api.images_generations")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None

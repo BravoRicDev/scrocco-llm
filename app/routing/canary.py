@@ -82,7 +82,7 @@ class CanaryMixin:
             try:
                 ex |= set(self._sess_deps().get(current_session(), ()))
             except Exception:                  # noqa: BLE001
-                report_suppressed("canary.hedge_canaries@83")
+                report_suppressed("canary.CanaryMixin.hedge_canaries")
         floor = 0
         if requested_group:
             try:

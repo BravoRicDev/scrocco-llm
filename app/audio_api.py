@@ -200,7 +200,7 @@ async def audio_speech(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    report_suppressed("audio_api.audio_speech@197")
+                    report_suppressed("audio_api.audio_speech")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
@@ -409,7 +409,7 @@ async def systemone(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    report_suppressed("audio_api.systemone@407")
+                    report_suppressed("audio_api.systemone")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
@@ -579,7 +579,7 @@ async def _audio_transcribe(request: Request, path: str):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    report_suppressed("audio_api._audio_transcribe@578")
+                    report_suppressed("audio_api._audio_transcribe")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None

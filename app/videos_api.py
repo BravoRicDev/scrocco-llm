@@ -243,7 +243,7 @@ async def videos_generations(request: Request):
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    report_suppressed("videos_api.videos_generations@239")
+                    report_suppressed("videos_api.videos_generations")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None

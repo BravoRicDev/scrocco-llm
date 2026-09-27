@@ -744,7 +744,7 @@ async def _images_chat_loop(
                 try:
                     _strike_hook(False, need)(dep["model"], detail)
                 except Exception:
-                    report_suppressed("image_helpers._images_chat_loop@751")
+                    report_suppressed("image_helpers._images_chat_loop")
             if _was_dormant:
                 gw_state.router.mark_failed_double_residual(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
