@@ -220,7 +220,7 @@ _RECOVERABLE_WARNING = [
     ("forwarder.py", "[max-input] note_discovered fallito per %s"),
     ("forwarder.py", "[strike] hook error: %s"),
     ("router.py", "[lifecycle] retire %s fallito"),
-    ("router.py", "[probe] auto-retirement di %s fallito"),
+    ("routing/cooldown.py", "[probe] auto-retirement di %s fallito"),
     ("routing/warm.py", "[warm] note_warm_owner %s fallito"),
     ("autoprobe.py", "[autoprobe] giro ritirati terminato con errore"),
     ("autoprobe.py", "[autoprobe] pass terminato con errore"),
