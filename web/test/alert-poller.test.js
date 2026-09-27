@@ -83,6 +83,18 @@ test("checkAndNotify: cooldown non scaduto -> non notifica", async () => {
   assert.equal(calls.length, 0, "fetch chiamato durante cooldown");
 });
 
+test("checkAndNotify: la stessa regola (tick successivi del poller) rispetta il cooldown", async () => {
+  calls.length = 0;
+  const rule = makeRule();                  // stesso oggetto riusato dal timer
+  const first = await poller.checkAndNotify(rule);
+  assert.equal(first.triggered, true, JSON.stringify(first));
+  calls.length = 0;
+  const second = await poller.checkAndNotify(rule);
+  assert.equal(second.triggered, false);
+  assert.equal(second.reason, "cooldown");
+  assert.equal(calls.length, 0, "notifica ripetuta entro notify_min_interval_sec");
+});
+
 test("status: expose started, activeRules, lastRunAt", () => {
   const st = poller.status();
   assert.equal(typeof st.started, "boolean");

@@ -53,6 +53,48 @@ jobs:
           name: coverage-xml
           path: coverage.xml
 
+  web-tests:
+    # Pannello web (Node + Postgres): i test girano contro il gateway MOCK.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: scrocco_web_test
+        ports:
+          - 15999:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:testpass@localhost:15999/scrocco_web_test
+      GATEWAY_MOCK: "1"
+      JWT_SECRET: test-secret-ci-only
+      NODE_ENV: test
+      ALERT_POLLER_DISABLED: "1"
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run test suite
+        run: npm test
+
   build-and-test:
     runs-on: ubuntu-latest
     permissions:

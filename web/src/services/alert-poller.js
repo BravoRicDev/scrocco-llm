@@ -112,6 +112,10 @@ async function checkAndNotify(rule) {
     await notify(rule, healthPct, matched);
 
     await query("UPDATE alert_rules SET last_notified_at = NOW() WHERE id = $1", [rule.id]);
+    // Il poller riusa lo STESSO oggetto regola a ogni tick: senza aggiornarlo
+    // qui, cooldownPassed() vedrebbe per sempre il valore letto all'avvio e
+    // notificherebbe a ogni controllo ignorando notify_min_interval_sec.
+    rule.last_notified_at = new Date().toISOString();
 
     return { triggered: true, health_pct: healthPct, rows: matched.length };
   } catch (err) {

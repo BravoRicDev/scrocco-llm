@@ -60,17 +60,19 @@ const circuitBreaker = {
 
 // Constants imported from limits.js
 
+// Errori di CONNETTIVITA' (rete o server Postgres non disponibile): sono gli
+// unici che meritano retry e che contano per il circuit breaker.
+const RETRYABLE_CODES = new Set([
+  "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "ENETUNREACH",
+  "EHOSTUNREACH", "ECONNRESET",
+  "57P01", "57P02", "57P03", "08006", "08001",
+]);
+const RETRYABLE_MESSAGE = /connection.*refused|connection.*reset|timeout|ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i;
+
 function isRetryableError(err) {
   if (!err) return false;
-  const retryableCodes = [
-    "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "ENETUNREACH",
-    "EHOSTUNREACH", "ECONNRESET",
-    "57P01", "57P02", "57P03", "08006", "08001",
-  ];
-  if (err.code && retryableCodes.includes(err.code)) return true;
-  return /connection.*refused|connection.*reset|timeout|ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(
-    err.message || ""
-  );
+  if (err.code && RETRYABLE_CODES.has(err.code)) return true;
+  return RETRYABLE_MESSAGE.test(err.message || "");
 }
 
 async function withRetry(fn, context = "") {
@@ -136,7 +138,10 @@ export async function query(text, params, context = "") {
     circuitBreaker.recordSuccess();
     return result;
   } catch (err) {
-    circuitBreaker.recordFailure();
+    // Un errore SQL (vincolo violato, sintassi...) prova che il DB risponde:
+    // non deve aprire il breaker, altrimenti 5 input non validi di fila
+    // bloccherebbero l'intero pannello per resetTimeoutMs.
+    if (isRetryableError(err)) circuitBreaker.recordFailure();
     throw err;
   }
 }
