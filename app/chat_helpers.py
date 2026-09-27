@@ -47,7 +47,6 @@ _ANON_FP_MIN_CHARS = 24
 
 
 def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
-    import app.main as M
     """Id di sessione deterministico per client ANONIMI.
 
     Base = primo messaggio `system` + primo messaggio `user` + `user-agent`.
@@ -55,6 +54,8 @@ def _anon_session_fingerprint(request: Request, payload: dict) -> str | None:
     diverse; del contenuto viene salvato solo l'hash (nessun testo in chiaro).
     Gated da `policy.anon_session_fingerprint`.
     """
+
+    import app.main as M
     if not getattr(M.policy, "anon_session_fingerprint", True):
         return None
     if not isinstance(payload, dict):
@@ -207,7 +208,6 @@ def _sniff_headers(request: Request, *, logger, body_size: int = 0, session_id: 
 
 
 def _emit_summary(**f) -> None:
-    import app.main as M
     """Riga [summary] JSON a fine richiesta (osservabilità per-request).
 
     Campi tipici: ses, req, grp, dep, tries, fb, dur_ms, stream, qc, wd,
@@ -218,6 +218,8 @@ def _emit_summary(**f) -> None:
     Il profilo e' deducibile dal gruppo (<prefix><profilo>-...); se manca
     (gruppi cap senza dims) si prova il campo esplicito "profile".
     """
+
+    import app.main as M
     try:
         if "via" not in f and f.get("dep"):
             d = M.router.config.deployment_by_unique(f["dep"])
@@ -314,9 +316,10 @@ def _usage_of(data) -> dict | None:
 
 # --------------------------------------------------- auto-learn capacità
 def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
-    import app.main as M
     """Registra il SUGGERIMENTO (mode=suggest, default) o applica la rimozione
     della membership (mode=auto) per il (modello, capà) colpito."""
+
+    import app.main as M
     mode = M.router.policy.cap_auto_learn
     if mode == "off":
         return
@@ -361,10 +364,11 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
 
 
 def _strike_hook(explicit: bool, need=frozenset()):
-    import app.main as M
     """Hook per il forwarder/loop endpoint: attribuisce i rifiuti modalità al
     modello upstream. MAI su richieste esplicite (il client le ha volute), mai
     con routing disattivato; conta solo cap dichiarate dal modello colpito."""
+
+    import app.main as M
 
     def hook(model: str, detail: str) -> None:
         pol = M.router.policy
