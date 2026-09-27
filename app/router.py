@@ -64,6 +64,7 @@ from .routing.cooldown import CooldownMixin
 from .routing.failure import FailureMixin
 from .routing.usage import UsageMixin
 from .routing.lazy import lazy_dict
+from .routing.rolling import RollingWindow
 from .routing.evict import drop_expired, entry_ts, evict_oldest
 from . import metrics
 
@@ -227,12 +228,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         # Serve a NASCONDERE dai candidati il 20% (configurabile) piu' usato
         # quando si pesca a freddo, distribuendo il carico a prescindere
         # dall'`order`. In-memory; ricostruita dai log all'avvio.
-        self._usage_times: dict[str, "deque[tuple[float, float]]"] = {}
+        self._usage_times: dict[str, RollingWindow] = {}  # (ts, unita' di peso)
         # BILANCIAMENTO -go: finestra rolling (default 5h) dei TOKEN DI OUTPUT
         # realmente consumati per-deployment (solo risposte consegnate). E' la
         # metrica del pick a freddo sui bucket rinnovo: la risorsa scarsa di un
         # abbonamento e' l'output, non il prefill. In-memory.
-        self._out_tokens: dict[str, "deque[tuple[float, int]]"] = {}
+        self._out_tokens: dict[str, RollingWindow] = {}
         # Budget A FINESTRA dei cooldown-wakeup della scala (solo dim nati da
         # 429/quota): evita di riesumare sempre gli stessi deployment.
         self._wake_times: dict[str, "deque[float]"] = {}

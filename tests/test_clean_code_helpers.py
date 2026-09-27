@@ -147,3 +147,49 @@ def test_spawn_keeps_reference_until_done():
         assert t not in reg
 
     asyncio.run(main())
+
+
+# ------------------------------------------------ rolling usage windows
+def test_rolling_usage_matches_full_resum():
+    """Somma incrementale == somma completa della vecchia implementazione
+    (conteggi e token esatti, pesi a meno dell'arrotondamento float)."""
+    from collections import deque
+
+    import pytest
+
+    from app.routing.usage import UsageMixin
+
+    class _Pol:
+        go_balance_window_sec = 300
+
+    class _R(UsageMixin):
+        policy = _Pol()
+
+    rng = random.Random(11)
+    r = _R()
+    ref_w: deque = deque()
+    ref_o: deque = deque()
+    now = 1_000_000.0
+    for _ in range(5000):
+        now += rng.uniform(0, 60)
+        ctx = rng.choice([None, 0, -5, 100, 7999, 8000, 8001, 80000, 123456.7, "x"])
+        r.note_usage("u", ts=now, ctx_est=ctx)
+        try:
+            w = max(1.0, float(int(ctx)) / 8000.0) if ctx else 1.0
+        except (TypeError, ValueError):
+            w = 1.0
+        ref_w.append((now, w))
+        tok = rng.choice([0, 1, 50, 4096])
+        r.note_output_tokens("u", tok, ts=now)
+        if tok > 0:
+            ref_o.append((now, tok))
+        probe = now + rng.uniform(0, 90000)
+        while ref_w and ref_w[0][0] < probe - 86400.0:
+            ref_w.popleft()
+        assert r.usage_weight_24h("u", now=probe) == pytest.approx(sum(x for _t, x in ref_w), rel=1e-12)
+        assert r.usage_count_24h("u", now=probe) == len(ref_w)
+        while ref_o and ref_o[0][0] < probe - 300:
+            ref_o.popleft()
+        assert r.output_tokens_window("u", now=probe) == sum(n for _t, n in ref_o)
+        if rng.random() < 0.01:          # finestra svuotata: si riparte
+            now = probe

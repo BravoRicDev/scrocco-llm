@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import deque
 
 from ..session_ctx import current_session
 from .lazy import lazy_dict
+from .rolling import RollingWindow
 
 log = logging.getLogger("nx.router")
 
@@ -35,6 +35,9 @@ log = logging.getLogger("nx.router")
 class UsageMixin:
     # --------------------------------------------- cold usage spread
     _USAGE_WINDOW = 86400.0
+    # Peso 1.0 = 8000 token di prefill: i pesi si accumulano in UNITA' intere
+    # (somma esatta), la lettura riconverte in peso.
+    _USAGE_UNIT = 8000
 
     def _usage(self) -> dict:
         return lazy_dict(self, "_usage_times")
@@ -50,17 +53,15 @@ class UsageMixin:
         d = self._usage()
         dq = d.get(unique)
         if dq is None:
-            dq = deque()
+            dq = RollingWindow()
             d[unique] = dq
         now = time.time() if ts is None else ts
         try:
-            w = max(1.0, float(int(ctx_est)) / 8000.0) if ctx_est else 1.0
+            units = max(self._USAGE_UNIT, int(ctx_est)) if ctx_est else self._USAGE_UNIT
         except (TypeError, ValueError):
-            w = 1.0
-        dq.append((now, w))
-        cut = now - self._USAGE_WINDOW
-        while dq and dq[0][0] < cut:
-            dq.popleft()
+            units = self._USAGE_UNIT
+        dq.add(now, units)
+        dq.prune(now - self._USAGE_WINDOW)
 
     def usage_weight_24h(self, unique: str, now: float | None = None) -> float:
         """Somma dei pesi (token/8000) dei tentativi nelle ultime 24h."""
@@ -68,19 +69,15 @@ class UsageMixin:
         if not dq:
             return 0.0
         now = time.time() if now is None else now
-        cut = now - self._USAGE_WINDOW
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-        return float(sum(w for _t, w in dq))
+        dq.prune(now - self._USAGE_WINDOW)
+        return dq.total / float(self._USAGE_UNIT)
 
     def usage_count_24h(self, unique: str, now: float | None = None) -> int:
         dq = self._usage().get(unique)
         if not dq:
             return 0
         now = time.time() if now is None else now
-        cut = now - self._USAGE_WINDOW
-        while dq and dq[0][0] < cut:
-            dq.popleft()
+        dq.prune(now - self._USAGE_WINDOW)
         return len(dq)
 
     def usage_count_window(self, unique: str, sec: float, now: float | None = None) -> int:
@@ -94,7 +91,7 @@ class UsageMixin:
         now = time.time() if now is None else now
         cut = now - max(0.001, float(sec))
         n = 0
-        for ts, _w in reversed(dq):
+        for ts, _units in reversed(dq):
             if ts < cut:
                 break
             n += 1
@@ -144,14 +141,11 @@ class UsageMixin:
         d = self._out_toks()
         dq = d.get(unique)
         if dq is None:
-            dq = deque()
+            dq = RollingWindow()
             d[unique] = dq
         now = time.time() if ts is None else ts
-        dq.append((now, n))
-        win = self._go_balance_window()
-        cut = now - win
-        while dq and dq[0][0] < cut:
-            dq.popleft()
+        dq.add(now, n)
+        dq.prune(now - self._go_balance_window())
 
     def output_tokens_window(self, unique: str, sec: float | None = None, now: float | None = None) -> int:
         """Token di output consumati da `unique` nella finestra rolling (default
@@ -161,10 +155,8 @@ class UsageMixin:
             return 0
         now = time.time() if now is None else now
         win = self._go_balance_window() if sec is None else float(sec)
-        cut = now - max(0.001, win)
-        while dq and dq[0][0] < cut:
-            dq.popleft()
-        return int(sum(n for _t, n in dq))
+        dq.prune(now - max(0.001, win))
+        return int(dq.total)
 
     def _attached_unique(self, unique: str) -> bool:
         """True se `unique` e' 'attaccato' alla sessione CORRENTE (successo
