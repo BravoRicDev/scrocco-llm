@@ -29,10 +29,10 @@ from pathlib import Path
 import re
 import yaml
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import csv_store, journal, logview, metrics
+from . import config_writes, csv_store, journal, logview, metrics
 from . import state as gw_state
 from .suppressed import report_suppressed
 from . import protocols as proto
@@ -46,6 +46,15 @@ from .policy import Policy, policy_effective_all
 log = logging.getLogger("nx.admin")
 
 admin_api = APIRouter(prefix="/admin", tags=["admin"])
+
+
+async def _config_write_guard():
+    """Rotte che riscrivono CSV/policy: una scrittura alla volta, anche tra
+    worker (lettura-modifica-scrittura intera sotto lock); a fine richiesta
+    gli altri worker ricaricano subito (app/config_writes.py)."""
+    async with config_writes.locked_async():
+        yield
+    config_writes.changed()
 
 
 def _tune(name: str, default):
@@ -241,7 +250,7 @@ async def list_deployments(request: Request, profile: str | None = None):
     return {"count": len(out), "deployments": out}
 
 
-@admin_api.post("/deployments")
+@admin_api.post("/deployments", dependencies=[Depends(_config_write_guard)])
 async def create_deployment(request: Request):
     denied = _require_master(request)
     if denied:
@@ -283,7 +292,7 @@ async def create_deployment(request: Request):
                 len(v) for v in gw_state.config.groups.values())}
 
 
-@admin_api.put("/deployments/{row_hash}")
+@admin_api.put("/deployments/{row_hash}", dependencies=[Depends(_config_write_guard)])
 async def update_deployment(row_hash: str, request: Request):
     denied = _require_master(request)
     if denied:
@@ -323,7 +332,7 @@ async def update_deployment(row_hash: str, request: Request):
     return {"ok": True, "id": new_id, "previous_id": row_hash}
 
 
-@admin_api.delete("/deployments/{row_hash}")
+@admin_api.delete("/deployments/{row_hash}", dependencies=[Depends(_config_write_guard)])
 async def delete_deployment(row_hash: str, request: Request):
     denied = _require_master(request)
     if denied:
@@ -345,7 +354,7 @@ async def delete_deployment(row_hash: str, request: Request):
             "profile": view["profile"]}
 
 
-@admin_api.post("/deployments/bulk")
+@admin_api.post("/deployments/bulk", dependencies=[Depends(_config_write_guard)])
 async def bulk_deployments(request: Request):
     """Operazioni multiple in UNA chiamata; batch ATOMICO: se una sola op
     è invalida, NESSUNA viene applicata."""
@@ -467,7 +476,7 @@ async def admin_repairs(request: Request, limit: int = 0):
     return repairlog.aggregate(limit=limit)
 
 
-@admin_api.post("/profiles/purge")
+@admin_api.post("/profiles/purge", dependencies=[Depends(_config_write_guard)])
 async def purge_profile(request: Request):
     """Rimuove la COLONNA di un profilo dal CSV (solo se zero righe la usano).
     Serve dopo aver eliminato tutti i suoi deployment: igiene dell'header."""
@@ -725,6 +734,7 @@ async def reload_gateway(request: Request):
             gw_state.router.apply_quirks()
         except Exception:
             report_suppressed("admin.reload_gateway")
+        config_writes.changed()               # multi-worker: anche gli altri
         return {"ok": True, "message": "configurazione ricaricata"}
     except Exception as exc:
         return _err(500, f"reload failed: {exc}")
@@ -1225,7 +1235,18 @@ def strip_cap_from_map(map_: dict[str, list[str]], model: str,
 def remove_cap_for_model(model: str, cap: str, evidence: str = "",
                          count: int = 0) -> dict | None:
     """AUTO-LEARN (mode=auto): rimuove `cap` da `model` nella mappa con
-    scrittura atomica validata + journal. Ritorna il report o None su errore."""
+    scrittura atomica validata + journal. Ritorna il report o None su errore.
+    Lettura-modifica-scrittura sotto il lock delle scritture di config: va
+    chiamata FUORI dall'event loop (vedi chat_helpers._auto_learn_apply)."""
+    with config_writes.locked():
+        report = _remove_cap_for_model_locked(model, cap, evidence, count)
+    if report is not None:
+        config_writes.changed()
+    return report
+
+
+def _remove_cap_for_model_locked(model: str, cap: str, evidence: str,
+                                 count: int) -> dict | None:
     try:
         current: dict = {}
         if Path(gw_state.POLICY_PATH).exists():
@@ -1258,7 +1279,7 @@ def remove_cap_for_model(model: str, cap: str, evidence: str = "",
         return None
 
 
-@admin_api.patch("/policy")
+@admin_api.patch("/policy", dependencies=[Depends(_config_write_guard)])
 async def patch_policy(request: Request):
     """Modifica gateway.yaml A CALDO con validazione preventiva su tmp:
     yaml invalido -> nessun cambio. Effetto immediato sui routing nuovi."""
@@ -1371,7 +1392,7 @@ async def admin_csv_get(request: Request):
             "count": count, "backups": _csv_backups(gw_state.VAR_DIR)}
 
 
-@admin_api.put("/csv")
+@admin_api.put("/csv", dependencies=[Depends(_config_write_guard)])
 async def admin_csv_put(request: Request):
     """PUT /admin/csv (master): sostituisce l'intero CSV.
 
@@ -1487,7 +1508,7 @@ async def get_policy_raw(request: Request):
     return {"path": str(gw_state.POLICY_PATH), "raw": raw}
 
 
-@admin_api.put("/policy/raw")
+@admin_api.put("/policy/raw", dependencies=[Depends(_config_write_guard)])
 async def put_policy_raw(request: Request):
     """PUT /admin/policy/raw (master): sostituisce l'INTERO gateway.yaml col
     testo fornito (NIENTE merge — usa PATCH /admin/policy per i patch parziali).
@@ -1552,7 +1573,7 @@ async def list_backups(request: Request):
             "yaml": _list_backups("gateway.yaml-*.yaml")}
 
 
-@admin_api.post("/backups/restore")
+@admin_api.post("/backups/restore", dependencies=[Depends(_config_write_guard)])
 async def restore_backup(request: Request):
     """POST /admin/backups/restore (master): {filename} -> ripristina un
     backup di var/backups/ sul file live e ricarica (config per CSV, policy
@@ -1607,7 +1628,7 @@ def _row_caps_of(row: dict) -> list[str]:
                   & CAPS_TOKENS)
 
 
-@admin_api.post("/capabilities/seed-from-map")
+@admin_api.post("/capabilities/seed-from-map", dependencies=[Depends(_config_write_guard)])
 async def capabilities_seed_from_map(request: Request):
     """Propone (dry_run=true) o applica (false) la colonna `caps` per ogni
     riga, derivandola dall'attuale capability_routing.model_capabilities

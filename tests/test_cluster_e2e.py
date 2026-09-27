@@ -102,7 +102,10 @@ def cluster2(tmp_path):
     run_root = tempfile.mkdtemp(prefix="sc-")        # path corto: limite AF_UNIX
     env = {**os.environ, "GATEWAY_WORKERS": "2", "GATEWAY_MASTER_KEY": KEY, "GATEWAY_PORT": str(gw_port),
            "GATEWAY_HEARTBEAT_FILE": str(tmp_path / "hb"), "GATEWAY_RUN_DIR": run_root,
-           "BACKGROUND_CAUTIOUS": "1", "PYTHONUNBUFFERED": "1"}
+           "BACKGROUND_CAUTIOUS": "1", "PYTHONUNBUFFERED": "1",
+           # watcher lento: una modifica di config vista SUBITO dall'altro
+           # worker puo' venire solo dall'avviso sul bus
+           "GATEWAY_WATCH_SECONDS": "30"}
     env.pop("PYTEST_CURRENT_TEST", None)
     logs = open(tmp_path / "gw.log", "wb")
     up = subprocess.Popen([sys.executable, "-m", "uvicorn", "upstream:app", "--port", str(up_port),
@@ -174,7 +177,10 @@ def test_two_workers_behave_like_one_process(cluster2):
 
 def test_worker_crash_is_invisible_and_restarted(cluster2):
     base, run_dir = cluster2["base"], cluster2["run_dir"]
-    assert _chat(base, "ses_warm").status_code == 200
+    for i in range(16):                              # porta la chiave in 429 in cooldown
+        assert _chat(base, f"warm_{i}").status_code == 200
+    before = [c["unique"] for c in _worker_state(run_dir, 0)["cooldowns_active"]]
+    assert before
     # individua il worker 1 dal log del supervisore
     log_text = cluster2["log"].read_text(errors="replace")
     pid = int(log_text.split("worker 1 avviato (pid ")[1].split(")")[0])
@@ -190,8 +196,28 @@ def test_worker_crash_is_invisible_and_restarted(cluster2):
     else:
         raise AssertionError("worker 1 non riavviato")
     time.sleep(1.0)
+    # il worker riavviato e' entrato allineato allo stato vivo dell'altro
+    assert "allineato" in cluster2["log"].read_text(errors="replace")
+    assert [c["unique"] for c in _worker_state(run_dir, 1)["cooldowns_active"]] == before
+    hits_before = httpx.get(f"http://127.0.0.1:{cluster2['up_port']}/hits").json().get("Bearer K-BAD")
     for i in range(6):
         assert _chat(base, f"after_{i}").status_code == 200
+    assert httpx.get(f"http://127.0.0.1:{cluster2['up_port']}/hits").json().get("Bearer K-BAD") == hits_before
+
+
+def test_admin_config_change_reaches_the_other_worker_immediately(cluster2):
+    run_dir = cluster2["run_dir"]
+    auth = {"authorization": f"Bearer {KEY}"}
+    with httpx.Client(transport=httpx.HTTPTransport(uds=str(run_dir / "w0.sock"))) as w0:
+        r = w0.patch("http://w/admin/policy", headers=auth, json={"step_up_pct": 55})
+        assert r.status_code == 200, r.text
+    deadline = time.time() + 3.0                   # il watcher da solo impiegherebbe 30s
+    while time.time() < deadline:
+        if _worker_state(run_dir, 1)["policy"]["step_up_pct"] == 55:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("il worker 1 non ha ricaricato la policy")
 
 
 def test_sigterm_shuts_down_cleanly(cluster2):

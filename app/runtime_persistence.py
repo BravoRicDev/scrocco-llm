@@ -551,12 +551,17 @@ async def _watcher(interval: float) -> None:
 
     last_csv: int | None = None
     last_yaml: int | None = None
+    yaml_seen = False  # primo giro fatto: da li' anche la NASCITA del file e' un cambio
     _prev_uniques = _all_uniques()
     _prev_deps = _all_deps()
     # Lock seriale del reload: un reload in corso NON viene sovrapposto ma
     # serializzato (insieme al suo post-processing probe/drain). Il lock
     # sincrono in config.reload() protegge invece il momento dello swap.
     _reload_lock = asyncio.Lock()
+    # Multi-worker: un altro worker ha riscritto CSV/policy -> giro subito
+    # (con un processo solo l'evento non scatta mai: stesso ritmo di prima).
+    _wake = asyncio.Event()
+    cluster.on_config_changed(_wake.set)
     while True:
         try:
             gw_state.router.purge_expired()  # igiene: sticky/cooldown scaduti
@@ -628,7 +633,7 @@ async def _watcher(interval: float) -> None:
                 _prev_deps = _all_deps()
 
             ym = csv_mtime_ns(gw_state.POLICY_PATH)
-            if ym is not None and last_yaml is not None and ym != last_yaml:
+            if ym is not None and yaml_seen and ym != last_yaml:
                 try:
                     fresh = Policy.load(gw_state.POLICY_PATH)
                 except Exception as exc:
@@ -666,12 +671,17 @@ async def _watcher(interval: float) -> None:
                         len(fresh.aliases),
                         fresh.profile_step_up_pct or "-",
                     )
-            if ym is not None and last_yaml is None:
+            if ym is not None and not yaml_seen:
                 log.info("[policy] watcher: baseline %s", gw_state.POLICY_PATH.name)
             last_yaml = ym
+            yaml_seen = True
         except Exception as exc:  # mai far morire il watcher
             log.warning("[config] watcher error: %s", exc)
-        await asyncio.sleep(interval)
+        try:
+            await asyncio.wait_for(_wake.wait(), interval)
+        except asyncio.TimeoutError:
+            pass
+        _wake.clear()
 
 
 def seconds_to_midnight(now: float | None = None) -> float:

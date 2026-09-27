@@ -36,12 +36,14 @@ the same router method on every other worker over a local fan-out bus.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import functools
 import inspect
 import json
 import logging
 import os
+import pickle
 import threading
 import zlib
 from pathlib import Path
@@ -54,7 +56,6 @@ log = logging.getLogger("nx.cluster")
 ENV_SIZE = "GATEWAY_WORKERS"
 ENV_INDEX = "GATEWAY_WORKER_INDEX"
 ENV_RUN_DIR = "GATEWAY_RUN_DIR"
-ENV_SEED = "GATEWAY_CLUSTER_SEED"      # mescolamento del CSV identico tra worker (app/config.py)
 
 _LINE_LIMIT = 64 * 1024 * 1024
 
@@ -193,6 +194,9 @@ ROUTER_METHODS: tuple[str, ...] = (
     # capability, modelli, riparazioni, escalation
     "note_cap_strike", "note_model_failure", "note_repair_exempt",
     "record_escalation_win",
+    # SESSION-DEP GUARD: "quale sessione ha usato per ultima il dep" e'
+    # indicizzata per deployment, quindi e' stato di TUTTE le sessioni
+    "_note_dep_session", "note_session_activity",
     # lease di concorrenza per chiave
     "_lease_put", "_lease_drop",
     # comandi operatore (admin)
@@ -226,22 +230,47 @@ def _ctx_tokens(ctx_est: Any) -> int:
         return 0
 
 
+# Stato GLOBALE del router copiato a un worker che (ri)entra nel cluster
+# (snapshot del worker piu' anziano): cio' che i metodi replicati mutano.
+# Esclusi lo stato per-sessione (resta al proprietario) e le cache locali.
+SYNC_ATTRS: tuple[str, ...] = (
+    "_stats", "_cooldown", "_cooldown_since", "_cooldown_full", "_cooldown_prov_map",
+    "_key_hints", "_key_soft", "_usage_times", "_out_tokens", "_wake_times", "_gen_rate",
+    "_gen_last_model", "_cap_strikes", "_esc_win", "_base_scores", "_provider_scores",
+    "_key_scores", "_avg_latencies", "_lat_buckets", "_ttft_buckets", "_prefill_rate",
+    "_est_div", "_scores_decay_ts", "_scores_decay_log_ts", "_conc_limit", "_conc_ok",
+    "_circuit_breakers", "_dep_circuit_breakers", "_model_cb", "_model_fail_win_map",
+    "_repair_exempt_map", "_key_leases_map", "_discovered_max_input", "_endpoint_quarantine",
+    "_last_attempt", "_prov_last", "_dep_last_session", "_session_deps",
+)
+SYNC_TIMEOUT_SEC = 10.0
+
+
 class Replicator:
     """Avvolge i metodi replicati e riesegue quelli ricevuti dagli altri."""
 
-    def __init__(self, router, keyhealth, send: Callable[[dict], None]):
+    def __init__(self, router, keyhealth, send: Callable[[dict], None], origin: str = ""):
         self.router = router
         self.keyhealth = keyhealth
+        self.origin = origin
         self._send = send
         self._targets = {"r": router, "kh": keyhealth}
         self._allowed = {"r": frozenset(ROUTER_METHODS), "kh": frozenset(KEYHEALTH_METHODS)}
         self._sigs: dict[tuple[str, str], inspect.Signature] = {}
         self._wrapped: list[tuple[object, str]] = []
-        # richieste in volo / lease ricevute da ogni altro processo: se quel
-        # processo muore vanno tolte (non arrivera' mai il note_end)
+        # richieste in volo [n, token] e lease PER PROCESSO d'origine (questo
+        # compreso): se un processo muore le sue vanno tolte (non arrivera'
+        # mai il note_end); un worker che entra le riceve nello snapshot.
         self._origin_inflight: dict[str, dict[str, list[int]]] = {}
         self._origin_leases: dict[str, set[str]] = {}
-        self._local_inflight: dict[str, int] = {}
+        # ultimo numero di sequenza applicato per processo d'origine: rende
+        # esatto il passaggio snapshot -> messaggi arrivati nel frattempo
+        self._seq = 0
+        self._seen: dict[str, int] = {}
+        self._syncing = False
+        self._buffer: list[dict] = []
+        self._synced: asyncio.Event | None = None
+        self.last_sync_applied = False
         self.published = 0
         self.replayed = 0
         self.skipped = 0
@@ -307,25 +336,19 @@ class Replicator:
             self.skipped += 1
             log.debug("[cluster] %s non replicato: argomento %s", name, exc)
             return
-        if kind == "r":
-            if name in _COOLDOWN_SYNC or name in ("note_start", "note_end"):
-                bound = self._bound(kind, name, args, kwargs)
-                unique = bound.get("unique")
-                if name in _COOLDOWN_SYNC and isinstance(unique, str):
-                    msg["cd"] = [unique, self._cooldown_snapshot(unique)]
-                elif isinstance(unique, str):
-                    delta = 1 if name == "note_start" else -1
-                    n = self._local_inflight.get(unique, 0) + delta
-                    if n > 0:
-                        self._local_inflight[unique] = n
-                    else:
-                        self._local_inflight.pop(unique, None)
+        if kind == "r" and name in _COOLDOWN_SYNC:
+            unique = self._bound(kind, name, args, kwargs).get("unique")
+            if isinstance(unique, str):
+                msg["cd"] = [unique, self._cooldown_snapshot(unique)]
+        self._track_origin(self.origin, kind, name, args, kwargs)
+        self._seq += 1
+        msg["s"] = self._seq
         self.published += 1
         self._send(msg)
 
     def local_inflight(self) -> int:
         """Richieste in volo servite da QUESTO worker (drain allo shutdown)."""
-        return sum(self._local_inflight.values())
+        return sum(n for n, _tokens in self._origin_inflight.get(self.origin, {}).values())
 
     # -- cooldown: copia dello stato finale --------------------------------
     def _cooldown_snapshot(self, unique: str) -> list:
@@ -342,9 +365,36 @@ class Replicator:
 
     # -- ricezione --------------------------------------------------------
     def handle(self, msg: dict) -> None:
+        t = msg.get("t")
+        if t == "config_changed":
+            for callback in list(_CONFIG_LISTENERS):
+                callback()
+            return
+        if t == "sync_req":
+            self._answer_sync(str(msg.get("o") or ""))
+            return
+        if t == "sync":
+            if self._syncing:
+                self.apply_sync(msg)
+            return
+        if self._syncing:              # in attesa dello snapshot: in coda
+            self._buffer.append(msg)
+            return
+        self._apply(msg)
+
+    def _apply(self, msg: dict) -> None:
         if msg.get("t") == "down":
             self.peer_down(str(msg.get("o") or ""))
             return
+        origin = str(msg.get("o") or "")
+        seq = msg.get("s")
+        if isinstance(seq, int) and origin:
+            if seq <= self._seen.get(origin, 0):
+                return                 # gia' compreso nello snapshot
+            self._seen[origin] = seq
+        self._replay(msg, origin)
+
+    def _replay(self, msg: dict, origin: str) -> None:
         kind, name = msg.get("k"), msg.get("m")
         if kind not in self._allowed or name not in self._allowed[kind]:
             return
@@ -364,7 +414,7 @@ class Replicator:
                 if "cd" in msg:
                     unique, snap = msg["cd"]
                     self._cooldown_restore(unique, snap)
-                self._track_origin(str(msg.get("o") or ""), kind, name, args, kwargs)
+                self._track_origin(origin, kind, name, args, kwargs)
                 if kind == "kh" and is_leader() and name == "set_state":
                     self.keyhealth.save()     # il leader e' chi scrive il file
             self.replayed += 1
@@ -406,6 +456,7 @@ class Replicator:
 
     def peer_down(self, origin: str) -> None:
         """Un processo e' uscito: le sue richieste in volo non chiuderanno mai."""
+        self._seen.pop(origin, None)
         inflight = self._origin_inflight.pop(origin, {})
         leases = self._origin_leases.pop(origin, set())
         if not inflight and not leases:
@@ -423,6 +474,64 @@ class Replicator:
             _replaying.reset(token)
         log.info("[cluster] processo %s uscito: tolte %d richieste in volo e %d lease",
                  origin, sum(v[0] for v in inflight.values()), len(leases))
+
+    # -- ingresso nel cluster: snapshot dal worker piu' anziano ----------
+    def snapshot(self) -> dict:
+        """Stato globale attuale + in volo/lease per processo + sequenze viste.
+        Preso in un colpo solo sull'event loop: e' un punto coerente."""
+        state = {a: getattr(self.router, a) for a in SYNC_ATTRS if hasattr(self.router, a)}
+        seen = dict(self._seen)
+        seen[self.origin] = self._seq
+        return {
+            "state": base64.b64encode(pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)).decode("ascii"),
+            "inflight": {o: {u: list(c) for u, c in m.items()} for o, m in self._origin_inflight.items() if m},
+            "leases": {o: sorted(t) for o, t in self._origin_leases.items() if t},
+            "seen": seen,
+        }
+
+    def _answer_sync(self, requester: str) -> None:
+        if not requester:
+            return
+        if self._syncing:              # anch'io sto entrando: niente da offrire
+            self._send({"t": "sync", "to": requester, "empty": True})
+            return
+        try:
+            self._send({"t": "sync", "to": requester, **self.snapshot()})
+        except Exception:  # noqa: BLE001 - chi entra ripiega sullo stato da disco
+            log.warning("[cluster] snapshot per %s fallito", requester, exc_info=True)
+            self._send({"t": "sync", "to": requester, "empty": True})
+
+    def begin_sync(self) -> asyncio.Event:
+        self._syncing = True
+        self._buffer = []
+        self._synced = asyncio.Event()
+        return self._synced
+
+    def apply_sync(self, msg: dict | None) -> bool:
+        """Applica lo snapshot (None/empty = nessuno: resta lo stato da disco),
+        poi i messaggi arrivati nel frattempo che lo snapshot non comprende."""
+        applied = False
+        if msg and not msg.get("empty"):
+            try:
+                state = pickle.loads(base64.b64decode(msg["state"]))
+                for attr, value in state.items():
+                    if attr in SYNC_ATTRS:
+                        setattr(self.router, attr, value)
+                self._origin_inflight = {o: {u: [int(c[0]), int(c[1])] for u, c in m.items()}
+                                         for o, m in (msg.get("inflight") or {}).items()}
+                self._origin_leases = {o: set(t) for o, t in (msg.get("leases") or {}).items()}
+                self._seen = {o: int(v) for o, v in (msg.get("seen") or {}).items()}
+                applied = True
+            except Exception:  # noqa: BLE001
+                log.warning("[cluster] snapshot illeggibile: resto sullo stato da disco", exc_info=True)
+        self._syncing = False
+        pending, self._buffer = self._buffer, []
+        for m in pending:
+            self._apply(m)
+        self.last_sync_applied = applied
+        if self._synced is not None:
+            self._synced.set()
+        return applied
 
 
 # ------------------------------------------------------------------- bus --
@@ -523,6 +632,7 @@ class BusHub:
     def __init__(self, path: str):
         self.path = path
         self._peers: dict[str, asyncio.StreamWriter] = {}
+        self._index: dict[str, int] = {}
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -532,6 +642,31 @@ class BusHub:
             pass
         self._server = await asyncio.start_unix_server(self._handle, path=self.path, limit=_LINE_LIMIT)
         os.chmod(self.path, 0o600)
+
+    def _route(self, line: bytes, origin: str) -> None:
+        """Replica e `down` a tutti gli altri; `to` a un solo destinatario;
+        `sync_req` al worker piu' anziano (indice piu' basso) tra gli altri."""
+        if b'"to":' in line or b'"sync_req"' in line:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                return
+            if msg.get("t") == "sync_req":
+                others = sorted((i, o) for o, i in self._index.items() if o != origin and o in self._peers)
+                if not others:
+                    self._send_to(origin, _dumps({"t": "sync", "to": origin, "empty": True}))
+                else:
+                    self._send_to(others[0][1], line)
+                return
+            if msg.get("to"):
+                self._send_to(str(msg["to"]), line)
+                return
+        self._broadcast(line, origin)
+
+    def _send_to(self, origin: str, data: bytes) -> None:
+        w = self._peers.get(origin)
+        if w is not None and not w.is_closing():
+            w.write(data)
 
     def _broadcast(self, data: bytes, skip: str | None) -> None:
         for origin, w in list(self._peers.items()):
@@ -547,16 +682,18 @@ class BusHub:
             if hello.get("t") != "hello" or not origin:
                 return
             self._peers[origin] = writer
+            self._index[origin] = int(hello.get("w") or 0)
             while True:
                 line = await reader.readline()
                 if not line:
                     break
-                self._broadcast(line, origin)
+                self._route(line, origin)
         except (ConnectionError, ValueError, asyncio.LimitOverrunError):
             pass
         finally:
             if origin and self._peers.get(origin) is writer:
                 self._peers.pop(origin, None)
+                self._index.pop(origin, None)
                 self._broadcast(_dumps({"t": "down", "o": origin}), origin)
             writer.close()
 
@@ -573,6 +710,19 @@ class BusHub:
 _REPLICATOR: Replicator | None = None
 _BUS: BusClient | None = None
 _LOG_FILTER = _ReplayLogFilter()
+_CONFIG_LISTENERS: list[Callable[[], None]] = []
+
+
+def on_config_changed(callback: Callable[[], None]) -> None:
+    """Registra chi va avvisato quando un altro worker riscrive CSV/policy."""
+    if callback not in _CONFIG_LISTENERS:
+        _CONFIG_LISTENERS.append(callback)
+
+
+def notify_config_changed() -> None:
+    """Questo worker ha riscritto CSV/policy: gli altri ricaricano subito."""
+    if _BUS is not None:
+        _BUS.send({"t": "config_changed"})
 
 
 async def start(router, keyhealth) -> None:
@@ -582,13 +732,21 @@ async def start(router, keyhealth) -> None:
         return
     origin = f"w{index()}:{os.getpid()}"
     bus = BusClient(bus_socket(), origin, index(), on_message=lambda m: rep.handle(m))
-    rep = Replicator(router, keyhealth, send=bus.send)
+    rep = Replicator(router, keyhealth, send=bus.send, origin=origin)
     for h in logging.getLogger().handlers:
         h.addFilter(_LOG_FILTER)
+    synced = rep.begin_sync()          # cio' che arriva prima dello snapshot va in coda
     await bus.start()
     rep.install()
     _REPLICATOR, _BUS = rep, bus
-    log.info("[cluster] worker %d/%d collegato al bus (%s)", index(), size(), origin)
+    bus.send({"t": "sync_req"})
+    try:
+        await asyncio.wait_for(synced.wait(), SYNC_TIMEOUT_SEC)
+        mode = "allineato" if rep.last_sync_applied else "primo del cluster (stato da disco)"
+    except asyncio.TimeoutError:
+        rep.apply_sync(None)
+        mode = "snapshot non arrivato (stato da disco)"
+    log.info("[cluster] worker %d/%d collegato al bus (%s): %s", index(), size(), origin, mode)
 
 
 async def stop() -> None:

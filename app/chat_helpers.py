@@ -8,6 +8,7 @@ da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
 il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -18,6 +19,7 @@ from starlette.requests import Request
 
 from . import journal, metrics
 from . import state as gw_state
+from .bgtasks import spawn
 from .suppressed import report_suppressed
 from .forwarder import _client_attribution
 from .opencode_gate import (
@@ -357,6 +359,19 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
             len(candidates),
         )
         return
+    # Riscrive gateway.yaml sotto il lock delle scritture di config (anche
+    # tra worker): su un thread, cosi' l'attesa del lock non ferma mai il loop.
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        _auto_learn_remove(model, cap, evidence, count)
+    else:
+        spawn(loop, asyncio.to_thread(_auto_learn_remove, model, cap, evidence, count))
+
+
+def _auto_learn_remove(model: str, cap: str, evidence: str, count: int) -> None:
     try:
         from .admin import remove_cap_for_model
 

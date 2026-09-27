@@ -25,7 +25,6 @@ import calendar
 import csv
 import hashlib
 import logging
-import os
 import random
 import re
 import threading
@@ -440,22 +439,17 @@ def _classify(row: dict[str, str], today: date) -> dict[str, Any]:
     }
 
 
-# Multi-worker (app/serve.py): ogni worker carica il CSV per conto suo, ma gli
-# unique (`gruppo__modello__<indice>`) dipendono dal mescolamento e devono
-# indicare lo STESSO deployment in tutti i processi (stato replicato per
-# unique). Il supervisore passa un seme comune: il mescolamento diventa
-# funzione di (seme, contenuto del CSV), identico ovunque e diverso a ogni
-# avvio del cluster o modifica del CSV. Senza seme (processo singolo) si usa
-# il `random` globale, esattamente come prima.
-CLUSTER_SEED_ENV = "GATEWAY_CLUSTER_SEED"
-
-
-def _shuffle_rng(rows: list[list[str]]):
-    seed = os.environ.get(CLUSTER_SEED_ENV)
-    if not seed:
-        return random
+# Gli unique (`gruppo__modello__<indice>`) nascono dal mescolamento dei
+# deployment dentro ogni modello. Col `random` globale l'indice cambiava a
+# ogni avvio: statistiche e cooldown salvati per unique finivano, dopo un
+# restart, attaccati a un deployment diverso; e con piu' worker ognuno aveva
+# la sua mappa unique -> chiave. Il mescolamento resta, ma e' funzione del
+# CONTENUTO del CSV: stesso CSV -> stessi unique, in ogni processo e dopo
+# ogni riavvio; un CSV modificato rimescola. `GatewayConfig(seed=...)` (test)
+# continua a usare il `random` globale seminato.
+def _shuffle_rng(rows: list[list[str]]) -> random.Random:
     digest = hashlib.sha256("\x1e".join("\x1f".join(r) for r in rows).encode("utf-8")).hexdigest()
-    return random.Random(f"{seed}:{digest}")
+    return random.Random(digest)
 
 
 def _shuffle_bucket(deps: list[dict], rng=random) -> list[dict]:
@@ -743,6 +737,7 @@ class GatewayConfig:
         self.loaded_at = today or date.today()
         if seed is not None:
             random.seed(seed)  # usato SOLO nei test per riproducibilità
+        self._seeded = seed is not None
         self.profiles: list[str] = []
         self.groups: dict[str, list[dict]] = {}       # group_name -> deployments
         self.group_caps: dict[str, str | None] = {}   # group_name -> cap|None(testo)
@@ -783,7 +778,7 @@ class GatewayConfig:
         # dopo un PUT /admin/csv sbagliato o un ripristino incompleto): NON deve
         # brickare il gateway -> stessa via del fresh install (0 deployment, il
         # playbook /bootstrap guida fino al primo bulk-insert).
-        self._rng = _shuffle_rng(reader or [])
+        self._rng = random if getattr(self, "_seeded", False) else _shuffle_rng(reader or [])
         if not reader or not any(any(c.strip() for c in row) for row in reader):
             log.warning("[config] CSV assente/vuoto (%s): avvio con 0 "
                         "deployment (fresh install: segui GET /bootstrap)",

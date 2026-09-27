@@ -15,9 +15,8 @@ import logging
 import threading
 from pathlib import Path
 
-from . import csv_store, journal, metrics
+from . import config_writes, csv_store, journal, metrics
 from .bgtasks import spawn
-from .jsonl_store import file_lock
 from .config import THINKING_REPLAY_HEADER
 
 log = logging.getLogger("nx.csvlearn")
@@ -50,10 +49,13 @@ def mark_twins_in_memory(config, model: str,
 
 def _persist(config, csv_path: Path, var_dir: Path, model: str,
              flag: str = THINKING_REPLAY_HEADER) -> int:
-    # lettura-modifica-scrittura sotto lock tra processi: con piu' worker due
-    # apprendimenti contemporanei non si sovrascrivono a vicenda
-    with file_lock(csv_path):
-        return _persist_locked(config, csv_path, var_dir, model, flag)
+    # lettura-modifica-scrittura sotto il lock delle scritture di config
+    # (anche tra worker: admin e apprendimenti non si sovrascrivono)
+    with config_writes.locked():
+        n = _persist_locked(config, csv_path, var_dir, model, flag)
+    if n:
+        config_writes.changed()
+    return n
 
 
 def _persist_locked(config, csv_path: Path, var_dir: Path, model: str, flag: str) -> int:

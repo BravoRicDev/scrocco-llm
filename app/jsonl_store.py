@@ -9,9 +9,11 @@ chiamante.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
+import time
 
 try:                                   # POSIX: lock tra processi (multi-worker)
     import fcntl
@@ -61,3 +63,41 @@ def file_lock(path: str | os.PathLike):
         yield
     finally:
         os.close(fd)                   # la close rilascia il flock
+
+
+@contextlib.asynccontextmanager
+async def async_file_lock(path: str | os.PathLike, timeout: float = 30.0):
+    """Come `file_lock`, per il codice async: attende il lock SENZA bloccare
+    l'event loop (tentativi non bloccanti). Solleva TimeoutError oltre
+    `timeout` secondi."""
+    if fcntl is None:
+        yield
+        return
+    fd = os.open(os.fspath(path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"lock {path} occupato") from None
+                await asyncio.sleep(0.02)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def path_lock(path: str | os.PathLike):
+    """`file_lock` su un file di lock GIA' nominato (non `<path>.lock`)."""
+    if fcntl is None:
+        yield
+        return
+    fd = os.open(os.fspath(path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)

@@ -42,7 +42,7 @@ def pair(tmp_path):
     pol = {"key_concurrency_enabled": True, "key_concurrency_max": 4}
     a, b = _router(path, **pol), _router(path, **pol)
     inbox: list[dict] = []
-    rep_b = Replicator(b, None, send=lambda m: None)
+    rep_b = Replicator(b, None, send=lambda m: None, origin="wB:1")
 
     def deliver(msg):
         msg["o"] = "wA:1"
@@ -50,7 +50,7 @@ def pair(tmp_path):
         inbox.append(wire)
         rep_b.handle(wire)
 
-    rep_a = Replicator(a, None, send=deliver)
+    rep_a = Replicator(a, None, send=deliver, origin="wA:1")
     rep_a.install()
     yield a, b, rep_a, rep_b, inbox
     rep_a.uninstall()
@@ -321,10 +321,11 @@ def test_bus_fans_out_to_others_and_reports_down(tmp_path):
 
 
 # ------------------------------------------------------ config condivisa --
-def test_cluster_seed_gives_every_worker_the_same_uniques(tmp_path, monkeypatch):
-    """Gli unique (`gruppo__modello__<indice>`) nascono da un mescolamento:
-    con il seme di cluster tutti i worker ottengono la STESSA mappa
-    unique -> chiave, indipendentemente dallo stato del loro `random`."""
+def test_uniques_are_a_function_of_the_csv_content(tmp_path):
+    """Gli unique (`gruppo__modello__<indice>`) nascono da un mescolamento
+    che dipende SOLO dal contenuto del CSV: ogni worker e ogni riavvio
+    ottengono la stessa mappa unique -> chiave, qualunque sia lo stato del
+    loro `random`. Un CSV diverso rimescola."""
     import random
 
     rows = "".join(f"r{i},model-a,groq,https://a.test/v1,free,32,32000,5,K-{i},\n" for i in range(12))
@@ -335,13 +336,15 @@ def test_cluster_seed_gives_every_worker_the_same_uniques(tmp_path, monkeypatch)
         cfg = GatewayConfig(str(path), proxy_prefix="scrocco-llm-")
         return {d["unique"]: d["api_key"] for deps in cfg.groups.values() for d in deps}
 
-    monkeypatch.setenv(cluster.ENV_SEED, "abc123")
     random.seed(1)
     first = mapping()
     random.seed(99)
     assert mapping() == first
-    monkeypatch.setenv(cluster.ENV_SEED, "altro-avvio")
-    assert mapping() != first          # nuovo cluster: nuovo mescolamento
+    def order(m: dict) -> list:
+        return [k for _u, k in sorted(m.items(), key=lambda kv: int(kv[0].rsplit("__", 1)[1])) if k != "K-99"]
+
+    path.write_text(CSV.splitlines()[0] + "\n" + rows + "r99,model-a,groq,https://a.test/v1,free,32,32000,5,K-99,\n")
+    assert order(mapping()) != order(first)       # CSV cambiato: si rimescola
 
 
 def test_per_worker_state_files_start_from_the_single_process_file(tmp_path, monkeypatch):
@@ -356,3 +359,159 @@ def test_per_worker_state_files_start_from_the_single_process_file(tmp_path, mon
     assert _own_or_shared(own) == base            # primo avvio multi-worker
     own.write_text("{}")
     assert _own_or_shared(own) == own
+
+
+# ------------------------------------------- ingresso nel cluster (sync) --
+def test_joining_worker_gets_the_live_state_exactly(tmp_path, monkeypatch):
+    """Un worker che (ri)entra riceve lo stato globale ATTUALE da un altro:
+    i messaggi arrivati durante l'attesa gia' compresi nello snapshot non
+    vengono riapplicati, quelli successivi si'."""
+    _frozen_clock(monkeypatch)
+    path = tmp_path / "k.csv"
+    path.write_text(CSV)
+    pol = {"key_concurrency_enabled": True, "key_concurrency_max": 4}
+    a, c = _router(path, **pol), _router(path, **pol)
+    outbox: list[dict] = []
+    rep_a = Replicator(a, None, send=lambda m: outbox.append(json.loads(json.dumps({**m, "o": "wA:1"}))),
+                       origin="wA:1")
+    rep_a.install()
+    try:
+        u0, u1, _u2 = _uniques(a)
+        a.note_start(u0, ctx_est=300)
+        a.mark_failed(u1, reason="http_429", status=429)
+        a.key_lease_acquire(a.config.deployment_by_unique(u0))
+        rep_c = Replicator(c, None, send=lambda m: None, origin="wC:1")
+        synced = rep_c.begin_sync()
+        rep_c.handle(outbox[1])                   # arriva durante l'attesa, ma e' nello snapshot
+        snap = json.loads(json.dumps({"t": "sync", "to": "wC:1", **rep_a.snapshot()}))
+        a.note_start(u0, ctx_est=300)             # DOPO lo snapshot
+        rep_c.handle(outbox[-1])
+        assert c.stats_for(u0).inflight == 0      # ancora in coda
+        rep_c.handle(snap)
+        assert synced.is_set() and rep_c.last_sync_applied
+        assert c.dump_stats() == a.dump_stats()
+        assert c.save_cooldowns() == a.save_cooldowns()
+        assert c.stats_for(u0).inflight == a.stats_for(u0).inflight == 2
+        assert c.stats_for(u0).inflight_tokens == 600
+        assert c.key_leases_view() == a.key_leases_view()
+        rep_c.handle({"t": "down", "o": "wA:1"})  # e se A muore, C sa cosa togliere
+        assert c.stats_for(u0).inflight == 0 and not c.key_leases_view()
+    finally:
+        rep_a.uninstall()
+
+
+def test_a_worker_still_joining_offers_no_snapshot(tmp_path):
+    path = tmp_path / "k.csv"
+    path.write_text(CSV)
+    sent: list[dict] = []
+    rep = Replicator(_router(path), None, send=sent.append, origin="w1:1")
+    rep.begin_sync()
+    rep.handle({"t": "sync_req", "o": "w2:1"})
+    assert sent == [{"t": "sync", "to": "w2:1", "empty": True}]
+    rep.handle({"t": "sync", "to": "w1:1", "empty": True})
+    assert not rep.last_sync_applied and not rep._syncing
+
+
+def test_session_dep_guard_is_shared(pair):
+    """Quale sessione ha usato per ultima un deployment e' stato di TUTTE le
+    sessioni: una sessione su un altro worker non deve rubarlo."""
+    from app.session_ctx import set_current_session
+
+    a, b, *_ = pair
+    u0 = _uniques(a)[0]
+    a.note_session_success("ses_A", u0, latency_ms=100.0)
+    assert b._dep_sess()[u0][0] == "ses_A"
+    set_current_session("ses_B")
+    try:
+        assert b.other_session_recent(u0) is True
+    finally:
+        set_current_session(None)
+
+
+def test_hub_routes_sync_requests_and_directed_replies(tmp_path):
+    async def main():
+        sock = str(tmp_path / "bus.sock")
+        hub = BusHub(sock)
+        await hub.start()
+        got: dict[str, list] = {"w0": [], "w1": [], "w2": []}
+        clients = {n: BusClient(sock, f"{n}:1", i, got[n].append) for i, n in enumerate(got)}
+        for n in ("w1", "w2"):
+            await clients[n].start()
+        await asyncio.sleep(0.05)
+        clients["w2"].send({"t": "sync_req"})           # w0 assente: risponde il piu' anziano, w1
+        await asyncio.sleep(0.05)
+        assert [m["t"] for m in got["w1"]] == ["sync_req"] and got["w2"] == []
+        clients["w1"].send({"t": "sync", "to": "w2:1", "empty": True})
+        await asyncio.sleep(0.05)
+        assert got["w2"] == [{"t": "sync", "to": "w2:1", "empty": True, "o": "w1:1"}]
+        await clients["w1"].stop()
+        await clients["w2"].stop()
+        await asyncio.sleep(0.05)
+        await clients["w0"].start()                      # da solo: risponde il hub
+        clients["w0"].send({"t": "sync_req"})
+        await asyncio.sleep(0.05)
+        assert got["w0"][-1] == {"t": "sync", "to": "w0:1", "empty": True}
+        await clients["w0"].stop()
+        await hub.stop()
+
+    asyncio.run(main())
+
+
+# ------------------------------------------------ scritture di config --
+def test_config_writes_are_serialized_across_processes(tmp_path):
+    import threading
+
+    from app import config_writes
+
+    held = threading.Event()
+
+    def writer():
+        with config_writes.locked(tmp_path):
+            held.set()
+            time.sleep(0.3)
+
+    t = threading.Thread(target=writer)
+    t.start()
+    held.wait(2)
+
+    async def other():
+        t0 = time.monotonic()
+        async with config_writes.locked_async(tmp_path):
+            return time.monotonic() - t0
+
+    waited = asyncio.run(other())
+    t.join()
+    assert waited >= 0.2
+
+
+def test_config_change_notice_reaches_the_other_workers(tmp_path, monkeypatch):
+    sent: list[dict] = []
+
+    class _Bus:
+        def send(self, msg):
+            sent.append(msg)
+
+    monkeypatch.setattr(cluster, "_BUS", _Bus())
+    cluster.notify_config_changed()
+    assert sent == [{"t": "config_changed"}]
+
+    woke: list[int] = []
+    monkeypatch.setattr(cluster, "_CONFIG_LISTENERS", [lambda: woke.append(1)])
+    path = tmp_path / "k.csv"
+    path.write_text(CSV)
+    Replicator(_router(path), None, send=lambda m: None).handle({"t": "config_changed", "o": "w0:1"})
+    assert woke == [1]
+
+
+def test_admin_config_writers_take_the_lock():
+    from app.admin import _config_write_guard, admin_api
+
+    guarded = {(sorted(r.methods)[0], r.path) for r in admin_api.routes
+               if any(d.call is _config_write_guard for d in r.dependant.dependencies)}
+    assert guarded == {
+        ("POST", "/admin/deployments"), ("PUT", "/admin/deployments/{row_hash}"),
+        ("DELETE", "/admin/deployments/{row_hash}"), ("POST", "/admin/deployments/bulk"),
+        ("POST", "/admin/profiles/purge"), ("PATCH", "/admin/policy"), ("PUT", "/admin/csv"),
+        ("PUT", "/admin/policy/raw"), ("POST", "/admin/backups/restore"),
+        ("POST", "/admin/capabilities/seed-from-map"),
+    }

@@ -32,7 +32,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import secrets
 import shutil
 import signal
 import socket
@@ -156,9 +155,6 @@ class Supervisor:
             os.environ.get("GATEWAY_HEARTBEAT_MAX_AGE", liveness.DEFAULT_MAX_AGE_SEC))
         self.shutdown_timeout = float(os.environ.get("GATEWAY_SHUTDOWN_TIMEOUT", "60"))
         self.run_dir = ""
-        # un seme per vita del cluster: stessi unique su tutti i worker, anche
-        # su quelli riavviati (vedi app/config.py::_shuffle_rng)
-        self.seed = os.environ.get(cluster.ENV_SEED) or secrets.token_hex(8)
         self._sock: socket.socket | None = None
         self._stopping: asyncio.Event | None = None
         self._last_beat = 0.0
@@ -211,7 +207,6 @@ class Supervisor:
             cluster.ENV_SIZE: str(len(self.workers)),
             cluster.ENV_INDEX: str(w.index),
             cluster.ENV_RUN_DIR: self.run_dir,
-            cluster.ENV_SEED: self.seed,
             "GATEWAY_LISTEN_FD": str(self._sock.fileno()),
             "GATEWAY_HEARTBEAT_FILE": hb,
         })
