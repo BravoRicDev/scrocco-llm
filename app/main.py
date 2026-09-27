@@ -314,6 +314,9 @@ _last_stats_save = 0.0
 # probe/decay ripartono con l'eta' reale e la durata totale.
 _cooldown_file = VAR_DIR / "cooldown_state.json"
 _last_cooldown_save = 0.0
+# Throttle DEDICATO delle firme Gemini: condividere _last_stats_save (appena
+# aggiornato dallo stesso tick del watcher) le faceva salvare solo allo shutdown.
+_last_thought_sigs_save = 0.0
 # WARM-START DI ROUTING (var/routing_state.json): holder cache, sticky,
 # ownership warm, demote per-sessione, pin escalation e watermark ctxcompact.
 # Senza questo, ogni deploy ripartiva freddo: ri-rotazioni, ri-escalations e

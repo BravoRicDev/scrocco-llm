@@ -230,3 +230,21 @@ def test_policy_float_int_match_getattr_or_expression():
             assert policy_float(p, name, d, falsy=fz) == float(getattr(p, name, d) or fz)
             assert policy_int(p, name, d, falsy=fz) == int(getattr(p, name, d) or fz)
         assert policy_float(p, name, 9) == float(getattr(p, name, 9) or 9)
+
+
+# ------------------------------------------- thought signatures throttle
+def test_watcher_tick_persists_thought_sigs(monkeypatch, tmp_path):
+    """Il tick del watcher salva stats/routing (F26) E le firme Gemini: prima
+    il throttle condiviso con le stats le rimandava sempre allo shutdown."""
+    import app.main as M
+    from app import runtime_persistence as rp
+
+    monkeypatch.setattr(M, "PERSIST_STATS", True)
+    monkeypatch.setattr(M, "_last_stats_save", 0.0)
+    monkeypatch.setattr(M, "_last_routing_save", 0.0)
+    monkeypatch.setattr(M, "_last_thought_sigs_save", 0.0)
+    monkeypatch.setattr(M, "_thought_sigs_file", tmp_path / "thought_sigs.json")
+    writes = rp._maybe_save_all(defer=True)            # stesso ordine del watcher
+    writes += rp._maybe_save_thought_sigs(defer=True)
+    assert tmp_path / "thought_sigs.json" in [w.path for w in writes]
+    assert rp._maybe_save_thought_sigs(defer=True) == []   # throttle 60s

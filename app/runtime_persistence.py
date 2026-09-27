@@ -363,8 +363,9 @@ def _maybe_save_thought_sigs(force: bool = False, *, defer: bool = False) -> lis
     if not M.PERSIST_STATS:
         return []
     now = time.time()
-    if not force and now - M._last_stats_save < 60:
+    if not force and now - M._last_thought_sigs_save < 60:
         return []
+    M._last_thought_sigs_save = now
     from .thought_sig import THOUGHT_SIGS
 
     return _dispatch([_PendingWrite(M._thought_sigs_file, _freeze_json(THOUGHT_SIGS.dump()),
