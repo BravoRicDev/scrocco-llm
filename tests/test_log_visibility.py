@@ -219,7 +219,7 @@ _RECOVERABLE_WARNING = [
     ("main.py", "[images] mirror %s fallito: %s"),
     ("forwarder.py", "[max-input] note_discovered fallito per %s"),
     ("forwarder.py", "[strike] hook error: %s"),
-    ("router.py", "[lifecycle] retire %s fallito"),
+    ("routing/failure.py", "[lifecycle] retire %s fallito"),
     ("routing/cooldown.py", "[probe] auto-retirement di %s fallito"),
     ("routing/warm.py", "[warm] note_warm_owner %s fallito"),
     ("autoprobe.py", "[autoprobe] giro ritirati terminato con errore"),
@@ -247,8 +247,8 @@ _MOVEMENT_INFO = [
     ("main.py", "[sveglia] nessun dormiente maturo"),
     ("router.py", "[ladder] %s cronico (fail_24h>=%d)"),
     ("router.py", "[restrict] %s: failover same-model -> %s"),
-    ("router.py", "[cooldown-class] %s classe=transient"),
-    ("router.py", "[cooldown-class] %s classe=quota"),
+    ("routing/failure.py", "[cooldown-class] %s classe=transient"),
+    ("routing/failure.py", "[cooldown-class] %s classe=quota"),
 ]
 
 
