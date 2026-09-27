@@ -1,7 +1,7 @@
 """Endpoint di health, metrics e /v1/models.
 
 Estratti da `app/main.py` (C2, Round 4 Clean Code). Gli oggetti condivisi
-(`config`, `policy`, `router`, `authn`, `capmeta`, `metrics`) sono importati
+(`config`, `policy`, `router`, `authn`: STATO runtime) sono raggiunti
 DENTRO il corpo delle funzioni tramite `import app.main as M`: a livello di
 modulo si creerebbe un ciclo di import (main include questo router a fine
 file, dopo aver definito tutto).
@@ -12,6 +12,11 @@ import time
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 from starlette.requests import Request
+
+from . import capmeta
+from . import metrics
+from .http_responses import unauthorized as _unauthorized
+from .observability import render_prometheus
 
 router = APIRouter()
 
@@ -67,9 +72,9 @@ async def metrics_endpoint():
     erano settati in una route shadowed -> mai emessi).
     """
     import app.main as M
-    M.metrics.set_gauge("nx_cooldown_active", len(M.router._cooldown))
-    M.metrics.set_gauge("nx_sticky_active", len(M.router._sticky))
-    body = M.metrics.render() + M.render_prometheus()
+    metrics.set_gauge("nx_cooldown_active", len(M.router._cooldown))
+    metrics.set_gauge("nx_sticky_active", len(M.router._sticky))
+    body = metrics.render() + render_prometheus()
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
@@ -213,19 +218,19 @@ def _model_entry(name: str, *, rich: bool = True) -> dict:
     caps, deps = _caps_and_deps(name)
     if not caps:
         return entry
-    entry["capabilities"] = M.capmeta.ollama_capabilities(caps)
-    entry["architecture"] = M.capmeta.modalities(caps)
+    entry["capabilities"] = capmeta.ollama_capabilities(caps)
+    entry["architecture"] = capmeta.modalities(caps)
     if not rich:
         return entry
-    entry["capabilities_sx"] = M.capmeta.structured_style(caps)
-    entry["supported_parameters"] = M.capmeta.supported_parameters(caps)
-    entry["modalities"] = M.capmeta.llama_cpp_modalities(caps)
-    ctx_max, ctx_min = M.capmeta.context_lengths(deps)
+    entry["capabilities_sx"] = capmeta.structured_style(caps)
+    entry["supported_parameters"] = capmeta.supported_parameters(caps)
+    entry["modalities"] = capmeta.llama_cpp_modalities(caps)
+    ctx_max, ctx_min = capmeta.context_lengths(deps)
     if ctx_max:
         entry["context_length"] = ctx_max
         entry["context_length_min"] = ctx_min
         entry["top_provider"] = {"max_completion_tokens": None}
-    entry.update(M.capmeta.litellm_style(caps))
+    entry.update(capmeta.litellm_style(caps))
     if ctx_max:
         entry["max_input_tokens"] = ctx_max
     return entry
@@ -236,7 +241,7 @@ async def list_models(request: Request):
     import app.main as M
     auth = M.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return M._unauthorized(auth.error)
+        return _unauthorized(auth.error)
     view = _view_for(request, auth)
     rich = view == "stable"
     names = sorted(set(_names_for_auth(auth, view)))

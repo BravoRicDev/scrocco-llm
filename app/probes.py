@@ -15,6 +15,7 @@ import contextlib
 import time
 
 from . import autoprobe
+from .stream_verdicts import _soft_cd
 from .suppressed import report_suppressed
 from . import metrics
 
@@ -170,7 +171,7 @@ def _spawn_probe(
                     _f24 = M.router.stats_for(u).fail_count_24h
                 except Exception:
                     _f24 = 0
-                M.router.mark_failed(u, seconds=M._soft_cd(_f24), reason="probe_error")
+                M.router.mark_failed(u, seconds=_soft_cd(_f24), reason="probe_error")
                 metrics.inc("nx_hedge_total", ("probe_fail",))
             else:
                 # empty_eof/length_truncated: comportamento del modello, non

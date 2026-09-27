@@ -1,7 +1,7 @@
 """Endpoint video async (submit, poll status, download content).
 Estratti verbatim da `app/main.py` (cluster C9, Round 4 Clean Code).
 Gli oggetti condivisi (`policy`, `authn`, `router`, `config`, `log`,
-`forwarder`, `_unauthorized`, `_forbidden`, `_videos_jobs`) sono importati
+`forwarder`, `_videos_jobs`: STATO runtime) sono raggiunti
 DENTRO il corpo delle funzioni tramite `import app.main as M`: a livello di
 modulo si creerebbe un ciclo di import (main include questo router a fine
 file, dopo aver definito tutto). `_videos_jobs` resta un dict MUTATO (non
@@ -16,6 +16,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import metrics
+from .http_responses import unauthorized as _unauthorized
+from .http_responses import forbidden as _forbidden
 from .suppressed import report_suppressed
 from .auth import AuthResult
 from .chat_helpers import (
@@ -58,9 +60,9 @@ async def videos_generations(request: Request):
     model = M.policy.canonicalize(raw_model)
     auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return M._unauthorized(auth.error)
+        return _unauthorized(auth.error)
     if not M.authn.authorize_model(auth, model):
-        return M._forbidden(model, auth.profile)
+        return _forbidden(model, auth.profile)
 
     need = frozenset({"video_gen"}) if M.router.policy.routing_active() else frozenset()
     # i2v / reference-to-video: le immagini d'input esigono il token vision
@@ -319,7 +321,7 @@ async def videos_status(job_id: str, request: Request, model: str | None = None)
 
     auth = M.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return M._unauthorized(auth.error)
+        return _unauthorized(auth.error)
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err
@@ -356,7 +358,7 @@ async def videos_content(job_id: str, request: Request, model: str | None = None
 
     auth = M.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return M._unauthorized(auth.error)
+        return _unauthorized(auth.error)
     deps, err = _job_deps(job_id, model or request.query_params.get("model"))
     if err:
         return err

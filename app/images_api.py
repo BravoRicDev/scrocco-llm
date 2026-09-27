@@ -1,7 +1,7 @@
 """Endpoint /v1/images/generations, /v1/images/edits, /v1/images/files.
 Estratti verbatim da `app/main.py` (cluster C7, Round 4 Clean Code).
 Gli oggetti condivisi (`policy`, `authn`, `router`, `config`, `log`,
-`forwarder`, `_unauthorized`, `_forbidden`) sono importati DENTRO il corpo
+`forwarder`: STATO runtime) sono raggiunti DENTRO il corpo
 delle funzioni tramite `import app.main as M`: a livello di modulo si
 creerebbe un ciclo di import (main include questo router a fine file, dopo
 aver definito tutto).
@@ -12,6 +12,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import imagestore, metrics
+from .http_responses import unauthorized as _unauthorized
+from .http_responses import forbidden as _forbidden
 from .suppressed import report_suppressed
 from .auth import AuthResult
 from .chat_helpers import (
@@ -69,9 +71,9 @@ async def images_generations(request: Request):
 
     auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return M._unauthorized(auth.error)
+        return _unauthorized(auth.error)
     if not M.authn.authorize_model(auth, model):
-        return M._forbidden(model, auth.profile)
+        return _forbidden(model, auth.profile)
 
     need = frozenset({"image_gen"}) if M.router.policy.routing_active() else frozenset()
     refs = image_refs_from_payload(payload)
@@ -436,9 +438,9 @@ async def images_edits(request: Request):
     model = M.policy.canonicalize(raw_model)
     auth: AuthResult = M.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return M._unauthorized(auth.error)
+        return _unauthorized(auth.error)
     if not M.authn.authorize_model(auth, model):
-        return M._forbidden(model, auth.profile)
+        return _forbidden(model, auth.profile)
 
     need = frozenset({"image_gen", "image_edit"}) if M.router.policy.routing_active() else frozenset()
     _set_opencode_gate(request)

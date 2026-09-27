@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import autoprobe, imagestore, audiostore, metrics, repairlog, sniff
+from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
 from .suppressed import report_suppressed
 from . import forwarder as fwd
 from .atomic_store import JsonSnapshot
@@ -656,7 +657,7 @@ async def _watcher(interval: float) -> None:
                     set_reasoning_reserve(1.0 - float(getattr(fresh, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
                     apply_cooldown_policy(fresh)
                     _apply_misc_policy(fresh)
-                    set_schemaout_config(M._so_cfg_from_policy(fresh))
+                    set_schemaout_config(_so_cfg_from_policy(fresh))
                     M.forwarder._keepalive_pool = fresh.http_keepalive_pool
                     configure_estimate(
                         adaptive=fresh.estimate_adaptive_enabled,

@@ -494,24 +494,8 @@ async def generic_error_handler(request: Request, exc: Exception):
     )
 
 
-def _unauthorized(detail: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=401, content={"error": {"message": detail, "type": "auth_error", "param": None, "code": "401"}}
-    )
-
-
-def _forbidden(model: str, profile: str | None) -> JSONResponse:
-    return JSONResponse(
-        status_code=403,
-        content={
-            "error": {
-                "message": f"Model '{model}' not allowed for this key" + (f" (profile '{profile}')" if profile else ""),
-                "type": "permission_error",
-                "param": None,
-                "code": "403",
-            }
-        },
-    )
+from .http_responses import forbidden as _forbidden  # noqa: E402
+from .http_responses import unauthorized as _unauthorized  # noqa: E402
 
 
 # ---------------------------------------------------------- chat completions
