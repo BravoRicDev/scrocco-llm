@@ -15,7 +15,12 @@ import time
 from pathlib import Path
 
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
-_FALLBACK_RE = re.compile(r"\[fallback\]\s+stream\s+(\S+)\s")
+# `stream` e' OPZIONALE: le call site NON-stream (app/forwarder.py, e
+# router.py CROSS-MODEL) emettono "[fallback] <unique> ..." senza quella
+# parola, mentre quelle stream (app/main.py) scrivono "[fallback] stream
+# <unique> ...". Con la parola obbligatoria i fallback non-stream finivano
+# ignorati e le finestre rolling-24h partivano senza quei tentativi.
+_FALLBACK_RE = re.compile(r"\[fallback\]\s+(?:stream\s+)?(\S+)\s")
 _SUMMARY_RE = re.compile(r"\[summary\]\s+\{.*?\"dep\":\s*\"([^\"]+)\"")
 _AUTOPROBE_RE = re.compile(r"\[autoprobe\]\s+(\S+):\s+probe\s+(OK|KO)")
 

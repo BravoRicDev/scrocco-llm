@@ -132,3 +132,51 @@ def test_logboot_scan(tmp_path):
 def test_logboot_missing_file(tmp_path):
     usage, probes = scan_log(tmp_path / "nope.log", time.time())
     assert usage == [] and probes == []
+
+
+# ------------------------------------------- [fallback] stream vs non-stream
+# Le call site NON-stream (app/forwarder.py) scrivono "[fallback] <dep> ..."
+# SENZA la parola "stream": vanno comunque contate come tentativi.
+
+# righe reali, con il formato di ciascuna call site
+_FB_STREAM = "WARNING [fallback] stream depStream 429 motivo=quota -> depNext"
+_FB_NONSTREAM = ("WARNING [fallback] depNonStream 402 quota esaurita -> depNext")
+_FB_CROSS_MODEL = "WARNING [fallback] grpCROSS CROSS-MODEL m1 -> m2"
+
+
+@pytest.mark.parametrize("body,expected", [
+    (_FB_STREAM, "depStream"),                 # app/main.py (stream)
+    (_FB_NONSTREAM, "depNonStream"),           # app/forwarder.py (non-stream)
+    (_FB_CROSS_MODEL, "grpCROSS"),             # app/router.py CROSS-MODEL
+])
+def test_fallback_re_cattura_entrambi_i_formati(tmp_path, body, expected):
+    """`_FALLBACK_RE` matcha sia "[fallback] stream <dep> " sia
+    "[fallback] <dep> ": il secondo era ignorato (parola obbligatoria)."""
+    now = time.time()
+    p = tmp_path / "gateway.log"
+    p.write_text(_line(now - 10, body) + "\n", encoding="utf-8")
+
+    usage, _probes = scan_log(p, now - 86400.0)
+
+    assert [u for u, _ in usage] == [expected]
+
+
+def test_logboot_scan_conta_anche_i_fallback_non_stream(tmp_path):
+    """La scansione ricostruisce l'uso dai DUE formati insieme."""
+    now = time.time()
+    p = tmp_path / "gateway.log"
+    p.write_text(
+        _line(now - 10, "WARNING [fallback] stream depStream 429 motivo=x\n")
+        + _line(now - 15, "WARNING [fallback] depNonStream 402 quota "
+                          "esaurita -> depNext\n")
+        + _line(now - 20, "WARNING [fallback] depB 404 upstream (modello "
+                          "inesistente) -> depNext\n")
+        + _line(now - 30, 'INFO [summary] {"req":"r1","dep":"depB"}\n'),
+        encoding="utf-8")
+
+    usage, _probes = scan_log(p, now - 86400.0)
+
+    # 3 tentativi di fallback (uno stream, due non-stream) + 1 dal [summary]:
+    # depB compare due volte (fallback + summary), quindi 4 voci totali.
+    assert sorted(u for u, _ in usage) == [
+        "depB", "depB", "depNonStream", "depStream"]
