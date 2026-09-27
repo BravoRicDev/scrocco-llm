@@ -36,6 +36,7 @@ import random
 import time
 
 from ..caution import background_cautious_enabled
+from ..policy import policy_float, policy_int
 from .estimate import _is_quota_evidence
 from .evict import drop_expired, entry_ts, evict_oldest, last_sample_ts, record_ts
 from .lazy import lazy_dict
@@ -143,7 +144,7 @@ class CooldownMixin:
             return False
         if not getattr(self.policy, "cooldown_probe_enabled", True):
             return False
-        ratio = float(getattr(self.policy, "cooldown_probe_after_ratio", 0.5) or 0.0)
+        ratio = policy_float(self.policy, "cooldown_probe_after_ratio", 0.5, falsy=0.0)
         pr = self.cooldown_progress(unique)
         return pr is not None and pr >= ratio
 
@@ -166,7 +167,7 @@ class CooldownMixin:
         per un singolo errore isolato. 0 = nessun decadimento."""
         if streak <= 0:
             return 0
-        hl = float(getattr(self.policy, "cooldown_streak_halflife_sec", 0) or 0)
+        hl = policy_float(self.policy, "cooldown_streak_halflife_sec", 0)
         if hl <= 0 or not last_fail_ts:
             return streak
         now = time.time() if now is None else now
@@ -186,7 +187,7 @@ class CooldownMixin:
         spalmati su ~2s invece che al medesimo millisecondo (altrimenti al
         secondo N ripartono tutti insieme -> nuova raffica di 429). E' una
         funzione pura di `unique`: stabile tra restart, niente random."""
-        cap = float(getattr(self.policy, "cooldown_jitter_sec_max", 2.0) or 0.0)
+        cap = policy_float(self.policy, "cooldown_jitter_sec_max", 2.0, falsy=0.0)
         if cap <= 0:
             return 0.0
         h = hashlib.sha256(str(unique).encode("utf-8")).digest()
@@ -201,7 +202,7 @@ class CooldownMixin:
         nello stesso secondo: senza, ripartono tutti al medesimo ms e
         rifanno raffica."""
         sec = max(1.0, float(seconds))
-        ratio = float(getattr(self.policy, "cooldown_jitter_ratio", 0.0) or 0.0)
+        ratio = policy_float(self.policy, "cooldown_jitter_ratio", 0.0)
         if ratio > 0:
             sec = max(1.0, sec * random.uniform(1.0 - ratio, 1.0 + ratio))
         if unique:
@@ -216,7 +217,7 @@ class CooldownMixin:
         Un'evidenza di QUOTA (429/satura) non basta a ritirare: la chiave e'
         viva, ha solo finito il budget del momento. Il ritiro scatta solo su
         fallimenti sostanziali (401/403/modello morto/5xx permanenti)."""
-        cap = int(getattr(self.policy, "probe_retire_after", 0) or 0)
+        cap = policy_int(self.policy, "probe_retire_after", 0)
         if cap <= 0 or s.probe_fail_streak < cap:
             return False
         if _is_quota_evidence(getattr(s, "last_reason", None)):
@@ -273,7 +274,7 @@ class CooldownMixin:
     def _prune_wake_times(self, now: float | None = None) -> None:
         """Pota i timestamp di wakeup oltre la finestra (memoria)."""
         now = now if now is not None else time.time()
-        _win = max(1.0, float(getattr(self.policy, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
+        _win = max(1.0, policy_float(self.policy, "ladder_cooldown_wakeup_window_sec", 3600))
         for u, dq in list((getattr(self, "_wake_times", None) or {}).items()):
             while dq and now - dq[0] > _win:
                 dq.popleft()
@@ -282,7 +283,7 @@ class CooldownMixin:
 
     def _prune_hunt_state(self, now: float | None = None) -> None:
         now = now if now is not None else time.time()
-        win = float(getattr(self.policy, "hunt_window_sec", 3600) or 3600)
+        win = policy_float(self.policy, "hunt_window_sec", 3600)
         for k, st in list((getattr(self, "_hunt_state", None) or {}).items()):
             dq = st.get("races")
             while dq and now - dq[0] > win:
@@ -317,7 +318,7 @@ class CooldownMixin:
             self._sticky_dep.pop(s, None)
         # STIMA per-sessione: TTL di policy + cap 4096 (eviction sul piu' vecchio)
         _sr = self._sess_est()
-        _sttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        _sttl = policy_int(self.policy, "session_estimate_ttl_sec", 3600, falsy=0)
         if _sttl > 0:
             drop_expired(_sr, record_ts, now, _sttl)
         evict_oldest(_sr, record_ts)
@@ -359,7 +360,7 @@ class CooldownMixin:
         # SOFT-PER-CHIAVE: hint scaduti (ttl x2) e blocchi oltre la scadenza.
         _kh = getattr(self, "_key_hints", None)
         if isinstance(_kh, dict):
-            _kttl = max(120.0, float(getattr(self.policy, "rate_hint_ttl_sec", 20.0) or 20.0) * 2)
+            _kttl = max(120.0, policy_float(self.policy, "rate_hint_ttl_sec", 20.0) * 2)
             for tag in [t for t, (ts, _r) in _kh.items() if now - ts > _kttl]:
                 _kh.pop(tag, None)
         _ks = getattr(self, "_key_soft", None)
@@ -369,7 +370,7 @@ class CooldownMixin:
         # F25: breaker di modello — dimentica le aperture molto scadute.
         _mcb = getattr(self, "_model_cb", None)
         if isinstance(_mcb, dict):
-            _mttl = max(300.0, float(getattr(self.policy, "model_circuit_open_sec", 60) or 60) * 4)
+            _mttl = max(300.0, policy_float(self.policy, "model_circuit_open_sec", 60) * 4)
             for k in [k for k, e in _mcb.items() if now - max(e.get("opened") or 0.0, e.get("ts") or 0.0) > _mttl]:
                 _mcb.pop(k, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
@@ -379,7 +380,7 @@ class CooldownMixin:
             self._cooldown_full_map().pop(u, None)
         # PURGE escalation-winner: TTL a finestra scorrevole; gli entries
         # vecchi di escalation_pin_ttl_sec vengono droppati.
-        _epp = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec", 300) or 300))
+        _epp = max(1, policy_int(self.policy, "escalation_pin_ttl_sec", 300))
         _ewd = self._esc()
         dead_ew = [g for g, (_u, ts) in _ewd.items() if now - ts > _epp]
         for g in dead_ew:

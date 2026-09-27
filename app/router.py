@@ -45,7 +45,7 @@ from typing import Any
 
 from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST, ORDER_LAST
 from .suppressed import report_suppressed
-from .policy import Policy
+from .policy import Policy, policy_float, policy_int
 from .capabilities import count_image_parts
 from .effort import get_effort
 from .caution import background_cautious_enabled
@@ -357,10 +357,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         quella soglia non si taglia nulla; se tutti a 0 usi -> nessun taglio."""
         if not deps:
             return deps
-        pct = float(getattr(self.policy, "cold_spread_pct", 0.20) or 0.0)
+        pct = policy_float(self.policy, "cold_spread_pct", 0.20, falsy=0.0)
         if pct <= 0.0:
             return deps
-        min_pool = int(getattr(self.policy, "ladder_skip_after", 10) or 10)
+        min_pool = policy_int(self.policy, "ladder_skip_after", 10)
         pool = [d for d in deps if not self._attached_unique(d["unique"])]
         n = len(pool)
         if n < max(1, min_pool):
@@ -402,7 +402,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
 
     def _guard_sec(self) -> float:
         try:
-            return max(0.0, float(getattr(self.policy, "session_dep_guard_sec", 900) or 0))
+            return max(0.0, policy_float(self.policy, "session_dep_guard_sec", 900, falsy=0))
         except (TypeError, ValueError):
             return 900.0
 
@@ -448,7 +448,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if not entry:
             return None
         unique, ts = entry
-        ttl = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec", 300) or 300))
+        ttl = max(1, policy_int(self.policy, "escalation_pin_ttl_sec", 300))
         if time.time() - ts > ttl:
             _ew.pop(group_name, None)  # scaduto
             return None
@@ -566,7 +566,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                     winner.get("group"),
                     req_grp,
                 )
-        n_dims = max(0, int(getattr(self.policy, "escalation_pin_probe_dims", 2) or 0))
+        n_dims = max(0, policy_int(self.policy, "escalation_pin_probe_dims", 2, falsy=0))
         if n_dims <= 0:
             return None  # probe disabilitato (anche retry)
         m = self.DIM_SUFFIX_RE.search(req_grp)
@@ -657,7 +657,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         fattore applicato (1.0 = nessun decay)."""
         now = time.time() if now is None else now
         self._init_scoring_if_needed()
-        hl = float(getattr(self.policy, "reputation_decay_halflife_sec", 0.0) or 0.0)
+        hl = policy_float(self.policy, "reputation_decay_halflife_sec", 0.0)
         last = self._scores_decay_ts
         self._scores_decay_ts = now
         if hl <= 0.0 or now <= last:
@@ -800,10 +800,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if ctx < 8000 or pt <= 1000:
             return
         try:
-            alpha = float(getattr(self.policy, "estimate_calib_alpha", 0.05) or 0.05)
+            alpha = policy_float(self.policy, "estimate_calib_alpha", 0.05)
         except (TypeError, ValueError):
             alpha = 0.05
-        base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
+        base = policy_float(self.policy, "estimate_divisor", 4)
         d = getattr(self, "_est_div", None)
         if d is None:
             d = self._est_div = {}
@@ -821,7 +821,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         """Moltiplicatore da applicare alla stima grezza per `unique`
         (1.0 = nessuna correzione appresa): divisor_base / divisor_appreso."""
         try:
-            base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
+            base = policy_float(self.policy, "estimate_divisor", 4)
         except (TypeError, ValueError):
             base = 4.0
         d = getattr(self, "_est_div", {}) or {}
@@ -836,7 +836,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         il budget della frontiera ctxcompact deve usare QUESTO, altrimenti
         sottostima il contesto e lascia il payload sopra max_input."""
         try:
-            base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
+            base = policy_float(self.policy, "estimate_divisor", 4)
         except (TypeError, ValueError):
             base = 4.0
         d = getattr(self, "_est_div", {}) or {}
@@ -882,8 +882,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             pt = int(prompt_tokens or 0)
         except (TypeError, ValueError):
             return
-        _minch = int(getattr(self.policy, "session_estimate_min_chars", 8000) or 0)
-        _minpt = int(getattr(self.policy, "session_estimate_min_tokens", 1000) or 0)
+        _minch = policy_int(self.policy, "session_estimate_min_chars", 8000, falsy=0)
+        _minpt = policy_int(self.policy, "session_estimate_min_tokens", 1000, falsy=0)
         if ch_post < _minch or pt < _minpt:
             return
         if ch_pre < ch_post:
@@ -935,12 +935,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             return None
         if n < 1 or ch <= 0 or pt <= 0:
             return None
-        _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        _ttl = policy_int(self.policy, "session_estimate_ttl_sec", 3600, falsy=0)
         if _ttl > 0 and time.time() - ts > _ttl:
             return None
         try:
-            _lo = float(getattr(self.policy, "session_estimate_min_ratio", 1.5) or 1.5)
-            _hi = float(getattr(self.policy, "session_estimate_max_ratio", 8.0) or 8.0)
+            _lo = policy_float(self.policy, "session_estimate_min_ratio", 1.5)
+            _hi = policy_float(self.policy, "session_estimate_max_ratio", 8.0)
         except (TypeError, ValueError):
             _lo, _hi = 1.5, 8.0
         return max(_lo, min(_hi, ch / float(pt)))
@@ -973,7 +973,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if val <= cur:
             return
         d[session_id] = (val, now)
-        _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        _ttl = policy_int(self.policy, "session_estimate_ttl_sec", 3600, falsy=0)
         if _ttl > 0:
             drop_expired(d, entry_ts, now, _ttl)
         evict_oldest(d, entry_ts)
@@ -988,7 +988,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if not rec:
             return None
         val, ts = rec
-        _ttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
+        _ttl = policy_int(self.policy, "session_estimate_ttl_sec", 3600, falsy=0)
         if _ttl > 0 and time.time() - ts > _ttl:
             return None
         return int(val)
@@ -1024,7 +1024,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
            aderente a quello specifico upstream -> max (anti-overflow).
         """
         try:
-            margin = float(getattr(self.policy, "session_estimate_margin", 1.05) or 1.0)
+            margin = policy_float(self.policy, "session_estimate_margin", 1.05, falsy=1.0)
         except (TypeError, ValueError):
             margin = 1.05
         cpt = self.session_chars_per_token(session_id, pre=pre)
@@ -1221,7 +1221,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if unique not in self._base_scores:
             _pref0 = float(dep.get("model_preference", 0) or 0)
             if _pref0:
-                self._base_scores[unique] = -_pref0 * float(getattr(self.policy, "model_preference_base", 10.0) or 0.0)
+                self._base_scores[unique] = -_pref0 * policy_float(self.policy, "model_preference_base", 10.0, falsy=0.0)
         score = self._base_scores.get(unique, 0.0)
         pk = self._provider_key(dep)
         ak = self._api_key_str(dep)
@@ -1307,7 +1307,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             # /admin/tuning ma NON usata -> la classifica usava sempre tutta
             # la storia. Ora si limita agli ultimi N campioni (0 = tutta).
             try:
-                _win = int(getattr(self.policy, "dynamic_scoring_history_window", 0) or 0)
+                _win = policy_int(self.policy, "dynamic_scoring_history_window", 0)
             except (TypeError, ValueError):
                 _win = 0
             if _win > 0:
@@ -1497,7 +1497,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         turni -go alla sessione SENZA demotare il deployment (che resta
         warm/holder). Default 20s; <= 0 disabilita il trigger."""
         try:
-            return int(getattr(self.policy, "go_refund_trigger_ms", 20000) or 0)
+            return policy_int(self.policy, "go_refund_trigger_ms", 20000, falsy=0)
         except (TypeError, ValueError):
             return 20000
 
@@ -1548,10 +1548,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             return False
         dq = st.get("races")
         if dq:
-            win = float(getattr(self.policy, "hunt_window_sec", 3600) or 3600)
+            win = policy_float(self.policy, "hunt_window_sec", 3600)
             while dq and now - dq[0] > win:
                 dq.popleft()
-            cap = int(getattr(self.policy, "hunt_max_per_window", 5) or 0)
+            cap = policy_int(self.policy, "hunt_max_per_window", 5, falsy=0)
             if cap > 0 and len(dq) >= cap:
                 return False
         return True
@@ -1570,7 +1570,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         st = hs.setdefault((session_id, _ctx_bucket(ctx_est)), {"races": deque(), "backoff_until": 0.0})
         st["races"].append(now)
         if not gained:
-            st["backoff_until"] = now + float(getattr(self.policy, "hunt_backoff_sec", 600) or 600)
+            st["backoff_until"] = now + policy_float(self.policy, "hunt_backoff_sec", 600)
 
     def _is_slow_dep(self, unique: str, ctx_est=None) -> bool:
         """True se la latenza del deployment supera la soglia di rotazione
@@ -1818,7 +1818,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         timer >45s (`_slow_timer_flagged`): un pool fatto di soli lenti non
         blocca il canario (li si lascia esaurire, senza penalita'). Cap <= 0 =
         nessun gate."""
-        cap = int(getattr(self.policy, "slow_race_max_warm", 6) or 0)
+        cap = policy_int(self.policy, "slow_race_max_warm", 6, falsy=0)
         if cap <= 0:
             return True
         if not session_id or not profile:
@@ -2234,10 +2234,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             u = dep_or_unique
             dep = self.config.deployment_by_unique(u) if u else None
         model = (dep or {}).get("model")
-        thr = max(0, int(getattr(self.policy, "model_fail_threshold", 3) or 0))
+        thr = max(0, policy_int(self.policy, "model_fail_threshold", 3, falsy=0))
         if not u or not model or thr <= 0:
             return 0
-        win = float(getattr(self.policy, "model_fail_window_sec", 900) or 900)
+        win = policy_float(self.policy, "model_fail_window_sec", 900)
         now = time.time()
         dq = self._model_fail_win().setdefault(model, deque())
         dq.append(now)
@@ -2245,7 +2245,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             dq.popleft()
         if len(dq) < thr:
             return len(dq)
-        cd = float(getattr(self.policy, "model_fail_cooldown_sec", 600) or 600)
+        cd = policy_float(self.policy, "model_fail_cooldown_sec", 600)
         n = 0
         for _lst in self.config.groups.values():
             for d in _lst:
@@ -2402,7 +2402,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         return d
 
     def _lease_max_age(self) -> float:
-        return max(1.0, float(getattr(self.policy, "key_concurrency_lease_max_age_sec", 120) or 120))
+        return max(1.0, policy_float(self.policy, "key_concurrency_lease_max_age_sec", 120))
 
     def _prune_key_leases(self, now: float | None = None) -> None:
         """Scarta le lease piu' vecchie del tetto (una richiesta interrotta
@@ -2434,7 +2434,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         now = time.time()
         self._prune_key_leases(now)
         key = dep.get("api_key") or ""
-        cap = max(0, int(getattr(self.policy, "key_concurrency_max", 2) or 0))
+        cap = max(0, policy_int(self.policy, "key_concurrency_max", 2, falsy=0))
         ent = self._key_leases().setdefault(key, [])
         if cap and len(ent) >= cap:
             return None
@@ -2459,7 +2459,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         non deve mai trasformarsi in un 503."""
         if not bool(getattr(self.policy, "key_concurrency_enabled", False)):
             return deps
-        cap = max(0, int(getattr(self.policy, "key_concurrency_max", 2) or 0))
+        cap = max(0, policy_int(self.policy, "key_concurrency_max", 2, falsy=0))
         if not cap:
             return deps
         self._prune_key_leases()
@@ -2496,7 +2496,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
 
     def key_soft_view(self) -> dict:
         now = time.time()
-        hints_ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec", 20.0) or 20.0))
+        hints_ttl = max(1.0, policy_float(self.policy, "rate_hint_ttl_sec", 20.0))
         soft = getattr(self, "_key_soft", None)
         hints = getattr(self, "_key_hints", None)
         soft = soft if isinstance(soft, dict) else {}
@@ -2520,9 +2520,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
 
     def model_circuits_view(self) -> dict:
         now = time.time()
-        open_sec = float(getattr(self.policy, "model_circuit_open_sec", 60) or 60)
-        win = float(getattr(self.policy, "model_circuit_window_sec", 60) or 60)
-        need = int(getattr(self.policy, "model_circuit_keys", 3) or 3)
+        open_sec = policy_float(self.policy, "model_circuit_open_sec", 60)
+        win = policy_float(self.policy, "model_circuit_window_sec", 60)
+        need = policy_int(self.policy, "model_circuit_keys", 3)
         _cb = getattr(self, "_model_cb", None)
         models: dict[str, dict] = {}
         for mkey, ent in (_cb if isinstance(_cb, dict) else {}).items():
@@ -3097,7 +3097,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
     def purge_draining(self) -> int:
         """Rimuove i draining oltre il TTL (anche con inflight residua)."""
         now = time.time()
-        ttl = max(1.0, float(getattr(self.policy, "hotreload_drain_ttl_sec", 120.0) or 120.0))
+        ttl = max(1.0, policy_float(self.policy, "hotreload_drain_ttl_sec", 120.0))
         dead = [u for u, d in list(self._drain().items()) if now - d.get("ts", 0) > ttl]
         for u in dead:
             log.info(
@@ -4098,7 +4098,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             if isinstance(k, str) and k:
                 tag = hashlib.sha256(k.encode("utf-8", errors="replace")).hexdigest()[:12]
                 rec = (getattr(self, "_key_hints", None) or {}).get(tag)
-                proven = max(0.0, float(getattr(self.policy, "rate_hint_proven_sec", 900.0) or 0.0))
+                proven = max(0.0, policy_float(self.policy, "rate_hint_proven_sec", 900.0, falsy=0.0))
                 if rec and proven > 0 and time.time() - rec[0] <= proven:
                     return False
         s = self.stats_for(dep["unique"])
@@ -4148,13 +4148,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         return lazy_dict(self, "_conc_ok")
 
     def _conc_default(self) -> int:
-        return max(1, int(getattr(self.policy, "conc_default_limit", 3) or 3))
+        return max(1, policy_int(self.policy, "conc_default_limit", 3))
 
     def _conc_max(self) -> int:
-        return max(1, int(getattr(self.policy, "conc_max_limit", 10) or 10))
+        return max(1, policy_int(self.policy, "conc_max_limit", 10))
 
     def _conc_streak(self) -> int:
-        return max(1, int(getattr(self.policy, "conc_learn_success_streak", 20) or 20))
+        return max(1, policy_int(self.policy, "conc_learn_success_streak", 20))
 
     def _concurrent_limit_for(self, d: dict) -> int:
         """Limite di concorrenza per il deployment: il valore FISSO dalla
@@ -4184,7 +4184,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if not deps:
             return deps
         try:
-            ratio = float(getattr(self.policy, "conc_token_ratio", 0.0) or 0.0)
+            ratio = policy_float(self.policy, "conc_token_ratio", 0.0)
         except (TypeError, ValueError):
             ratio = 0.0
         try:
@@ -4560,7 +4560,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
                     "[probe] %s: %d dormienti maturi (>=%.0f%% del cooldown) -> probe passivo",
                     group_name,
                     len(_ripe),
-                    float(getattr(self.policy, "cooldown_probe_after_ratio", 0.5) or 0.5) * 100,
+                    policy_float(self.policy, "cooldown_probe_after_ratio", 0.5) * 100,
                 )
                 deps = _ripe
             else:
@@ -4720,7 +4720,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             and cap_g in (getattr(self.policy, "cap_fair_share_caps", None) or ())
             and not self._is_renewal_bucket(group_name)
         ):
-            _win = float(getattr(self.policy, "cap_fair_share_window_sec", 60) or 60)
+            _win = policy_float(self.policy, "cap_fair_share_window_sec", 60)
             _now = time.time()
 
             def _fs_key(_d):
@@ -4890,7 +4890,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         # per-gruppo, cosi' anche la scala piatta spalma il carico.
         _hidden = self._spread_hidden_chain(chain) if _live_walk else set()
         if tried and limit > 0 and _live_walk:
-            _skip_after = max(1, int(getattr(self.policy, "ladder_skip_after", 4) or 4))
+            _skip_after = max(1, policy_int(self.policy, "ladder_skip_after", 4))
             _gc: dict[str, int] = {}
             for _u in tried:
                 _d = self.config.deployment_by_unique(_u)
@@ -5148,7 +5148,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             age = (
                 float(min_age_sec)
                 if min_age_sec is not None
-                else float(getattr(self.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
+                else policy_float(self.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0)
             )
         except (TypeError, ValueError):
             age = 3600.0
@@ -5342,7 +5342,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         if not session_id:
             return
         now = time.time()
-        win = max(1.0, float(getattr(self.policy, "warm_ready_rpm_window_sec", 180) or 180))
+        win = max(1.0, policy_float(self.policy, "warm_ready_rpm_window_sec", 180))
         dq = self._sess_rate().setdefault(session_id, deque())
         dq.append(now)
         cutoff = now - win
@@ -5663,8 +5663,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         # deployment RAFFREDDATO da più tempo (stantio) e con cooldown residuo
         # minore nel dim corrente, PRIMA di escalationare a -go/fallback. Stessa
         # soglia degli "stantii" della scala: un cooldown fresco non si tocca.
-        _chronic_thr = max(1, int(getattr(self.policy, "cooldown_retry_max_fail_24h", 10) or 10))
-        _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec", 300) or 300)
+        _chronic_thr = max(1, policy_int(self.policy, "cooldown_retry_max_fail_24h", 10))
+        _stale_age = policy_float(self.policy, "stale_cooldown_retry_sec", 300)
         _cooled = [
             d
             for d in self.config.groups.get(group_name, [])

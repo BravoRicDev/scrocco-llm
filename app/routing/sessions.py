@@ -15,6 +15,7 @@ import time
 
 from ..opencode_gate import (dep_usable as _dep_usable,
                              opencode_cautious_request)
+from ..policy import policy_float, policy_int
 from ..session_ctx import current_session
 from .evict import SESSION_MAP_CAP, drop_expired, entry_ts, evict_oldest, fingerprint_ts
 from .lazy import lazy_dict
@@ -45,7 +46,7 @@ class SessionMixin:
         if not ent:
             return None
         unique, ts = ent
-        ttl = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
+        ttl = policy_float(self.policy, "go_stick_ttl_sec", 600)
         if time.time() - ts > ttl:
             d.pop(sid, None)
             return None
@@ -126,9 +127,9 @@ class SessionMixin:
             return 0
         d = self._sess_turns_map()
         n = int((d.get(sid) or {}).get("n") or 0)
-        pct = float(getattr(self.policy, "go_refund_pct", 20) or 0)
-        lo = int(getattr(self.policy, "go_refund_min_turns", 5) or 0)
-        hi = int(getattr(self.policy, "go_refund_max_turns", 20) or 0)
+        pct = policy_float(self.policy, "go_refund_pct", 20, falsy=0)
+        lo = policy_int(self.policy, "go_refund_min_turns", 5, falsy=0)
+        hi = policy_int(self.policy, "go_refund_max_turns", 20, falsy=0)
         refund = max(lo, min(hi, int(round(pct / 100.0 * n))))
         return self._add_go_turns(sid, refund, "n=%d, pct=%.0f%%, " % (n, pct))
 
@@ -150,11 +151,11 @@ class SessionMixin:
             return 0
         if n_fb <= 0:
             return 0
-        per = float(getattr(self.policy, "go_refund_fb_per_fallback", 0.5) or 0)
+        per = policy_float(self.policy, "go_refund_fb_per_fallback", 0.5, falsy=0)
         if per <= 0:
             return 0
-        lo = int(getattr(self.policy, "go_refund_fb_min_turns", 1) or 0)
-        hi = int(getattr(self.policy, "go_refund_fb_max_turns", 3) or 0)
+        lo = policy_int(self.policy, "go_refund_fb_min_turns", 1, falsy=0)
+        hi = policy_int(self.policy, "go_refund_fb_max_turns", 3, falsy=0)
         refund = max(lo, min(hi, int(n_fb * per)))
         return self._add_go_turns(sid, refund, "fb=%d, " % n_fb)
 
@@ -583,7 +584,7 @@ class SessionMixin:
         ts = d.get(sid)
         if ts is None:
             return False
-        ttl = float(getattr(self.policy, "cache_holder_ttl_sec", 3600) or 3600)
+        ttl = policy_float(self.policy, "cache_holder_ttl_sec", 3600)
         if time.time() - ts > ttl:
             d.pop(sid, None)
             return False
@@ -637,7 +638,7 @@ class SessionMixin:
         `last_go()` (che muta la mappa espellendo gli scaduti): la validita' e'
         ricalcolata qui, in modo difensivo, dal solo TTL di policy."""
         now = time.time() if now is None else now
-        ttl = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
+        ttl = policy_float(self.policy, "go_stick_ttl_sec", 600)
         out: list[dict] = []
         for sid, ent in (getattr(self, "_last_go", None) or {}).items():
             try:

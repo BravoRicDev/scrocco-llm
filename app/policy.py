@@ -3534,3 +3534,20 @@ def refill_out_budget(payload: dict, policy) -> int:
     if v <= 0:
         v = int(getattr(policy, "warm_refill_default_out_tokens", 4096) or 4096)
     return v
+
+
+_SAME_AS_DEFAULT = object()
+
+
+def policy_float(policy, name: str, default, falsy=_SAME_AS_DEFAULT) -> float:
+    """`float(getattr(policy, name, default) or falsy)`: legge un parametro
+    numerico della policy (anche da oggetti policy parziali dei test). Un
+    valore falsy (assente, None, 0) vale `falsy`, di default = `default`."""
+    return float(getattr(policy, name, default)
+                 or (default if falsy is _SAME_AS_DEFAULT else falsy))
+
+
+def policy_int(policy, name: str, default, falsy=_SAME_AS_DEFAULT) -> int:
+    """Come `policy_float`, con conversione `int`."""
+    return int(getattr(policy, name, default)
+               or (default if falsy is _SAME_AS_DEFAULT else falsy))

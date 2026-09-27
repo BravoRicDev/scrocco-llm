@@ -37,6 +37,7 @@ import logging
 import time
 
 from .estimate import ErrorKind, _is_quota_evidence
+from ..policy import policy_float, policy_int
 
 log = logging.getLogger("nx.router")
 
@@ -304,10 +305,10 @@ class FailureMixin:
         if not rec:
             return False
         ts, rem = rec
-        ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec", 20.0) or 20.0))
+        ttl = max(1.0, policy_float(self.policy, "rate_hint_ttl_sec", 20.0))
         if now - ts > ttl:
             return False
-        cap = int(getattr(self.policy, "rate_hint_remaining_max", 5) or 5)
+        cap = policy_int(self.policy, "rate_hint_remaining_max", 5)
         return rem <= cap
 
     def note_rate_limit(self, unique: str, rl: dict) -> None:
@@ -390,11 +391,11 @@ class FailureMixin:
         n = max(0, int(fail_count_24h or 0))
         if n <= 1:
             return float(base_seconds)
-        base_m = max(1, int(getattr(self.policy, "cooldown_base_min", 30) or 30))
-        mult_m = max(0, int(getattr(self.policy, "cooldown_linear_mult_min", 30) or 30))
+        base_m = max(1, policy_int(self.policy, "cooldown_base_min", 30))
+        mult_m = max(0, policy_int(self.policy, "cooldown_linear_mult_min", 30))
         potent = (base_m + mult_m * max(0, n - 1)) * 60.0
-        potent = min(potent, float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
-        return min(float(base_seconds) + 0.1 * potent, float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
+        potent = min(potent, policy_float(self.policy, "max_cooldown_sec", 18000))
+        return min(float(base_seconds) + 0.1 * potent, policy_float(self.policy, "max_cooldown_sec", 18000))
 
     def mark_failed_double_residual(self, unique: str, reason: str | None = None, status: int | None = None) -> float:
         """Raddoppia il cooldown residuo quando un deployment dormiente fallisce
@@ -408,7 +409,7 @@ class FailureMixin:
         new_cd = remaining * 2.0
         new_cd = min(new_cd, float(self.policy.max_cooldown_sec))
         if reason == "timeout":
-            _tm = max(1, int(getattr(self.policy, "timeout_cooldown_mult", 10) or 10))
+            _tm = max(1, policy_int(self.policy, "timeout_cooldown_mult", 10))
             new_cd = min(new_cd * _tm, float(self.policy.max_cooldown_sec))
         s = self.stats_for(unique)
         # ESC-PIN: idem mark_failed (il winner fallito si sblocca).
@@ -437,9 +438,9 @@ class FailureMixin:
         # Leva B: stessa pausa minima longa (2h) se il cronico fallisce
         # di nuovo anche da dormiente (mark_failed_double_residual usa già
         # il raddoppio del residuo; qui garantiamo almeno il floor).
-        thr = max(1, int(getattr(self.policy, "cooldown_retry_max_fail_24h", 10) or 10))
+        thr = max(1, policy_int(self.policy, "cooldown_retry_max_fail_24h", 10))
         if s.fail_count_24h >= thr:
-            floor_cd = max(1.0, float(getattr(self.policy, "chronic_fail_cooldown_sec", 7200) or 7200))
+            floor_cd = max(1.0, policy_float(self.policy, "chronic_fail_cooldown_sec", 7200))
             new_cd = min(max(new_cd, floor_cd), float(self.policy.max_cooldown_sec))
         new_cd = self._apply_jitter(new_cd, unique)
         self._cooldown[unique] = now + new_cd

@@ -26,6 +26,7 @@ import logging
 import time
 
 from .lazy import lazy_dict
+from ..policy import policy_float, policy_int
 
 log = logging.getLogger("nx.router")
 
@@ -213,8 +214,8 @@ class CircuitBreakerMixin:
         if not dep.get("model"):
             return
         now = time.time()
-        win = float(getattr(self.policy, "model_circuit_window_sec", 60) or 60)
-        need = int(getattr(self.policy, "model_circuit_keys", 3) or 3)
+        win = policy_float(self.policy, "model_circuit_window_sec", 60)
+        need = policy_int(self.policy, "model_circuit_keys", 3)
         store = getattr(self, "_model_cb", None)
         if store is None:
             store = {}
@@ -241,7 +242,7 @@ class CircuitBreakerMixin:
         ent = getattr(self, "_model_cb", {}).get(self._model_cb_key(dep))
         if not ent or not ent.get("opened"):
             return False
-        open_sec = float(getattr(self.policy, "model_circuit_open_sec", 60) or 60)
+        open_sec = policy_float(self.policy, "model_circuit_open_sec", 60)
         if time.time() - ent["opened"] > open_sec:
             return False     # finestra chiusa: si riprova (half-open implicito)
         return True

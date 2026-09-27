@@ -212,3 +212,21 @@ def test_report_suppressed_is_rate_limited(caplog, monkeypatch):
     recs = [r for r in caplog.records if r.name == "nx.suppressed"]
     assert len(recs) == 1 and recs[0].exc_info is not None
     assert suppressed.suppressed_counts() == {"test.site": 5}
+
+
+# --------------------------------------------------------- policy readers
+def test_policy_float_int_match_getattr_or_expression():
+    from app.policy import policy_float, policy_int
+
+    class P:
+        zero = 0
+        none = None
+        val = "7"
+        f = 2.5
+
+    p = P()
+    for name in ("zero", "none", "val", "f", "missing"):
+        for d, fz in ((3, 3), (3, 0), (1.5, 0.0)):
+            assert policy_float(p, name, d, falsy=fz) == float(getattr(p, name, d) or fz)
+            assert policy_int(p, name, d, falsy=fz) == int(getattr(p, name, d) or fz)
+        assert policy_float(p, name, 9) == float(getattr(p, name, 9) or 9)

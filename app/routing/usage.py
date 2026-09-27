@@ -26,6 +26,7 @@ import logging
 import time
 
 from ..session_ctx import current_session
+from ..policy import policy_float
 from .lazy import lazy_dict
 from .rolling import RollingWindow
 
@@ -121,7 +122,7 @@ class UsageMixin:
 
     def _go_stick_ttl_sec(self) -> float:
         try:
-            v = float(getattr(self.policy, "go_stick_ttl_sec", 600) or 600)
+            v = policy_float(self.policy, "go_stick_ttl_sec", 600)
         except (TypeError, ValueError):
             v = 600.0
         return v if v > 0 else 600.0

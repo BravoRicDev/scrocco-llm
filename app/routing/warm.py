@@ -15,6 +15,7 @@ from collections import Counter
 from ..opencode_gate import (dep_usable as _dep_usable,
                              is_opencode_zen_dep,
                              opencode_cautious_request)
+from ..policy import policy_float, policy_int
 from ..session_ctx import current_session
 
 log = logging.getLogger("nx.router")
@@ -41,7 +42,7 @@ class WarmMixin:
     def _warm_ttl(self) -> float:
         """Finestra di validita' del pool caldi (0 = session_dep_guard_sec)."""
         try:
-            v = float(getattr(self.policy, "warm_pool_ttl_sec", 0) or 0)
+            v = policy_float(self.policy, "warm_pool_ttl_sec", 0)
         except (TypeError, ValueError):
             v = 0.0
         return v if v > 0 else self._guard_sec()
@@ -247,7 +248,7 @@ class WarmMixin:
             out.sort(key=_wkey)     # blocco unico: propri > prestati > lenti
         if not out:
             return []
-        max_n = max(0, int(getattr(self.policy, "warm_pool_max_attempts", 0) or 0))
+        max_n = max(0, policy_int(self.policy, "warm_pool_max_attempts", 0))
         if max_n > 0:
             out = out[:max_n]
         _n_own = sum(1 for d in out if d["unique"] in _own_set)
@@ -298,7 +299,7 @@ class WarmMixin:
         if cache is not None and (now - cache[0]) < 5.0:
             return cache[1]
         out: set[str] = set()
-        idle = float(getattr(self.policy, "warm_borrow_idle_sec", 240.0) or 0.0)
+        idle = policy_float(self.policy, "warm_borrow_idle_sec", 240.0, falsy=0.0)
         try:
             guard = self._guard_sec()
             for u, ent in list(self._dep_sess().items()):
@@ -344,7 +345,7 @@ class WarmMixin:
                 return False
         except Exception:                              # noqa: BLE001
             return False
-        idle = float(getattr(self.policy, "warm_borrow_idle_sec", 240.0) or 0.0)
+        idle = policy_float(self.policy, "warm_borrow_idle_sec", 240.0, falsy=0.0)
         return self._dep_idle_age(unique, now) >= idle
 
     def warm_ready_effective(self, session_id: str | None,
