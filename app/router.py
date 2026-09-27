@@ -45,15 +45,18 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import (GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST,
-                     ORDER_LAST)
+from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST, ORDER_LAST
 from .policy import Policy
 from .capabilities import required_caps, count_image_parts
 from .effort import get_effort
 from .caution import background_cautious_enabled
-from .opencode_gate import (dep_usable as _dep_usable,
-                            is_opencode_zen_dep, is_native_session,
-                            opencode_cautious_request, zen_first_request)
+from .opencode_gate import (
+    dep_usable as _dep_usable,
+    is_opencode_zen_dep,
+    is_native_session,
+    opencode_cautious_request,
+    zen_first_request,
+)
 from .thought_sig import is_gemini_deployment, should_avoid_gemini
 from .session_ctx import current_session, set_current_session
 from .routing.warm import WarmMixin
@@ -78,7 +81,7 @@ from app.constants import COOLDOWN_BASE_SECONDS as COOLDOWN_SECONDS
 from app.constants import SCORING_WEIGHTS as SW
 
 # Latency-based routing parameters (configurable via env vars / gateway.yaml)
-LATENCY_ROTATE_THRESHOLD_MS = 90000   # 90 seconds default threshold
+LATENCY_ROTATE_THRESHOLD_MS = 90000  # 90 seconds default threshold
 # SOFT demote (C size-aware): un successo 60-90s su una richiesta PESANTE
 # (>30k token) marca il dep "lento soft" SOLO per le successive richieste
 # pesanti della stessa sessione; le leggere lo usano normalmente. Il hard
@@ -99,8 +102,8 @@ CTX_BUCKET_COUNT = len(CTX_BUCKETS) + 1
 # il TTFT atteso quando il bucket richiesto non ha campioni (prima si ripiegava
 # sull'EMA globale mista -> deadline troppo stretto -> rotazioni/503 su catene
 # fredde con contesti grossi).
-TTFT_RATE_MIN_CTX = 8000        # sotto: il prefill e' trascurabile/rumoroso
-TTFT_RATE_FLOOR_MS = 250.0      # pavimento assoluto dell'estrapolazione
+TTFT_RATE_MIN_CTX = 8000  # sotto: il prefill e' trascurabile/rumoroso
+TTFT_RATE_FLOOR_MS = 250.0  # pavimento assoluto dell'estrapolazione
 # Demote per-sessione SOLO se la chiamata e' lenta sia in termini ASSOLUTI sia
 # RELATIVI alla baseline del dep nello STESSO bucket (>2x): chi ha sempre
 # servito i contesti grossi non viene punito per la sua natura.
@@ -114,401 +117,45 @@ SLOW_REL_BASELINE_MULT = 2.0
 SLOW_LATENCY_ABS_FLOOR_MS = 45000.0
 SLOW_LATENCY_REL_MULT = 2.0
 SLOW_LATENCY_MIN_PEERS = 5
-SLOW_GEN_MULT = 6.0                 # total atteso ~ ttft * mult (fallback)
-SLOW_TYPICAL_COMPLETION_TOKENS = 600.0   # output tipico per la stima gen
+SLOW_GEN_MULT = 6.0  # total atteso ~ ttft * mult (fallback)
+SLOW_TYPICAL_COMPLETION_TOKENS = 600.0  # output tipico per la stima gen
 
 
-def _is_quota_evidence(reason: str | None, status: int | None = None) -> bool:
-    """True se l'evidenza di fallimento e' di QUOTA (429/satura), non di guasto.
-
-    Stessa regola di KeyHealth.observe (F30): una chiave satura e' viva, non
-    rotta. Usata per NON contare questi fallimenti verso il ritiro automatico.
-    """
-    r = (reason or "").lower()
-    try:
-        st = abs(int(status)) if status else 0
-    except (TypeError, ValueError):
-        st = 0
-    return bool(st == 429 or "429" in r or "quota" in r or "rate_limit" in r)
-
-
-def _ctx_bucket(ctx_est) -> int:
-    """Indice di bucket per la stima token del contesto; -1 = ignoto."""
-    try:
-        c = int(ctx_est)
-    except (TypeError, ValueError):
-        return -1
-    for i, edge in enumerate(CTX_BUCKETS):
-        if c < edge:
-            return i
-    return len(CTX_BUCKETS)
-
-
-class ErrorKind:
-    """Classificazione centralizzata degli errori upstream (strategia di
-    recupero diversa per categoria).
-
-    - TRANSIENT:      errore di rete/timeout/5xx -> cooldown breve, riprova.
-    - QUOTA_RESET:    quota esaurita con reset temporale noto -> cooldown
-                      ESATTO al reset, senza escalation.
-    - PERMANENT_DEAD: chiave morta / modello rimosso -> niente cooldown,
-                      si ritira il deployment (CSV intatto).
-    - GENERIC_4XX:    altro 4xx -> escalation attuale.
-    """
-    TRANSIENT = "transient"
-    QUOTA_RESET = "quota_reset"
-    PERMANENT_DEAD = "permanent_dead"
-    GENERIC_4XX = "generic_4xx"
-LATENCY_PENALTY_PER_SEC = 0.5         # 0.5 points per second over threshold
-
-# Dynamic scoring defaults (override via gateway.yaml -> policy)
-DYNAMIC_SCORING_DEFAULTS = {
-    "enabled": True,
-    "latency_p95_weight": 1.0,
-    "error_rate_weight": 2.0,
-    "throughput_weight": 0.5,
-    "history_window": 100,
-}
-
-# Provider bias normalization: "log" (default), "sqrt", "none"
-PROVIDER_BIAS_NORMALIZATION = "log"
-
-
-@dataclass
-class DepStats:
-    """Statistiche runtime per deployment (rotazione adattiva).
-
-    I campi budget_* (Feature no-spreco) NON sono persistiti: le finestre
-    ripartono pulite al restart e i cap si ri-apprendono al primo 429.
-    """
-    last_used: float = 0.0
-    ema_latency_ms: float | None = None
-    inflight: int = 0
-    # Prefill REALE in volo (somma delle ctx_est): un heavy da 90k pesa come
-    # 18 light da 5k. E' il limiter che resta vero anche coi gemelli, perche'
-    # l'upstream vede la somma dei token, non il conteggio locale.
-    inflight_tokens: int = 0
-    fail_streak: int = 0              # fallimenti consecutivi (escalation cooldown)
-    success_ema: float | None = None  # tasso successo stimato (penalità dolce)
-    last_reason: str | None = None    # ultimo motivo di fallimento (402, 429...)
-    last_provenance: str | None = None  # nascita del cooldown (P0)
-    # --- budget guard: finestre scorrevoli + cap appresi dai 429 ---------
-    minute_calls: int = 0             # chiamate nel minuto corrente
-    minute_key: str = ""              # "YYYY-MM-DDTHH:MM" del bucket corrente
-    day_calls: int = 0                # chiamate nel giorno corrente (UTC)
-    day_key: str = ""                 # "YYYY-MM-DD"
-    min_cap_learned: float = 0.0      # 0 = nessun limite appreso
-    day_cap_learned: float = 0.0
-    # --- fail count 24h: cooldown lineare basato su fallimenti giornalieri ---
-    fail_count_24h: int = 0
-    fail_day_key: str = ""            # "YYYY-MM-DD" del giorno corrente
-    # --- contatori cumulativi + timestamp (persistiti in adaptive_stats) ---
-    ok_count: int = 0                 # successi cumulativi (mai azzerati)
-    fail_count: int = 0               # fallimenti cumulativi (mai azzerati)
-    last_success_ts: float = 0.0      # timestamp ultimo successo
-    last_fail_ts: float = 0.0         # timestamp ultimo fallimento
-    probe_fail_streak: int = 0        # probe passivi consecutivi falliti (cap)
-    json_fallback: int = 0            # quante volte ha ignorato stream:true (JSON->SSE)
-    # --- dynamic scoring: feature osservate per-deployment ---
-    latency_history: list = field(default_factory=list)  # ultimi N (bucket, ctx, ms)
-    total_tokens: int = 0              # token completati cumulativi
-    total_duration_ms: float = 0.0     # durata cumulativa ms
-    recent_failures: int = 0           # fallimenti negli ultimi N tentativi
-    recent_attempts: int = 0           # tentativi negli ultimi N
-
-HOT_WORDS: dict[str, str] = {
-    r"pensaci\s+bene": "max",
-    r"pensa\s+a\s+fondo": "max",
-    r"\bragiona\b": "max",
-    r"deep\s*think": "max",
-}
-HOT_WORDS_WINDOW = 3
-
-
-def _json_size(obj: Any) -> int:
-    """Lunghezza del JSON serializzato; 0 su errore (mai bloccare il routing)."""
-    try:
-        return len(json.dumps(obj, ensure_ascii=False, default=str))
-    except Exception:
-        return 0
-
-
-def _prompt_chars(messages: Any, tools: Any = None) -> int:
-    """Caratteri del payload prompt (stessa base di `_estimate_legacy`).
-
-    Conta content (str o parti testuali), tool_calls (nome + arguments JSON),
-    reasoning_content/reasoning e, se presenti, gli schemi `tools`. E' la base
-    su cui si misura il rapporto REALE char/token del provider (vedi
-    `note_session_estimate`): va chiamata sia sui messaggi EFFETTIVAMENTE
-    inviati a monte (dopo histnorm/ctxcompact) sia sulla preview pre-ctxcompact
-    usata al routing, cosi' i due lati della stima coincidono.
-    """
-    total = 0
-    if tools:
-        total += _json_size(list(tools))
-    for m in messages or ():
-        if not isinstance(m, dict):
-            continue
-        c = m.get("content")
-        if isinstance(c, str):
-            total += len(c)
-        elif isinstance(c, list):
-            total += sum(len(p.get("text", "")) for p in c
-                         if isinstance(p, dict))
-        for tc in m.get("tool_calls") or ():
-            if isinstance(tc, dict):
-                fn = tc.get("function") or {}
-                total += len(str(fn.get("name") or ""))
-                total += _json_size(fn.get("arguments"))
-        rc = m.get("reasoning_content") or m.get("reasoning")
-        if isinstance(rc, str):
-            total += len(rc)
-    return total
-
-
-def _estimate_legacy(messages: Any, divisor: int = CHARS_PER_TOKEN,
-                     image_token_estimate: int = 0, tools: Any = None) -> int:
-    """Stima storica: somma caratteri / divisor (default chars/4)."""
-    tokens = _prompt_chars(messages, tools) // max(1, divisor)
-    if image_token_estimate > 0:
-        tokens += count_image_parts(messages) * image_token_estimate
-    return tokens
-
-
-def _tokens_for_text(s: str) -> int:
-    """Stima token di UNA stringa con densita' adattiva (nostra, no upstream).
-
-    Il semplice chars/4 e' tarato sulla prosa inglese: sottostima il codice/JSON
-    (ricchi di simboli) e sopravvaluta testo CJK/accentato. Qui scegliamo un
-    divisore per-blocco in base alla composizione del testo. Non e' una
-    calibrazione dagli usage upstream (falsati da troncamento/compressione) ma
-    una stima piu' realistica del contenuto reale.
-    """
-    n = len(s)
-    if n == 0:
-        return 0
-    non_ascii = 0
-    symbols = 0
-    for ch in s:
-        if ord(ch) > 127:
-            non_ascii += 1
-        elif not ch.isalnum() and not ch.isspace():
-            symbols += 1
-    div = float(CHARS_PER_TOKEN)
-    # Codice/JSON: molti simboli -> piu' token per carattere.
-    if symbols / n > 0.15:
-        div -= 0.8
-    # CJK/accentato: pochissimi caratteri per token.
-    if non_ascii / n > 0.10:
-        div = min(div, 2.2)
-    div = max(1.5, div)
-    return int(n / div)
-
-
-def _estimate_adaptive(messages: Any, divisor: int = CHARS_PER_TOKEN,
-                       image_token_estimate: int = 0, tools: Any = None) -> int:
-    """Stima adattiva: densita' per-blocco invece di un divisore unico."""
-    total = 0
-    if tools:
-        total += _tokens_for_text(json.dumps(list(tools), ensure_ascii=False,
-                                             default=str))
-    for m in messages or ():
-        if not isinstance(m, dict):
-            continue
-        c = m.get("content")
-        if isinstance(c, str):
-            total += _tokens_for_text(c)
-        elif isinstance(c, list):
-            total += sum(_tokens_for_text(p.get("text", "")) for p in c
-                         if isinstance(p, dict))
-        for tc in m.get("tool_calls") or ():
-            if isinstance(tc, dict):
-                fn = tc.get("function") or {}
-                total += _tokens_for_text(str(fn.get("name") or ""))
-                total += _tokens_for_text(json.dumps(fn.get("arguments"),
-                                                      ensure_ascii=False,
-                                                      default=str))
-        rc = m.get("reasoning_content") or m.get("reasoning")
-        if isinstance(rc, str):
-            total += _tokens_for_text(rc)
-    if image_token_estimate > 0:
-        total += count_image_parts(messages) * image_token_estimate
-    return total
-
-
-# Modalita' della stima: shadow = calcola e logga entrambe ma ritorna la
-# legacy; adaptive = ritorna quella adattiva. Configurate dalla policy.
-_ESTIMATE_ADAPTIVE = False
-_ESTIMATE_SHADOW = True
-_estimate_shadow_stats: dict[str, int] = {"n": 0, "legacy": 0, "adaptive": 0}
-# AUTO-ADAPTIVE: il rollout della stima non deve dipendere da un intervento
-# manuale ne' da una finestra di traffico che i deploy azzerano. I contatori
-# shadow sopravvivono al restart (persistiti in adaptive_stats.json) e, appena
-# ci sono campioni sufficienti con delta contenuto, la stima adattiva si
-# attiva da sola. La policy resta il master switch manuale.
-_ESTIMATE_AUTO_ALLOWED = False
-_ESTIMATE_AUTO_ON = False
-_ESTIMATE_AUTO_MIN_N = 200
-_ESTIMATE_AUTO_MAX_DELTA_PCT = 5.0
-
-
-def configure_estimate(*, adaptive: bool, shadow: bool,
-                       auto_enable: bool | None = None,
-                       auto_min_n: int | None = None,
-                       auto_max_delta_pct: float | None = None) -> None:
-    global _ESTIMATE_ADAPTIVE, _ESTIMATE_SHADOW, _ESTIMATE_AUTO_ALLOWED
-    global _ESTIMATE_AUTO_MIN_N, _ESTIMATE_AUTO_MAX_DELTA_PCT, _ESTIMATE_AUTO_ON
-    _ESTIMATE_ADAPTIVE = bool(adaptive)
-    _ESTIMATE_SHADOW = bool(shadow)
-    if auto_enable is not None:
-        _ESTIMATE_AUTO_ALLOWED = bool(auto_enable)
-        if not _ESTIMATE_AUTO_ALLOWED:
-            _ESTIMATE_AUTO_ON = False    # policy off -> spegne anche il runtime
-    if auto_min_n is not None:
-        _ESTIMATE_AUTO_MIN_N = max(1, int(auto_min_n))
-    if auto_max_delta_pct is not None:
-        _ESTIMATE_AUTO_MAX_DELTA_PCT = max(0.0, float(auto_max_delta_pct))
-    if _ESTIMATE_ADAPTIVE:
-        _ESTIMATE_AUTO_ON = False        # il master switch esplicito vince
-
-
-def estimate_auto_state() -> dict:
-    """Stato del rollout automatico (admin e test)."""
-    return {"allowed": _ESTIMATE_AUTO_ALLOWED, "on": _ESTIMATE_AUTO_ON,
-            "min_n": _ESTIMATE_AUTO_MIN_N,
-            "max_delta_pct": _ESTIMATE_AUTO_MAX_DELTA_PCT}
-
-
-def load_estimate_shadow(data: dict) -> None:
-    """Ripristina i contatori shadow (n/legacy/adaptive) da disco."""
-    if not isinstance(data, dict):
-        return
-    try:
-        n = max(0, int(data.get("n") or 0))
-        lg = max(0, int(data.get("legacy") or 0))
-        ad = max(0, int(data.get("adaptive") or 0))
-    except (TypeError, ValueError):
-        return
-    if n and (lg <= 0 or ad < 0):
-        return
-    _estimate_shadow_stats["n"] = n
-    _estimate_shadow_stats["legacy"] = lg
-    _estimate_shadow_stats["adaptive"] = ad
-
-
-def _maybe_auto_adaptive() -> None:
-    """Accende la stima adattiva quando l'evidenza shadow e' sufficiente."""
-    global _ESTIMATE_AUTO_ON
-    if _ESTIMATE_AUTO_ON or _ESTIMATE_ADAPTIVE or not _ESTIMATE_AUTO_ALLOWED:
-        return
-    n = _estimate_shadow_stats["n"]
-    if n < _ESTIMATE_AUTO_MIN_N:
-        return
-    lg = _estimate_shadow_stats["legacy"]
-    if lg <= 0:
-        return
-    delta = abs(_estimate_shadow_stats["adaptive"] - lg) * 100.0 / lg
-    if delta <= _ESTIMATE_AUTO_MAX_DELTA_PCT:
-        _ESTIMATE_AUTO_ON = True
-        log.info("[estimate] auto-adaptive ON: n=%d delta=%.2f%% (<= %.2f%%)",
-                 n, delta, _ESTIMATE_AUTO_MAX_DELTA_PCT)
-
-
-def estimate_shadow_stats() -> dict:
-    """Contatori cumulativi della modalita' shadow (per /admin/policy)."""
-    s = dict(_estimate_shadow_stats)
-    n = s.get("n") or 0
-    if n:
-        s["legacy_avg"] = round(s["legacy"] / n, 1)
-        s["adaptive_avg"] = round(s["adaptive"] / n, 1)
-        s["delta_pct"] = round((s["adaptive"] - s["legacy"]) * 100.0
-                               / max(1, s["legacy"]), 1)
-    s["auto"] = estimate_auto_state()
-    return s
-
-
-def estimate_tokens(messages: Any, divisor: int = CHARS_PER_TOKEN,
-                    image_token_estimate: int = 0,
-                    tools: Any = None) -> int:
-    """Stima grezza del contesto: somma caratteri / divisor (default chars/4).
-
-    Conta TUTTO cio' che l'upstream fatturera' nel prompt: content dei
-    messaggi, tool_calls (nome + arguments), reasoning_content/reasoning e,
-    se fornito, gli schemi in `tools`. Se non li si conta, tool_calls e
-    reasoning restano invisibili alla stima e il contesto reale viene
-    sottovalutato fino a ~12x (poi l'upstream risponde 413).
-    Se image_token_estimate > 0, aggiunge quel valore per ogni parte-immagine.
-
-    Con la stima adattiva attiva (shadow o adaptive, da policy) calcola anche
-    la variante `_estimate_adaptive`; in shadow logga il confronto e ritorna la
-    legacy, cosi' si valida senza cambiare il routing.
-    """
-    legacy = _estimate_legacy(messages, divisor, image_token_estimate, tools)
-    if not (_ESTIMATE_ADAPTIVE or _ESTIMATE_SHADOW):
-        return legacy
-    adaptive = _estimate_adaptive(messages, divisor, image_token_estimate, tools)
-    _estimate_shadow_stats["n"] += 1
-    _estimate_shadow_stats["legacy"] += legacy
-    _estimate_shadow_stats["adaptive"] += adaptive
-    _maybe_auto_adaptive()
-    if _ESTIMATE_SHADOW and not (_ESTIMATE_ADAPTIVE or _ESTIMATE_AUTO_ON):
-        log.debug("[estimate] shadow legacy=%d adaptive=%d delta=%+d",
-                  legacy, adaptive, adaptive - legacy)
-        return legacy
-    return adaptive
-
-
-def detect_hot_words(messages: Any, patterns: list[str] | None = None,
-                     window: int = HOT_WORDS_WINDOW) -> bool:
-    """Hot word negli ultimi N messaggi USER (non assistant: falsi positivi)."""
-    patterns = patterns or list(HOT_WORDS)
-    if not messages:
-        return False
-    import re as _re
-    for msg in messages[-window:]:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        content = msg.get("content") or ""
-        if isinstance(content, list):
-            content = " ".join(p.get("text", "") for p in content
-                               if isinstance(p, dict))
-        if not content:
-            continue
-        for pattern in patterns:
-            if _re.search(pattern, content, re.IGNORECASE):
-                return True
-    return False
-
-
-def inject_identity(data: dict, dep: dict, router=None) -> None:
-    """Sostituisce/inserisce il system message d'identità e setta il modello univoco.
-
-    Replica _select_and_inject() dell'hook: certezza del modello che risponde.
-    Con router passato, arricchisce il log con l'EMA di latenza del deployment.
-    """
-    real = dep["model"]
-    sys_msg = {
-        "role": "system",
-        "content": (f"You are {real}. When the user asks which model you are, "
-                    f"reply exactly: I am {real}."),
-    }
-    messages = list(data.get("messages") or [])
-    if messages and messages[0].get("role") == "system":
-        messages[0] = sys_msg
-    else:
-        messages.insert(0, sys_msg)
-    data["messages"] = messages
-    data["model"] = dep["unique"]
-    extra = ""
-    if router is not None:
-        s = router.stats_for(dep["unique"])
-        if s.ema_latency_ms:
-            extra = f", ema={s.ema_latency_ms:.0f}ms"
-    prov = dep.get("api_base", "")
-    if "://" in prov:
-        prov = prov.split("://", 1)[1].split("/", 1)[0]
-    log.info("[identity] %s -> %s (%s via %s%s)", dep["group"], dep["unique"],
-             real, prov, extra)
+# Re-exports from app.routing.estimate (extracted verbatim, R0).
+# Tests and internal code import these names from app.router.
+from app.routing.estimate import (  # noqa: F401
+    _is_quota_evidence,
+    _ctx_bucket,
+    _json_size,
+    _prompt_chars,
+    _estimate_legacy,
+    _tokens_for_text,
+    _estimate_adaptive,
+    configure_estimate,
+    estimate_auto_state,
+    load_estimate_shadow,
+    _maybe_auto_adaptive,
+    estimate_shadow_stats,
+    estimate_tokens,
+    detect_hot_words,
+    inject_identity,
+    ErrorKind,
+    DepStats,
+    CTX_BUCKETS,
+    CTX_BUCKET_COUNT,
+    LATENCY_PENALTY_PER_SEC,
+    DYNAMIC_SCORING_DEFAULTS,
+    PROVIDER_BIAS_NORMALIZATION,
+    HOT_WORDS,
+    HOT_WORDS_WINDOW,
+    _ESTIMATE_ADAPTIVE,
+    _ESTIMATE_SHADOW,
+    _estimate_shadow_stats,
+    _ESTIMATE_AUTO_ALLOWED,
+    _ESTIMATE_AUTO_ON,
+    _ESTIMATE_AUTO_MIN_N,
+    _ESTIMATE_AUTO_MAX_DELTA_PCT,
+)
 
 
 class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
@@ -516,10 +163,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         self.config = config
         self.policy = policy or Policy.default()
         self._sticky: dict[str, tuple[str, float]] = {}
-        self._cooldown: dict[str, float] = {}   # unique -> expiry epoch
+        self._cooldown: dict[str, float] = {}  # unique -> expiry epoch
         self._cooldown_since: dict[str, float] = {}  # unique -> quando fu messo
-        self._cooldown_full: dict[str, float] = {}   # unique -> durata totale (probe/decay)
-        self._stats: dict[str, DepStats] = {}   # unique -> statistiche runtime
+        self._cooldown_full: dict[str, float] = {}  # unique -> durata totale (probe/decay)
+        self._stats: dict[str, DepStats] = {}  # unique -> statistiche runtime
         # conteggio pick deviati dalla regola multimodal_last_resort
         self.media_deferred: dict[str, int] = {}
         # conteggio fallback che attraversano MODELLI diversi nei gruppi
@@ -603,15 +250,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # Lazy-init via _esc() per i Router "nudi" (test con Router.__new__).
         self._esc_win: dict[str, tuple[str, float]] = {}
         # --- Reputation Scoring (Blocco 1) ---
-        self._base_scores: dict[str, float] = {}       # unique -> base score
+        self._base_scores: dict[str, float] = {}  # unique -> base score
         # ANTI-RAFFICA PROVIDER (solo testo/dims): ultimo TENTATIVO
         # (provider, model) e ts per provider. Serve a non fare due richieste
         # consecutive allo stesso provider (rischio ban). Lazy per Router nudi.
         self._last_attempt: tuple[str, str] | None = None
         self._prov_last: dict[str, float] = {}
-        self._provider_scores: dict[str, float] = {}   # provider_model -> group score
-        self._key_scores: dict[str, float] = {}        # api_key -> group score
-        self._avg_latencies: dict[str, float] = {}     # unique -> average latency
+        self._provider_scores: dict[str, float] = {}  # provider_model -> group score
+        self._key_scores: dict[str, float] = {}  # api_key -> group score
+        self._avg_latencies: dict[str, float] = {}  # unique -> average latency
         # EMA PER BUCKET DI CONTESTO (vedi CTX_BUCKETS): totali e TTFT separate.
         # unique -> [e0,e1,e2,e3]; 0.0 = nessun campione per quel bucket.
         self._lat_buckets: dict[str, list] = {}
@@ -671,13 +318,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         self._applied_quirks: list[dict] = []
         try:
             self.apply_quirks()
-        except Exception as exc:                      # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("[quirk] applicazione fallita: %r", exc)
         # TUNING DA POLICY: allinea le costanti di modulo ai valori dichiarati
         # (default = valore storico: se non configurati, nulla cambia).
         try:
             self.sync_runtime_constants()
-        except Exception as exc:                      # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("[router] sync tuning fallito: %r", exc)
 
     # ------------------------------------------------- escalation winner
@@ -693,23 +340,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
     # -------------------------------------------------------------- sticky
 
-
-
     # ---------------------------------------------------- deployment-sticky
     def _is_renewal_bucket(self, group_name: str) -> bool:
         """True se il gruppo è un bucket rinnovo/pagato (-go, -fallback)."""
         go_suf = self.config.go_suffix or ""
         fb_suf = self.config.fallback_suffix or ""
-        return (group_name.endswith(go_suf) or group_name.endswith(fb_suf))
-
-
-
-
+        return group_name.endswith(go_suf) or group_name.endswith(fb_suf)
 
     # --- Sticky per-capability (deployment_sticky_per_capability) ---
-
-
-
 
     # --------------------------------------------- session cache holder
     def _cache_ok(self) -> dict:
@@ -719,13 +357,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             self._session_last_ok = d
         return d
 
-
-
-
-
-
     # ------------------------------------------ ctxcompact watermark
-
 
     # ------------------------------------------------- audit del prefisso (F4)
 
@@ -739,8 +371,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             self._usage_times = d
         return d
 
-    def note_usage(self, unique: str, ts: float | None = None,
-                   ctx_est: int | None = None) -> None:
+    def note_usage(self, unique: str, ts: float | None = None, ctx_est: int | None = None) -> None:
         """Registra un TENTATIVO (ok o fail, NON un probe) nella finestra
         rolling 24h usata dallo spread a freddo. F28: il peso e' il PREFILL
         reale (ctx_est/8000), non 1: 10 chiamate da 80k pesano come 100 da 2k,
@@ -784,8 +415,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             dq.popleft()
         return len(dq)
 
-    def usage_count_window(self, unique: str, sec: float,
-                           now: float | None = None) -> int:
+    def usage_count_window(self, unique: str, sec: float, now: float | None = None) -> int:
         """Tentativi (start) nella finestra rolling `sec`, usato dal fair-share
         delle chiavi nei gruppi capacità primary. NON pota il deque: la finestra
         a 24h del cold-spread deve restare intatta (si limita a contare, dal
@@ -803,7 +433,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         return n
 
     # ------------------------------------------------- bilanciamento -go
-    _GO_BALANCE_DEFAULT_WINDOW = 18000.0   # 5h
+    _GO_BALANCE_DEFAULT_WINDOW = 18000.0  # 5h
 
     def _out_toks(self) -> dict:
         d = getattr(self, "_out_tokens", None)
@@ -814,9 +444,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
     def _go_balance_window(self) -> float:
         try:
-            v = float(getattr(self.policy, "go_balance_window_sec",
-                              self._GO_BALANCE_DEFAULT_WINDOW)
-                      or self._GO_BALANCE_DEFAULT_WINDOW)
+            v = float(
+                getattr(self.policy, "go_balance_window_sec", self._GO_BALANCE_DEFAULT_WINDOW)
+                or self._GO_BALANCE_DEFAULT_WINDOW
+            )
         except (TypeError, ValueError):
             v = self._GO_BALANCE_DEFAULT_WINDOW
         return v if v > 0 else self._GO_BALANCE_DEFAULT_WINDOW
@@ -834,8 +465,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             v = 600.0
         return v if v > 0 else 600.0
 
-    def note_output_tokens(self, unique: str, completion_tokens,
-                           ts: float | None = None) -> None:
+    def note_output_tokens(self, unique: str, completion_tokens, ts: float | None = None) -> None:
         """Registra i TOKEN DI OUTPUT di una risposta CONSEGNATA nella finestra
         rolling del bilanciamento -go. Solo successi con token reali: un
         fallimento (o una risposta a vuoto) non consuma quota di output."""
@@ -859,8 +489,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         while dq and dq[0][0] < cut:
             dq.popleft()
 
-    def output_tokens_window(self, unique: str, sec: float | None = None,
-                             now: float | None = None) -> int:
+    def output_tokens_window(self, unique: str, sec: float | None = None, now: float | None = None) -> int:
         """Token di output consumati da `unique` nella finestra rolling (default
         5h, policy `go_balance.window_sec`). 0 se non ci sono campioni."""
         dq = self._out_toks().get(unique)
@@ -908,14 +537,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if k <= 0:
             return deps
         ranked = sorted(
-            pool,
-            key=lambda d: (counts[d["unique"]],
-                           self.stats_for(d["unique"]).last_used or 0.0),
-            reverse=True)
+            pool, key=lambda d: (counts[d["unique"]], self.stats_for(d["unique"]).last_used or 0.0), reverse=True
+        )
         hide = {d["unique"] for d in ranked[:k]}
         kept = [d for d in deps if d["unique"] not in hide]
-        log.info("[spread] hidden=%d/%d (%.0f%%) kept=%d: %s", len(hide), n,
-                 pct * 100, len(kept), ",".join(sorted(hide)[:6]))
+        log.info(
+            "[spread] hidden=%d/%d (%.0f%%) kept=%d: %s", len(hide), n, pct * 100, len(kept), ",".join(sorted(hide)[:6])
+        )
         return kept
 
     def _spread_hidden_chain(self, chain: list[str]) -> set[str]:
@@ -928,8 +556,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if dep is None:
                 continue
             g = dep.get("group", "")
-            if self.config.group_caps.get(g) is not None \
-                    or self._is_renewal_bucket(g):
+            if self.config.group_caps.get(g) is not None or self._is_renewal_bucket(g):
                 continue
             by_group.setdefault(g, []).append(dep)
         hide: set[str] = set()
@@ -938,20 +565,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             hide |= {d["unique"] for d in deps} - kept
         return hide
 
-
-
-
-
     def _guard_sec(self) -> float:
         try:
-            return max(0.0, float(getattr(self.policy, "session_dep_guard_sec",
-                                          900) or 0))
+            return max(0.0, float(getattr(self.policy, "session_dep_guard_sec", 900) or 0))
         except (TypeError, ValueError):
             return 900.0
-
-
-
-
 
     def _free_group(self, group_name: str) -> bool:
         """True se il gruppo NON e' un bucket rinnovo/pagato."""
@@ -959,10 +577,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
     # --------------------------------------- modalita' compatta (sticky)
 
-
     # ------------------------------------------------- escalation winner
-    def record_escalation_win(self, requested_group: str | None,
-                              served_dep: dict | None) -> None:
+    def record_escalation_win(self, requested_group: str | None, served_dep: dict | None) -> None:
         """Ricorda il deployment che ha SERVITO con successo una richiesta
         PARTITA da `requested_group` ma atterrata su un gruppo PIU' ALTO
         (salita della scala). Solo-in-salita: se invece il servizio e' nel
@@ -984,10 +600,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # salita buona: (ri)setta e SCIVOLA il ts (finestra scorrevole)
         self._esc()[requested_group] = (served_dep["unique"], time.time())
 
-    def _try_esc_win(self, group_name: str,
-                     need: frozenset[str] | None = None,
-                     ctx: int | None = None,
-                     tried: set[str] | None = None) -> dict | None:
+    def _try_esc_win(
+        self, group_name: str, need: frozenset[str] | None = None, ctx: int | None = None, tried: set[str] | None = None
+    ) -> dict | None:
         """Restituisce il deployment winner ricordato per `group_name` SOLO se
         ancora spendibile: pin non scaduto, deployment ancora nel CSV, non in
         cooldown, capacita' e contesto compatibili, non gia' tentato. Altrimenti
@@ -1000,37 +615,34 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not entry:
             return None
         unique, ts = entry
-        ttl = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec",
-                                 300) or 300))
+        ttl = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec", 300) or 300))
         if time.time() - ts > ttl:
-            _ew.pop(group_name, None)                     # scaduto
+            _ew.pop(group_name, None)  # scaduto
             return None
         if tried and unique in tried:
             return None
         dep = self.config.deployment_by_unique(unique)
-        if dep is None:                                   # hot-reload: rimosso
+        if dep is None:  # hot-reload: rimosso
             _ew.pop(group_name, None)
             return None
-        if self._gemini_blocked(dep):                     # richiesta non eleggibile
+        if self._gemini_blocked(dep):  # richiesta non eleggibile
             return None
-        if self.is_cooled_down(unique):                   # non rimuove: revive
+        if self.is_cooled_down(unique):  # non rimuove: revive
             return None
-        if self.other_session_recent(unique):             # occupato altra sessione
+        if self.other_session_recent(unique):  # occupato altra sessione
             return None
-        if not self._cap_fits(dep, ctx):                  # NON regge il ctx
+        if not self._cap_fits(dep, ctx):  # NON regge il ctx
             return None
-        if not _dep_usable(dep):                          # upstream non usabile
+        if not _dep_usable(dep):  # upstream non usabile
             return None
-        if need and not self._dep_supports(dep, need):    # capacita' mancante
+        if need and not self._dep_supports(dep, need):  # capacita' mancante
             return None
-        log.info("[esc-pin] %s -> %s (eta=%.0fs): salto la scala",
-                 group_name, unique, time.time() - ts)
+        log.info("[esc-pin] %s -> %s (eta=%.0fs): salto la scala", group_name, unique, time.time() - ts)
         return dep
 
-    def _pick_tiered(self, group_name: str,
-                     need: frozenset[str] | None = None,
-                     ctx: int | None = None,
-                     tried: set[str] | None = None) -> dict | None:
+    def _pick_tiered(
+        self, group_name: str, need: frozenset[str] | None = None, ctx: int | None = None, tried: set[str] | None = None
+    ) -> dict | None:
         """Sceglie 1 deployment VIVO nel TIER (order) vivo piu' basso non
         ancora sondato in questo gruppo. Serve a provare, UNO PER TIER, tutti
         i tier vivi di una dim (non solo il primo di `pick_deployment`): il
@@ -1075,11 +687,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return ch
         return random.choice(pool)
 
-    def _esc_pin_probe(self, req_grp: str | None, winner: dict | None,
-                       need: frozenset[str] | None = None,
-                       ctx: int | None = None,
-                       tried: set[str] | None = None,
-                       *, allow_retry: bool = True) -> dict | None:
+    def _esc_pin_probe(
+        self,
+        req_grp: str | None,
+        winner: dict | None,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        tried: set[str] | None = None,
+        *,
+        allow_retry: bool = True,
+    ) -> dict | None:
         """RICAMPIONAMENTO PRE-PIN.
 
         Prima di usare la scorciatoia del pin (winner, tipicamente -go),
@@ -1097,32 +714,33 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return None
         if winner is None or not req_grp:
             return None
-        if (getattr(self.policy, "cache_aware_enabled", True)
-                and getattr(self.policy, "cache_skip_probe_when_holder",
-                            True)):
+        if getattr(self.policy, "cache_aware_enabled", True) and getattr(
+            self.policy, "cache_skip_probe_when_holder", True
+        ):
             _hold = self.session_holder()
             if _hold and winner.get("unique") == _hold:
                 if winner.get("group") == req_grp:
-                    log.info("[cache] winner==detentore %s (stesso bucket): "
-                             "salto il probe", _hold)
+                    log.info("[cache] winner==detentore %s (stesso bucket): salto il probe", _hold)
                     return None
                 # Detentore su bucket DIVERSO (tipico: -go dopo un'escalation,
                 # perche' note_session_success registra il holder su QUALSIASI
                 # successo, renewal inclusi): NON saltare il probe, o la
                 # sessione resta incollata al bucket a pagamento senza mai
                 # riprovare la free-dim richiesta (regressione vista live).
-                log.info("[cache] winner==detentore %s ma su altro bucket "
-                         "(%s != %s): provo comunque la richiesta",
-                         _hold, winner.get("group"), req_grp)
-        n_dims = max(0, int(getattr(self.policy, "escalation_pin_probe_dims",
-                                     2) or 0))
+                log.info(
+                    "[cache] winner==detentore %s ma su altro bucket (%s != %s): provo comunque la richiesta",
+                    _hold,
+                    winner.get("group"),
+                    req_grp,
+                )
+        n_dims = max(0, int(getattr(self.policy, "escalation_pin_probe_dims", 2) or 0))
         if n_dims <= 0:
-            return None                       # probe disabilitato (anche retry)
+            return None  # probe disabilitato (anche retry)
         m = self.DIM_SUFFIX_RE.search(req_grp)
         if not m:
-            return None                       # -go/-fallback/cap: niente dim
+            return None  # -go/-fallback/cap: niente dim
         req_dim = int(m.group(1))
-        pname = req_grp[:m.start()][len(self.config.proxy_prefix):]
+        pname = req_grp[: m.start()][len(self.config.proxy_prefix) :]
         base = f"{self.config.proxy_prefix}{pname}"
         tried_set = tried or set()
         tried_groups: dict[str, int] = {}
@@ -1135,14 +753,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # (a) retry nella dim richiesta: 1 tentativo per OGNI tier vivo del
         #     bucket (non solo il primo di pick_deployment). Il bucket
         #     nominale resta la prima scelta anche col pin.
-        if allow_retry and getattr(self.policy, "escalation_pin_probe_retry",
-                                   True):
-            cand = self._pick_tiered(req_grp, need=need, ctx=ctx,
-                                     tried=tried_set)
+        if allow_retry and getattr(self.policy, "escalation_pin_probe_retry", True):
+            cand = self._pick_tiered(req_grp, need=need, ctx=ctx, tried=tried_set)
             if cand is not None:
-                log.info("[esc-pin-probe] %s: retry dim richiesta "
-                         "(tier=%s) -> %s", req_grp, cand.get("order"),
-                         cand["unique"])
+                log.info(
+                    "[esc-pin-probe] %s: retry dim richiesta (tier=%s) -> %s",
+                    req_grp,
+                    cand.get("order"),
+                    cand["unique"],
+                )
                 return cand
 
         # (b) dim intermedie (> dim richiesta, escluso il gruppo winner).
@@ -1151,8 +770,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         #     continuano prima di aprirne di nuove; il budget
         #     `escalation_pin_probe_dims` conta le dim gia' aperte.
         winner_group = winner.get("group")
-        inter = [d for d in self.config.profile_dims.get(pname, [])
-                 if d > req_dim and f"{base}-{d}k" != winner_group]
+        inter = [d for d in self.config.profile_dims.get(pname, []) if d > req_dim and f"{base}-{d}k" != winner_group]
         if not inter:
             return None
         cand_by_dim = []
@@ -1164,29 +782,35 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not cand_by_dim:
             return None
         opened = [d for d in inter if f"{base}-{d}k" in tried_groups]
-        cont = [(d, g, c) for (d, g, c) in cand_by_dim
-                if f"{base}-{d}k" in tried_groups]
-        fresh = [(d, g, c) for (d, g, c) in cand_by_dim
-                 if f"{base}-{d}k" not in tried_groups]
+        cont = [(d, g, c) for (d, g, c) in cand_by_dim if f"{base}-{d}k" in tried_groups]
+        fresh = [(d, g, c) for (d, g, c) in cand_by_dim if f"{base}-{d}k" not in tried_groups]
         if getattr(self.policy, "escalation_pin_probe_random", True):
             random.shuffle(fresh)
         if cont:
             _d, g, cand = cont[0]
         elif len(opened) >= n_dims:
-            return None                       # campionamento gia' esaurito
+            return None  # campionamento gia' esaurito
         elif fresh:
             _d, g, cand = fresh[0]
         else:
             return None
-        log.info("[esc-pin-probe] %s: sondo dim intermedia %s (tier=%s) -> %s",
-                 req_grp, g, cand.get("order"), cand["unique"])
+        log.info(
+            "[esc-pin-probe] %s: sondo dim intermedia %s (tier=%s) -> %s", req_grp, g, cand.get("order"), cand["unique"]
+        )
         return cand
 
     # ------------------------------------------------------------ cooldown
-    def mark_failed(self, unique: str, seconds: float | None = None,
-                    reason: str | None = None, status: int | None = None,
-                    kind: str | None = None, *, additive: bool = False,
-                    provenance: str | None = None) -> float:
+    def mark_failed(
+        self,
+        unique: str,
+        seconds: float | None = None,
+        reason: str | None = None,
+        status: int | None = None,
+        kind: str | None = None,
+        *,
+        additive: bool = False,
+        provenance: str | None = None,
+    ) -> float:
         """Marca il deployment fallito con cooldown.
 
         - `seconds` esplicito vince SEMPRE (es. Retry-After su 429)
@@ -1229,8 +853,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # sprecare tentativi, log e metriche.
             self._update_circuit_breaker_on_failure(unique, key_level=True)
             self._retire_permanent(unique, reason or "permanent_dead")
-            log.warning("[cooldown] %s errore PERMANENTE (%s): niente cooldown, "
-                        "deployment retired", unique, reason or "-")
+            log.warning(
+                "[cooldown] %s errore PERMANENTE (%s): niente cooldown, deployment retired", unique, reason or "-"
+            )
             return 0.0
         # --- budget guard: apprendimento del limite dal 429 --------------
         bg_cfg = pol.budget_guard or {}
@@ -1241,24 +866,26 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             learned_day = max(floor_day, s.day_calls * 1.2)
             s.min_cap_learned = max(s.min_cap_learned, learned_min)
             s.day_cap_learned = max(s.day_cap_learned, learned_day)
-            log.info("[budget] %s: cap appresi da 429 -> ~%.0f/min, "
-                     "~%.0f/giorno", unique, s.min_cap_learned,
-                     s.day_cap_learned)
+            log.info(
+                "[budget] %s: cap appresi da 429 -> ~%.0f/min, ~%.0f/giorno",
+                unique,
+                s.min_cap_learned,
+                s.day_cap_learned,
+            )
         # --- dynamic concurrency limit: 429/503 = concorrenza oltre il
         # limite -> dimezza il limite appreso (min 1) -----------------------
         if status in (429, 503):
             self._punish_concurrency(unique)
         s.fail_streak += 1
         prev = 1.0 if s.success_ema is None else s.success_ema
-        s.success_ema = max(0.0, 0.8 * prev)      # EMA verso lo 0 (α=0.2)
-        _explicit_seconds = seconds is not None   # F18: solo per i DERIVATI
+        s.success_ema = max(0.0, 0.8 * prev)  # EMA verso lo 0 (α=0.2)
+        _explicit_seconds = seconds is not None  # F18: solo per i DERIVATI
         # PROVENIENZA del cooldown (P0): da cosa NASCE. Solo gli 'heuristic'
         # (nostra stima) possono essere testati in anticipo dalla sveglia;
         # 'authoritative' (Retry-After/quota dichiarati dal provider), 'credit'
         # (402) e 'tier' (403) NON si toccano: il provider ha detto quando
         # torna e ritentare prima e' solo rumore (e rischio ban).
-        _prov = provenance or self._infer_provenance(reason, status,
-                                                     _explicit_seconds)
+        _prov = provenance or self._infer_provenance(reason, status, _explicit_seconds)
         s.last_provenance = _prov
         self._cooldown_prov()[unique] = _prov
         if seconds is None:
@@ -1270,8 +897,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 seconds = min(seconds, float(pol.max_cooldown_sec))
             elif pol.cooldown_escalation and s.fail_streak > 1:
                 expo = min(s.fail_streak - 1, 24)
-                seconds = min(float(pol.max_cooldown_sec),
-                              float(pol.cooldown_sec) * (2 ** expo))
+                seconds = min(float(pol.max_cooldown_sec), float(pol.cooldown_sec) * (2**expo))
             else:
                 seconds = float(pol.cooldown_sec)
         seconds = max(1.0, float(seconds))
@@ -1280,8 +906,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # credit/tier non si tocca MAI. 0 = nessun tetto.
         _is_quota = str(reason or "").startswith("quota_exhausted")
         if _prov == "heuristic" and not _is_quota:
-            _ceil = max(0, int(getattr(pol, "cooldown_estimate_ceiling_sec",
-                                       0) or 0))
+            _ceil = max(0, int(getattr(pol, "cooldown_estimate_ceiling_sec", 0) or 0))
             if _ceil > 0:
                 seconds = min(seconds, float(_ceil))
         # ── CLASSI DI ERRORE (F18) ────────────────────────────────────────
@@ -1301,11 +926,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 else:
                     _sc = int(getattr(pol, "cooldown_transient_sec", 15) or 15)
                 seconds = min(seconds, max(1.0, float(_sc)))
-                log.info("[cooldown-class] %s classe=transient(%s) -> %.0fs",
-                         unique, reason or "5xx", seconds)
+                log.info("[cooldown-class] %s classe=transient(%s) -> %.0fs", unique, reason or "5xx", seconds)
             elif _cls == "quota":
-                log.info("[cooldown-class] %s classe=quota -> %.0fs "
-                         "(retry-after)", unique, seconds)
+                log.info("[cooldown-class] %s classe=quota -> %.0fs (retry-after)", unique, seconds)
         # TIMEOUT: solo in modalita' storica (classi disattivate) vale il
         # moltiplicatore `timeout_cooldown_mult`; con le classi attive il
         # timeout ha gia' il suo cooldown breve dedicato (anti black-hole:
@@ -1318,10 +941,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # dopo essere stato "svegliato" dal paracadute e aver fallito, non
         # deve essere ritentato a breve. clear_cooldown su successo lo azzera.
         thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10) or 10))
-        if s.fail_count_24h >= thr and kind != ErrorKind.QUOTA_RESET \
-                and not _is_quota:
-            floor_cd = max(1.0, float(getattr(
-                pol, "chronic_fail_cooldown_sec", 7200) or 7200))
+        if s.fail_count_24h >= thr and kind != ErrorKind.QUOTA_RESET and not _is_quota:
+            floor_cd = max(1.0, float(getattr(pol, "chronic_fail_cooldown_sec", 7200) or 7200))
             seconds = min(max(seconds, floor_cd), float(pol.max_cooldown_sec))
         if kind != ErrorKind.QUOTA_RESET:
             seconds = self._apply_jitter(seconds, unique)
@@ -1343,45 +964,48 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             self._cooldown_since[unique] = _now
             self._cooldown_full_map()[unique] = float(seconds)
         esc = ""
-        if seconds is not None and s.fail_streak > 1 \
-                and getattr(pol, "cooldown_mode", "linear") == "exponential":
+        if seconds is not None and s.fail_streak > 1 and getattr(pol, "cooldown_mode", "linear") == "exponential":
             esc = " escalation"
         _tag = "esteso di" if additive else "inattivo per"
-        log.warning("[cooldown] %s %s %ds%s (streak=%d, fail_24h=%d)",
-                    unique, _tag, int(seconds), esc, s.fail_streak,
-                    s.fail_count_24h)
+        log.warning(
+            "[cooldown] %s %s %ds%s (streak=%d, fail_24h=%d)",
+            unique,
+            _tag,
+            int(seconds),
+            esc,
+            s.fail_streak,
+            s.fail_count_24h,
+        )
 
         # F7: il 429 e' quasi sempre un fatto di CHIAVE/account, non del
         # singolo deployment: bloccare soft (skip a pick, zero strike/zero
         # cooldown) TUTTE le twin sulla stessa api_key per il Retry-After.
         # F18: vale anche per 'quota_exhausted' (limite giornaliero/mensile
         # della chiave: stesso effetto, stessa gestione).
-        if reason in ("http_429", "quota_exhausted") and \
-                getattr(pol, "key_soft_429_enabled", True):
+        if reason in ("http_429", "quota_exhausted") and getattr(pol, "key_soft_429_enabled", True):
             _d429 = self.config.deployment_by_unique(unique)
             _k429 = (_d429 or {}).get("api_key")
             if isinstance(_k429, str) and _k429:
-                _tag429 = hashlib.sha256(
-                    _k429.encode("utf-8", errors="replace")).hexdigest()[:12]
-                _cap = max(10.0, float(getattr(pol, "key_soft_max_sec",
-                                               900) or 900))
+                _tag429 = hashlib.sha256(_k429.encode("utf-8", errors="replace")).hexdigest()[:12]
+                _cap = max(10.0, float(getattr(pol, "key_soft_max_sec", 900) or 900))
                 # jitter DETERMINISTICO (F19): le twin non devono ripartire
                 # tutte nel medesimo millisecondo al termine del Retry-After.
-                _until = _now + min(float(seconds), _cap) \
-                    + self._jitter_spread(_tag429)
+                _until = _now + min(float(seconds), _cap) + self._jitter_spread(_tag429)
                 _sd = getattr(self, "_key_soft", None)
                 if _sd is None:
                     _sd = {}
                     self._key_soft = _sd
                 if float(_sd.get(_tag429, 0.0)) < _until:
                     _sd[_tag429] = _until
-                    log.info("[key-soft] chiave %s*: skip soft %ds "
-                             "(429 su %s)", _tag429[:6],
-                             int(min(float(seconds), _cap)), unique)
+                    log.info(
+                        "[key-soft] chiave %s*: skip soft %ds (429 su %s)",
+                        _tag429[:6],
+                        int(min(float(seconds), _cap)),
+                        unique,
+                    )
 
         # --- Circuit Breaker (hybrid: dep sempre, key solo errori di chiave) ---
-        self._update_circuit_breaker_on_failure(
-            unique, key_level=self._is_key_level_failure(status, reason))
+        self._update_circuit_breaker_on_failure(unique, key_level=self._is_key_level_failure(status, reason))
         # F25: 5xx sistematici su chiavi diverse -> breaker di MODELLO
         self._note_model_failure(self._dep_of(unique), status)
 
@@ -1417,10 +1041,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return False
         g = dep.get("group", "")
         try:
-            if self.config.group_caps.get(g) is not None \
-                    or self._is_renewal_bucket(g):
+            if self.config.group_caps.get(g) is not None or self._is_renewal_bucket(g):
                 return False
-        except Exception:                       # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return False
         k = dep.get("api_key")
         if not isinstance(k, str) or not k:
@@ -1439,8 +1062,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not rec:
             return False
         ts, rem = rec
-        ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec",
-                                     20.0) or 20.0))
+        ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec", 20.0) or 20.0))
         if now - ts > ttl:
             return False
         cap = int(getattr(self.policy, "rate_hint_remaining_max", 5) or 5)
@@ -1469,8 +1091,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     d[tag] = (time.time(), _rem)
                     if len(d) > 8192:
                         _now = time.time()
-                        for k in [k for k, (t, _r) in d.items()
-                                  if _now - t > 3600]:
+                        for k in [k for k, (t, _r) in d.items() if _now - t > 3600]:
                             d.pop(k, None)
         bg = self.policy.budget_guard or {}
         if not bg.get("enabled"):
@@ -1489,14 +1110,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         new_cap = max(1.0, remaining + 1.0)
         if s.min_cap_learned <= 0 or new_cap < s.min_cap_learned:
             s.min_cap_learned = new_cap
-            log.info("[budget] %s: hint rate-limit (remaining=%.0f<=%d) -> "
-                     "cap ~%.0f/min", unique, remaining, thr, new_cap)
+            log.info(
+                "[budget] %s: hint rate-limit (remaining=%.0f<=%d) -> cap ~%.0f/min", unique, remaining, thr, new_cap
+            )
 
     def _retire_permanent(self, unique: str, reason: str) -> None:
         """Ritira un deployment permanentemente rotto (chiave morta, modello
         rimosso). NON tocca il CSV: usa il lifecycle keyhealth (retired)."""
         try:
-            from . import main as _gw_mod          # lazy: evita cicli import
+            from . import main as _gw_mod  # lazy: evita cicli import
+
             kh = getattr(_gw_mod, "KEYHEALTH", None)
             if kh is None:
                 return
@@ -1506,8 +1129,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         except Exception:  # noqa: BLE001
             log.warning("[lifecycle] retire %s fallito", unique, exc_info=True)
 
-    def escalate_cooldown(self, base_seconds: float,
-                          fail_count_24h: int) -> float:
+    def escalate_cooldown(self, base_seconds: float, fail_count_24h: int) -> float:
         """Escalation DOLCE del cooldown per fallimenti ricorrenti (24h).
 
         - primo fallimento (~1): ritorna `base_seconds` invariato;
@@ -1530,12 +1152,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         mult_m = max(0, int(getattr(self.policy, "cooldown_linear_mult_min", 30) or 30))
         potent = (base_m + mult_m * max(0, n - 1)) * 60.0
         potent = min(potent, float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
-        return min(float(base_seconds) + 0.1 * potent,
-                   float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
+        return min(float(base_seconds) + 0.1 * potent, float(getattr(self.policy, "max_cooldown_sec", 18000) or 18000))
 
-    def mark_failed_double_residual(self, unique: str,
-                                     reason: str | None = None,
-                                     status: int | None = None) -> float:
+    def mark_failed_double_residual(self, unique: str, reason: str | None = None, status: int | None = None) -> float:
         """Raddoppia il cooldown residuo quando un deployment dormiente fallisce
         di nuovo. Usato al posto di mark_failed per i retry di deployment
         in cooldown (stale/ultima spiaggia)."""
@@ -1547,8 +1166,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         new_cd = remaining * 2.0
         new_cd = min(new_cd, float(self.policy.max_cooldown_sec))
         if reason == "timeout":
-            _tm = max(1, int(getattr(self.policy, "timeout_cooldown_mult", 10)
-                             or 10))
+            _tm = max(1, int(getattr(self.policy, "timeout_cooldown_mult", 10) or 10))
             new_cd = min(new_cd * _tm, float(self.policy.max_cooldown_sec))
         s = self.stats_for(unique)
         # ESC-PIN: idem mark_failed (il winner fallito si sblocca).
@@ -1577,20 +1195,21 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # Leva B: stessa pausa minima longa (2h) se il cronico fallisce
         # di nuovo anche da dormiente (mark_failed_double_residual usa già
         # il raddoppio del residuo; qui garantiamo almeno il floor).
-        thr = max(1, int(getattr(self.policy, "cooldown_retry_max_fail_24h", 10)
-                                    or 10))
+        thr = max(1, int(getattr(self.policy, "cooldown_retry_max_fail_24h", 10) or 10))
         if s.fail_count_24h >= thr:
-            floor_cd = max(1.0, float(getattr(
-                self.policy, "chronic_fail_cooldown_sec", 7200) or 7200))
-            new_cd = min(max(new_cd, floor_cd),
-                         float(self.policy.max_cooldown_sec))
+            floor_cd = max(1.0, float(getattr(self.policy, "chronic_fail_cooldown_sec", 7200) or 7200))
+            new_cd = min(max(new_cd, floor_cd), float(self.policy.max_cooldown_sec))
         new_cd = self._apply_jitter(new_cd, unique)
         self._cooldown[unique] = now + new_cd
         self._cooldown_since[unique] = now
         self._cooldown_full_map()[unique] = float(new_cd)
-        log.warning("[cooldown] %s dormiente ri-fallito -> cooldown "
-                    "raddoppiato a %ds (residuo era %ds, fail_24h=%d)",
-                    unique, int(new_cd), int(remaining), s.fail_count_24h)
+        log.warning(
+            "[cooldown] %s dormiente ri-fallito -> cooldown raddoppiato a %ds (residuo era %ds, fail_24h=%d)",
+            unique,
+            int(new_cd),
+            int(remaining),
+            s.fail_count_24h,
+        )
         self._maybe_retire_on_probe_fail(unique, s)
         return new_cd
 
@@ -1614,17 +1233,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     # --------------------------------------------------- Reputation scoring
     def _init_scoring_if_needed(self) -> None:
         """Initialize scoring dicts if not already initialized (for __new__ pattern)."""
-        if not hasattr(self, '_base_scores'):
+        if not hasattr(self, "_base_scores"):
             self._base_scores: dict[str, float] = {}
-        if not hasattr(self, '_provider_scores'):
+        if not hasattr(self, "_provider_scores"):
             self._provider_scores: dict[str, float] = {}
-        if not hasattr(self, '_key_scores'):
+        if not hasattr(self, "_key_scores"):
             self._key_scores: dict[str, float] = {}
-        if not hasattr(self, '_avg_latencies'):
+        if not hasattr(self, "_avg_latencies"):
             self._avg_latencies: dict[str, float] = {}
-        if not hasattr(self, '_scores_decay_ts'):
+        if not hasattr(self, "_scores_decay_ts"):
             self._scores_decay_ts: float = time.time()
-        if not hasattr(self, '_scores_decay_log_ts'):
+        if not hasattr(self, "_scores_decay_log_ts"):
             self._scores_decay_log_ts: float = time.time()
 
     def _decay_scores(self, now: float | None = None) -> float:
@@ -1636,8 +1255,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         fattore applicato (1.0 = nessun decay)."""
         now = time.time() if now is None else now
         self._init_scoring_if_needed()
-        hl = float(getattr(self.policy, "reputation_decay_halflife_sec", 0.0)
-                   or 0.0)
+        hl = float(getattr(self.policy, "reputation_decay_halflife_sec", 0.0) or 0.0)
         last = self._scores_decay_ts
         self._scores_decay_ts = now
         if hl <= 0.0 or now <= last:
@@ -1645,8 +1263,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         dt = now - last
         factor = 0.5 ** (dt / hl)
         pruned = 0
-        for d in (self._base_scores, self._provider_scores,
-                  self._key_scores):
+        for d in (self._base_scores, self._provider_scores, self._key_scores):
             for k in list(d.keys()):
                 v = d[k] * factor
                 if abs(v) < 1e-4:
@@ -1657,19 +1274,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # Heartbeat INFO ogni ~10 minuti (il watcher gira ogni pochi secondi:
         # loggare ad ogni tick sarebbe rumore); dettaglio a DEBUG.
         if now - self._scores_decay_log_ts >= 600.0:
-            log.info("[rep-decay] punteggi *=%.4f (halflife=%.1fh, "
-                     "finestra=%.0fs, potati=%d)", factor, hl / 3600.0, dt,
-                     pruned)
+            log.info(
+                "[rep-decay] punteggi *=%.4f (halflife=%.1fh, finestra=%.0fs, potati=%d)",
+                factor,
+                hl / 3600.0,
+                dt,
+                pruned,
+            )
             self._scores_decay_log_ts = now
         else:
-            log.debug("[rep-decay] *=%.6f dt=%.0fs potati=%d", factor, dt,
-                      pruned)
+            log.debug("[rep-decay] *=%.6f dt=%.0fs potati=%d", factor, dt, pruned)
         return factor
 
     def _provider_key(self, dep: dict) -> str:
         """Restituisce la chiave provider/modello per il scoring di gruppo."""
         self._init_scoring_if_needed()
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return "default|default"
         prov = dep.get("api_base", "")
         model = dep.get("model", "")
@@ -1678,13 +1298,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     def _api_key_str(self, dep: dict) -> str:
         """Restituisce la chiave API per il scoring di gruppo."""
         self._init_scoring_if_needed()
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return ""
         return dep.get("api_key", "")
 
     def record_attempt(self, unique: str) -> None:
         """Registra un tentativo: incrementa il punteggio del provider e della chiave."""
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return
         dep = self.config.deployment_by_unique(unique)
         if dep is None:
@@ -1697,9 +1317,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["ATTEMPT_KEY"]
         log.debug("[rep-attempt] %s provider+=%d key+=%d", unique, SW["ATTEMPT_PROVIDER"], SW["ATTEMPT_KEY"])
 
-    def record_success(self, unique: str, latency_ms: float,
-                       quality: float = 1.0, ctx_est=None,
-                       kind: str = "total") -> None:
+    def record_success(
+        self, unique: str, latency_ms: float, quality: float = 1.0, ctx_est=None, kind: str = "total"
+    ) -> None:
         """Registra un successo: decrementa i punteggi per deployment, provider, chiave.
 
         `quality` in [0.1, 1.0] scala l'alpha dell'EMA di latenza: una risposta
@@ -1711,7 +1331,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         tempo al primo contenuto (commit dello stream). L'EMA globale
         `_avg_latencies` resta mista per compatibilita' (timeout adattivo,
         tie-breaker); i consumatori sensibili al contesto leggono i bucket."""
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return
         dep = self.config.deployment_by_unique(unique)
         if dep is None:
@@ -1731,12 +1351,31 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             self._avg_latencies[unique] = old_avg * (1 - alpha) + latency_ms * alpha
         ema_new = self._avg_latencies[unique]
         if old_avg is None or (old_avg < LATENCY_ROTATE_THRESHOLD_MS and ema_new >= LATENCY_ROTATE_THRESHOLD_MS):
-            log.info("[latency-cross] %s ema superata soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg or 0, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
+            log.info(
+                "[latency-cross] %s ema superata soglia: da %.0fms a %.0fms (threshold=%dms)",
+                unique,
+                old_avg or 0,
+                ema_new,
+                LATENCY_ROTATE_THRESHOLD_MS,
+            )
         elif old_avg and old_avg >= LATENCY_ROTATE_THRESHOLD_MS and ema_new < LATENCY_ROTATE_THRESHOLD_MS:
-            log.info("[latency-cross] %s ema rientrata sotto soglia: da %.0fms a %.0fms (threshold=%dms)", unique, old_avg, ema_new, LATENCY_ROTATE_THRESHOLD_MS)
+            log.info(
+                "[latency-cross] %s ema rientrata sotto soglia: da %.0fms a %.0fms (threshold=%dms)",
+                unique,
+                old_avg,
+                ema_new,
+                LATENCY_ROTATE_THRESHOLD_MS,
+            )
         # --- EMA per bucket di contesto (F1) + history per il p95 dinamico ---
         self._note_latency_sample(unique, latency_ms, ctx_est, kind, alpha)
-        log.debug("[rep-success] %s dep+=%d provider+=%d key+=%d ema=%.0fms", unique, SW["SUCCESS_DEPLOYMENT"], SW["SUCCESS_PROVIDER"], SW["SUCCESS_KEY"], latency_ms)
+        log.debug(
+            "[rep-success] %s dep+=%d provider+=%d key+=%d ema=%.0fms",
+            unique,
+            SW["SUCCESS_DEPLOYMENT"],
+            SW["SUCCESS_PROVIDER"],
+            SW["SUCCESS_KEY"],
+            latency_ms,
+        )
 
         # --- Circuit Breaker: success updates ---
         self._update_circuit_breaker_on_success(unique)
@@ -1759,8 +1398,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if ctx < 8000 or pt <= 1000:
             return
         try:
-            alpha = float(getattr(self.policy, "estimate_calib_alpha", 0.05)
-                          or 0.05)
+            alpha = float(getattr(self.policy, "estimate_calib_alpha", 0.05) or 0.05)
         except (TypeError, ValueError):
             alpha = 0.05
         base = float(getattr(self.policy, "estimate_divisor", 4) or 4)
@@ -1817,8 +1455,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d = self._sess_ratio = {}
         return d
 
-    def note_session_estimate(self, session_id: str | None, pre_chars,
-                              post_chars, prompt_tokens) -> None:
+    def note_session_estimate(self, session_id: str | None, pre_chars, post_chars, prompt_tokens) -> None:
         """Accumula i rapporti char/token della sessione su DUE basi.
 
         `pre_chars`  = caratteri del payload al momento della STIMA (preview
@@ -1846,10 +1483,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             pt = int(prompt_tokens or 0)
         except (TypeError, ValueError):
             return
-        _minch = int(getattr(self.policy, "session_estimate_min_chars",
-                             8000) or 0)
-        _minpt = int(getattr(self.policy, "session_estimate_min_tokens",
-                             1000) or 0)
+        _minch = int(getattr(self.policy, "session_estimate_min_chars", 8000) or 0)
+        _minpt = int(getattr(self.policy, "session_estimate_min_tokens", 1000) or 0)
         if ch_post < _minch or pt < _minpt:
             return
         if ch_pre < ch_post:
@@ -1865,14 +1500,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         rec["n"] = int(rec.get("n") or 0) + 1
         rec["ts"] = now
         d[session_id] = rec
-        log.info("[est-sess] %s: campione pre=%d post=%d pt=%d "
-                 "cpt_post=%.2f cpt_pre=%.2f -> media cpt_pre=%.2f (n=%d)",
-                 session_id, ch_pre, ch_post, pt,
-                 ch_post / max(1, pt), ch_pre / max(1, pt),
-                 rec["pre"] / max(1, rec["pt"]), rec["n"])
+        log.info(
+            "[est-sess] %s: campione pre=%d post=%d pt=%d cpt_post=%.2f cpt_pre=%.2f -> media cpt_pre=%.2f (n=%d)",
+            session_id,
+            ch_pre,
+            ch_post,
+            pt,
+            ch_post / max(1, pt),
+            ch_pre / max(1, pt),
+            rec["pre"] / max(1, rec["pt"]),
+            rec["n"],
+        )
 
-    def session_chars_per_token(self, session_id: str | None,
-                                pre: bool = False):
+    def session_chars_per_token(self, session_id: str | None, pre: bool = False):
         """Rapporto char/token appreso per la sessione (None se assente/stale).
 
         `pre=False` (default) -> `cpt_post` = char inviati / token (tokenizer
@@ -1888,8 +1528,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not isinstance(rec, dict):
             return None
         try:
-            ch = int(rec.get("pre" if pre else "post")
-                     or rec.get("chars") or 0)
+            ch = int(rec.get("pre" if pre else "post") or rec.get("chars") or 0)
             pt = int(rec.get("pt") or 0)
             n = int(rec.get("n") or 0)
             ts = float(rec.get("ts") or 0.0)
@@ -1901,10 +1540,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if _ttl > 0 and time.time() - ts > _ttl:
             return None
         try:
-            _lo = float(getattr(self.policy, "session_estimate_min_ratio",
-                                1.5) or 1.5)
-            _hi = float(getattr(self.policy, "session_estimate_max_ratio",
-                                8.0) or 8.0)
+            _lo = float(getattr(self.policy, "session_estimate_min_ratio", 1.5) or 1.5)
+            _hi = float(getattr(self.policy, "session_estimate_max_ratio", 8.0) or 8.0)
         except (TypeError, ValueError):
             _lo, _hi = 1.5, 8.0
         return max(_lo, min(_hi, ch / float(pt)))
@@ -1916,8 +1553,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d = self._sess_floor = {}
         return d
 
-    def note_session_overflow(self, session_id: str | None,
-                              tokens: int | float | None) -> None:
+    def note_session_overflow(self, session_id: str | None, tokens: int | float | None) -> None:
         """Alza la soglia minima della sessione dopo un context_length_exceeded.
 
         Monotona (solo max): la richiesta successiva stima almeno questo valore
@@ -1946,10 +1582,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             for s in [s for s, (_v, t) in d.items() if now - t > _ttl]:
                 d.pop(s, None)
         if len(d) > 4096:
-            for s in sorted(d, key=lambda k: d[k][1])[:len(d) - 4096]:
+            for s in sorted(d, key=lambda k: d[k][1])[: len(d) - 4096]:
                 d.pop(s, None)
-        log.info("[session-overflow] %s: soglia sessione alzata a >=%d token",
-                 session_id, val)
+        log.info("[session-overflow] %s: soglia sessione alzata a >=%d token", session_id, val)
 
     def session_floor_tokens(self, session_id: str | None) -> int | None:
         """Floor monotono della sessione (None se assente/scaduto)."""
@@ -1965,12 +1600,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return None
         return int(val)
 
-    def estimate_for_session(self, session_id: str | None, messages: Any,
-                             divisor: int = CHARS_PER_TOKEN,
-                             image_token_estimate: int = 0,
-                             tools: Any = None,
-                             pre: bool = False,
-                             unique: str | None = None) -> tuple[int, bool]:
+    def estimate_for_session(
+        self,
+        session_id: str | None,
+        messages: Any,
+        divisor: int = CHARS_PER_TOKEN,
+        image_token_estimate: int = 0,
+        tools: Any = None,
+        pre: bool = False,
+        unique: str | None = None,
+    ) -> tuple[int, bool]:
         """Stima del contesto con il rapporto per-sessione, se disponibile.
 
         Ritorna `(tokens, usato_rapporto)`. Senza rapporto appreso (1o turno di
@@ -1992,14 +1631,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
            aderente a quello specifico upstream -> max (anti-overflow).
         """
         try:
-            margin = float(getattr(self.policy, "session_estimate_margin",
-                                   1.05) or 1.0)
+            margin = float(getattr(self.policy, "session_estimate_margin", 1.05) or 1.0)
         except (TypeError, ValueError):
             margin = 1.05
         cpt = self.session_chars_per_token(session_id, pre=pre)
         if not cpt:
-            est = estimate_tokens(messages, divisor, image_token_estimate,
-                                  tools)
+            est = estimate_tokens(messages, divisor, image_token_estimate, tools)
             used = False
         else:
             est = int(_prompt_chars(messages, tools) / cpt * max(1.0, margin))
@@ -2013,14 +1650,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             try:
                 _div = self.effective_divisor(unique)
                 if _div and _div > 0:
-                    est = max(est, int(_prompt_chars(messages, tools)
-                                       / _div * max(1.0, margin)))
-            except Exception:                          # noqa: BLE001
+                    est = max(est, int(_prompt_chars(messages, tools) / _div * max(1.0, margin)))
+            except Exception:  # noqa: BLE001
                 pass
         return est, used
 
-    def _note_latency_sample(self, unique: str, latency_ms: float,
-                             ctx_est, kind: str, alpha: float) -> None:
+    def _note_latency_sample(self, unique: str, latency_ms: float, ctx_est, kind: str, alpha: float) -> None:
         """Aggiorna l'EMA del bucket giusto (total o ttft) e, per i totali con
         contesto noto, la history usata dal p95 del dynamic scoring."""
         try:
@@ -2032,8 +1667,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         b = _ctx_bucket(ctx_est)
         if b < 0:
             return
-        table = getattr(self, "_ttft_buckets" if kind == "ttft"
-                        else "_lat_buckets", None)
+        table = getattr(self, "_ttft_buckets" if kind == "ttft" else "_lat_buckets", None)
         if not isinstance(table, dict):
             return
         v = table.get(unique)
@@ -2057,8 +1691,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     rate = self._prefill_rate = {}
                 r = lat / (cx / 1000.0)
                 prev = rate.get(unique)
-                rate[unique] = r if prev is None or prev <= 0 else \
-                    prev * (1 - alpha) + r * alpha
+                rate[unique] = r if prev is None or prev <= 0 else prev * (1 - alpha) + r * alpha
             return
         s = self.stats_for(unique)
         if s is not None:
@@ -2069,8 +1702,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if len(h) > 20:
                 del h[:-20]
 
-    def bucket_latency_ms(self, unique: str, ctx_est=None,
-                          kind: str = "total") -> float | None:
+    def bucket_latency_ms(self, unique: str, ctx_est=None, kind: str = "total") -> float | None:
         """EMA del deployment nel bucket di contesto della richiesta.
 
         Se il bucket non ha campioni: per kind='ttft' (F9) estrapola dal rate
@@ -2078,8 +1710,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         solo su contesti piccoli non sembra "veloce" anche su 100k; per gli
         altri kind ripiega sull'EMA globale (compat)."""
         b = _ctx_bucket(ctx_est)
-        table = getattr(self, "_ttft_buckets" if kind == "ttft"
-                        else "_lat_buckets", None)
+        table = getattr(self, "_ttft_buckets" if kind == "ttft" else "_lat_buckets", None)
         if b >= 0 and isinstance(table, dict):
             v = table.get(unique)
             if v and len(v) > b and v[b] > 0:
@@ -2095,8 +1726,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 return max(TTFT_RATE_FLOOR_MS, float(r) * cx / 1000.0)
         return getattr(self, "_avg_latencies", {}).get(unique)
 
-    def note_stream_end(self, unique: str, dur_ms: float, ctx_est=None,
-                        completion_tokens=None) -> None:
+    def note_stream_end(self, unique: str, dur_ms: float, ctx_est=None, completion_tokens=None) -> None:
         """Durata TOTALE di uno stream committed: alimenta solo i bucket
         'total' (il punteggio di reputazione e l'EMA globale li ha gia'
         contati il commit sul primo contenuto)."""
@@ -2114,7 +1744,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     gr = {}
                     self._gen_rate = gr
                 prev = gr.get(unique)
-                gr[unique] = (tps if not prev else prev * 0.8 + tps * 0.2)
+                gr[unique] = tps if not prev else prev * 0.8 + tps * 0.2
         except (TypeError, ValueError):
             pass
 
@@ -2130,7 +1760,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         - altro 4xx (schema/payload): come sempre (deployment+provider+chiave:
           spesso e' specifico del modello/deployment).
         """
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return
         dep = self.config.deployment_by_unique(unique)
         if dep is None:
@@ -2141,10 +1771,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             log.debug("[rep-fail] %s classe=quota: nessuna penale", unique)
             return
         if cls == "transient":
-            self._base_scores[unique] = self._base_scores.get(unique, 0) \
-                + SW["FAIL_TRANSIENT"]
-            log.debug("[rep-fail] %s classe=transient dep+=%d (chiave e "
-                      "provider intatti)", unique, SW["FAIL_TRANSIENT"])
+            self._base_scores[unique] = self._base_scores.get(unique, 0) + SW["FAIL_TRANSIENT"]
+            log.debug(
+                "[rep-fail] %s classe=transient dep+=%d (chiave e provider intatti)", unique, SW["FAIL_TRANSIENT"]
+            )
             return
         self._base_scores[unique] = self._base_scores.get(unique, 0) + SW["FAIL_DEPLOYMENT"]
         pk = self._provider_key(dep)
@@ -2155,7 +1785,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         else:
             self._provider_scores[pk] = self._provider_scores.get(pk, 0) + SW["FAIL_PROVIDER"]
             self._key_scores[ak] = self._key_scores.get(ak, 0) + SW["FAIL_KEY"]
-        log.debug("[rep-fail] %s dep+=%d provider+=%d key+=%d is_key=%s", unique, SW["FAIL_DEPLOYMENT"], SW["FAIL_PROVIDER"], SW["FAIL_KEY"], is_key_fail)
+        log.debug(
+            "[rep-fail] %s dep+=%d provider+=%d key+=%d is_key=%s",
+            unique,
+            SW["FAIL_DEPLOYMENT"],
+            SW["FAIL_PROVIDER"],
+            SW["FAIL_KEY"],
+            is_key_fail,
+        )
 
     @staticmethod
     def _error_class(status: int | None, reason: str | None = None) -> str:
@@ -2167,19 +1804,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         r = (reason or "").lower()
         if st == 429 or "429" in r or "rate_limit" in r or "quota" in r:
             return "quota"
-        if st in (401, 402, 403) or any(x in r for x in (
-                "401", "402", "403", "auth", "forbidden", "unauthorized")):
+        if st in (401, 402, 403) or any(x in r for x in ("401", "402", "403", "auth", "forbidden", "unauthorized")):
             return "key"
-        if st >= 500 or (st == 0 and r in (
-                "timeout", "read_timeout", "network", "network_error",
-                "provider_transient", "provider_fault")):
+        if st >= 500 or (
+            st == 0
+            and r in ("timeout", "read_timeout", "network", "network_error", "provider_transient", "provider_fault")
+        ):
             return "transient"
         return "generic"
 
-    def _reputation_score(self, unique: str, dep: dict,
-                          ctx_est=None) -> float:
+    def _reputation_score(self, unique: str, dep: dict, ctx_est=None) -> float:
         """Calcola il punteggio di reputazione per un deployment."""
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return 0.0
         # COLD START: il deployment parte da -(preferenza × model_preference_base).
         # Un modello preferito (pref>0) parte molto avanti (es. pref=100, base=10
@@ -2192,8 +1828,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if unique not in self._base_scores:
             _pref0 = float(dep.get("model_preference", 0) or 0)
             if _pref0:
-                self._base_scores[unique] = -_pref0 * float(
-                    getattr(self.policy, "model_preference_base", 10.0) or 0.0)
+                self._base_scores[unique] = -_pref0 * float(getattr(self.policy, "model_preference_base", 10.0) or 0.0)
         score = self._base_scores.get(unique, 0.0)
         pk = self._provider_key(dep)
         ak = self._api_key_str(dep)
@@ -2206,28 +1841,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # Normalizzazione log-scaling: provider/key con molti deployment non dominano
         # log(n+1) dove n = deployment count per provider/key
         norm = PROVIDER_BIAS_NORMALIZATION
-        if norm != "none" and hasattr(self, 'config') and self.config and hasattr(self.config, 'groups'):
+        if norm != "none" and hasattr(self, "config") and self.config and hasattr(self.config, "groups"):
             if norm == "log":
                 # Conta deployment per questo provider/model e per api_key
-                prov_count = sum(
-                    1 for lst in self.config.groups.values()
-                    for d in lst if self._provider_key(d) == pk
-                )
-                key_count = sum(
-                    1 for lst in self.config.groups.values()
-                    for d in lst if self._api_key_str(d) == ak
-                )
+                prov_count = sum(1 for lst in self.config.groups.values() for d in lst if self._provider_key(d) == pk)
+                key_count = sum(1 for lst in self.config.groups.values() for d in lst if self._api_key_str(d) == ak)
                 prov_score = prov_score / math.log(prov_count + 1) if prov_count > 0 else prov_score
                 key_score = key_score / math.log(key_count + 1) if key_count > 0 else key_score
             elif norm == "sqrt":
-                prov_count = sum(
-                    1 for lst in self.config.groups.values()
-                    for d in lst if self._provider_key(d) == pk
-                )
-                key_count = sum(
-                    1 for lst in self.config.groups.values()
-                    for d in lst if self._api_key_str(d) == ak
-                )
+                prov_count = sum(1 for lst in self.config.groups.values() for d in lst if self._provider_key(d) == pk)
+                key_count = sum(1 for lst in self.config.groups.values() for d in lst if self._api_key_str(d) == ak)
                 prov_score = prov_score / math.sqrt(prov_count) if prov_count > 0 else prov_score
                 key_score = key_score / math.sqrt(key_count) if key_count > 0 else key_score
         # "none" = no normalization
@@ -2247,11 +1870,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             penalty = over_seconds * LATENCY_PENALTY_PER_SEC  # e.g., 0.5 per second
             _dcy = self._cooldown_decay(unique)
             if _dcy < 1.0:
-                penalty *= _dcy        # penalita' che decade col cooldown
+                penalty *= _dcy  # penalita' che decade col cooldown
             score += penalty
-            log.debug("[latency-penalty] %s ema=%.0fms threshold=%.0fms "
-                      "penalty=%.1f (over=%.1fs)",
-                      unique, ema, _thr, penalty, over_seconds)
+            log.debug(
+                "[latency-penalty] %s ema=%.0fms threshold=%.0fms penalty=%.1f (over=%.1fs)",
+                unique,
+                ema,
+                _thr,
+                penalty,
+                over_seconds,
+            )
 
         # Bias di EFFORT: SOLO quando il client chiede esplicitamente effort
         # "high" si sposta la scelta verso l'intelligence alta e si premia chi
@@ -2273,13 +1901,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             score *= factor
             if dep.get("effort_capable"):
                 score -= EFFORT_CAPABLE_BONUS
-            log.debug("[effort-bias] %s effort=high intel=%.0f factor=%.3f "
-                      "totale=%.1f", unique, intel, factor, score)
+            log.debug("[effort-bias] %s effort=high intel=%.0f factor=%.3f totale=%.1f", unique, intel, factor, score)
 
         # --- Dynamic scoring: latency p95, error_rate, throughput ---
         # Pesi configurabili via policy (DYNAMIC_SCORING_DEFAULTS override)
         ds_enabled = getattr(self.policy, "dynamic_scoring_enabled", True)
-        if ds_enabled and hasattr(self, '_stats') and unique in self._stats:
+        if ds_enabled and hasattr(self, "_stats") and unique in self._stats:
             stats = self._stats[unique]
             hist = stats.latency_history or []
             # Finestra dei campioni per il dynamic scoring (`dynamic_scoring_
@@ -2287,8 +1914,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # /admin/tuning ma NON usata -> la classifica usava sempre tutta
             # la storia. Ora si limita agli ultimi N campioni (0 = tutta).
             try:
-                _win = int(getattr(self.policy,
-                                   "dynamic_scoring_history_window", 0) or 0)
+                _win = int(getattr(self.policy, "dynamic_scoring_history_window", 0) or 0)
             except (TypeError, ValueError):
                 _win = 0
             if _win > 0:
@@ -2352,15 +1978,20 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     # Higher throughput = better (lower score)
                     score -= min(throughput, 1000.0) * tput_weight / 100.0  # cap at 1000 tok/s
 
-                log.debug("[dynamic-scoring] %s p95=%.0fms err=%.2f tput=%.1f score=%.1f",
-                          unique, p95_latency, error_rate if recent_attempts else 0,
-                          throughput if total_tokens else 0, score)
+                log.debug(
+                    "[dynamic-scoring] %s p95=%.0fms err=%.2f tput=%.1f score=%.1f",
+                    unique,
+                    p95_latency,
+                    error_rate if recent_attempts else 0,
+                    throughput if total_tokens else 0,
+                    score,
+                )
 
         return score
 
     def _get_avg_latency(self, unique: str) -> float | None:
         """Restituisce la media storica della latenza per un deployment."""
-        if not hasattr(self, 'config') or self.config is None:
+        if not hasattr(self, "config") or self.config is None:
             return None
         return self._avg_latencies.get(unique)
 
@@ -2380,8 +2011,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         c = cache.get(ck)
         if c and now - c[1] < 60.0:
             return c[0]
-        table = getattr(self, "_ttft_buckets" if kind == "ttft"
-                        else "_lat_buckets", None)
+        table = getattr(self, "_ttft_buckets" if kind == "ttft" else "_lat_buckets", None)
         vals = []
         for v in (table or {}).values():
             try:
@@ -2390,8 +2020,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             except (TypeError, ValueError, IndexError):
                 continue
         med = None
-        if len(vals) >= max(1, int(getattr(self.policy, 'slow_latency_min_peers',
-                                            SLOW_LATENCY_MIN_PEERS))):
+        if len(vals) >= max(1, int(getattr(self.policy, "slow_latency_min_peers", SLOW_LATENCY_MIN_PEERS))):
             vals.sort()
             med = vals[len(vals) // 2]
         cache[ck] = (med, now)
@@ -2408,18 +2037,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         c = cache.get("__global__")
         if c and now - c[1] < 60.0:
             return c[0]
-        vals = [float(v) for v in (getattr(self, "_avg_latencies", {}) or {})
-                .values() if v and float(v) > 0]
+        vals = [float(v) for v in (getattr(self, "_avg_latencies", {}) or {}).values() if v and float(v) > 0]
         med = None
-        if len(vals) >= max(1, int(getattr(self.policy, 'slow_latency_min_peers',
-                                            SLOW_LATENCY_MIN_PEERS))):
+        if len(vals) >= max(1, int(getattr(self.policy, "slow_latency_min_peers", SLOW_LATENCY_MIN_PEERS))):
             vals.sort()
             med = vals[len(vals) // 2]
         cache["__global__"] = (med, now)
         return med
 
-    def _expected_latency_ms(self, unique: str, ctx_est=None,
-                             kind: str = "total"):
+    def _expected_latency_ms(self, unique: str, ctx_est=None, kind: str = "total"):
         """Latenza ATTESA per questa taglia: mediana di flotta del bucket,
         altrimenti mediana GLOBALE, altrimenti il bucket del dep, altrimenti
         stima dal rate (prefill + generazione)."""
@@ -2449,14 +2075,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return ttft + (SLOW_TYPICAL_COMPLETION_TOKENS / float(g)) * 1000.0
         return ttft * SLOW_GEN_MULT
 
-    def _slow_threshold_ms(self, unique: str, ctx_est=None,
-                           kind: str = "total") -> float:
+    def _slow_threshold_ms(self, unique: str, ctx_est=None, kind: str = "total") -> float:
         """Soglia size-aware oltre la quale un dep e' "lento"."""
         base = self._expected_latency_ms(unique, ctx_est, kind)
         if not base or base <= 0:
             return float(LATENCY_ROTATE_THRESHOLD_MS)
-        return max(float(SLOW_LATENCY_ABS_FLOOR_MS),
-                   float(SLOW_LATENCY_REL_MULT) * float(base))
+        return max(float(SLOW_LATENCY_ABS_FLOOR_MS), float(SLOW_LATENCY_REL_MULT) * float(base))
 
     def _slow_race_ms(self) -> int:
         """Soglia ASSOLUTA della gara lenta (ms). Serve a decidere quando un
@@ -2465,8 +2089,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         basta: un dep lento "di suo", es. 107s con baseline 111s, verrebbe
         riabilitato subito)."""
         vals: list[int] = []
-        for nm in ("stream_slow_race_after_ms",
-                   "nonstream_slow_race_after_ms"):
+        for nm in ("stream_slow_race_after_ms", "nonstream_slow_race_after_ms"):
             try:
                 v = int(getattr(self.policy, nm, 0) or 0)
             except (TypeError, ValueError):
@@ -2509,12 +2132,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return 0
         try:
             got = self.grant_go_refund_fb(session_id, n_fb)
-        except Exception:                          # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return 0
         if got > 0:
             try:
                 metrics.inc("nx_go_refund_total", ("fb",))
-            except Exception:                      # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 pass
         return got
 
@@ -2524,8 +2147,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         caccia senza guadagno = il buono non esiste) o ha superato il cap."""
         if not session_id:
             return True
-        st = (getattr(self, "_hunt_state", None) or {}).get(
-            (session_id, _ctx_bucket(ctx_est)))
+        st = (getattr(self, "_hunt_state", None) or {}).get((session_id, _ctx_bucket(ctx_est)))
         if not st:
             return True
         now = time.time()
@@ -2552,13 +2174,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if hs is None:
             hs = {}
             self._hunt_state = hs
-        st = hs.setdefault(
-            (session_id, _ctx_bucket(ctx_est)),
-            {"races": deque(), "backoff_until": 0.0})
+        st = hs.setdefault((session_id, _ctx_bucket(ctx_est)), {"races": deque(), "backoff_until": 0.0})
         st["races"].append(now)
         if not gained:
-            st["backoff_until"] = now + float(
-                getattr(self.policy, "hunt_backoff_sec", 600) or 600)
+            st["backoff_until"] = now + float(getattr(self.policy, "hunt_backoff_sec", 600) or 600)
 
     def _is_slow_dep(self, unique: str, ctx_est=None) -> bool:
         """True se la latenza del deployment supera la soglia di rotazione
@@ -2576,9 +2195,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return False
         return float(avg) > self._slow_threshold_ms(unique, ctx_est)
 
-    def is_slow_for_session(self, unique: str,
-                            session_id: str | None = None,
-                            ctx: int | None = None) -> bool:
+    def is_slow_for_session(self, unique: str, session_id: str | None = None, ctx: int | None = None) -> bool:
         """True se QUESTA sessione ha avuto un successo LENTO su `unique`
         entro la finestra warm. Due severita':
 
@@ -2611,7 +2228,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return False
         if isinstance(rec, tuple):
             ts, hard = rec
-        else:                                   # formato storico (solo ts)
+        else:  # formato storico (solo ts)
             ts, hard = rec, True
         if time.time() - ts > self._warm_ttl():
             m.pop(unique, None)
@@ -2624,10 +2241,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 return False
         return True
 
-    def _note_session_slow(self, session_id: str | None, unique: str,
-                           latency_ms: float | None,
-                           ctx_est: int | None = None,
-                           kind: str = "total") -> None:
+    def _note_session_slow(
+        self,
+        session_id: str | None,
+        unique: str,
+        latency_ms: float | None,
+        ctx_est: int | None = None,
+        kind: str = "total",
+    ) -> None:
         """Marchia (o ripulisce) `unique` come 'lento per la sessione'. Solo
         free-dims (mai -go/-fallback ne' gruppi capacita'), come la warm
         ownership: e' li' che la latenza e' un segnale utile. HARD oltre
@@ -2654,8 +2275,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if dep is None:
             return
         g = dep.get("group", "")
-        if self.config.group_caps.get(g) is not None \
-                or self._is_renewal_bucket(g):
+        if self.config.group_caps.get(g) is not None or self._is_renewal_bucket(g):
             return
         try:
             lat = None if latency_ms is None else float(latency_ms)
@@ -2668,15 +2288,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         d = self._sess_slow()
         # Baseline del dep nel bucket/tipo DI QUESTA chiamata (include il
         # campione corrente: l'alpha 0.3 lascia comunque vincere gli outlier).
-        base = self.bucket_latency_ms(unique, ctx_est,
-                                      kind="ttft" if kind == "ttft" else "total")
-        relative_ok = base is None or base <= 0 or lat is None \
-            or lat > SLOW_REL_BASELINE_MULT * float(base)
+        base = self.bucket_latency_ms(unique, ctx_est, kind="ttft" if kind == "ttft" else "total")
+        relative_ok = base is None or base <= 0 or lat is None or lat > SLOW_REL_BASELINE_MULT * float(base)
         _thr = self._slow_threshold_ms(unique, ctx_est, kind)
-        hard = (lat is not None and lat > _thr and relative_ok)
-        soft = (not hard) and lat is not None \
-            and lat > max(SOFT_SLOW_LATENCY_MS, _thr * 0.6) \
-            and heavy and relative_ok
+        hard = lat is not None and lat > _thr and relative_ok
+        soft = (not hard) and lat is not None and lat > max(SOFT_SLOW_LATENCY_MS, _thr * 0.6) and heavy and relative_ok
         # RIMBORSO LATENZA: soglia PROPRIA e ASSOLUTA, INDIPENDENTE dalla
         # marcatura "lento" (che resta a 45s). Un dep che serve in ~32s regala
         # turni -go ma NON viene demoto: resta warm/holder e al ritorno dai
@@ -2696,31 +2312,38 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d.setdefault(session_id, {})[unique] = (time.time(), hard)
             if not _was:
                 metrics.inc("nx_slow_flag_total", ("set",))
-                log.info("🐢 [slow-flag] %s: marcato %s lento per la sessione "
-                         "%s (%.0fms > soglia %.0fms; NESSUN cooldown: va in "
-                         "fondo al warm fino al prossimo successo rapido)",
-                         unique, "HARD" if hard else "SOFT", session_id,
-                         lat or 0.0, _thr)
+                log.info(
+                    "🐢 [slow-flag] %s: marcato %s lento per la sessione "
+                    "%s (%.0fms > soglia %.0fms; NESSUN cooldown: va in "
+                    "fondo al warm fino al prossimo successo rapido)",
+                    unique,
+                    "HARD" if hard else "SOFT",
+                    session_id,
+                    lat or 0.0,
+                    _thr,
+                )
         else:
             m = d.get(session_id)
             if m:
                 # se c'e' anche il marchio del TIMER, la pulizia la logga quel
                 # ramo sotto (evita doppioni)
-                if m.pop(unique, None) is not None \
-                        and not (tm and unique in tm):
+                if m.pop(unique, None) is not None and not (tm and unique in tm):
                     metrics.inc("nx_slow_flag_total", ("clear",))
-                    log.info("✅ [slow-flag] %s: NON piu' lento per la "
-                             "sessione %s (successo rapido)", unique,
-                             session_id)
+                    log.info(
+                        "✅ [slow-flag] %s: NON piu' lento per la sessione %s (successo rapido)", unique, session_id
+                    )
                 if not m:
                     d.pop(session_id, None)
         if tm and unique in tm:
             if lat is not None and lat <= self._slow_race_ms():
                 tm.pop(unique, None)
                 metrics.inc("nx_slow_flag_total", ("clear",))
-                log.info("✅ [slow-flag] %s: NON piu' lento per la sessione "
-                         "%s (successo rapido, %.0fms)", unique, session_id,
-                         lat)
+                log.info(
+                    "✅ [slow-flag] %s: NON piu' lento per la sessione %s (successo rapido, %.0fms)",
+                    unique,
+                    session_id,
+                    lat,
+                )
             if not tm:
                 t.pop(session_id, None)
         if len(d) > 4096:
@@ -2744,8 +2367,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 if not m:
                     t.pop(sid, None)
 
-    def mark_session_slow(self, session_id: str | None,
-                          unique: str | None) -> None:
+    def mark_session_slow(self, session_id: str | None, unique: str | None) -> None:
         """Marchia SUBITO `unique` come 'lento per la sessione' (hard, senza
         le guardie di soglia/relativa di `_note_session_slow`).
 
@@ -2763,8 +2385,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if dep is None:
             return
         g = dep.get("group", "")
-        if self.config.group_caps.get(g) is not None \
-                or self._is_renewal_bucket(g):
+        if self.config.group_caps.get(g) is not None or self._is_renewal_bucket(g):
             return
         _m = self._sess_slow().setdefault(session_id, {})
         _was = unique in _m
@@ -2779,16 +2400,25 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         self.grant_go_refund(session_id)
         if not _was:
             metrics.inc("nx_slow_flag_total", ("set",))
-            log.info("🐢 [slow-flag] %s: marcato LENTO per la sessione %s "
-                     "(timer gara lenta; NESSUN cooldown: va in fondo al warm "
-                     "fino al prossimo successo RAPIDO < %sms)",
-                     unique, session_id, self._slow_race_ms())
+            log.info(
+                "🐢 [slow-flag] %s: marcato LENTO per la sessione %s "
+                "(timer gara lenta; NESSUN cooldown: va in fondo al warm "
+                "fino al prossimo successo RAPIDO < %sms)",
+                unique,
+                session_id,
+                self._slow_race_ms(),
+            )
 
-    def slow_race_allowed(self, session_id: str | None, profile: str | None,
-                          group_name: str | None,
-                          need: frozenset[str] | None, ctx: int | None,
-                          out_tokens: int | None = None,
-                          tried: set[str] | None = None) -> bool:
+    def slow_race_allowed(
+        self,
+        session_id: str | None,
+        profile: str | None,
+        group_name: str | None,
+        need: frozenset[str] | None,
+        ctx: int | None,
+        out_tokens: int | None = None,
+        tried: set[str] | None = None,
+    ) -> bool:
         """True se il canary LENTO puo' essere aperto: la sessione ha MENO di
         `slow_race_max_warm` warm NON LENTI validi per QUESTA richiesta (need +
         ctx + output, include i prestati). Il flag "lento" e' SOLO quello del
@@ -2802,19 +2432,23 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return True
         try:
             pool = self.warm_valid_for(
-                session_id, profile, group_name, need, ctx, out_tokens,
+                session_id,
+                profile,
+                group_name,
+                need,
+                ctx,
+                out_tokens,
                 tried=tried,
-                include_borrowed=self._borrow_selectable())
-            n = sum(1 for d in pool
-                    if not self._slow_timer_flagged(d["unique"], session_id))
+                include_borrowed=self._borrow_selectable(),
+            )
+            n = sum(1 for d in pool if not self._slow_timer_flagged(d["unique"], session_id))
         except Exception:
             return True
         return n < cap
 
-    def _is_demoted_dep(self, unique: str,
-                        session_id: str | None = None,
-                        ctx: int | None = None,
-                        allow_slow: bool = False) -> bool:
+    def _is_demoted_dep(
+        self, unique: str, session_id: str | None = None, ctx: int | None = None, allow_slow: bool = False
+    ) -> bool:
         """Dep fuori dai tier 'economici' per la sessione: EMA globale sopra
         soglia OPPURE successo lento registrato per QUESTA sessione (hard:
         sempre; soft: solo con ctx pesante > SOFT_SLOW_CTX_MIN). Resta
@@ -2828,8 +2462,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return True
         if allow_slow:
             return False
-        return (self._is_slow_dep(unique, ctx)
-                or self.is_slow_for_session(unique, session_id, ctx))
+        return self._is_slow_dep(unique, ctx) or self.is_slow_for_session(unique, session_id, ctx)
 
     _DIM_GROUP_RE = __import__("re").compile(r"-(\d+)k$")
 
@@ -2840,11 +2473,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         capiente ma priva di zen (che costringerebbe a provider non-free)."""
         if not group_name:
             return False
-        return any(is_opencode_zen_dep(d)
-                   for d in (self.config.groups.get(group_name) or ()))
+        return any(is_opencode_zen_dep(d) for d in (self.config.groups.get(group_name) or ()))
 
-    def climb_dim_group(self, group_name: str | None,
-                        ctx_est) -> str | None:
+    def climb_dim_group(self, group_name: str | None, ctx_est) -> str | None:
         """SALITA DI DIM: se il payload non entra nel gruppo `-Nk` richiesto,
         ritorna il gruppo dim PIU' PICCOLO (stesso profilo) il cui
         max_input >= ctx_est; None se nessun dim basta o il gruppo non e'
@@ -2857,22 +2488,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if cx <= 0 or not group_name:
             return None
         m = self._DIM_GROUP_RE.search(group_name)
-        if m is None or self.config.group_caps.get(group_name) is not None \
-                or self._is_renewal_bucket(group_name):
+        if m is None or self.config.group_caps.get(group_name) is not None or self._is_renewal_bucket(group_name):
             return None
-        head = group_name[:m.start()]
+        head = group_name[: m.start()]
         cur_mx = 0
         best = None
         for g, deps in (self.config.groups or {}).items():
-            if self.config.group_caps.get(g) is not None \
-                    or self._is_renewal_bucket(g):
+            if self.config.group_caps.get(g) is not None or self._is_renewal_bucket(g):
                 continue
             mm = self._DIM_GROUP_RE.search(g)
-            if mm is None or g[:mm.start()] != head:
+            if mm is None or g[: mm.start()] != head:
                 continue
             try:
-                mx = max((int(d.get("max_input_tokens") or 0) for d in deps),
-                         default=0)
+                mx = max((int(d.get("max_input_tokens") or 0) for d in deps), default=0)
             except (TypeError, ValueError):
                 continue
             if g == group_name:
@@ -2882,7 +2510,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if best and best[0] != group_name and best[1] > cur_mx:
             return best[0]
         return None
-
 
     def first_content_deadline_ms(self, unique: str, ctx_est=None) -> int:
         """Finestra d'attesa del primo contenuto per `unique`.
@@ -2896,22 +2523,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         presto, mentre un dep lento mantiene un margine proporzionato (mai
         oltre il cap)."""
         qcp = getattr(self.policy, "qc_json", None)
-        cap = max(2000, int(getattr(qcp, "stream_first_content_ms", 20000)
-                            or 20000))
+        cap = max(2000, int(getattr(qcp, "stream_first_content_ms", 20000) or 20000))
         if not bool(getattr(qcp, "stream_first_content_adaptive", True)):
             return cap
-        ema = float(self.bucket_latency_ms(unique, ctx_est,
-                                           kind="ttft") or 0.0)
+        ema = float(self.bucket_latency_ms(unique, ctx_est, kind="ttft") or 0.0)
         if ema <= 0:
             return cap
         mult = float(getattr(qcp, "stream_first_content_mult", 3.0) or 3.0)
-        floor = min(int(getattr(qcp, "stream_first_content_floor_ms", 20000)
-                        or 0), cap)
+        floor = min(int(getattr(qcp, "stream_first_content_floor_ms", 20000) or 0), cap)
         return max(2000, min(cap, max(floor, int(ema * mult))))
 
-
     # --------------------------------------------------- auto-learn capacità
-    _CAP_STRIKE_WINDOW_SEC = 7 * 86400   # strike più vecchi di 7gg si azzerano
+    _CAP_STRIKE_WINDOW_SEC = 7 * 86400  # strike più vecchi di 7gg si azzerano
 
     def note_cap_strike(self, model: str, caps, evidence: str) -> list[str]:
         """Registra un rifiuto modalità per (model, cap). Ritorna le cap che
@@ -2937,10 +2560,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         out = []
         for key, st in sorted(self._cap_strikes.items()):
             model, _, cap = key.partition("|")
-            out.append({"model": model, "cap": cap,
-                        "count": int(st.get("count", 0)),
-                        "first": st.get("first"), "last": st.get("last"),
-                        "evidence": st.get("evidence", "")})
+            out.append(
+                {
+                    "model": model,
+                    "cap": cap,
+                    "count": int(st.get("count", 0)),
+                    "first": st.get("first"),
+                    "last": st.get("last"),
+                    "evidence": st.get("evidence", ""),
+                }
+            )
         return out
 
     def _pref_for(self, unique: str) -> int:
@@ -2979,7 +2608,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         _s = self._stats.get(unique)
         _rs = str(getattr(_s, "last_reason", "") or "")
         if _rs.startswith("quota_exhausted"):
-            _mx = max(_mx, 7 * 86400.0)     # QUOTA_MAX_COOLDOWN_S (7 giorni)
+            _mx = max(_mx, 7 * 86400.0)  # QUOTA_MAX_COOLDOWN_S (7 giorni)
         return max(1.0, min(_mx, full * factor))
 
     def cooldown_residual(self, unique: str) -> float:
@@ -2992,8 +2621,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         since = self._cooldown_since.get(unique)
         full = self._cooldown_full_map().get(unique) or 0.0
         if full > 0 and since is not None:
-            return max(0.0, since + self._effective_cooldown_full(unique, full)
-                       - now)
+            return max(0.0, since + self._effective_cooldown_full(unique, full) - now)
         return max(0.0, exp - now)
 
     def is_cooled_down(self, unique: str) -> bool:
@@ -3043,12 +2671,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     def probe_ready(self, unique: str) -> bool:
         """True se un deployment dormiente e' maturo per un probe passivo
         (>= cooldown_probe_after_ratio del cooldown trascorso)."""
-        if background_cautious_enabled():      # cautela generica: niente re-probe
+        if background_cautious_enabled():  # cautela generica: niente re-probe
             return False
         if not getattr(self.policy, "cooldown_probe_enabled", True):
             return False
-        ratio = float(getattr(self.policy, "cooldown_probe_after_ratio",
-                              0.5) or 0.0)
+        ratio = float(getattr(self.policy, "cooldown_probe_after_ratio", 0.5) or 0.0)
         pr = self.cooldown_progress(unique)
         return pr is not None and pr >= ratio
 
@@ -3063,8 +2690,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return 1.0
         return max(0.0, 1.0 - pr)
 
-    def _decay_streak(self, streak: int, last_fail_ts: float,
-                      now: float | None = None) -> int:
+    def _decay_streak(self, streak: int, last_fail_ts: float, now: float | None = None) -> int:
         """Decadimento del fail_streak per inattivita' (halflife).
 
         Dopo `cooldown_streak_halflife_sec` senza fallimenti lo streak si
@@ -3082,8 +2708,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         decayed = int(round(streak * (0.5 ** (elapsed / hl))))
         decayed = max(0, min(streak, decayed))
         if decayed < streak:
-            log.info("[streak] %d -> %d dopo %.0f min di inattivita'",
-                     streak, decayed, elapsed / 60.0)
+            log.info("[streak] %d -> %d dopo %.0f min di inattivita'", streak, decayed, elapsed / 60.0)
         return decayed
 
     def _jitter_spread(self, unique: str) -> float:
@@ -3127,23 +2752,23 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if cap <= 0 or s.probe_fail_streak < cap:
             return False
         if _is_quota_evidence(getattr(s, "last_reason", None)):
-            log.debug("[probe] %s non ritirato: ultima evidenza di quota "
-                      "(%s)", unique, s.last_reason)
+            log.debug("[probe] %s non ritirato: ultima evidenza di quota (%s)", unique, s.last_reason)
             return False
         try:
-            from . import main as _gw_mod      # lazy: evita cicli d'import
+            from . import main as _gw_mod  # lazy: evita cicli d'import
+
             kh = getattr(_gw_mod, "KEYHEALTH", None)
             if kh is not None and not kh.is_retired(unique):
-                kh.set_state(unique, "retired",
-                             reason="probe_escalation_cap")
+                kh.set_state(unique, "retired", reason="probe_escalation_cap")
                 kh.save()
-                log.warning("[probe] %s RETIRED: %d probe consecutivi falliti "
-                            "(problema permanente, non temporaneo)",
-                            unique, s.probe_fail_streak)
+                log.warning(
+                    "[probe] %s RETIRED: %d probe consecutivi falliti (problema permanente, non temporaneo)",
+                    unique,
+                    s.probe_fail_streak,
+                )
                 return True
-        except Exception:                      # mai bloccare il routing
-            log.warning("[probe] auto-retirement di %s fallito", unique,
-                        exc_info=True)
+        except Exception:  # mai bloccare il routing
+            log.warning("[probe] auto-retirement di %s fallito", unique, exc_info=True)
         return False
 
     def is_retired(self, unique: str) -> bool:
@@ -3153,20 +2778,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         POST /admin/deployments/unretire o con un probe riuscito.
         """
         try:
-            from . import main as _gw_mod      # lazy: evita cicli d'import
+            from . import main as _gw_mod  # lazy: evita cicli d'import
+
             kh = getattr(_gw_mod, "KEYHEALTH", None)
             return bool(kh and kh.is_retired(unique))
-        except Exception:                      # mai bloccare il routing
+        except Exception:  # mai bloccare il routing
             return False
 
     def _retired_permanent(self, unique: str) -> bool:
         """Ritirato per motivo PERMANENTE: mai riusabile, nemmeno in ultima
         spiaggia (spam di errori inutili su una chiave/modello morti)."""
         try:
-            from . import main as _gw_mod      # lazy: evita cicli d'import
+            from . import main as _gw_mod  # lazy: evita cicli d'import
+
             kh = getattr(_gw_mod, "KEYHEALTH", None)
             return bool(kh and kh.is_permanently_retired(unique))
-        except Exception:                      # mai bloccare il routing
+        except Exception:  # mai bloccare il routing
             return False
 
     def _retired_usable(self, unique: str) -> bool:
@@ -3178,8 +2805,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     def _prune_wake_times(self, now: float | None = None) -> None:
         """Pota i timestamp di wakeup oltre la finestra (memoria)."""
         now = now if now is not None else time.time()
-        _win = max(1.0, float(getattr(
-            self.policy, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
+        _win = max(1.0, float(getattr(self.policy, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
         for u, dq in list((getattr(self, "_wake_times", None) or {}).items()):
             while dq and now - dq[0] > _win:
                 dq.popleft()
@@ -3203,37 +2829,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
         Senza purge, con tanti session_id unici, i dict crescerebbero senza
         limite sugli uptime lunghi. Ritorna (sticky_rimosse, cooldown_rimossi).
-        
+
         [Blocco 1] Ora include anche la pulizia di _stats (memory leak fix):
         rimuove entry stale (>48h) per prevenire crescita infinita della memoria.
         """
         self._prune_hunt_state()
         self._prune_wake_times()
         now = time.time()
-        self._decay_scores(now)     # time-decay reputazione (halflife policy)
-        dead_sessions = [s for s, (_t, ts) in self._sticky.items()
-                         if now - ts > self.policy.sticky_ttl_sec]
+        self._decay_scores(now)  # time-decay reputazione (halflife policy)
+        dead_sessions = [s for s, (_t, ts) in self._sticky.items() if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_sessions:
             self._sticky.pop(s, None)
-        dead_sg = [s for s, (_g, ts) in self._session_group.items()
-                   if now - ts > self.policy.sticky_ttl_sec]
+        dead_sg = [s for s, (_g, ts) in self._session_group.items() if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_sg:
             self._session_group.pop(s, None)
         # PURGE deployment-sticky: stessa TTL dello sticky di gruppo
-        dead_dep = [s for s, (_u, ts) in self._sticky_dep.items()
-                    if now - ts > self.policy.sticky_ttl_sec]
+        dead_dep = [s for s, (_u, ts) in self._sticky_dep.items() if now - ts > self.policy.sticky_ttl_sec]
         for s in dead_dep:
             self._sticky_dep.pop(s, None)
         # STIMA per-sessione: TTL di policy + cap 4096 (eviction sul piu' vecchio)
         _sr = self._sess_est()
         _sttl = int(getattr(self.policy, "session_estimate_ttl_sec", 3600) or 0)
         if _sttl > 0:
-            for s in [s for s, r in _sr.items()
-                      if now - float((r or {}).get("ts") or 0.0) > _sttl]:
+            for s in [s for s, r in _sr.items() if now - float((r or {}).get("ts") or 0.0) > _sttl]:
                 _sr.pop(s, None)
         if len(_sr) > 4096:
-            for s in sorted(_sr, key=lambda k: float(
-                    (_sr[k] or {}).get("ts") or 0.0))[:len(_sr) - 4096]:
+            for s in sorted(_sr, key=lambda k: float((_sr[k] or {}).get("ts") or 0.0))[: len(_sr) - 4096]:
                 _sr.pop(s, None)
         # FLOOR per-sessione (overflow context): stessa TTL + cap 4096.
         _sf = self._sess_floor_map()
@@ -3241,30 +2862,26 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             for s in [s for s, (_v, t) in _sf.items() if now - t > _sttl]:
                 _sf.pop(s, None)
         if len(_sf) > 4096:
-            for s in sorted(_sf, key=lambda k: _sf[k][1])[:len(_sf) - 4096]:
+            for s in sorted(_sf, key=lambda k: _sf[k][1])[: len(_sf) - 4096]:
                 _sf.pop(s, None)
         # TURNI/RIMBORSO -go per-sessione: TTL sticky + cap 4096.
         _tn = getattr(self, "_session_turns", None)
         if isinstance(_tn, dict):
-            for s in [s for s, e in _tn.items()
-                      if now - float((e or {}).get("ts") or 0.0)
-                      > self.policy.sticky_ttl_sec]:
+            for s in [
+                s for s, e in _tn.items() if now - float((e or {}).get("ts") or 0.0) > self.policy.sticky_ttl_sec
+            ]:
                 _tn.pop(s, None)
             if len(_tn) > 4096:
-                for s in sorted(_tn, key=lambda k: float(
-                        (_tn[k] or {}).get("ts") or 0.0))[:len(_tn) - 4096]:
+                for s in sorted(_tn, key=lambda k: float((_tn[k] or {}).get("ts") or 0.0))[: len(_tn) - 4096]:
                     _tn.pop(s, None)
         # BILANCIAMENTO -go: token di output — pota la finestra e limita le voci.
         _ot = getattr(self, "_out_tokens", None)
         if isinstance(_ot, dict):
             _owin = self._go_balance_window()
-            for u in [u for u, dq in _ot.items()
-                      if not dq or now - dq[-1][0] > _owin]:
+            for u in [u for u, dq in _ot.items() if not dq or now - dq[-1][0] > _owin]:
                 _ot.pop(u, None)
             if len(_ot) > 4096:
-                for u in sorted(
-                        _ot, key=lambda k: (_ot[k][-1][0] if _ot[k] else 0.0)
-                )[:len(_ot) - 4096]:
+                for u in sorted(_ot, key=lambda k: _ot[k][-1][0] if _ot[k] else 0.0)[: len(_ot) - 4096]:
                     _ot.pop(u, None)
         # SESSION-DEP GUARD: entry piu' vecchi della finestra (x2) non servono.
         _gttl = self._guard_sec() * 2
@@ -3287,10 +2904,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # SOFT-PER-CHIAVE: hint scaduti (ttl x2) e blocchi oltre la scadenza.
         _kh = getattr(self, "_key_hints", None)
         if isinstance(_kh, dict):
-            _kttl = max(120.0, float(getattr(self.policy, "rate_hint_ttl_sec",
-                                             20.0) or 20.0) * 2)
-            for tag in [t for t, (ts, _r) in _kh.items()
-                        if now - ts > _kttl]:
+            _kttl = max(120.0, float(getattr(self.policy, "rate_hint_ttl_sec", 20.0) or 20.0) * 2)
+            for tag in [t for t, (ts, _r) in _kh.items() if now - ts > _kttl]:
                 _kh.pop(tag, None)
         _ks = getattr(self, "_key_soft", None)
         if isinstance(_ks, dict):
@@ -3299,12 +2914,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # F25: breaker di modello — dimentica le aperture molto scadute.
         _mcb = getattr(self, "_model_cb", None)
         if isinstance(_mcb, dict):
-            _mttl = max(300.0, float(getattr(self.policy,
-                                             "model_circuit_open_sec",
-                                             60) or 60) * 4)
-            for k in [k for k, e in _mcb.items()
-                      if now - max(e.get("opened") or 0.0,
-                                   e.get("ts") or 0.0) > _mttl]:
+            _mttl = max(300.0, float(getattr(self.policy, "model_circuit_open_sec", 60) or 60) * 4)
+            for k in [k for k, e in _mcb.items() if now - max(e.get("opened") or 0.0, e.get("ts") or 0.0) > _mttl]:
                 _mcb.pop(k, None)
         dead_cd = [u for u, exp in self._cooldown.items() if now > exp]
         for u in dead_cd:
@@ -3313,21 +2924,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             self._cooldown_full_map().pop(u, None)
         # PURGE escalation-winner: TTL a finestra scorrevole; gli entries
         # vecchi di escalation_pin_ttl_sec vengono droppati.
-        _epp = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec",
-                                  300) or 300))
+        _epp = max(1, int(getattr(self.policy, "escalation_pin_ttl_sec", 300) or 300))
         _ewd = self._esc()
-        dead_ew = [g for g, (_u, ts) in _ewd.items()
-                   if now - ts > _epp]
+        dead_ew = [g for g, (_u, ts) in _ewd.items() if now - ts > _epp]
         for g in dead_ew:
             _ewd.pop(g, None)
         # [Blocco 1] Cleanup _stats: rimuovi entry vecchie di 48h (fix memoria)
-        stale_stats = [u for u, s in self._stats.items()
-                       if now - s.last_used > 172800]  # 48h
+        stale_stats = [u for u, s in self._stats.items() if now - s.last_used > 172800]  # 48h
         for u in stale_stats:
             del self._stats[u]
         # [Blocco 1] Cleanup _cap_strikes: rimuovi strike vecchi di 7gg
-        stale_strikes = [k for k, st in self._cap_strikes.items()
-                         if now - st.get("last", 0) > 604800]  # 7gg
+        stale_strikes = [k for k, st in self._cap_strikes.items() if now - st.get("last", 0) > 604800]  # 7gg
         for k in stale_strikes:
             del self._cap_strikes[k]
         # [Blocco 1] Cleanup scoring: rimuovi punteggi dei deployment non più attivi.
@@ -3335,8 +2942,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # di scoring inizializzati: in quel caso si salta la pulizia.
         try:
             self._init_scoring_if_needed()
-            active_uniques = (set(self.config.all_uniques())
-                              if hasattr(self.config, 'all_uniques') else set())
+            active_uniques = set(self.config.all_uniques()) if hasattr(self.config, "all_uniques") else set()
             if not active_uniques:
                 # Fallback: raccogli tutti gli unique dai gruppi
                 for deps in self.config.groups.values():
@@ -3363,23 +2969,37 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             stale_keys = [k for k in self._key_scores if k not in active_keys]
             for k in stale_keys:
                 self._key_scores.pop(k, None)
-        except Exception as exc:               # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.debug("[purge] scoring cleanup saltato (%s)", exc)
         if dead_sessions or dead_cd or dead_sg or dead_dep:
-            log.debug("[purge] sticky=%d cooldown=%d sessioni=%d dep_sticky=%d",
-                      len(dead_sessions), len(dead_cd), len(dead_sg),
-                      len(dead_dep))
+            log.debug(
+                "[purge] sticky=%d cooldown=%d sessioni=%d dep_sticky=%d",
+                len(dead_sessions),
+                len(dead_cd),
+                len(dead_sg),
+                len(dead_dep),
+            )
         if stale_stats or stale_strikes:
-            log.debug("[purge] stats=%d strikes=%d cleaned",
-                      len(stale_stats), len(stale_strikes))
+            log.debug("[purge] stats=%d strikes=%d cleaned", len(stale_stats), len(stale_strikes))
         return len(dead_sessions), len(dead_cd)
 
     # ------------------------------------------------ purge sessioni (admin)
     _SESSION_STATE_MAPS = (
-        "_sticky", "_sticky_dep", "_session_group", "_session_last_ok",
-        "_session_deps", "_session_slow", "_session_slow_timer",
-        "_ctx_frontier", "_prefix_fp", "_session_compact", "_sess_ratio",
-        "_sess_floor", "_session_rate", "_session_turns", "_probes_flight",
+        "_sticky",
+        "_sticky_dep",
+        "_session_group",
+        "_session_last_ok",
+        "_session_deps",
+        "_session_slow",
+        "_session_slow_timer",
+        "_ctx_frontier",
+        "_prefix_fp",
+        "_session_compact",
+        "_sess_ratio",
+        "_sess_floor",
+        "_session_rate",
+        "_session_turns",
+        "_probes_flight",
     )
 
     def purge_sessions(self, session_id: str | None = None) -> dict:
@@ -3409,8 +3029,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 for u in dead:
                     _ds.pop(u, None)
                 counts["_dep_last_session"] = len(dead)
-        log.warning("[sessions] purge (session=%s): %s", sid or "*",
-                    {k: v for k, v in counts.items() if v})
+        log.warning("[sessions] purge (session=%s): %s", sid or "*", {k: v for k, v in counts.items() if v})
         return {"ok": True, "session_id": sid, "purged": counts}
 
     # ------------------------------------------------------------- routing
@@ -3435,8 +3054,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         vedere immagini?), che non devono cambiare per un cooldown."""
         if not dep:
             return frozenset()
-        return self.policy.caps_for(dep.get("model", "")) \
-            | (dep.get("caps") or frozenset())
+        return self.policy.caps_for(dep.get("model", "")) | (dep.get("caps") or frozenset())
 
     def _dep_supports(self, dep: dict, need: frozenset[str]) -> bool:
         """True se il deployment dichiara tutte le capacità richieste.
@@ -3450,20 +3068,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
     # token che rendono un modello "multimodale" ai fini della protezione
     # free-tier (multimodal_last_resort): input media + cap generativi.
-    MEDIA_TOKENS = frozenset(
-        {"vision", "video", "audio", "image_gen", "video_gen", "tts", "stt"})
+    MEDIA_TOKENS = frozenset({"vision", "video", "audio", "image_gen", "video_gen", "tts", "stt"})
 
     # gruppi dove il FALLBACK deve preferire lo stesso modello upstream:
     # cambiare voce (tts/stt) o generare immagini/video con un modello
     # diverso inatteso rompe la coerenza dell'output. Altri modelli sono
     # ammessi solo a esaurimento degli same-model, con log + contatore.
-    SAME_MODEL_PRIORITY_CAPS = frozenset(
-        {"image_gen", "video_gen", "tts", "stt"})
+    SAME_MODEL_PRIORITY_CAPS = frozenset({"image_gen", "video_gen", "tts", "stt"})
 
     def _is_media_capable(self, dep: dict) -> bool:
         """True se il deployment accetta/produce media (union mappa+caps)."""
-        declared = self.policy.caps_for(dep.get("model", "")) \
-            | (dep.get("caps") or frozenset())
+        declared = self.policy.caps_for(dep.get("model", "")) | (dep.get("caps") or frozenset())
         return bool(declared & self.MEDIA_TOKENS)
 
     def _is_deferrable(self, dep: dict) -> bool:
@@ -3471,26 +3086,25 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         multimodale E non esentato dalla colonna CSV `media_defer`.
         media_defer=false -> il deployment resta eleggibile per il testo puro
         senza toccare le sue capacità reali (caps intatti)."""
-        return (self._is_media_capable(dep)
-                and bool(dep.get("media_defer", True)))
+        return self._is_media_capable(dep) and bool(dep.get("media_defer", True))
 
     def _prefer_same_model(self, cap: str | None, cur_model: str) -> bool:
         """True se il fallback da questo gruppo cap deve PRIORIZZARE (non
         escludere) gli altri deployment dello stesso modello upstream."""
-        return (self.policy.gen_same_model_failover and cap is not None
-                and cap in self.SAME_MODEL_PRIORITY_CAPS and bool(cur_model))
+        return (
+            self.policy.gen_same_model_failover
+            and cap is not None
+            and cap in self.SAME_MODEL_PRIORITY_CAPS
+            and bool(cur_model)
+        )
 
-    def _note_cross(self, group_name: str, from_model: str,
-                    to_model: str) -> None:
+    def _note_cross(self, group_name: str, from_model: str, to_model: str) -> None:
         """Attraversamento verso un modello DIVERSO nei gruppi gen/stt:
         sempre loggato + contato (osservabilità del 'cambio voce/stile')."""
-        self.gen_cross_model[group_name] = \
-            self.gen_cross_model.get(group_name, 0) + 1
-        log.warning("[fallback] %s CROSS-MODEL %s -> %s",
-                    group_name, from_model, to_model)
+        self.gen_cross_model[group_name] = self.gen_cross_model.get(group_name, 0) + 1
+        log.warning("[fallback] %s CROSS-MODEL %s -> %s", group_name, from_model, to_model)
 
-    def _defer_media(self, group_name: str, need: frozenset[str] | None,
-                     deps: list[dict]) -> tuple[list[dict], bool]:
+    def _defer_media(self, group_name: str, need: frozenset[str] | None, deps: list[dict]) -> tuple[list[dict], bool]:
         """MULTIMODAL LAST RESORT (hard, tutti i tier): in un gruppo DIMS le
         richieste pure-testo non devono cadere su modelli con input media
         finché esiste almeno un text-only vivo. Ritorna (pool, deferito?).
@@ -3501,26 +3115,25 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not self.policy.multimodal_last_resort:
             return deps, False
         if need and not need.isdisjoint(self.MEDIA_TOKENS):
-            return deps, False                      # richiesta media: mai
+            return deps, False  # richiesta media: mai
         if self.config.group_caps.get(group_name) is not None:
-            return deps, False                      # gruppo cap: mai
+            return deps, False  # gruppo cap: mai
         text_only = [d for d in deps if not self._is_deferrable(d)]
         if text_only and len(text_only) < len(deps):
-            self.media_deferred[group_name] = \
-                self.media_deferred.get(group_name, 0) + 1
+            self.media_deferred[group_name] = self.media_deferred.get(group_name, 0) + 1
             if not self._defer_active.get(group_name):
-                log.info("[defer] %s: quota protetta, scartati %d "
-                         "multimodali (%d text-only attivi)",
-                         group_name, len(deps) - len(text_only),
-                         len(text_only))
+                log.info(
+                    "[defer] %s: quota protetta, scartati %d multimodali (%d text-only attivi)",
+                    group_name,
+                    len(deps) - len(text_only),
+                    len(text_only),
+                )
                 self._defer_active[group_name] = True
             else:
-                log.debug("[defer] %s: scartati %d multimodali",
-                          group_name, len(deps) - len(text_only))
+                log.debug("[defer] %s: scartati %d multimodali", group_name, len(deps) - len(text_only))
             return text_only, True
         if self._defer_active.pop(group_name, None):
-            log.info("[defer] %s: multimodali di nuovo eleggibili",
-                     group_name)
+            log.info("[defer] %s: multimodali di nuovo eleggibili", group_name)
         return deps, False
 
     def _capable_dims(self, pname: str, need: frozenset[str]) -> list[int]:
@@ -3540,9 +3153,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     break
         return capable
 
-    def _capability_tier_group(self, pname: str | None,
-                               need: frozenset[str] | None,
-                               tier_start: str, cfg) -> str | None:
+    def _capability_tier_group(
+        self, pname: str | None, need: frozenset[str] | None, tier_start: str, cfg
+    ) -> str | None:
         """Gruppo CAPACITA' corrispondente al tier richiesto.
 
         Es. `scrocco-llm-<p>-go` con need=image_gen e senza generatori nel
@@ -3550,17 +3163,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         gruppo capacita' per quel tier (il chiamante fa pass-through)."""
         if not pname or not need:
             return None
-        cap = next((c for c in CAP_PRIORITY_ORDER if c in need
-                    and f"{cfg.proxy_prefix}{pname}-{c}" in cfg.groups), None)
+        cap = next(
+            (c for c in CAP_PRIORITY_ORDER if c in need and f"{cfg.proxy_prefix}{pname}-{c}" in cfg.groups), None
+        )
         if cap is None:
             return None
-        sfx = (cfg.go_suffix if tier_start == "go"
-               else cfg.fallback_suffix if tier_start == "fallback" else "")
+        sfx = cfg.go_suffix if tier_start == "go" else cfg.fallback_suffix if tier_start == "fallback" else ""
         gname = f"{cfg.proxy_prefix}{pname}-{cap}{sfx}"
         return gname if gname in cfg.groups else None
 
-    def _missing_media_caps(self, requested: str,
-                            need: frozenset[str] | None) -> list[str]:
+    def _missing_media_caps(self, requested: str, need: frozenset[str] | None) -> list[str]:
         """Capacita' MEDIA richieste che il deployment/richiesta NON dichiara.
 
         Considera solo la DICHIARAZIONE, non la disponibilita': un cooldown
@@ -3626,8 +3238,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         m[unique] = int(m.get(unique, 0)) + 1
         return m[unique]
 
-    def repair_exempt_blocked(self, unique: str | None,
-                              limit: int = 3) -> bool:
+    def repair_exempt_blocked(self, unique: str | None, limit: int = 3) -> bool:
         """True quando lo streak ha ESAURITO il budget di esenzione: da qui in
         poi il fallimento va trattato come KO normale."""
         if not unique or int(limit) <= 0:
@@ -3679,17 +3290,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     continue
                 try:
                     if self.cooldown_residual(d["unique"]) > cd:
-                        continue          # mai accorciare un bench piu' lungo
-                    self.mark_failed(d["unique"], seconds=cd,
-                                     reason="model_unhealthy")
+                        continue  # mai accorciare un bench piu' lungo
+                    self.mark_failed(d["unique"], seconds=cd, reason="model_unhealthy")
                     n += 1
-                except Exception:                          # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     pass
         self._model_fail_win().pop(model, None)
         try:
-            log.warning("[model-bench] %s: %d KO in %.0fs -> modello in pausa "
-                        "%.0fs su %d chiavi", model, thr, win, cd, n)
-        except Exception:                                  # noqa: BLE001
+            log.warning(
+                "[model-bench] %s: %d KO in %.0fs -> modello in pausa %.0fs su %d chiavi", model, thr, win, cd, n
+            )
+        except Exception:  # noqa: BLE001
             pass
         return thr
 
@@ -3702,7 +3313,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             m = (dep or {}).get("model")
             if m:
                 self._model_fail_win().pop(m, None)
-        except Exception:                                  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
 
     # ------------------------------------------------------- DEGRADED MODE (P1)
@@ -3716,8 +3327,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     def _degraded_state(self) -> dict:
         st = getattr(self, "_degraded_st", None)
         if st is None:
-            st = self._degraded_st = {"since": None, "healthy": None,
-                                      "active": False}
+            st = self._degraded_st = {"since": None, "healthy": None, "active": False}
         return st
 
     @staticmethod
@@ -3725,7 +3335,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         raw = (dep or {}).get("api_base") or (dep or {}).get("endpoint") or ""
         try:
             return urllib.parse.urlparse(raw).hostname or ""
-        except Exception:                                  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return ""
 
     def hosts_health(self) -> tuple[int, int]:
@@ -3742,17 +3352,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     if not u or not h:
                         continue
                     tot.add(h)
-                    if (u in ok or self.is_cooled_down(u)
-                            or self.is_retired(u)
-                            or self._endpoint_quarantined(d)):
+                    if u in ok or self.is_cooled_down(u) or self.is_retired(u) or self._endpoint_quarantined(d):
                         continue
                     try:
                         if self.is_draining(u):
                             continue
-                    except Exception:                      # noqa: BLE001
+                    except Exception:  # noqa: BLE001
                         pass
                     ok.add(h)
-        except Exception:                                  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return 0, 0
         return len(ok), len(tot)
 
@@ -3766,11 +3374,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 return False
             ratio_thr = float(getattr(p, "degraded_healthy_ratio", 0.5) or 0.0)
             min_prov = int(getattr(p, "degraded_min_providers", 3) or 0)
-            entry = max(0.0, float(getattr(p, "degraded_entry_grace_sec",
-                                            60) or 0.0))
-            exitg = max(0.0, float(getattr(p, "degraded_exit_grace_sec",
-                                            120) or 0.0))
-        except Exception:                                  # noqa: BLE001
+            entry = max(0.0, float(getattr(p, "degraded_entry_grace_sec", 60) or 0.0))
+            exitg = max(0.0, float(getattr(p, "degraded_exit_grace_sec", 120) or 0.0))
+        except Exception:  # noqa: BLE001
             return False
         if ratio_thr <= 0:
             return False
@@ -3789,9 +3395,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 st["since"] = now
             if not st["active"] and (now - st["since"]) >= entry:
                 st["active"] = True
-                log.warning("[degraded] host sani %d/%d (%.0f%% < %.0f%%): "
-                            "sospendo cascata/hedge/hunt finche' la rete non "
-                            "si riprende", h, t, ratio * 100.0, ratio_thr * 100.0)
+                log.warning(
+                    "[degraded] host sani %d/%d (%.0f%% < %.0f%%): "
+                    "sospendo cascata/hedge/hunt finche' la rete non "
+                    "si riprende",
+                    h,
+                    t,
+                    ratio * 100.0,
+                    ratio_thr * 100.0,
+                )
         else:
             st["since"] = None
             if st["active"]:
@@ -3803,8 +3415,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 if exitg <= 0.0 or (now - st["healthy"]) >= exitg:
                     st["active"] = False
                     st["healthy"] = None
-                    log.info("[degraded] host sani %d/%d -> riprendo "
-                             "l'esplorazione", h, t)
+                    log.info("[degraded] host sani %d/%d -> riprendo l'esplorazione", h, t)
             else:
                 st["healthy"] = None
         return bool(st["active"])
@@ -3812,10 +3423,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     def degraded_view(self) -> dict:
         st = self._degraded_state()
         h, t = self.hosts_health()
-        return {"active": bool(st.get("active")), "hosts_healthy": h,
-                "hosts_total": t,
-                "ratio": (round(h / float(t), 3) if t else None),
-                "since": st.get("since")}
+        return {
+            "active": bool(st.get("active")),
+            "hosts_healthy": h,
+            "hosts_total": t,
+            "ratio": (round(h / float(t), 3) if t else None),
+            "since": st.get("since"),
+        }
 
     # ------------------------------------------------- LEASE PER CHIAVE (P2)
     def _key_leases(self) -> dict:
@@ -3825,8 +3439,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         return d
 
     def _lease_max_age(self) -> float:
-        return max(1.0, float(getattr(
-            self.policy, "key_concurrency_lease_max_age_sec", 120) or 120))
+        return max(1.0, float(getattr(self.policy, "key_concurrency_lease_max_age_sec", 120) or 120))
 
     def _prune_key_leases(self, now: float | None = None) -> None:
         """Scarta le lease piu' vecchie del tetto (una richiesta interrotta
@@ -3853,8 +3466,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         — il chiamante NON deve bloccare la richiesta (cap SOFT: la chiave
         viene solo deprioritizzata finche' esistono alternative), quindi il
         None serve solo a non incrementare il contatore."""
-        if not dep or not bool(getattr(self.policy,
-                                        "key_concurrency_enabled", False)):
+        if not dep or not bool(getattr(self.policy, "key_concurrency_enabled", False)):
             return None
         now = time.time()
         self._prune_key_leases(now)
@@ -3863,7 +3475,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         ent = self._key_leases().setdefault(key, [])
         if cap and len(ent) >= cap:
             return None
-        tok = ("%s|%s|%d" % (key[:12], dep.get("unique"), now))
+        tok = "%s|%s|%d" % (key[:12], dep.get("unique"), now)
         ent.append((tok, now, dep.get("unique")))
         return (key, tok)
 
@@ -3891,8 +3503,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         m = self._key_leases()
         if not m:
             return deps
-        kept = [d for d in deps
-                if len(m.get(d.get("api_key") or "", ())) < cap]
+        kept = [d for d in deps if len(m.get(d.get("api_key") or "", ())) < cap]
         return kept or deps
 
     def key_leases_view(self) -> dict:
@@ -3918,38 +3529,35 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     # ------------------------------------------- VISTE STATO RUNTIME (read-only)
     @staticmethod
     def _tag_key(raw: str) -> str:
-        return hashlib.sha256(
-            str(raw).encode("utf-8", errors="replace")).hexdigest()[:12]
+        return hashlib.sha256(str(raw).encode("utf-8", errors="replace")).hexdigest()[:12]
 
     def key_soft_view(self) -> dict:
         now = time.time()
-        hints_ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec",
-                                           20.0) or 20.0))
+        hints_ttl = max(1.0, float(getattr(self.policy, "rate_hint_ttl_sec", 20.0) or 20.0))
         soft = getattr(self, "_key_soft", None)
         hints = getattr(self, "_key_hints", None)
         soft = soft if isinstance(soft, dict) else {}
         hints = hints if isinstance(hints, dict) else {}
         try:
             from . import autoprobe as _ap
+
             quota = getattr(_ap, "_key_quota_day", {}) or {}
-        except Exception:                           # noqa: BLE001
+        except Exception:  # noqa: BLE001
             quota = {}
         return {
-            "soft": {k: round(max(0.0, float(v) - now), 1)
-                     for k, v in sorted(soft.items()) if float(v) > now},
-            "hints": {k: {"age_sec": round(now - float(ts), 1),
-                          "remaining": int(rem),
-                          "stale": (now - float(ts)) > hints_ttl}
-                      for k, (ts, rem) in sorted(hints.items())},
-            "quota_day": {self._tag_key(k): round(max(0.0, float(v) - now), 1)
-                          for k, v in sorted(quota.items())
-                          if float(v) > now},
+            "soft": {k: round(max(0.0, float(v) - now), 1) for k, v in sorted(soft.items()) if float(v) > now},
+            "hints": {
+                k: {"age_sec": round(now - float(ts), 1), "remaining": int(rem), "stale": (now - float(ts)) > hints_ttl}
+                for k, (ts, rem) in sorted(hints.items())
+            },
+            "quota_day": {
+                self._tag_key(k): round(max(0.0, float(v) - now), 1) for k, v in sorted(quota.items()) if float(v) > now
+            },
         }
 
     def model_circuits_view(self) -> dict:
         now = time.time()
-        open_sec = float(getattr(self.policy, "model_circuit_open_sec",
-                                 60) or 60)
+        open_sec = float(getattr(self.policy, "model_circuit_open_sec", 60) or 60)
         win = float(getattr(self.policy, "model_circuit_window_sec", 60) or 60)
         need = int(getattr(self.policy, "model_circuit_keys", 3) or 3)
         _cb = getattr(self, "_model_cb", None)
@@ -3959,16 +3567,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             ts = float((ent or {}).get("ts") or 0.0)
             models[mkey] = {
                 "distinct_keys": len((ent or {}).get("tags") or ()),
-                "keys_needed": need, "opened": bool(opened),
-                "open_remaining_sec": (round(max(0.0, open_sec - (now - opened)),
-                                             1) if opened else 0),
+                "keys_needed": need,
+                "opened": bool(opened),
+                "open_remaining_sec": (round(max(0.0, open_sec - (now - opened)), 1) if opened else 0),
                 "window_age_sec": (round(now - ts, 1) if ts else None),
             }
-        return {"enabled": bool(getattr(self.policy, "model_circuit_enabled",
-                                        True)),
-                "window_sec": win, "keys_needed": need, "open_sec": open_sec,
-                "open_total": sum(1 for v in models.values() if v["opened"]),
-                "models": models}
+        return {
+            "enabled": bool(getattr(self.policy, "model_circuit_enabled", True)),
+            "window_sec": win,
+            "keys_needed": need,
+            "open_sec": open_sec,
+            "open_total": sum(1 for v in models.values() if v["opened"]),
+            "models": models,
+        }
 
     def circuit_breakers_view(self) -> dict:
         now = time.time()
@@ -3976,25 +3587,23 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         def _row(cb: dict) -> dict:
             lf = float((cb or {}).get("last_failure") or 0.0)
             op = float((cb or {}).get("opened_at") or 0.0)
-            return {"state": (cb or {}).get("state"),
-                    "failures": int((cb or {}).get("failures") or 0),
-                    "last_failure_age_sec": (round(now - lf, 1) if lf else None),
-                    "opened_age_sec": (round(now - op, 1) if op else None)}
+            return {
+                "state": (cb or {}).get("state"),
+                "failures": int((cb or {}).get("failures") or 0),
+                "last_failure_age_sec": (round(now - lf, 1) if lf else None),
+                "opened_age_sec": (round(now - op, 1) if op else None),
+            }
 
         _kcb = getattr(self, "_circuit_breakers", None)
         _dcb = getattr(self, "_dep_circuit_breakers", None)
         return {
-            "keys": {self._tag_key(k): _row(v)
-                     for k, v in (_kcb if isinstance(_kcb, dict) else {}).items()},
-            "deployments": {k: _row(v)
-                            for k, v in (_dcb if isinstance(_dcb, dict)
-                                         else {}).items()},
-            "config": {"threshold": getattr(self.policy,
-                                            "circuit_breaker_threshold", 5),
-                       "timeout": getattr(self.policy,
-                                          "circuit_breaker_timeout", 60.0),
-                       "half_open_requests": getattr(
-                           self.policy, "circuit_breaker_half_open_requests", 3)},
+            "keys": {self._tag_key(k): _row(v) for k, v in (_kcb if isinstance(_kcb, dict) else {}).items()},
+            "deployments": {k: _row(v) for k, v in (_dcb if isinstance(_dcb, dict) else {}).items()},
+            "config": {
+                "threshold": getattr(self.policy, "circuit_breaker_threshold", 5),
+                "timeout": getattr(self.policy, "circuit_breaker_timeout", 60.0),
+                "half_open_requests": getattr(self.policy, "circuit_breaker_half_open_requests", 3),
+            },
         }
 
     def provider_alternation_view(self) -> dict:
@@ -4005,20 +3614,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         rec = None
         if last:
             lp = str(last[0] or "")
-            rec = {"provider": lp,
-                   "model": (last[1] if len(last) > 1 else None),
-                   "dim_k": (last[2] if len(last) > 2 else None),
-                   "age_sec": round(now - float(prov_last.get(lp, now)), 1)}
-        return {"enabled": bool(getattr(self.policy,
-                                        "provider_alternation_enabled", True)),
-                "last_attempt": rec}
+            rec = {
+                "provider": lp,
+                "model": (last[1] if len(last) > 1 else None),
+                "dim_k": (last[2] if len(last) > 2 else None),
+                "age_sec": round(now - float(prov_last.get(lp, now)), 1),
+            }
+        return {"enabled": bool(getattr(self.policy, "provider_alternation_enabled", True)), "last_attempt": rec}
 
     def probes_in_flight_view(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         out: dict[str, dict] = {}
         for sid, m in (self._probes() or {}).items():
-            live = {u: round(now - float(ts), 1)
-                    for u, ts in m.items() if now - float(ts) <= 950}
+            live = {u: round(now - float(ts), 1) for u, ts in m.items() if now - float(ts) <= 950}
             if live:
                 out[sid] = {"count": len(live), "uniques": live}
         return {"total": sum(v["count"] for v in out.values()), "sessions": out}
@@ -4032,18 +3640,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             pre = int((rec or {}).get("pre") or 0)
             post = int((rec or {}).get("post") or 0)
             pt = int((rec or {}).get("pt") or 0)
-            out.append({
-                "session_id": sid, "samples": int((rec or {}).get("n") or 0),
-                "pre_chars": pre, "post_chars": post, "prompt_tokens": pt,
-                "cpt_pre": (round(pre / pt, 3) if pt else None),
-                "cpt_post": (round(post / pt, 3) if pt else None),
-                "age_sec": round(now - float((rec or {}).get("ts") or 0.0), 1),
-            })
+            out.append(
+                {
+                    "session_id": sid,
+                    "samples": int((rec or {}).get("n") or 0),
+                    "pre_chars": pre,
+                    "post_chars": post,
+                    "prompt_tokens": pt,
+                    "cpt_pre": (round(pre / pt, 3) if pt else None),
+                    "cpt_post": (round(post / pt, 3) if pt else None),
+                    "age_sec": round(now - float((rec or {}).get("ts") or 0.0), 1),
+                }
+            )
         return out
 
     # --------------------------------------------------- QUIRK LOCALE (P2-9)
-    QUIRK_FLAGS = ("thinking_replay", "strip_reasoning", "no_thinking",
-                   "hold_until_finish", "media_defer")
+    QUIRK_FLAGS = ("thinking_replay", "strip_reasoning", "no_thinking", "hold_until_finish", "media_defer")
 
     def sync_runtime_constants(self) -> dict:
         """Propaga i parametri di tuning della policy nelle costanti di
@@ -4066,16 +3678,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 globals()[name] = val
                 changed[name] = {"old": old, "new": val}
 
-        _set("LATENCY_ROTATE_THRESHOLD_MS", _num(
+        _set(
             "LATENCY_ROTATE_THRESHOLD_MS",
-            getattr(p, "latency_rotate_threshold_ms",
-                    LATENCY_ROTATE_THRESHOLD_MS), int))
-        _set("SOFT_SLOW_LATENCY_MS", _num(
+            _num(
+                "LATENCY_ROTATE_THRESHOLD_MS",
+                getattr(p, "latency_rotate_threshold_ms", LATENCY_ROTATE_THRESHOLD_MS),
+                int,
+            ),
+        )
+        _set(
             "SOFT_SLOW_LATENCY_MS",
-            getattr(p, "soft_slow_latency_ms", SOFT_SLOW_LATENCY_MS), int))
-        _set("SOFT_SLOW_CTX_MIN", _num(
-            "SOFT_SLOW_CTX_MIN",
-            getattr(p, "soft_slow_ctx_min", SOFT_SLOW_CTX_MIN), int))
+            _num("SOFT_SLOW_LATENCY_MS", getattr(p, "soft_slow_latency_ms", SOFT_SLOW_LATENCY_MS), int),
+        )
+        _set("SOFT_SLOW_CTX_MIN", _num("SOFT_SLOW_CTX_MIN", getattr(p, "soft_slow_ctx_min", SOFT_SLOW_CTX_MIN), int))
         edges = getattr(p, "ctx_bucket_edges", None) or list(CTX_BUCKETS)
         try:
             edges_t = tuple(int(e) for e in edges)
@@ -4083,43 +3698,47 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             edges_t = tuple(CTX_BUCKETS)
         _set("CTX_BUCKETS", edges_t)
         _set("CTX_BUCKET_COUNT", len(edges_t) + 1)
-        _set("TTFT_RATE_MIN_CTX", _num(
-            "TTFT_RATE_MIN_CTX",
-            getattr(p, "ttft_rate_min_ctx", TTFT_RATE_MIN_CTX), int))
-        _set("TTFT_RATE_FLOOR_MS", _num(
+        _set("TTFT_RATE_MIN_CTX", _num("TTFT_RATE_MIN_CTX", getattr(p, "ttft_rate_min_ctx", TTFT_RATE_MIN_CTX), int))
+        _set(
             "TTFT_RATE_FLOOR_MS",
-            getattr(p, "ttft_rate_floor_ms", TTFT_RATE_FLOOR_MS), float))
-        _set("SLOW_LATENCY_ABS_FLOOR_MS", _num(
+            _num("TTFT_RATE_FLOOR_MS", getattr(p, "ttft_rate_floor_ms", TTFT_RATE_FLOOR_MS), float),
+        )
+        _set(
             "SLOW_LATENCY_ABS_FLOOR_MS",
-            getattr(p, "slow_latency_abs_floor_ms",
-                    SLOW_LATENCY_ABS_FLOOR_MS), float))
-        _set("SLOW_LATENCY_REL_MULT", _num(
+            _num(
+                "SLOW_LATENCY_ABS_FLOOR_MS", getattr(p, "slow_latency_abs_floor_ms", SLOW_LATENCY_ABS_FLOOR_MS), float
+            ),
+        )
+        _set(
             "SLOW_LATENCY_REL_MULT",
-            getattr(p, "slow_latency_rel_mult", SLOW_LATENCY_REL_MULT), float))
-        _set("SLOW_LATENCY_MIN_PEERS", _num(
+            _num("SLOW_LATENCY_REL_MULT", getattr(p, "slow_latency_rel_mult", SLOW_LATENCY_REL_MULT), float),
+        )
+        _set(
             "SLOW_LATENCY_MIN_PEERS",
-            getattr(p, "slow_latency_min_peers",
-                    SLOW_LATENCY_MIN_PEERS), int))
-        _set("SLOW_GEN_MULT", _num(
-            "SLOW_GEN_MULT",
-            getattr(p, "slow_gen_mult", SLOW_GEN_MULT), float))
-        _set("SLOW_TYPICAL_COMPLETION_TOKENS", _num(
+            _num("SLOW_LATENCY_MIN_PEERS", getattr(p, "slow_latency_min_peers", SLOW_LATENCY_MIN_PEERS), int),
+        )
+        _set("SLOW_GEN_MULT", _num("SLOW_GEN_MULT", getattr(p, "slow_gen_mult", SLOW_GEN_MULT), float))
+        _set(
             "SLOW_TYPICAL_COMPLETION_TOKENS",
-            getattr(p, "slow_typical_completion_tokens",
-                    SLOW_TYPICAL_COMPLETION_TOKENS), float))
-        _set("SLOW_REL_BASELINE_MULT", _num(
+            _num(
+                "SLOW_TYPICAL_COMPLETION_TOKENS",
+                getattr(p, "slow_typical_completion_tokens", SLOW_TYPICAL_COMPLETION_TOKENS),
+                float,
+            ),
+        )
+        _set(
             "SLOW_REL_BASELINE_MULT",
-            getattr(p, "slow_rel_baseline_mult",
-                    SLOW_REL_BASELINE_MULT), float))
-        _set("EFFORT_CAPABLE_BONUS", _num(
+            _num("SLOW_REL_BASELINE_MULT", getattr(p, "slow_rel_baseline_mult", SLOW_REL_BASELINE_MULT), float),
+        )
+        _set(
             "EFFORT_CAPABLE_BONUS",
-            getattr(p, "effort_capable_bonus", EFFORT_CAPABLE_BONUS), float))
-        _set("LATENCY_PENALTY_PER_SEC", _num(
+            _num("EFFORT_CAPABLE_BONUS", getattr(p, "effort_capable_bonus", EFFORT_CAPABLE_BONUS), float),
+        )
+        _set(
             "LATENCY_PENALTY_PER_SEC",
-            getattr(p, "latency_penalty_per_sec",
-                    LATENCY_PENALTY_PER_SEC), float))
-        _pbn = str(getattr(p, "provider_bias_normalization",
-                           PROVIDER_BIAS_NORMALIZATION) or "log").lower()
+            _num("LATENCY_PENALTY_PER_SEC", getattr(p, "latency_penalty_per_sec", LATENCY_PENALTY_PER_SEC), float),
+        )
+        _pbn = str(getattr(p, "provider_bias_normalization", PROVIDER_BIAS_NORMALIZATION) or "log").lower()
         if _pbn in ("log", "sqrt", "none"):
             _set("PROVIDER_BIAS_NORMALIZATION", _pbn)
         # Pesi reputazione: SW e' un dict importato per riferimento, quindi lo
@@ -4138,8 +3757,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                         changed.setdefault("SCORING_WEIGHTS", {})[wk] = nv
                         SW[wk] = nv
         if changed:
-            log.info("[router] tuning da policy applicato: %s",
-                     ", ".join(sorted(changed)))
+            log.info("[router] tuning da policy applicato: %s", ", ".join(sorted(changed)))
         return changed
 
     def apply_quirks(self) -> int:
@@ -4152,13 +3770,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # propaga senza restart.
         try:
             self.sync_runtime_constants()
-        except Exception as exc:                      # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("[router] sync tuning fallito: %r", exc)
         quirks = list(getattr(self.policy, "quirks", None) or [])
         self._applied_quirks = []
         if not quirks:
             return 0
         import fnmatch
+
         n = 0
         for dep in self._all_deps():
             model = str(dep.get("model") or "").lower()
@@ -4168,21 +3787,23 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     continue
                 flag = str(q.get("flag") or "")
                 if flag not in self.QUIRK_FLAGS:
-                    log.warning("[quirk] flag sconosciuto '%s' per %s",
-                                flag, glob)
+                    log.warning("[quirk] flag sconosciuto '%s' per %s", flag, glob)
                     continue
                 dep[flag] = True
                 n += 1
                 self._applied_quirks.append(
-                    {"model": glob, "flag": flag,
-                     "severity": q.get("severity") or "warning",
-                     "note": q.get("note") or "", "unique": dep.get("unique")})
-                if (q.get("severity") == "blocker"):
-                    log.warning("[quirk] BLOCKER %s (%s) -> %s",
-                                dep.get("model"), flag, dep.get("unique"))
+                    {
+                        "model": glob,
+                        "flag": flag,
+                        "severity": q.get("severity") or "warning",
+                        "note": q.get("note") or "",
+                        "unique": dep.get("unique"),
+                    }
+                )
+                if q.get("severity") == "blocker":
+                    log.warning("[quirk] BLOCKER %s (%s) -> %s", dep.get("model"), flag, dep.get("unique"))
         if self._applied_quirks:
-            log.info("[quirk] %d applicazioni su %d quirk dichiarati",
-                     n, len(quirks))
+            log.info("[quirk] %d applicazioni su %d quirk dichiarati", n, len(quirks))
         return n
 
     def quirks_view(self) -> dict:
@@ -4190,8 +3811,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         by_model: dict[str, int] = {}
         for a in applied:
             by_model[a["model"]] = by_model.get(a["model"], 0) + 1
-        return {"declared": len(getattr(self.policy, "quirks", None) or []),
-                "applied": len(applied), "by_model": by_model}
+        return {
+            "declared": len(getattr(self.policy, "quirks", None) or []),
+            "applied": len(applied),
+            "by_model": by_model,
+        }
 
     def _all_deps(self):
         for deps in self.config.groups.values():
@@ -4215,41 +3839,38 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             rem = self.cooldown_residual(u)
             d = self.config.deployment_by_unique(u) or {}
             s = self.stats_for(u)
-            rows.append({
-                "unique": u, "model": d.get("model"), "group": d.get("group"),
-                "remaining_sec": int(rem),
-                "reason": getattr(s, "last_reason", None),
-                "provenance": self.cooldown_provenance(u),
-                "fail_24h": getattr(s, "fail_count_24h", None),
-                "probeable": self.cooldown_probeable(u),
-            })
+            rows.append(
+                {
+                    "unique": u,
+                    "model": d.get("model"),
+                    "group": d.get("group"),
+                    "remaining_sec": int(rem),
+                    "reason": getattr(s, "last_reason", None),
+                    "provenance": self.cooldown_provenance(u),
+                    "fail_24h": getattr(s, "fail_count_24h", None),
+                    "probeable": self.cooldown_probeable(u),
+                }
+            )
         rows.sort(key=lambda r: -r["remaining_sec"])
         benches: dict[str, int] = {}
         for u in self._cooldown:
             if not self.is_cooled_down(u):
                 continue
             d = self.config.deployment_by_unique(u) or {}
-            if getattr(self.stats_for(u), "last_reason", None) == \
-                    "model_unhealthy":
-                benches[str(d.get("model"))] = benches.get(
-                    str(d.get("model")), 0) + 1
-        exempt = {u: n for u, n in (getattr(self, "_repair_exempt_map", {})
-                                    or {}).items() if n}
+            if getattr(self.stats_for(u), "last_reason", None) == "model_unhealthy":
+                benches[str(d.get("model"))] = benches.get(str(d.get("model")), 0) + 1
+        exempt = {u: n for u, n in (getattr(self, "_repair_exempt_map", {}) or {}).items() if n}
         return {
             "cooldowns_total": len(rows),
             "cooldowns": rows[:limit],
-            "model_bench": dict(sorted(benches.items(),
-                                       key=lambda kv: -kv[1])[:limit]),
+            "model_bench": dict(sorted(benches.items(), key=lambda kv: -kv[1])[:limit]),
             "endpoint_quarantine": self.endpoint_quarantine_view(),
             "key_leases": self.key_leases_view(),
             "repair_exempt": exempt,
-            "model_fail_window": {m: len(q) for m, q in
-                                  (getattr(self, "_model_fail_win_map", {})
-                                   or {}).items() if q},
+            "model_fail_window": {m: len(q) for m, q in (getattr(self, "_model_fail_win_map", {}) or {}).items() if q},
         }
 
-    def clear_pressure(self, model: str | None = None,
-                       unique: str | None = None) -> dict:
+    def clear_pressure(self, model: str | None = None, unique: str | None = None) -> dict:
         """Azzera cooldown + penalita' + finestre di fallimento (operatore).
 
         `unique` -> solo quel deployment; `model` -> tutte le sue chiavi;
@@ -4298,12 +3919,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if mcb:
                 mcb.clear()
         self._key_leases().clear()
-        log.warning("[pressure] clear (model=%s unique=%s): %d cooldown "
-                    "rimossi", want_model or "-", unique or "-", len(cleared))
+        log.warning(
+            "[pressure] clear (model=%s unique=%s): %d cooldown rimossi", want_model or "-", unique or "-", len(cleared)
+        )
         return {"ok": True, "cleared": cleared, "count": len(cleared)}
 
-    def reset_scores(self, unique: str | None = None,
-                     model: str | None = None) -> dict:
+    def reset_scores(self, unique: str | None = None, model: str | None = None) -> dict:
         """Azzera i punteggi di reputazione (base/provider/key). Senza filtri
         svuota tutto; con `unique`/`model` rimuove solo le entry selezionate.
         Il time-decay resta invariato (solo i punteggi correnti sono toccati)."""
@@ -4325,8 +3946,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     key_sel.add(self._api_key_str(d))
 
         def _drop(mp: dict, sel: set[str] | None) -> int:
-            targets = (list(mp) if sel is None
-                       else [k for k in list(mp) if k in sel])
+            targets = list(mp) if sel is None else [k for k in list(mp) if k in sel]
             for k in targets:
                 mp.pop(k, None)
             return len(targets)
@@ -4342,8 +3962,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             self._base_scores.clear()
             self._provider_scores.clear()
             self._key_scores.clear()
-        log.warning("[scores] reset (unique=%s model=%s): base=%d prov=%d key=%d",
-                    want_u or "-", want_m or "-", n_base, n_prov, n_key)
+        log.warning(
+            "[scores] reset (unique=%s model=%s): base=%d prov=%d key=%d",
+            want_u or "-",
+            want_m or "-",
+            n_base,
+            n_prov,
+            n_key,
+        )
         return {"ok": True, "base": n_base, "provider": n_prov, "key": n_key}
 
     # ------------------------------------------------ PROVENIENZA COOLDOWN (P0)
@@ -4353,8 +3979,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d = self._cooldown_prov_map = {}
         return d
 
-    def _infer_provenance(self, reason: str | None, status: int | None,
-                          explicit_seconds: bool) -> str:
+    def _infer_provenance(self, reason: str | None, status: int | None, explicit_seconds: bool) -> str:
         """Classifica la NASCITA di un cooldown: 'credit' (402/no_credits),
         'tier' (403/forbidden/modello fuori tier), 'authoritative' (secondi
         dichiarati dal provider: Retry-After o reset quota), altrimenti
@@ -4383,7 +4008,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         sveglia puo' testarlo in anticipo. Mai per authoritative/credit/tier."""
         return self.cooldown_provenance(unique) == "heuristic"
 
-
     def inflight_total(self) -> int:
         """Richieste attualmente in volo su tutti i deployment (usato dal
         graceful shutdown per attendere il drain prima del flush finale)."""
@@ -4407,28 +4031,27 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         now = time.time()
         mk = time.strftime("%Y-%m-%dT%H:%M", time.gmtime(now))
         dk = time.strftime("%Y-%m-%d", time.gmtime(now))
-        if mk != s.minute_key:              # rollover minuto
+        if mk != s.minute_key:  # rollover minuto
             s.minute_key, s.minute_calls = mk, 0
-        if dk != s.day_key:                 # rollover giorno + cap appresi
+        if dk != s.day_key:  # rollover giorno + cap appresi
             s.day_key, s.day_calls = dk, 0
-            s.day_cap_learned = 0.0         # i limiti giornalieri ripartono
+            s.day_cap_learned = 0.0  # i limiti giornalieri ripartono
         s.minute_calls += 1
         s.day_calls += 1
         dep = self.config.deployment_by_unique(unique)
         if dep is not None:
             self._note_prov_attempt(dep)
             cap = self.config.group_caps.get(dep["group"])
-            if cap in self.SAME_MODEL_PRIORITY_CAPS \
-                    and self.policy.gen_same_model_failover:
+            if cap in self.SAME_MODEL_PRIORITY_CAPS and self.policy.gen_same_model_failover:
                 self._gen_last_model[dep["group"]] = dep["model"]
         # [Blocco 1] Registra tentativo per reputation scoring
         self.record_attempt(unique)
         # COLD SPREAD: il tentativo entra nella finestra rolling 24h
         self.note_usage(unique, ctx_est=ctx_est)
 
-    def note_result(self, unique: str, latency_ms: float,
-                    quality: float = 1.0, ctx_est=None,
-                    kind: str = "total") -> None:
+    def note_result(
+        self, unique: str, latency_ms: float, quality: float = 1.0, ctx_est=None, kind: str = "total"
+    ) -> None:
         """Risposta ricevuta: aggiorna l'EMA di latenza (non tocca inflight:
         per lo streaming chiude la nota_end al termine del flusso).
         Resetta anche lo streak di fallimenti e aggiorna il tasso successo.
@@ -4440,8 +4063,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         q = min(1.0, max(0.1, float(quality)))
         alpha = max(0.05, 0.3 * q)
         s = self.stats_for(unique)
-        s.ema_latency_ms = (latency_ms if s.ema_latency_ms is None
-                            else s.ema_latency_ms * (1 - alpha) + latency_ms * alpha)
+        s.ema_latency_ms = (
+            latency_ms if s.ema_latency_ms is None else s.ema_latency_ms * (1 - alpha) + latency_ms * alpha
+        )
         s.fail_streak = 0
         s.probe_fail_streak = 0
         # successo reale: azzera anche l'esenzione-riparazione (P0)
@@ -4453,8 +4077,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         s.ok_count += 1
         s.last_success_ts = time.time()
         # [Blocco 1] Registra successo per reputation scoring
-        self.record_success(unique, latency_ms, quality=q,
-                            ctx_est=ctx_est, kind=kind)
+        self.record_success(unique, latency_ms, quality=q, ctx_est=ctx_est, kind=kind)
         # Dynamic concurrency limit: successo a saturazione -> il limite sale
         self._learn_concurrency(unique)
 
@@ -4463,8 +4086,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         _s.inflight = max(0, _s.inflight - 1)
         if ctx_est:
             try:
-                _s.inflight_tokens = max(
-                    0, _s.inflight_tokens - max(0, int(ctx_est)))
+                _s.inflight_tokens = max(0, _s.inflight_tokens - max(0, int(ctx_est)))
             except (TypeError, ValueError):
                 pass
         # Connection draining: una richiesta a un deployment in draining e'
@@ -4477,8 +4099,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 self._finish_drain(unique)
 
     # ------------------------------------------- connection draining (hot-reload)
-    def start_draining(self, unique: str, dep: dict,
-                       inflight: int, *, operator: bool = False) -> None:
+    def start_draining(self, unique: str, dep: dict, inflight: int, *, operator: bool = False) -> None:
         """Archivia un deployment rimosso dal CSV ma con richieste in volo.
 
         Il dep viene RI-AGGIUNTO alla config (se assente) marcato draining:
@@ -4517,14 +4138,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     def purge_draining(self) -> int:
         """Rimuove i draining oltre il TTL (anche con inflight residua)."""
         now = time.time()
-        ttl = max(1.0, float(getattr(self.policy, "hotreload_drain_ttl_sec",
-                                     120.0) or 120.0))
-        dead = [u for u, d in list(self._drain().items())
-                if now - d.get("ts", 0) > ttl]
+        ttl = max(1.0, float(getattr(self.policy, "hotreload_drain_ttl_sec", 120.0) or 120.0))
+        dead = [u for u, d in list(self._drain().items()) if now - d.get("ts", 0) > ttl]
         for u in dead:
-            log.info("[drain] %s: TTL %ds scaduto (%d inflight) -> rimosso "
-                     "definitivamente", u, int(ttl),
-                     self._drain()[u].get("inflight", 0))
+            log.info(
+                "[drain] %s: TTL %ds scaduto (%d inflight) -> rimosso definitivamente",
+                u,
+                int(ttl),
+                self._drain()[u].get("inflight", 0),
+            )
             self._finish_drain(u)
         return len(dead)
 
@@ -4542,14 +4164,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             dep = d.get("dep") or {}
             grp = dep.get("group")
             if grp and self.config is not None and grp in self.config.groups:
-                self.config.groups[grp] = [
-                    x for x in self.config.groups[grp]
-                    if x.get("unique") != unique]
-            log.info("[drain] %s: draining completata -> rimosso dalla config",
-                     unique)
+                self.config.groups[grp] = [x for x in self.config.groups[grp] if x.get("unique") != unique]
+            log.info("[drain] %s: draining completata -> rimosso dalla config", unique)
         else:
-            log.warning("[drain] %s: draining ANNULLATA (undrain operatore)",
-                        unique)
+            log.warning("[drain] %s: draining ANNULLATA (undrain operatore)", unique)
         return True
 
     def _finish_drain(self, unique: str) -> None:
@@ -4565,31 +4183,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         """Snapshot serializzabile: EMA+last_used e scadenze cooldown."""
         self._init_scoring_if_needed()
         return {
-            "stats": {u: {"ema_latency_ms": s.ema_latency_ms,
-                          "last_used": s.last_used,
-                          "fail_streak": s.fail_streak,
-                          "success_ema": s.success_ema,
-                          "fail_count_24h": s.fail_count_24h,
-                          "fail_day_key": s.fail_day_key,
-                          "last_reason": s.last_reason,
-                          "last_provenance": s.last_provenance,
-                          "ok_count": s.ok_count,
-                          "fail_count": s.fail_count,
-                          "last_success_ts": s.last_success_ts,
-                          "last_fail_ts": s.last_fail_ts,
-                          "probe_fail_streak": s.probe_fail_streak}
-                      for u, s in self._stats.items()},
-            "cap_strikes": [{"key": k, **v} for k, v in
-                            self._cap_strikes.items()],
+            "stats": {
+                u: {
+                    "ema_latency_ms": s.ema_latency_ms,
+                    "last_used": s.last_used,
+                    "fail_streak": s.fail_streak,
+                    "success_ema": s.success_ema,
+                    "fail_count_24h": s.fail_count_24h,
+                    "fail_day_key": s.fail_day_key,
+                    "last_reason": s.last_reason,
+                    "last_provenance": s.last_provenance,
+                    "ok_count": s.ok_count,
+                    "fail_count": s.fail_count,
+                    "last_success_ts": s.last_success_ts,
+                    "last_fail_ts": s.last_fail_ts,
+                    "probe_fail_streak": s.probe_fail_streak,
+                }
+                for u, s in self._stats.items()
+            },
+            "cap_strikes": [{"key": k, **v} for k, v in self._cap_strikes.items()],
             # [Blocco 1] Reputation scoring
             "base_scores": dict(self._base_scores),
             "provider_scores": dict(self._provider_scores),
             "key_scores": dict(self._key_scores),
             "avg_latencies": dict(self._avg_latencies),
-            "ctx_lat": {u: list(v) for u, v in
-                        getattr(self, "_lat_buckets", {}).items()},
-            "ctx_ttft": {u: list(v) for u, v in
-                         getattr(self, "_ttft_buckets", {}).items()},
+            "ctx_lat": {u: list(v) for u, v in getattr(self, "_lat_buckets", {}).items()},
+            "ctx_ttft": {u: list(v) for u, v in getattr(self, "_ttft_buckets", {}).items()},
             "ttft_rate": dict(getattr(self, "_prefill_rate", {})),
             "est_div": dict(getattr(self, "_est_div", {})),
             # evidenza shadow del rollout auto-adaptive: sopravvive al restart
@@ -4639,11 +4258,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 except (TypeError, ValueError):
                     pass
                 try:
-                    s.probe_fail_streak = max(
-                        0, int(st.get("probe_fail_streak") or 0))
+                    s.probe_fail_streak = max(0, int(st.get("probe_fail_streak") or 0))
                 except (TypeError, ValueError):
                     pass
-            for st in (data.get("cap_strikes") or []):
+            for st in data.get("cap_strikes") or []:
                 if not isinstance(st, dict) or "|" not in str(st.get("key", "")):
                     continue
                 self._cap_strikes[str(st["key"])] = {
@@ -4661,8 +4279,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 self._key_scores[str(ak)] = float(score)
             for u, lat in (data.get("avg_latencies") or {}).items():
                 self._avg_latencies[str(u)] = float(lat)
-            for key, attr in (("ctx_lat", "_lat_buckets"),
-                              ("ctx_ttft", "_ttft_buckets")):
+            for key, attr in (("ctx_lat", "_lat_buckets"), ("ctx_ttft", "_ttft_buckets")):
                 table = getattr(self, attr, None)
                 if not isinstance(table, dict):
                     continue
@@ -4694,7 +4311,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     if 1.5 <= fd <= 4.5:
                         ediv[str(u)] = fd
             load_estimate_shadow(data.get("estimate_shadow") or {})
-        except Exception as exc:             # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.warning("[stats] load fallito (%s): riparto pulito", exc)
 
     # -------------------------------------------------- cooldown su disco
@@ -4746,7 +4363,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 if full > 0:
                     self._cooldown_full_map()[str(u)] = full
                 n += 1
-        except Exception as exc:             # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.warning("[cooldown] load fallito (%s): riparto pulito", exc)
             return 0
         if n:
@@ -4774,8 +4391,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             out = {}
             for k, v in (d or {}).items():
                 try:
-                    if isinstance(v, tuple) and len(v) == 2 \
-                            and now - float(v[1]) <= ttl:
+                    if isinstance(v, tuple) and len(v) == 2 and now - float(v[1]) <= ttl:
                         out[str(k)] = [v[0], float(v[1])]
                 except (TypeError, ValueError):
                     continue
@@ -4788,7 +4404,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             keep = {}
             for u, rec in (m or {}).items():
                 try:
-                    ts, hard = (rec if isinstance(rec, tuple) else (rec, True))
+                    ts, hard = rec if isinstance(rec, tuple) else (rec, True)
                     if now - float(ts) <= slow_ttl:
                         keep[str(u)] = [float(ts), bool(hard)]
                 except (TypeError, ValueError):
@@ -4813,36 +4429,29 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             try:
                 ts = float((e or {}).get("ts") or 0.0)
                 if now - ts <= sticky_ttl:
-                    session_turns[str(sid)] = [
-                        int((e or {}).get("n") or 0),
-                        int((e or {}).get("go_until") or 0), ts]
+                    session_turns[str(sid)] = [int((e or {}).get("n") or 0), int((e or {}).get("go_until") or 0), ts]
             except (TypeError, ValueError):
                 continue
         return {
             "saved_at": now,
             "sticky": _pairs(getattr(self, "_sticky", None), sticky_ttl),
-            "session_group": _pairs(getattr(self, "_session_group", None),
-                                     sticky_ttl),
-            "sticky_dep": _pairs(getattr(self, "_sticky_dep", None),
-                                  sticky_ttl),
-            "session_last_ok": _pairs(getattr(self, "_session_last_ok", None),
-                                       holder_ttl),
+            "session_group": _pairs(getattr(self, "_session_group", None), sticky_ttl),
+            "sticky_dep": _pairs(getattr(self, "_sticky_dep", None), sticky_ttl),
+            "session_last_ok": _pairs(getattr(self, "_session_last_ok", None), holder_ttl),
             "dep_last_session": deps_map,
             "session_deps": {
-                sid: sorted(u for u, (s2, _t) in deps_map.items()
-                            if s2 == sid)
-                for sid in {str(v[0]) for v in deps_map.values()}},
+                sid: sorted(u for u, (s2, _t) in deps_map.items() if s2 == sid)
+                for sid in {str(v[0]) for v in deps_map.values()}
+            },
             "session_slow": session_slow,
             "session_slow_timer": session_slow_timer,
             "session_turns": session_turns,
-            "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None),
-                                   guard),
+            "ctx_frontier": _pairs(getattr(self, "_ctx_frontier", None), guard),
             "esc_win": _pairs(getattr(self, "_esc_win", None), esc_ttl),
             "last_go": _pairs(getattr(self, "_last_go", None), go_ttl),
-            "discovered_max_input": {str(u): int(v) for u, v in
-                                     (getattr(self, "_discovered_max_input",
-                                              None) or {}).items()
-                                     if v},
+            "discovered_max_input": {
+                str(u): int(v) for u, v in (getattr(self, "_discovered_max_input", None) or {}).items() if v
+            },
         }
 
     def load_routing_state(self, data: dict) -> dict:
@@ -4876,8 +4485,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             report[report_name] = n
 
         _load_pairs("sticky", self._sticky, sticky_ttl, "sticky")
-        _load_pairs("session_group", self._session_group, sticky_ttl,
-                    "session_group")
+        _load_pairs("session_group", self._session_group, sticky_ttl, "session_group")
         _load_pairs("sticky_dep", self._sticky_dep, sticky_ttl, "sticky_dep")
         _load_pairs("session_last_ok", self._cache_ok(), holder_ttl, "holder")
         _load_pairs("esc_win", self._esc(), esc_ttl, "esc_win")
@@ -4937,8 +4545,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 ts = float(rec[2])
                 if now - ts > sticky_ttl or now < ts:
                     continue
-                dtn[str(sid)] = {"n": int(rec[0]), "go_until": int(rec[1]),
-                                 "ts": ts}
+                dtn[str(sid)] = {"n": int(rec[0]), "go_until": int(rec[1]), "ts": ts}
                 n += 1
             except (TypeError, ValueError, IndexError):
                 continue
@@ -4993,18 +4600,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # capacità (…-C-go / …-C-fallback).
         _grp = dep.get("group") or ""
         _cfg = getattr(self, "config", None)
-        if _grp.endswith(getattr(_cfg, "go_suffix", "") or "-go") \
-                or _grp.endswith(getattr(_cfg, "fallback_suffix", "")
-                                 or "-fallback"):
+        if _grp.endswith(getattr(_cfg, "go_suffix", "") or "-go") or _grp.endswith(
+            getattr(_cfg, "fallback_suffix", "") or "-fallback"
+        ):
             hl = pol.go_recency_halflife_sec
         else:
             hl = pol.recency_halflife_sec
-        freshness = 1.0 if s.last_used <= 0 else max(
-            0.05, math.exp(-(now - s.last_used) / max(0.001, hl)))
+        freshness = 1.0 if s.last_used <= 0 else max(0.05, math.exp(-(now - s.last_used) / max(0.001, hl)))
         speed = 1.0
         if s.ema_latency_ms and s.ema_latency_ms > 0:
-            speed = min(2.0, max(0.4,
-                                 pol.latency_ref_ms / s.ema_latency_ms))
+            speed = min(2.0, max(0.4, pol.latency_ref_ms / s.ema_latency_ms))
         sat = 1.0 / (1 + s.inflight)
         # penalità dolce per affidabilità: mai esclusione dura (quella la fa
         # il cooldown); un deployment flaky scende fino a ~25% del peso base
@@ -5027,20 +4632,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         budget = 1.0
         if bg.get("enabled"):
             ratio = 1.0
-            for used, cap in ((s.minute_calls, s.min_cap_learned),
-                              (s.day_calls, s.day_cap_learned)):
+            for used, cap in ((s.minute_calls, s.min_cap_learned), (s.day_calls, s.day_cap_learned)):
                 if not cap or cap <= 0:
-                    continue              # niente evidenza -> nessuna pena
+                    continue  # niente evidenza -> nessuna pena
                 r = max(0.0, 1.0 - (used / float(cap)))
                 ratio = min(ratio, r)
             soft = float(bg.get("soft_factor", 0.8))
-            if ratio < 1.0 - soft:        # sotto la soglia morbida
+            if ratio < 1.0 - soft:  # sotto la soglia morbida
                 # falloff lineare fino al peso residuo 5% a quota esaurita
                 span = max(0.05, 1.0 - soft)
                 budget = max(0.05, ratio / span)
                 if budget < 0.3:
-                    log.info("[budget] %s deprioritizzato (quota residua "
-                             "%.0f%%)", dep["unique"], ratio * 100)
+                    log.info("[budget] %s deprioritizzato (quota residua %.0f%%)", dep["unique"], ratio * 100)
         return max(0.05, priority * freshness * speed * sat * rel * budget)
 
     # -------------------------------------------------- chiave custom alias
@@ -5059,8 +4662,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
     # ---------------------------------------------------- scala dims (ladder)
     DIM_SUFFIX_RE = re.compile(r"-(\d+)k$")
 
-    def _note_session_group(self, session_id: str | None,
-                            gname: str | None) -> None:
+    def _note_session_group(self, session_id: str | None, gname: str | None) -> None:
         """Registra il gruppo risolto per la sessione; al cambio logga la
         transizione (osservabilità dei passaggi 200k->1000k ecc.). Log only."""
         if not session_id or not gname:
@@ -5068,12 +4670,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         prev = self._session_group.get(session_id)
         self._session_group[session_id] = (gname, time.time())
         if prev is not None and prev[0] != gname:
-            log.info("[session] %s: gruppo %s -> %s", session_id, prev[0],
-                     gname)
+            log.info("[session] %s: gruppo %s -> %s", session_id, prev[0], gname)
 
-    def _text_ladder(self, pname: str, start_dim: int | None = None,
-                     start_tier: str = "primary",
-                     end_dim: int | None = None) -> list[str]:
+    def _text_ladder(
+        self, pname: str, start_dim: int | None = None, start_tier: str = "primary", end_dim: int | None = None
+    ) -> list[str]:
         """SCALA UNICA del mondo-testo (dims_ladder_floor):
 
             [primari dims >= start_dim ascendenti] + [-go] + [-fallback]
@@ -5107,11 +4708,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # mai due vicini dello stesso provider se esistono alternative.
             _tiers: dict[int, list] = {}
             for dep in dim_deps:
-                _tiers.setdefault(self._eff_order(dep),
-                                  []).append(dep)
+                _tiers.setdefault(self._eff_order(dep), []).append(dep)
             for _t in sorted(_tiers):
-                chain.extend(d["unique"] for d in
-                             self._provider_chain(_tiers[_t], start_dim))
+                chain.extend(d["unique"] for d in self._provider_chain(_tiers[_t], start_dim))
         if start_tier in ("primary", "go"):
             for u in cfg.groups.get(f"{base}{cfg.go_suffix}", []):
                 chain.append(u["unique"])
@@ -5126,21 +4725,20 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if group_name not in cfg.groups:
             return []
         if group_name.endswith(cfg.fallback_suffix):
-            pname = group_name[:-len(cfg.fallback_suffix)][len(cfg.proxy_prefix):]
+            pname = group_name[: -len(cfg.fallback_suffix)][len(cfg.proxy_prefix) :]
             return self._text_ladder(pname, start_tier="fallback")
         if group_name.endswith(cfg.go_suffix):
-            pname = group_name[:-len(cfg.go_suffix)][len(cfg.proxy_prefix):]
+            pname = group_name[: -len(cfg.go_suffix)][len(cfg.proxy_prefix) :]
             return self._text_ladder(pname, start_tier="go")
         m = self.DIM_SUFFIX_RE.search(group_name)
         if not m:
             return []
-        pname = group_name[:m.start()][len(cfg.proxy_prefix):]
+        pname = group_name[: m.start()][len(cfg.proxy_prefix) :]
         return self._text_ladder(pname, start_dim=int(m.group(1)))
 
-    def _resolve_explicit(self, requested: str, pname: str | None,
-                          need: frozenset[str] | None,
-                          session_id: str | None,
-                          ctx_est: int) -> str | None:
+    def _resolve_explicit(
+        self, requested: str, pname: str | None, need: frozenset[str] | None, session_id: str | None, ctx_est: int
+    ) -> str | None:
         """Nome esplicito -> gruppo destinazione (None = rifiuto capace).
 
         - unique completo (__...)              -> passthrough esatto
@@ -5162,17 +4760,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if "__" in requested or not self.policy.dims_ladder_floor:
             missing = self._missing_media_caps(requested, need)
             if missing:
-                log.warning("[caps] %s richiede %s ma il deployment non "
-                            "dichiara %s: 400 esplicito",
-                            requested, sorted(need or ()), missing)
+                log.warning(
+                    "[caps] %s richiede %s ma il deployment non dichiara %s: 400 esplicito",
+                    requested,
+                    sorted(need or ()),
+                    missing,
+                )
                 return None
             return requested
-        if requested in cfg.groups \
-                and cfg.group_caps.get(requested) is not None:
+        if requested in cfg.groups and cfg.group_caps.get(requested) is not None:
             if need and not self._any_capable_in_group(requested, need):
-                log.warning("[caps] %s richiede %s ma %s non ha deployment "
-                            "capace: pass-through",
-                            requested, sorted(need), requested)
+                log.warning(
+                    "[caps] %s richiede %s ma %s non ha deployment capace: pass-through",
+                    requested,
+                    sorted(need),
+                    requested,
+                )
             self._note_session_group(session_id, requested)
             return requested
         tier_start = None
@@ -5182,7 +4785,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             tier_start = "go"
         if tier_start is not None:
             if requested not in cfg.groups:
-                return requested                    # nostro ma inesistente
+                return requested  # nostro ma inesistente
             # Il nome col suffisso di tier (`<p>-go`/`<p>-fallback`) e' il
             # tier del MONDO TESTO. Se la richiesta ha capacita' (es.
             # image_gen) e questo gruppo non ne ha di capaci, il vero tier
@@ -5192,41 +4795,44 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # mondo testo) invece che sui generatori -go.
             if need and not self._any_capable_in_group(requested, need):
                 _pfx = cfg.proxy_prefix
-                _base = requested[:-len(cfg.go_suffix)] if tier_start == "go" \
-                    else requested[:-len(cfg.fallback_suffix)]
-                _pname = _base[len(_pfx):] if _base.startswith(_pfx) else pname
-                cap_tier = self._capability_tier_group(_pname, need,
-                                                       tier_start, cfg)
+                _base = (
+                    requested[: -len(cfg.go_suffix)] if tier_start == "go" else requested[: -len(cfg.fallback_suffix)]
+                )
+                _pname = _base[len(_pfx) :] if _base.startswith(_pfx) else pname
+                cap_tier = self._capability_tier_group(_pname, need, tier_start, cfg)
                 if cap_tier is not None:
-                    log.info("[caps] %s -> %s (tier %s per %s)",
-                             requested, cap_tier, tier_start,
-                             sorted(need))
+                    log.info("[caps] %s -> %s (tier %s per %s)", requested, cap_tier, tier_start, sorted(need))
                     self._note_session_group(session_id, cap_tier)
                     return cap_tier
-                log.warning("[caps] %s richiede %s: nessun gruppo capacita' "
-                            "con tier %s, pass-through", requested,
-                            sorted(need), tier_start)
+                log.warning(
+                    "[caps] %s richiede %s: nessun gruppo capacita' con tier %s, pass-through",
+                    requested,
+                    sorted(need),
+                    tier_start,
+                )
             self._note_session_group(session_id, requested)
             return requested
         m = self.DIM_SUFFIX_RE.search(requested)
         if not m or requested not in cfg.groups:
-            return requested                        # non è un dims nostro noto
+            return requested  # non è un dims nostro noto
         floor = int(m.group(1))
-        pname2 = requested[:m.start()][len(cfg.proxy_prefix):]
+        pname2 = requested[: m.start()][len(cfg.proxy_prefix) :]
         all_dims = [d for d in cfg.profile_dims.get(pname2, []) if d >= floor]
         if not all_dims:
             top = max(cfg.profile_dims.get(pname2, []) or [floor])
-            log.warning("[ladder] soglia %dk oltre il massimo del profilo "
-                        "'%s': uso -%dk", floor, pname2, top)
+            log.warning("[ladder] soglia %dk oltre il massimo del profilo '%s': uso -%dk", floor, pname2, top)
             all_dims = [top]
         cand = all_dims
         if need:
             capable = set(self._capable_dims(pname2, need))
             cand = [d for d in all_dims if d in capable]
             if not cand:
-                log.warning("[ladder] nessuna dim >=%dk capace di %s nel "
-                            "profilo '%s': pass-through legacy",
-                            floor, sorted(need), pname2)
+                log.warning(
+                    "[ladder] nessuna dim >=%dk capace di %s nel profilo '%s': pass-through legacy",
+                    floor,
+                    sorted(need),
+                    pname2,
+                )
                 return requested
         pct = self.policy.step_up_for(pname2)
         # ZEN-FIRST (client opencode nativo): nel tier dei dim non si sceglie
@@ -5235,20 +4841,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # la salita non-zen sono decise subito dopo in `main._chat` (F31).
         if self._zen_first_active():
             _zbase = f"{cfg.proxy_prefix}{pname2}"
-            _zen_dims = [d for d in cand
-                         if self.group_has_zen(f"{_zbase}-{d}k")]
+            _zen_dims = [d for d in cand if self.group_has_zen(f"{_zbase}-{d}k")]
             if _zen_dims:
-                _zfit = next((d for d in _zen_dims
-                              if ctx_est <= d * 1000 * pct // 100), None)
+                _zfit = next((d for d in _zen_dims if ctx_est <= d * 1000 * pct // 100), None)
                 cand = [_zfit] if _zfit is not None else [_zen_dims[-1]]
-        chosen = next((d for d in cand
-                       if ctx_est <= d * 1000 * pct // 100), cand[-1])
+        chosen = next((d for d in cand if ctx_est <= d * 1000 * pct // 100), cand[-1])
         target = f"{cfg.proxy_prefix}{pname2}-{chosen}k"
         self._note_session_group(session_id, target)
         return target
 
-    def _alias_group(self, alias: str,
-                     need: frozenset[str] | None) -> str | None:
+    def _alias_group(self, alias: str, need: frozenset[str] | None) -> str | None:
         """Gruppo-alias per la capacita' richiesta (o testo se `need` e'
         vuoto/text). None se l'alias non ha un gruppo per quella capacita'."""
         cfg = self.config
@@ -5261,11 +4863,8 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # resto vale CAP_PRIORITY_ORDER.
         order = CAP_PRIORITY_ORDER
         if need and "image_edit" in need:
-            order = ("image_edit",) + tuple(c for c in CAP_PRIORITY_ORDER
-                                            if c != "image_edit")
-        cap = next((c for c in order
-                    if need and c in need
-                    and any(cfg.group_caps.get(g) == c for g in groups)), None)
+            order = ("image_edit",) + tuple(c for c in CAP_PRIORITY_ORDER if c != "image_edit")
+        cap = next((c for c in order if need and c in need and any(cfg.group_caps.get(g) == c for g in groups)), None)
         # `need` con sola "text" (o vuoto) -> gruppo testo (group_caps None)
         if cap is None and (not need or need == {"text"}):
             for g in sorted(groups):
@@ -5276,10 +4875,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return None
         return cfg.alias_target(alias, cap)
 
-    def _resolve_alias_name(self, requested: str,
-                            need: frozenset[str] | None,
-                            session_id: str | None,
-                            profile: str | None) -> str | None:
+    def _resolve_alias_name(
+        self, requested: str, need: frozenset[str] | None, session_id: str | None, profile: str | None
+    ) -> str | None:
         """Risolve un alias chiesto col NOME NUDO (es. `gemini`).
 
         Il nome non porta il prefisso del profilo: lo ricostruiamo dal profilo
@@ -5297,17 +4895,20 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 continue
             tgt = self._alias_group(requested, need)
             if tgt is not None:
-                log.info("[alias] %s -> %s (nudo, profilo=%s)",
-                         requested, tgt, p)
+                log.info("[alias] %s -> %s (nudo, profilo=%s)", requested, tgt, p)
                 self._note_session_group(session_id, tgt)
                 return tgt
         return None
 
-    def resolve_group_for_request(self, requested: str, messages: Any,
-                                   session_id: str | None,
-                                   need: frozenset[str] | None = None,
-                                   ctx: int | None = None,
-                                   profile: str | None = None) -> str | None:
+    def resolve_group_for_request(
+        self,
+        requested: str,
+        messages: Any,
+        session_id: str | None,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        profile: str | None = None,
+    ) -> str | None:
         """Ritorna il NOME GRUPPO destinazione (o unique esplicito già valido).
 
         Regole:
@@ -5325,11 +4926,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         """
         cfg = self.config
         if not requested.startswith(cfg.proxy_prefix):
-            return self._resolve_alias_name(requested, need, session_id,
-                                            profile)
+            return self._resolve_alias_name(requested, need, session_id, profile)
 
-        pname = cfg.profile_of_base(requested.split("__")[0]) \
-            or cfg.profile_of_base(requested)
+        pname = cfg.profile_of_base(requested.split("__")[0]) or cfg.profile_of_base(requested)
 
         # ---- ALIAS (colonna `alias`) ---------------------------------------
         # Un alias e' un nome richiamabile che riunisce le righe che lo
@@ -5344,15 +4943,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 log.info("[alias] %s -> %s", requested, _tgt)
                 self._note_session_group(session_id, _tgt)
                 return _tgt
-            log.info("[alias] %s: nessun gruppo per cap=%s, routing normale",
-                     requested, sorted(need or ()))
+            log.info("[alias] %s: nessun gruppo per cap=%s, routing normale", requested, sorted(need or ()))
 
         explicit = self.is_explicit(requested)
 
         # Nome di un GRUPPO-ALIAS gia' completo (esposto in whitelist): e' un
         # gruppo esplicito a tutti gli effetti (nessuna scala dims).
-        if requested in cfg.alias_groups or any(
-                requested in grps for grps in cfg.alias_groups.values()):
+        if requested in cfg.alias_groups or any(requested in grps for grps in cfg.alias_groups.values()):
             if requested in cfg.groups:
                 log.info("[alias] %s (gruppo-alias esplicito)", requested)
                 self._note_session_group(session_id, requested)
@@ -5362,39 +4959,35 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # serve anche al percorso esplicito -Nk (soglia minima -> start dim)
         img_est = getattr(self.policy, "image_token_estimate", 0) or 0
         if ctx is None:
-            ctx = estimate_tokens(messages, self.policy.estimate_divisor,
-                                  img_est)
+            ctx = estimate_tokens(messages, self.policy.estimate_divisor, img_est)
 
         # richiesta ESPLICITA: soglia minima / tier-start / passthrough
         if explicit:
-            return self._resolve_explicit(requested, pname, need,
-                                          session_id, ctx)
+            return self._resolve_explicit(requested, pname, need, session_id, ctx)
 
         media_need = {c for c in (need or ()) if c != "text"}
-        dims = cfg.profile_dims.get(requested, []) if requested in cfg.profile_dims \
+        dims = (
+            cfg.profile_dims.get(requested, [])
+            if requested in cfg.profile_dims
             else (cfg.profile_dims.get(pname, []) if pname else [])
+        )
 
         # ---- GRUPPI CAPACITÀ STRUTTURALI ---------------------------------
         # il dispatcher base instrada la richiesta media al gruppo -C dedicato
         # (ordine di specificità: image_gen > tts > stt > video > audio > vision)
-        if media_need and getattr(self.policy, "cap_groups_enabled", False) \
-                and pname:
+        if media_need and getattr(self.policy, "cap_groups_enabled", False) and pname:
             pcaps = cfg.profile_caps.get(pname, [])
-            target = next((c for c in CAP_PRIORITY_ORDER
-                           if c in media_need and c in pcaps), None)
+            target = next((c for c in CAP_PRIORITY_ORDER if c in media_need and c in pcaps), None)
             if target is not None:
                 gname = f"{cfg.proxy_prefix}{pname}-{target}"
-                log.info("[caps] dispatch strutturale %s -> %s (need=%s)",
-                         requested, gname, sorted(need))
+                log.info("[caps] dispatch strutturale %s -> %s (need=%s)", requested, gname, sorted(need))
                 self._note_session_group(session_id, gname)
                 return gname
             # nessun gruppo per le cap richieste: degrade o 400 rigoroso
             if getattr(self.policy, "cap_groups_on_missing", "dynamic") == "error":
-                log.warning("[caps] nessun gruppo %s nel profilo '%s': "
-                            "on_missing=error", sorted(media_need), pname)
+                log.warning("[caps] nessun gruppo %s nel profilo '%s': on_missing=error", sorted(media_need), pname)
                 return None
-            log.info("[caps] nessun gruppo %s nel profilo '%s': degrade "
-                     "dinamico", sorted(media_need), pname)
+            log.info("[caps] nessun gruppo %s nel profilo '%s': degrade dinamico", sorted(media_need), pname)
             # prosegue sul percorso dinamico legacy qui sotto
 
         # ---- filtro dinamico (percorso testo / degrade) -------------------
@@ -5407,26 +5000,21 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 # (regola: -go solo se richiesto esplicito o a fine scala).
                 # Si prosegue sulla scala completa: e' piu' probabile trovare
                 # un deployment capace tra i free che tra i -go.
-                log.info("[caps] nessun gruppo dim capace per %s: proseguo la "
-                         "scala (free -> zen -> -go)", sorted(need))
+                log.info("[caps] nessun gruppo dim capace per %s: proseguo la scala (free -> zen -> -go)", sorted(need))
 
         # hot-word SOLO percorso testo (i media seguono il gruppo dedicato)
         if not media_need:
-            speed_hit = detect_hot_words(messages,
-                                         patterns=self.policy.speed_hotwords,
-                                         window=self.policy.hotwords_window)
-            reason_hit = detect_hot_words(messages,
-                                          patterns=self.policy.hotwords,
-                                          window=self.policy.hotwords_window)
+            speed_hit = detect_hot_words(
+                messages, patterns=self.policy.speed_hotwords, window=self.policy.hotwords_window
+            )
+            reason_hit = detect_hot_words(messages, patterns=self.policy.hotwords, window=self.policy.hotwords_window)
             if (speed_hit or reason_hit) and dims:
                 if speed_hit:
                     target = self._pick_fast_group(pname, dims, ctx, need)
-                    log.info("[vigile] speed-word -> %s (session=%s)", target,
-                             session_id or "anonima")
+                    log.info("[vigile] speed-word -> %s (session=%s)", target, session_id or "anonima")
                 else:
                     target = f"{cfg.proxy_prefix}{pname}-{dims[-1]}k"
-                    log.info("[vigile] hot-word -> %s (session=%s)", target,
-                             session_id or "anonima")
+                    log.info("[vigile] hot-word -> %s (session=%s)", target, session_id or "anonima")
                 self._note_session_group(session_id, target)
                 return target
 
@@ -5436,12 +5024,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # resterebbe incollata al tier piccolo.
             if session_id:
                 sticky = self.sticky_get(session_id)
-                if (sticky and not self._is_renewal_bucket(sticky)
-                        and (not need
-                             or self._any_capable_in_group(sticky, need))):
+                if (
+                    sticky
+                    and not self._is_renewal_bucket(sticky)
+                    and (not need or self._any_capable_in_group(sticky, need))
+                ):
                     m_dim = re.search(r"-(\d+)k$", sticky)
-                    fits = (ctx is None or m_dim is None
-                            or ctx <= int(m_dim.group(1)) * 1000)
+                    fits = ctx is None or m_dim is None or ctx <= int(m_dim.group(1)) * 1000
                     if fits:
                         self._note_session_group(session_id, sticky)
                         return sticky
@@ -5461,15 +5050,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         chosen = pick(pct := self.policy.step_up_for(pname))
         # log della salita ANTICIPATA rispetto al comportamento legacy (100%)
         if pct < 100 and chosen != pick(100):
-            log.info("[vigile] step-up %d%%: ~%d tok -> -%dk "
-                     "(legacy sarebbe stato -%dk)",
-                     pct, ctx, chosen, pick(100))
+            log.info("[vigile] step-up %d%%: ~%d tok -> -%dk (legacy sarebbe stato -%dk)", pct, ctx, chosen, pick(100))
         target = f"{cfg.proxy_prefix}{pname}-{chosen}k"
         self._note_session_group(session_id, target)
         return target
 
-    def _pick_fast_group(self, pname: str | None, dims: list[int],
-                          ctx: int, need: frozenset[str] | None = None) -> str:
+    def _pick_fast_group(self, pname: str | None, dims: list[int], ctx: int, need: frozenset[str] | None = None) -> str:
         """Hot-word di VELOCITÀ: tra i gruppi candidati vince quello col
         deployment più rapido (EMA latenza minima tra i sani).
 
@@ -5490,8 +5076,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if need:
             dims = [d for d in dims if self._any_capable_in_group(f"{cfg.proxy_prefix}{pname}-{d}k", need)]
 
-        cands = [d for d in dims
-                 if d >= min_k and ctx <= d * 1000 * qual // 100]
+        cands = [d for d in dims if d >= min_k and ctx <= d * 1000 * qual // 100]
         if not cands:
             cands = [d for d in dims if ctx <= d * 1000]
         if not cands:
@@ -5512,7 +5097,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 if ema and (best_ema is None or ema < best_ema):
                     best_ema, best_d = ema, d
         if best_d is None:
-            best_d = cands[0]          # freddo: candidato più piccolo
+            best_d = cands[0]  # freddo: candidato più piccolo
         return f"{cfg.proxy_prefix}{pname}-{best_d}k"
 
     def _cap_fits(self, dep: dict, ctx: int | None) -> bool:
@@ -5533,8 +5118,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         return should_avoid_gemini() and is_gemini_deployment(dep)
 
     # ------------------------------------------- budget guard predittivo
-    def _virtually_saturated(self, dep: dict, safety: float,
-                             count_inflight: bool) -> bool:
+    def _virtually_saturated(self, dep: dict, safety: float, count_inflight: bool) -> bool:
         """True se il deployment ha raggiunto >= safety * cap appreso.
 
         Il cap esiste SOLO dopo un 429 reale (min/day_cap_learned): finche'
@@ -5548,25 +5132,21 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         appresi: gli header live sono la verità, il tetto imparato a forza
         di 429 era la versione buia della stessa informazione.
         """
-        if (self.policy.budget_guard or {}).get("suppress_with_headers", True) \
-                and getattr(self.policy, "rate_hint_skip_enabled", True):
+        if (self.policy.budget_guard or {}).get("suppress_with_headers", True) and getattr(
+            self.policy, "rate_hint_skip_enabled", True
+        ):
             k = dep.get("api_key")
             if isinstance(k, str) and k:
-                tag = hashlib.sha256(
-                    k.encode("utf-8", errors="replace")).hexdigest()[:12]
+                tag = hashlib.sha256(k.encode("utf-8", errors="replace")).hexdigest()[:12]
                 rec = (getattr(self, "_key_hints", None) or {}).get(tag)
-                proven = max(0.0, float(getattr(self.policy,
-                                                "rate_hint_proven_sec",
-                                                900.0) or 0.0))
-                if rec and proven > 0 \
-                        and time.time() - rec[0] <= proven:
+                proven = max(0.0, float(getattr(self.policy, "rate_hint_proven_sec", 900.0) or 0.0))
+                if rec and proven > 0 and time.time() - rec[0] <= proven:
                     return False
         s = self.stats_for(dep["unique"])
         minute_used = s.minute_calls
         if count_inflight:
             minute_used = max(minute_used, s.inflight)
-        for used, cap in ((minute_used, s.min_cap_learned),
-                          (s.day_calls, s.day_cap_learned)):
+        for used, cap in ((minute_used, s.min_cap_learned), (s.day_calls, s.day_cap_learned)):
             if cap and cap > 0 and used >= safety * cap:
                 return True
         return False
@@ -5589,14 +5169,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if safety <= 0:
             return deps
         count_inflight = bool(bg.get("count_inflight", True))
-        alive = [d for d in deps
-                 if not self._virtually_saturated(d, safety, count_inflight)]
+        alive = [d for d in deps if not self._virtually_saturated(d, safety, count_inflight)]
         if not alive:
             return deps
         if len(alive) < len(deps):
-            log.info("[budget] inflight-guard: %d/%d deployment oltre la "
-                     "soglia di sicurezza (%.0f%%), devio sui restanti",
-                     len(deps) - len(alive), len(deps), safety * 100)
+            log.info(
+                "[budget] inflight-guard: %d/%d deployment oltre la soglia di sicurezza (%.0f%%), devio sui restanti",
+                len(deps) - len(alive),
+                len(deps),
+                safety * 100,
+            )
         return alive
 
     # --------------------------------- dynamic concurrency limit (per-deployment)
@@ -5621,8 +5203,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         return max(1, int(getattr(self.policy, "conc_max_limit", 10) or 10))
 
     def _conc_streak(self) -> int:
-        return max(1, int(getattr(self.policy, "conc_learn_success_streak",
-                                  20) or 20))
+        return max(1, int(getattr(self.policy, "conc_learn_success_streak", 20) or 20))
 
     def _concurrent_limit_for(self, d: dict) -> int:
         """Limite di concorrenza per il deployment: il valore FISSO dalla
@@ -5633,8 +5214,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return max(1, int(fixed))
         return self._concl().get(d["unique"], self._conc_default())
 
-    def _apply_concurrency_limit(self, deps: list[dict],
-                                 ctx_est: int | None = None) -> list[dict]:
+    def _apply_concurrency_limit(self, deps: list[dict], ctx_est: int | None = None) -> list[dict]:
         """Esclude i deployment con inflight >= limite di concorrenza: le
         richieste gia' assegnate proseguono, le NUOVE vengono deviate su chiavi
         disponibili. Se TUTTO il gruppo e' saturo, lascia passare (l'edge
@@ -5664,17 +5244,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
         def _ok(d: dict) -> bool:
             s = self.stats_for(d["unique"])
-            if s.inflight >= hard:               # tetto duro anti-abuso
+            if s.inflight >= hard:  # tetto duro anti-abuso
                 return False
             fixed = d.get("concurrent_limit")
-            if fixed:                            # limite FISSO dal CSV
+            if fixed:  # limite FISSO dal CSV
                 return s.inflight < max(1, int(fixed))
             mxi = int(d.get("max_input_tokens") or 0)
             if ratio <= 0 or ctx <= 0 or mxi <= 0:
                 return s.inflight < self._concurrent_limit_for(d)
             used = s.inflight_tokens
             if used <= 0:
-                return True                      # niente prefill contato
+                return True  # niente prefill contato
             return used + ctx <= mxi * ratio
 
         avail = [d for d in deps if _ok(d)]
@@ -5689,10 +5269,10 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         (max conc_max_limit). Sotto saturazione la streak si azzera."""
         cfg = getattr(self, "config", None)
         if cfg is None:
-            return                        # Router "nudo" (test): no-op
+            return  # Router "nudo" (test): no-op
         dep = cfg.deployment_by_unique(unique)
         if dep is None or dep.get("concurrent_limit"):
-            return                        # limite FISSO: niente apprendimento
+            return  # limite FISSO: niente apprendimento
         s = self.stats_for(unique)
         if s.inflight >= self._concurrent_limit_for(dep):
             ok = self._concok()
@@ -5703,9 +5283,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 lim = self._concl().get(unique, self._conc_default())
                 newlim = min(self._conc_max(), lim + 1)
                 self._concl()[unique] = newlim
-                log.info("[concurrency] %s: limite dinamico %d -> %d "
-                         "(%d successi a saturazione)",
-                         unique, lim, newlim, n)
+                log.info(
+                    "[concurrency] %s: limite dinamico %d -> %d (%d successi a saturazione)", unique, lim, newlim, n
+                )
         else:
             self._concok().pop(unique, None)
 
@@ -5715,7 +5295,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         da mark_failed sui 429/503. Il limite FISSO non viene toccato."""
         cfg = getattr(self, "config", None)
         if cfg is None:
-            return                        # Router "nudo" (test): no-op
+            return  # Router "nudo" (test): no-op
         dep = cfg.deployment_by_unique(unique)
         if dep is None or dep.get("concurrent_limit"):
             return
@@ -5724,8 +5304,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         newlim = max(1, lim // 2)
         if newlim != lim:
             self._concl()[unique] = newlim
-            log.info("[concurrency] %s: 429/503 -> limite dimezzato %d -> %d",
-                     unique, lim, newlim)
+            log.info("[concurrency] %s: 429/503 -> limite dimezzato %d -> %d", unique, lim, newlim)
 
     # ------------------------------------------------- ANTI-RAFFICA PROVIDER
     def _dim_k(self, group_name: str | None) -> int:
@@ -5733,7 +5312,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         m = self.DIM_SUFFIX_RE.search(str(group_name or ""))
         try:
             return int(m.group(1)) if m else 0
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return 0
 
     def _note_prov_attempt(self, dep: dict) -> None:
@@ -5759,8 +5338,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return False
         return True
 
-    def _prov_avoid_key(self, dep: dict,
-                        req_dim: int | None = None) -> tuple[int, int, int]:
+    def _prov_avoid_key(self, dep: dict, req_dim: int | None = None) -> tuple[int, int, int]:
         """(same_p, dim_rank, same_m): PRIMARIO il provider diverso dall'ultimo
         tentativo (mai 2 di fila lo stesso), poi il -dim richiesto (0) con le
         salite crescenti dopo, poi lo STESSO modello su altro provider. Il
@@ -5779,16 +5357,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         same_m = 0 if (same_p == 0 and str(dep.get("model") or "") == lm) else 1
         return (same_p, dim_rank, same_m)
 
-    def _prov_alternate(self, cands: list[dict],
-                        req_dim: int | None = None) -> list[dict]:
+    def _prov_alternate(self, cands: list[dict], req_dim: int | None = None) -> list[dict]:
         """Riordino STABILE: prima i provider diversi dall'ultimo, poi il -dim
         richiesto (salite crescenti dopo). Non cambia l'insieme."""
         if not cands:
             return cands
         return sorted(cands, key=lambda d: self._prov_avoid_key(d, req_dim))
 
-    def _prov_prefer(self, winner: dict | None, cands: list[dict],
-                     group_name: str) -> dict | None:
+    def _prov_prefer(self, winner: dict | None, cands: list[dict], group_name: str) -> dict | None:
         """Anti-raffica: se il vincitore ripete l'ultimo provider e tra i
         candidati ce n'e' uno con provider DIVERSO, prendi il migliore
         alternativo (a parita', stesso modello su altro provider)."""
@@ -5802,15 +5378,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not alt:
             return winner
         try:
-            return min(alt, key=lambda d: (
-                self._prov_avoid_key(d, rd),
-                self._reputation_score(d["unique"], d, None),
-                self.usage_weight_24h(d["unique"])))
-        except Exception:                              # noqa: BLE001
+            return min(
+                alt,
+                key=lambda d: (
+                    self._prov_avoid_key(d, rd),
+                    self._reputation_score(d["unique"], d, None),
+                    self.usage_weight_24h(d["unique"]),
+                ),
+            )
+        except Exception:  # noqa: BLE001
             return alt[0]
 
-    def _provider_chain(self, cands: list[dict],
-                        req_dim: int | None = None) -> list[dict]:
+    def _provider_chain(self, cands: list[dict], req_dim: int | None = None) -> list[dict]:
         """CATENA DI PROVIDER: sequenza il piu' lunga possibile di provider
         DIVERSI, ognuno col suo miglior candidato (dim richiesto -> `order` ->
         reputation), poi si scende consecutivamente (2do di ognuno, ecc.).
@@ -5828,11 +5407,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             try:
                 _dk = self._dim_k(d.get("group"))
                 _dr = 0 if (not rd or _dk <= rd) else (_dk - rd)
-                return (_dr,
-                        self._eff_order(d),
-                        self._reputation_score(d["unique"], d, None),
-                        self.usage_weight_24h(d["unique"]))
-            except Exception:                          # noqa: BLE001
+                return (
+                    _dr,
+                    self._eff_order(d),
+                    self._reputation_score(d["unique"], d, None),
+                    self.usage_weight_24h(d["unique"]),
+                )
+            except Exception:  # noqa: BLE001
                 return (0, ORDER_LAST, 0.0, 0.0)
 
         for p in by:
@@ -5841,16 +5422,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # catena (dopo tutti i provider freschi), qualunque tier/EMA/punteggio.
         try:
             _warm = self._warm_providers()
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             _warm = set()
-        nw = sorted((p for p in by if p not in _warm),
-                    key=lambda p: (_q(by[p][0]), p))
-        wp = sorted((p for p in by if p in _warm),
-                    key=lambda p: (_q(by[p][0]), p))
+        nw = sorted((p for p in by if p not in _warm), key=lambda p: (_q(by[p][0]), p))
+        wp = sorted((p for p in by if p in _warm), key=lambda p: (_q(by[p][0]), p))
         last = getattr(self, "_last_attempt", None)
         if last and len(nw) > 1 and last[0] in nw:
             _i = nw.index(last[0])
-            nw = nw[_i + 1:] + nw[:_i + 1]
+            nw = nw[_i + 1 :] + nw[: _i + 1]
         provs = nw + wp
         out: list[dict] = []
         while True:
@@ -5901,8 +5480,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             (zen if is_opencode_zen_dep(d) else nonzen).append(u)
         return nonzen, zen
 
-    def _zen_split3(self, uniques: list[str]) -> tuple[list[str], list[str],
-                                                       list[str]]:
+    def _zen_split3(self, uniques: list[str]) -> tuple[list[str], list[str], list[str]]:
         """(free non-zen, zen, -go/-fallback): partizione completa sotto cautela
         opencode; fuori cautela ritorna (uniques, [], [])."""
         if not opencode_cautious_request():
@@ -5923,12 +5501,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 free.append(u)
         return free, zen, gofb
 
-    def pick_deployment(self, group_name: str, need: frozenset[str] | None = None,
-                        exclude: str | None = None,
-                        ctx: int | None = None,
-                        restrict_model: str | None = None,
-                        *, live_only: bool = False,
-                        prefer_holder: bool = False) -> dict | None:
+    def pick_deployment(
+        self,
+        group_name: str,
+        need: frozenset[str] | None = None,
+        exclude: str | None = None,
+        ctx: int | None = None,
+        restrict_model: str | None = None,
+        *,
+        live_only: bool = False,
+        prefer_holder: bool = False,
+    ) -> dict | None:
         """Selezione pesata dentro un gruppo, saltando i cooled-down.
 
         Con policy.adaptive_pick (default True): punteggio dinamico che
@@ -5940,6 +5523,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         nei gruppi capacità; `restrict_model` limita a un solo modello
         upstream (failover same-model dei gruppi gen/stt).
         """
+
         def _ok(d: dict, allow_retired: bool = False) -> bool:
             if d["unique"] == exclude:
                 return False
@@ -5963,9 +5547,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # SESSION-SLOW DEMOTE: un free-dim andato lento a QUESTA sessione
             # non va ri-pescato nei tier economici; torna solo a -fallback/
             # ultima spiaggia (vedi _walk_chain allow_slow).
-            if self.config.group_caps.get(group_name) is None \
-                    and not self._is_renewal_bucket(group_name) \
-                    and self.is_slow_for_session(d["unique"], ctx=ctx):
+            if (
+                self.config.group_caps.get(group_name) is None
+                and not self._is_renewal_bucket(group_name)
+                and self.is_slow_for_session(d["unique"], ctx=ctx)
+            ):
                 return False
             if getattr(self.policy, "circuit_breaker_enabled", True) and self._is_circuit_open(d["unique"]):
                 return False
@@ -5986,8 +5572,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 return False
             return True
 
-        deps = [d for d in self.config.groups.get(group_name, [])
-                if not self.is_cooled_down(d["unique"]) and _ok(d)]
+        deps = [d for d in self.config.groups.get(group_name, []) if not self.is_cooled_down(d["unique"]) and _ok(d)]
         if not deps and ctx:
             # F31: se il ctx non entra in NESSUN deployment del gruppo (tutti
             # con max_input dichiarato minore) l'"ultima spiaggia" sarebbe un
@@ -5997,10 +5582,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             _tok = [int(d.get("max_input_tokens") or 0) for d in _grp_all]
             if _tok and all(t > 0 and t < int(ctx) for t in _tok):
                 metrics.inc("nx_ctx_overflow_total", (group_name,))
-                log.info("[ctx-overflow] %s: ctx=%d oltre il max_input di "
-                         "tutti i %d deployment del gruppo (max=%d): "
-                         "fail-fast senza catena", group_name, ctx,
-                         len(_grp_all), max(_tok))
+                log.info(
+                    "[ctx-overflow] %s: ctx=%d oltre il max_input di "
+                    "tutti i %d deployment del gruppo (max=%d): "
+                    "fail-fast senza catena",
+                    group_name,
+                    ctx,
+                    len(_grp_all),
+                    max(_tok),
+                )
                 return None
         if not deps and not live_only:
             # Nessun vivo: ULTIMA SPIAGGIA con PROBE PASSIVO. Se esistono
@@ -6009,19 +5599,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # li resuscita; se falliscono il cooldown raddoppia (forwarder ->
             # mark_failed_double_residual). Senza probe maturi resta la vecchia
             # ultima spiaggia (ignora il cooldown), rispettando exclude/need.
-            _cand = [d for d in self.config.groups.get(group_name, [])
-                     if _ok(d, allow_retired=True)]
+            _cand = [d for d in self.config.groups.get(group_name, []) if _ok(d, allow_retired=True)]
             _ret_n = sum(1 for d in _cand if self.is_retired(d["unique"]))
             if _ret_n:
-                log.warning("[ladder] ULTIMA SPIAGGIA %s: uso anche %d "
-                            "ritirati non-permanenti", group_name, _ret_n)
+                log.warning("[ladder] ULTIMA SPIAGGIA %s: uso anche %d ritirati non-permanenti", group_name, _ret_n)
             _ripe = [d for d in _cand if self.probe_ready(d["unique"])]
             if _ripe:
-                log.info("[probe] %s: %d dormienti maturi (>=%.0f%% del "
-                         "cooldown) -> probe passivo", group_name, len(_ripe),
-                         float(getattr(self.policy,
-                                       "cooldown_probe_after_ratio", 0.5)
-                               or 0.5) * 100)
+                log.info(
+                    "[probe] %s: %d dormienti maturi (>=%.0f%% del cooldown) -> probe passivo",
+                    group_name,
+                    len(_ripe),
+                    float(getattr(self.policy, "cooldown_probe_after_ratio", 0.5) or 0.5) * 100,
+                )
                 deps = _ripe
             else:
                 deps = _cand
@@ -6045,10 +5634,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # filtri di eleggibilita' (cooldown, _ok, inflight-guard, capacita').
         # Entro il tier (stesso data+pref) si pesca a caso: non si surriscalda
         # sempre la stessa chiave, ma la famiglia giusta resta davanti.
-        if deps and self.config.group_caps.get(group_name) is None \
-                and (group_name.endswith(self.config.go_suffix or "-go")
-                     or group_name.endswith(self.config.fallback_suffix
-                                            or "-fallback")):
+        if (
+            deps
+            and self.config.group_caps.get(group_name) is None
+            and (
+                group_name.endswith(self.config.go_suffix or "-go")
+                or group_name.endswith(self.config.fallback_suffix or "-fallback")
+            )
+        ):
             # RICHIESTA ESPLICITA sul bucket: il detentore cache della
             # sessione vince sul tier (stessa chiave = KV-cache calda, i
             # crediti si "sommano" un account alla volta: al 429 il holder
@@ -6061,10 +5654,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if prefer_holder:
                 _ch = self.cache_holder(need=need, ctx=ctx, ttl=_go_ttl)
                 if _ch and any(_ch["unique"] == d["unique"] for d in deps):
-                    log.info("[pick-final] %s chosen=%s (esplicito: detentore "
-                             "cache, tier scavalcato)", group_name,
-                             _ch["unique"])
+                    log.info(
+                        "[pick-final] %s chosen=%s (esplicito: detentore cache, tier scavalcato)",
+                        group_name,
+                        _ch["unique"],
+                    )
                     return _ch
+
             # POOL A FREDDO: con `go_balance.flat_pool` (default) solo il
             # rinnovo di OGGI (sort_key==0) resta tier assoluto; tutti gli
             # altri rinnovi finiscono in un UNICO pool, cosi' il carico si
@@ -6101,13 +5697,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # agganciate sempre allo stesso.
             _lg_u = self.last_go()
             if _lg_u and any(_lg_u == d["unique"] for d in best):
-                log.info("[pick-final] %s chosen=%s (go/fallback: %s, "
-                         "last-go)", group_name, _lg_u, _tier)
+                log.info("[pick-final] %s chosen=%s (go/fallback: %s, last-go)", group_name, _lg_u, _tier)
                 return self.config.deployment_by_unique(_lg_u)
             _ch = self.cache_holder(need=need, ctx=ctx, ttl=_go_ttl)
             if _ch and any(_ch["unique"] == d["unique"] for d in best):
-                log.info("[pick-final] %s chosen=%s (go/fallback: %s, "
-                         "cache-holder)", group_name, _ch["unique"], _tier)
+                log.info("[pick-final] %s chosen=%s (go/fallback: %s, cache-holder)", group_name, _ch["unique"], _tier)
                 return _ch
             if self._go_balance_enabled():
                 _metric = "out5h"
@@ -6119,6 +5713,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
                 def _use(_u):
                     return float(self.usage_weight_24h(_u))
+
             _min_usage = min(_use(d["unique"]) for d in best)
             _least = [d for d in best if _use(d["unique"]) == _min_usage]
             # Tie-break: `model_preference` piu' alto (i preferiti restano in
@@ -6126,74 +5721,83 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             _top = max(_pref(d) for d in _least)
             _least = [d for d in _least if _pref(d) == _top]
             chosen = random.choice(_least)
-            log.info("[pick-final] %s chosen=%s (go/fallback: %s, %d chiavi, "
-                     "%s=%.1f)", group_name, chosen["unique"], _tier,
-                     len(_least), _metric, _min_usage)
+            log.info(
+                "[pick-final] %s chosen=%s (go/fallback: %s, %d chiavi, %s=%.1f)",
+                group_name,
+                chosen["unique"],
+                _tier,
+                len(_least),
+                _metric,
+                _min_usage,
+            )
             return chosen
         # COLD SPREAD: nasconde il 20% piu' usato (finestra 24h) PRIMA del
         # filtro `order`, cosi' il carico si distribuisce anche su order
         # diversi senza dipendere dalla gerarchia. Solo mondo testo dims.
-        if deps and self.config.group_caps.get(group_name) is None \
-                and self.DIM_SUFFIX_RE.search(group_name):
+        if deps and self.config.group_caps.get(group_name) is None and self.DIM_SUFFIX_RE.search(group_name):
             deps = self._spread_hide(deps)
         # TIER esplicito (colonna `order`): nei gruppi TESTO dims si prova
         # prima il tier col valore minimo tra i vivi; se e' tutto in cooldown
         # si scende automaticamente al tier successivo. Dentro il tier resta
         # il pick adattivo (reputation/latenza/priority). Solo mondo testo:
         # le catene capacita' (-vision, -audio, ...) non sono toccate.
-        if deps and self.config.group_caps.get(group_name) is None \
-                and self.DIM_SUFFIX_RE.search(group_name):
+        if deps and self.config.group_caps.get(group_name) is None and self.DIM_SUFFIX_RE.search(group_name):
             min_order = min(self._eff_order(d) for d in deps)
-            deps = [d for d in deps
-                    if self._eff_order(d) == min_order]
+            deps = [d for d in deps if self._eff_order(d) == min_order]
         # STICKINESS gen/stt: attacca le richieste consecutive allo stesso
         # modello upstream (voce/stile coerenti); le chiavi gemelle continuano
         # a ruotare per recency/EMA dentro il sottoinsieme. Nessuno vivo ->
         # pool completo (e un eventuale cross-model in fallback lo aggiornerà).
         cap_g = self.config.group_caps.get(group_name)
-        if cap_g is not None and self.policy.gen_same_model_failover \
-                and cap_g in self.SAME_MODEL_PRIORITY_CAPS:
+        if cap_g is not None and self.policy.gen_same_model_failover and cap_g in self.SAME_MODEL_PRIORITY_CAPS:
             last = self._gen_last_model.get(group_name)
             if last:
                 same = [d for d in deps if d.get("model") == last]
                 if same:
-                    log.debug("[sticky-model] %s: vincolo a %s (%d/%d "
-                              "chiavi vive)", group_name, last, len(same),
-                              len(deps))
+                    log.debug(
+                        "[sticky-model] %s: vincolo a %s (%d/%d chiavi vive)", group_name, last, len(same), len(deps)
+                    )
                     deps = same
         # FAIR-SHARE chiavi (gruppi capacità primary, opt-in): invece del
         # winner-take-all della reputation, sceglie la chiave col MINOR numero
         # di richieste nella finestra rolling (RPM pari sulle chiavi gemelle).
         # Solo bucket primary: -C-go/-C-fallback restano deterministici.
-        if deps and cap_g is not None \
-                and getattr(self.policy, "cap_fair_share_enabled", False) \
-                and cap_g in (getattr(self.policy, "cap_fair_share_caps", None)
-                              or ()) \
-                and not self._is_renewal_bucket(group_name):
-            _win = float(getattr(self.policy, "cap_fair_share_window_sec",
-                                 60) or 60)
+        if (
+            deps
+            and cap_g is not None
+            and getattr(self.policy, "cap_fair_share_enabled", False)
+            and cap_g in (getattr(self.policy, "cap_fair_share_caps", None) or ())
+            and not self._is_renewal_bucket(group_name)
+        ):
+            _win = float(getattr(self.policy, "cap_fair_share_window_sec", 60) or 60)
             _now = time.time()
 
             def _fs_key(_d):
-                return (self.usage_count_window(_d["unique"], _win, _now),
-                        int(self.stats_for(_d["unique"]).inflight),
-                        -int(_d.get("model_preference", 0) or 0),
-                        self._get_avg_latency(_d["unique"]) or float("inf"))
+                return (
+                    self.usage_count_window(_d["unique"], _win, _now),
+                    int(self.stats_for(_d["unique"]).inflight),
+                    -int(_d.get("model_preference", 0) or 0),
+                    self._get_avg_latency(_d["unique"]) or float("inf"),
+                )
 
             _bk = min(_fs_key(_d) for _d in deps)
             _best = [_d for _d in deps if _fs_key(_d) == _bk]
             chosen = random.choice(_best)
-            log.info("[pick-final] %s chosen=%s (fair-share: count=%d "
-                     "inflight=%d, %d chiavi a pari carico)", group_name,
-                     chosen["unique"], _bk[0], _bk[1], len(_best))
+            log.info(
+                "[pick-final] %s chosen=%s (fair-share: count=%d inflight=%d, %d chiavi a pari carico)",
+                group_name,
+                chosen["unique"],
+                _bk[0],
+                _bk[1],
+                len(_best),
+            )
             return chosen
         if not deps:
             return None
         now = time.time()
         if self.policy.adaptive_pick:
             # [Blocco 1] Reputation scoring: calcola punteggio per ogni deployment
-            rep_scores = [(self._reputation_score(d["unique"], d, ctx), d)
-                          for d in deps]
+            rep_scores = [(self._reputation_score(d["unique"], d, ctx), d) for d in deps]
             # Trova il punteggio MINIMO (lower is better)
             min_rep = min(s for s, _ in rep_scores)
             # Filtra solo i candidati con punteggio minimo
@@ -6202,26 +5806,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 return self._prov_prefer(candidates[0], deps, group_name)
             # Tie-breaker: model_preference più alto, poi media storica latenza
             if len(candidates) > 1:
+
                 def _lat(_d):
                     return self._get_avg_latency(_d["unique"]) or float("inf")
-                lat_sorted = sorted(
-                    candidates,
-                    key=lambda d: (-d.get("model_preference", 0), _lat(d)))
+
+                lat_sorted = sorted(candidates, key=lambda d: (-d.get("model_preference", 0), _lat(d)))
                 top = lat_sorted[0]
                 # Raggruppa quelli con stessa preferenza e stessa latenza migliore
-                tie = [d for d in lat_sorted
-                       if d.get("model_preference", 0) == top.get("model_preference", 0)
-                       and _lat(d) == _lat(top)]
+                tie = [
+                    d
+                    for d in lat_sorted
+                    if d.get("model_preference", 0) == top.get("model_preference", 0) and _lat(d) == _lat(top)
+                ]
                 if len(tie) == 1:
-                    log.debug("[pick] %s rep=%.1f tie-break-pref/lat -> %s",
-                              group_name, min_rep, tie[0]["unique"])
+                    log.debug("[pick] %s rep=%.1f tie-break-pref/lat -> %s", group_name, min_rep, tie[0]["unique"])
                     return self._prov_prefer(tie[0], deps, group_name)
                 # Ancora parità: usa legacy score come ultimo tie-breaker
                 weights = [self._score(d, now) for d in tie]
                 chosen = random.choices(tie, weights=weights, k=1)[0]
-                log.debug("[pick] %s rep=%.1f tie-break-legacy -> %s",
-                          group_name, min_rep, chosen["unique"])
-                log.info("[pick-final] %s chosen=%s min_rep=%.1f (%d candidates)", group_name, chosen["unique"], min_rep, len(candidates))
+                log.debug("[pick] %s rep=%.1f tie-break-legacy -> %s", group_name, min_rep, chosen["unique"])
+                log.info(
+                    "[pick-final] %s chosen=%s min_rep=%.1f (%d candidates)",
+                    group_name,
+                    chosen["unique"],
+                    min_rep,
+                    len(candidates),
+                )
                 return self._prov_prefer(chosen, deps, group_name)
             log.debug("[pick] %s rep=%.1f", group_name, min_rep)
         else:
@@ -6229,16 +5839,21 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             chosen = random.choices(deps, weights=weights, k=1)[0]
             return self._prov_prefer(chosen, deps, group_name)
 
-    def _walk_chain(self, chain: list[str], failed_unique: str | None,
-                    need: frozenset[str] | None = None,
-                    ctx: int | None = None,
-                    prefer_model: str | None = None, *,
-                    ignore_cooldown: bool = False,
-                    min_cooldown_age: float | None = None,
-                     limit: int = 0,
-                     tried: set[str] | None = None,
-                     allow_slow: bool = False,
-                     out_tokens: int | None = None) -> dict | None:
+    def _walk_chain(
+        self,
+        chain: list[str],
+        failed_unique: str | None,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        prefer_model: str | None = None,
+        *,
+        ignore_cooldown: bool = False,
+        min_cooldown_age: float | None = None,
+        limit: int = 0,
+        tried: set[str] | None = None,
+        allow_slow: bool = False,
+        out_tokens: int | None = None,
+    ) -> dict | None:
         """Cammina una catena piatta di univoci saltando cooled-down,
         deployment senza le capacità `need`, (se ctx) sopra max_input e —
         per richieste pure-testo su catene dims — i multimodali finché
@@ -6293,13 +5908,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     # riprendi DOPO il fallito, poi WRAP sull'inizio (voci
                     # precedenti = ultima chance, se non gia' tentate).
                     _i = chain.index(failed_unique)
-                    chain = chain[_i + 1:] + chain[:_i]
+                    chain = chain[_i + 1 :] + chain[:_i]
 
                 def _dim_ok(u: str) -> bool:
-                    g = str((self.config.deployment_by_unique(u) or {}
-                             ).get("group") or "")
+                    g = str((self.config.deployment_by_unique(u) or {}).get("group") or "")
                     _dk = self._dim_k(g)
                     return _dk == 0 or _dk >= _fmin
+
                 chain = [u for u in chain if _dim_ok(u)]
             elif failed_unique in chain:
                 start = chain.index(failed_unique) + 1
@@ -6319,13 +5934,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # La soglia è fissa (`ladder_skip_after`), non il `limit` variabile
         # del singolo step, per non escludere un gruppo a soglie incoerenti.
         exhausted_groups: set[str] = set()
-        _live_walk = (min_cooldown_age is None and not ignore_cooldown)
+        _live_walk = min_cooldown_age is None and not ignore_cooldown
         # COLD SPREAD: sul solo walk VIVO nascondi il 20% piu' usato (24h)
         # per-gruppo, cosi' anche la scala piatta spalma il carico.
         _hidden = self._spread_hidden_chain(chain) if _live_walk else set()
         if tried and limit > 0 and _live_walk:
-            _skip_after = max(1, int(getattr(self.policy,
-                                             "ladder_skip_after", 4) or 4))
+            _skip_after = max(1, int(getattr(self.policy, "ladder_skip_after", 4) or 4))
             _gc: dict[str, int] = {}
             for _u in tried:
                 _d = self.config.deployment_by_unique(_u)
@@ -6375,8 +5989,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # capacita' REALE per questa richiesta: un dep che sta nel
             # contesto ma non ha spazio per l'output richiesto non e' un
             # candidato valido (vale anche per canary/prestiti).
-            if (out_tokens is not None and out_tokens > 0
-                    and not self.dep_deliverable(dep, need, ctx, out_tokens)):
+            if out_tokens is not None and out_tokens > 0 and not self.dep_deliverable(dep, need, ctx, out_tokens):
                 return None
             return dep
 
@@ -6389,8 +6002,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     if len(eligible) >= limit:
                         break
         else:
-            eligible = [(u, d) for u in chain[start:]
-                        if (d := _eligible(u)) is not None]
+            eligible = [(u, d) for u in chain[start:] if (d := _eligible(u)) is not None]
         if not eligible:
             return None
         # protezione quota: preferisci i text-only PRESERVANDO l'ordine
@@ -6403,13 +6015,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
 
         # failover same-model (gruppi gen/stt): prima le chiavi gemelle
         if prefer_model:
-            same = [d for d in preferred
-                    if d.get("model") == prefer_model]
+            same = [d for d in preferred if d.get("model") == prefer_model]
             if same:
                 return same[0]
             if preferred and preferred[0].get("model") != prefer_model:
-                self._note_cross(gname, prefer_model,
-                                 preferred[0].get("model", "?"))
+                self._note_cross(gname, prefer_model, preferred[0].get("model", "?"))
             elif not preferred:
                 return None
 
@@ -6420,14 +6030,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # ruotare le chiavi gemelle del modello).
             _pm = self._go_pref()
             if _pm:
-                _hit = [d for d in preferred
-                        if self._is_go_bucket(d.get("group") or "")
-                        and self._go_pref_hit(d)]
+                _hit = [d for d in preferred if self._is_go_bucket(d.get("group") or "") and self._go_pref_hit(d)]
                 if _hit:
                     return _hit[0]
             return preferred[0]
         return None
-
 
     def _is_known_nonstream(self, unique: str) -> bool:
         """True se il dep e' noto per IGNORARE stream:true (risponde JSON e
@@ -6446,17 +6053,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not self._is_known_nonstream(unique):
             return False
         try:
-            allowed = bool(getattr(self.policy, "nonstream_canary_allowed",
-                                   True))
-        except Exception:                          # noqa: BLE001
+            allowed = bool(getattr(self.policy, "nonstream_canary_allowed", True))
+        except Exception:  # noqa: BLE001
             allowed = True
         return not allowed
 
-
-    def prelast_shared(self, uniques: list[str], failed_unique: str | None,
-                       need: frozenset[str] | None = None,
-                       ctx: int | None = None,
-                       tried: set[str] | None = None) -> dict | None:
+    def prelast_shared(
+        self,
+        uniques: list[str],
+        failed_unique: str | None,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        tried: set[str] | None = None,
+    ) -> dict | None:
         """TIER PRE-ULTIMA-SPIAGGIA (prima del -fallback a pagamento): tra i
         free-dims VIVI occupati da un'ALTRA sessione negli ultimi
         `session_dep_guard_sec`, sceglie quello col max_input piu' piccolo che
@@ -6501,15 +6110,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             cands.extend(kept or ds)
         if not cands:
             return None
-        cands.sort(key=lambda d: (int(d.get("max_input_tokens") or 0)
-                                  or (1 << 62),
-                                  self._prov_avoid_key(d)))
+        cands.sort(key=lambda d: (int(d.get("max_input_tokens") or 0) or (1 << 62), self._prov_avoid_key(d)))
         dep = cands[0]
         ent = self._dep_sess().get(dep["unique"]) or (None, 0.0)
-        log.info("[prelast] sessione condivisa: %s (max_in=%s, eta=%.0fs) -> "
-                 "usato prima di scendere al -fallback",
-                 dep["unique"], int(dep.get("max_input_tokens") or 0),
-                 max(0.0, time.time() - (ent[1] or 0.0)))
+        log.info(
+            "[prelast] sessione condivisa: %s (max_in=%s, eta=%.0fs) -> usato prima di scendere al -fallback",
+            dep["unique"],
+            int(dep.get("max_input_tokens") or 0),
+            max(0.0, time.time() - (ent[1] or 0.0)),
+        )
         return dep
 
     # ---------------------------------------------------- warm pool (caldi)
@@ -6520,18 +6129,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         cfg = self.config
         for suf in (cfg.fallback_suffix, cfg.go_suffix):
             if suf and group_name.endswith(suf):
-                base = group_name[:-len(suf)]
+                base = group_name[: -len(suf)]
                 if base.startswith(cfg.proxy_prefix):
-                    p = base[len(cfg.proxy_prefix):]
+                    p = base[len(cfg.proxy_prefix) :]
                     return p if p in cfg.profile_dims else None
         m = self.DIM_SUFFIX_RE.search(group_name)
         if m:
-            base = group_name[:m.start()]
+            base = group_name[: m.start()]
             if base.startswith(cfg.proxy_prefix):
-                p = base[len(cfg.proxy_prefix):]
+                p = base[len(cfg.proxy_prefix) :]
                 return p if p in cfg.profile_dims else None
         return None
-
 
     def _group_min_dim(self, group_name: str | None) -> int:
         """Dim minima (in k) richiesta da un gruppo TESTO.
@@ -6544,8 +6152,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         return int(m.group(1)) if m else 0
 
     # -------------------------------------------- warm-wake operatore (F4)
-    def _wake_anchor(self, unique: str | None, session_id: str | None,
-                     group: str | None) -> tuple[dict | None, str | None]:
+    def _wake_anchor(
+        self, unique: str | None, session_id: str | None, group: str | None
+    ) -> tuple[dict | None, str | None]:
         if unique:
             dep = self.config.deployment_by_unique(unique)
             return dep, (group or (dep or {}).get("group"))
@@ -6564,12 +6173,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return (deps[0] if deps else None), g
         return None, None
 
-    def warm_wake_targets(self, unique: str | None = None,
-                          session_id: str | None = None,
-                          group: str | None = None,
-                          min_age_sec: float | None = None,
-                          limit: int = 1,
-                          only_zen: bool = False) -> list[dict]:
+    def warm_wake_targets(
+        self,
+        unique: str | None = None,
+        session_id: str | None = None,
+        group: str | None = None,
+        min_age_sec: float | None = None,
+        limit: int = 1,
+        only_zen: bool = False,
+    ) -> list[dict]:
         """Seleziona fino a `limit` deployment DORMIENTI maturi (cooldown 429
         piu' vecchio di `min_age_sec`) da svegliare, ancorandosi a unique /
         group / session_id. Read-only: NON sonda, ritorna solo i candidati."""
@@ -6578,14 +6190,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return [dep] if dep else []
         anchor, req_group = self._wake_anchor(None, session_id, group)
         grp_for_profile = req_group or (anchor or {}).get("group")
-        profile = (self._group_profile(grp_for_profile)
-                   if grp_for_profile else None)
+        profile = self._group_profile(grp_for_profile) if grp_for_profile else None
         if only_zen and not profile:
             return []
         try:
-            age = (float(min_age_sec) if min_age_sec is not None else float(
-                getattr(self.policy, "warm_refill_wake_min_cooldown_age_sec",
-                        3600.0) or 3600.0))
+            age = (
+                float(min_age_sec)
+                if min_age_sec is not None
+                else float(getattr(self.policy, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
+            )
         except (TypeError, ValueError):
             age = 3600.0
         out: list[dict] = []
@@ -6593,10 +6206,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         for _ in range(max(1, int(limit))):
             try:
                 c = self.warm_wake_canary(
-                    profile, anchor or {}, None, None, None, tried=tried,
-                    requested_group=req_group, only_zen=bool(only_zen),
-                    min_age_sec=max(0.0, age))
-            except Exception:                      # noqa: BLE001
+                    profile,
+                    anchor or {},
+                    None,
+                    None,
+                    None,
+                    tried=tried,
+                    requested_group=req_group,
+                    only_zen=bool(only_zen),
+                    min_age_sec=max(0.0, age),
+                )
+            except Exception:  # noqa: BLE001
                 break
             if not c:
                 break
@@ -6609,13 +6229,11 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         """Frazione di finestra riservate al reasoning dei modelli
         effort_capable: stesso numero usato dal clamp (1 - headroom_ratio)."""
         try:
-            return max(0.0, 1.0 - float(getattr(
-                self.policy, "cache_ctx_reasoning_headroom_ratio", 0.7)))
-        except Exception:                              # noqa: BLE001
+            return max(0.0, 1.0 - float(getattr(self.policy, "cache_ctx_reasoning_headroom_ratio", 0.7)))
+        except Exception:  # noqa: BLE001
             return 0.30
 
-    def dep_deliverable(self, dep: dict, need: frozenset[str] | None,
-                        ctx: int | None, out_tokens: int | None) -> bool:
+    def dep_deliverable(self, dep: dict, need: frozenset[str] | None, ctx: int | None, out_tokens: int | None) -> bool:
         """Il dep puo' DAVVERO consegnare la risposta con QUESTI token:
         capacita' `need` + `ctx + safety(5%) + output(+riserva reasoning se
         effort_capable)` dentro la finestra. E' il criterio di validita' del
@@ -6648,8 +6266,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d = self._discovered_max_input = {}
         return d
 
-    def note_discovered_max_input(self, unique: str | None,
-                                  limit: int | None) -> None:
+    def note_discovered_max_input(self, unique: str | None, limit: int | None) -> None:
         """Il provider ha rivelato il VERO limite di input: ridimensiona il
         deployment cosi' il router non gli rimanda payload troppo grossi."""
         if not unique or not limit:
@@ -6663,21 +6280,24 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         dep = self.config.deployment_by_unique(unique) or {}
         mi = int(dep.get("max_input_tokens") or 0)
         if mi > 0:
-            lim = min(lim, mi)          # mai OLTRE il dichiarato
+            lim = min(lim, mi)  # mai OLTRE il dichiarato
         cur = self._discovered().get(unique)
         if cur and cur <= lim:
-            return                      # gia' noto un limite piu' stretto
+            return  # gia' noto un limite piu' stretto
         self._discovered()[unique] = lim
-        log.warning("[max-input] %s: limite reale scoperto dal provider = %d "
-                    "token (csv=%s) -> ridimensionato", unique, lim,
-                    mi or "0")
+        log.warning(
+            "[max-input] %s: limite reale scoperto dal provider = %d token (csv=%s) -> ridimensionato",
+            unique,
+            lim,
+            mi or "0",
+        )
 
     def _eff_max_input(self, dep: dict) -> int:
         """max_input EFFETTIVO: min(dichiarato, scoperto dal provider)."""
         mi = int(dep.get("max_input_tokens") or 0)
         try:
             dis = self._discovered().get(dep.get("unique"))
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             dis = None
         if dis and (mi <= 0 or dis < mi):
             return int(dis)
@@ -6691,7 +6311,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return False
         try:
             return (time.time() - ent[1]) < self._guard_sec()
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return False
 
     # ------------------------------------------------- PRESTITO DEI WARM
@@ -6705,19 +6325,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         now = time.time() if now is None else now
         try:
             lu = float(self.stats_for(unique).last_used or 0.0)
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             lu = 0.0
         if lu <= 0.0:
             ent = self._dep_sess().get(unique)
             if ent:
                 try:
                     lu = float(ent[1] or 0.0)
-                except Exception:                      # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     lu = 0.0
         if lu <= 0.0:
             return 0.0
         return max(0.0, now - lu)
-
 
     # ------------------------------------------- PROBES IN VOLO (tetto 4/sess)
     # Contiamo TUTTO lo speculativo ancora in corsa per la sessione (canari
@@ -6732,20 +6351,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d = self._probes_flight = {}
         return d
 
-    def note_probe_started(self, session_id: str | None,
-                           unique: str | None) -> None:
+    def note_probe_started(self, session_id: str | None, unique: str | None) -> None:
         if not session_id or not unique:
             return
         now = time.time()
         m = self._probes().setdefault(session_id, {})
         m[unique] = now
-        if len(m) > 64:                       # rete: spazza i dimenticati
+        if len(m) > 64:  # rete: spazza i dimenticati
             for u, ts in list(m.items()):
                 if now - ts > 950:
                     m.pop(u, None)
 
-    def note_probe_done(self, session_id: str | None,
-                        unique: str | None) -> None:
+    def note_probe_done(self, session_id: str | None, unique: str | None) -> None:
         if not session_id or not unique:
             return
         m = self._probes().get(session_id)
@@ -6783,27 +6400,28 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if not session_id:
             return
         now = time.time()
-        win = max(1.0, float(getattr(
-            self.policy, "warm_ready_rpm_window_sec", 180) or 180))
+        win = max(1.0, float(getattr(self.policy, "warm_ready_rpm_window_sec", 180) or 180))
         dq = self._sess_rate().setdefault(session_id, deque())
         dq.append(now)
         cutoff = now - win
         while dq and dq[0] < cutoff:
             dq.popleft()
-        if len(self._sess_rate()) > 4096:     # rete: spazza le sessioni morte
+        if len(self._sess_rate()) > 4096:  # rete: spazza le sessioni morte
             for sid, q in list(self._sess_rate().items()):
                 if not q or now - q[-1] > win * 2:
                     self._sess_rate().pop(sid, None)
 
-    def session_rpm(self, session_id: str | None,
-                    window_sec: float | None = None) -> float:
+    def session_rpm(self, session_id: str | None, window_sec: float | None = None) -> float:
         """Media richieste/min della sessione nella finestra (include la
         richiesta corrente se gia' contata con note_session_request)."""
         if not session_id:
             return 0.0
-        win = max(1.0, float(window_sec if window_sec is not None else
-                             getattr(self.policy, "warm_ready_rpm_window_sec",
-                                     180) or 180))
+        win = max(
+            1.0,
+            float(
+                window_sec if window_sec is not None else getattr(self.policy, "warm_ready_rpm_window_sec", 180) or 180
+            ),
+        )
         dq = self._sess_rate().get(session_id)
         if not dq:
             return 0.0
@@ -6814,7 +6432,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 break
             n += 1
         return n / (win / 60.0)
-
 
     # ------------------------------------- QUARANTENA ENDPOINT (ban / ToS IP)
     # Se un provider risponde "Access from this IP ... ip_banned" o
@@ -6830,8 +6447,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             d = self._endpoint_quarantine = {}
         return d
 
-    def quarantine_endpoint(self, host: str, seconds: float = 86400.0,
-                            reason: str = "ban/ToS") -> None:
+    def quarantine_endpoint(self, host: str, seconds: float = 86400.0, reason: str = "ban/ToS") -> None:
         if not host:
             return
         q = self._ep_quar()
@@ -6839,8 +6455,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if q.get(host, 0.0) >= until:
             return
         q[host] = until
-        log.warning("[quarantina] endpoint %s fuori gioco per %.0fs (%s)",
-                    host, max(0.0, float(seconds)), reason)
+        log.warning("[quarantina] endpoint %s fuori gioco per %.0fs (%s)", host, max(0.0, float(seconds)), reason)
 
     def _endpoint_quarantined(self, dep: dict | None) -> bool:
         """True se l'HOST dell'endpoint del dep e' in quarantena ban/ToS."""
@@ -6854,7 +6469,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return False
         try:
             host = urllib.parse.urlparse(url).hostname or ""
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return False
         if not host:
             return False
@@ -6862,7 +6477,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         if until <= 0:
             return False
         if time.time() >= until:
-            q.pop(host, None)                          # scaduta: pulisci
+            q.pop(host, None)  # scaduta: pulisci
             return False
         return True
 
@@ -6877,8 +6492,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 out[h] = round(until - now)
         return out
 
-
-
     def _tiers_of(self, uniqs, group: str | None = None) -> set[int]:
         """Tier `order` dei deployment indicati (per il round-robin canary).
         Con `group` filtra solo quel gruppo: i tier sono PER-GRUPPO, quindi
@@ -6892,13 +6505,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 continue
             try:
                 out.add(self._eff_order(d))
-            except Exception:                          # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 continue
         return out
-
-
-
-
 
     # ---------------------------------- MODELLI PREFERITI nei bucket -go/-fb
     def _go_pref(self) -> list[str]:
@@ -6925,8 +6534,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         same = [d for d in deps if self._go_pref_hit(d)]
         return same or deps
 
-
-
     def _in_use_deps(self) -> set[str]:
         """Unique "IN USO" da UNA QUALSIASI sessione:
           1) dep con OWNER caldo (warm) vivo;
@@ -6937,7 +6544,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         now = time.time()
         try:
             guard = self._guard_sec()
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             guard = 900.0
         # 1) WARM: dep con owner vivo (qualsiasi sessione).
         for u, ent in list(self._dep_sess().items()):
@@ -6946,7 +6553,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             try:
                 if (now - float(ent[1])) >= guard:
                     continue
-            except Exception:                          # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 continue
             out.add(str(u))
         # 2) PROBE IN VOLO (canari/sveglie, qualsiasi sessione).
@@ -6956,31 +6563,32 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     try:
                         if (now - float(ts)) > 950.0:
                             continue
-                    except Exception:                  # noqa: BLE001
+                    except Exception:  # noqa: BLE001
                         continue
                     out.add(str(u))
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         # 3) CHIAMATE REALI IN CORSO.
         try:
             for u, s in list(self._stats.items()):
                 if int(getattr(s, "inflight", 0) or 0) > 0:
                     out.add(str(u))
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         return out
 
-
-
-
-    def initial_pick(self, profile: str | None, group_name: str,
-                     need: frozenset[str] | None = None,
-                     ctx: int | None = None,
-                     session_id: str | None = None,
-                     warm: bool = True,
-                     prefer_holder: bool = False,
-                     prefer_fast: bool = False,
-                     out_tokens: int | None = None) -> dict | None:
+    def initial_pick(
+        self,
+        profile: str | None,
+        group_name: str,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        session_id: str | None = None,
+        warm: bool = True,
+        prefer_holder: bool = False,
+        prefer_fast: bool = False,
+        out_tokens: int | None = None,
+    ) -> dict | None:
         """Prima selezione dentro un gruppo; nessun candidato vivo ->
         cammina la catena DEL MONDO del gruppo (cap-chain per -C, testo
         per dims/-go/-fallback). Sostituisce pick+fallback_after in main.
@@ -6999,16 +6607,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # --- WARM POOL (caldi propri): PRIMA del -dim e della scala -------
         # Su -go/-fallback il caldo non si consulta: il pool warm traccia solo
         # i free-dims e i canari/refill lì sarebbero sonde sprecate.
-        if warm and self.config.group_caps.get(group_name) is None \
-                and not self._is_renewal_bucket(group_name):
+        if warm and self.config.group_caps.get(group_name) is None and not self._is_renewal_bucket(group_name):
             _pname = self._group_profile(group_name)
             if _pname:
                 _warm = self._warm_pool(
-                    session_id, self._warm_allowed(_pname, group_name),
-                    need=need, ctx=ctx,
+                    session_id,
+                    self._warm_allowed(_pname, group_name),
+                    need=need,
+                    ctx=ctx,
                     include_borrowed=self._borrow_selectable(),
                     out_tokens=out_tokens,
-                    cap_dim=self._group_min_dim(group_name) or None)
+                    cap_dim=self._group_min_dim(group_name) or None,
+                )
                 # Nativi opencode: dentro `_warm_pool` gli zen vincono sempre
                 # (blocco zen). Se c'e' uno zen caldo si resta entro la dim
                 # richiesta; se NON c'e' zen caldo si usa SUBITO il miglior
@@ -7020,53 +6630,56 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     # P3 (non-stream): se l'eletto e' LENTO e c'e' un caldo
                     # non-lento della stessa sessione, prendi quello (niente
                     # gara in non-stream: meglio non pagare un prefill lento).
-                    if prefer_fast and self._is_demoted_dep(
-                            _dep["unique"], session_id, ctx):
+                    if prefer_fast and self._is_demoted_dep(_dep["unique"], session_id, ctx):
                         for _alt in _warm[1:]:
-                            if not self._is_demoted_dep(
-                                    _alt["unique"], session_id, ctx):
-                                log.info("[warm] %s: eletto lento -> prendo "
-                                         "il caldo non-lento %s",
-                                         _dep["unique"], _alt["unique"])
+                            if not self._is_demoted_dep(_alt["unique"], session_id, ctx):
+                                log.info(
+                                    "[warm] %s: eletto lento -> prendo il caldo non-lento %s",
+                                    _dep["unique"],
+                                    _alt["unique"],
+                                )
                                 _dep = _alt
                                 break
                     if _dep["unique"] in self._lendable_set():
-                        log.info("[warm] initial_pick %s -> %s (caldo "
-                                 "PRESTATO da un'altra sessione, fermo da "
-                                 "%.0fs, max_in=%s)", group_name,
-                                 _dep["unique"],
-                                 self._dep_idle_age(_dep["unique"]),
-                                 int(_dep.get("max_input_tokens") or 0))
+                        log.info(
+                            "[warm] initial_pick %s -> %s (caldo "
+                            "PRESTATO da un'altra sessione, fermo da "
+                            "%.0fs, max_in=%s)",
+                            group_name,
+                            _dep["unique"],
+                            self._dep_idle_age(_dep["unique"]),
+                            int(_dep.get("max_input_tokens") or 0),
+                        )
                     else:
-                        log.info("[warm] initial_pick %s -> %s (caldo proprio: "
-                                 "my_success, max_in=%s)", group_name,
-                                 _dep["unique"],
-                                 int(_dep.get("max_input_tokens") or 0))
+                        log.info(
+                            "[warm] initial_pick %s -> %s (caldo proprio: my_success, max_in=%s)",
+                            group_name,
+                            _dep["unique"],
+                            int(_dep.get("max_input_tokens") or 0),
+                        )
                     if session_id and not self._is_renewal_bucket(group_name):
-                        if getattr(self.policy,
-                                   "deployment_sticky_per_capability", False):
-                            self.dep_cap_sticky_set(session_id, need,
-                                                    _dep["unique"])
+                        if getattr(self.policy, "deployment_sticky_per_capability", False):
+                            self.dep_cap_sticky_set(session_id, need, _dep["unique"])
                         elif self.policy.deployment_sticky:
                             self.dep_sticky_set(session_id, _dep["unique"])
                     return _dep
         # --- STICKY per-deployment (SOLO FREE, mai renewal/paid) ---------
         sticky_dep = None
         # Prima prova lo sticky per-capability se abilitato
-        if session_id and not self._is_renewal_bucket(group_name) \
-                and not opencode_cautious_request():
+        if session_id and not self._is_renewal_bucket(group_name) and not opencode_cautious_request():
             sticky_dep = self.dep_cap_sticky_get(session_id, need)
         # Fallback allo sticky classico (per-sessione)
         if not sticky_dep:
-            sticky_dep = (session_id
-                          and self.policy.deployment_sticky
-                          and not self._is_renewal_bucket(group_name)
-                          and not opencode_cautious_request()
-                          and self.dep_sticky_get(session_id))
+            sticky_dep = (
+                session_id
+                and self.policy.deployment_sticky
+                and not self._is_renewal_bucket(group_name)
+                and not opencode_cautious_request()
+                and self.dep_sticky_get(session_id)
+            )
         # -go esplicito (prefer_holder): riusa l'ultimo dep -go della sessione
         # (cache). In escalation il riuso avviene nella scala (_go_pref).
-        if not sticky_dep and prefer_holder and session_id \
-                and self._is_go_group(group_name):
+        if not sticky_dep and prefer_holder and session_id and self._is_go_group(group_name):
             sticky_dep = self.last_go(session_id)
         if sticky_dep:
             sd = self.config.deployment_by_unique(sticky_dep)
@@ -7076,33 +6689,31 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # 3) il contesto stimato sta nel suo max_input (usa _cap_fits
             #    che gestisce sia max_input_tokens che fallback ctx_k*1000)
             # 4) soddisfa le capacità richieste (vision, audio, ...)
-            if sd and sd.get("group") == group_name \
-                    and not self.is_cooled_down(sticky_dep) \
-                    and not self._gemini_blocked(sd) \
-                    and not self.other_session_recent(sticky_dep) \
-                    and not self._is_demoted_dep(
-                        sticky_dep, session_id, ctx,
-                        allow_slow=self._warm_allow_slow()) \
-                    and self._cap_fits(sd, ctx) \
-                    and _dep_usable(sd) \
-                    and (need is None or self._dep_supports(sd, need)):
-                log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)",
-                          session_id, sticky_dep, ctx or "?")
+            if (
+                sd
+                and sd.get("group") == group_name
+                and not self.is_cooled_down(sticky_dep)
+                and not self._gemini_blocked(sd)
+                and not self.other_session_recent(sticky_dep)
+                and not self._is_demoted_dep(sticky_dep, session_id, ctx, allow_slow=self._warm_allow_slow())
+                and self._cap_fits(sd, ctx)
+                and _dep_usable(sd)
+                and (need is None or self._dep_supports(sd, need))
+            ):
+                log.debug("[dep-sticky] %s riuso key %s (ctx≈%s)", session_id, sticky_dep, ctx or "?")
                 return sd
             # Sticky non valido: release e pesca normale
             self.dep_sticky_release(session_id)
 
         # --- PESCA NORMALE (adaptive_pick + recency) ---------------------
-        dep = self.pick_deployment(group_name, need=need, ctx=ctx,
-                                   prefer_holder=prefer_holder)
+        dep = self.pick_deployment(group_name, need=need, ctx=ctx, prefer_holder=prefer_holder)
         # Se lo sticky era su un gruppo dim più piccolo e ora serve un gruppo
         # più grande: stesso provider+modello nella stessa sessione (crescita
         # cache-preserving). Il pick normale ha già scelto; se matcha
         # modello+key dello sticky, riagganciamo lo sticky al nuovo gruppo.
         if dep is not None:
             # --- SET STICKY: free bucket, sessione non anonima -------------
-            if session_id and not self._is_renewal_bucket(group_name) \
-                    and not opencode_cautious_request():
+            if session_id and not self._is_renewal_bucket(group_name) and not opencode_cautious_request():
                 if getattr(self.policy, "deployment_sticky_per_capability", False):
                     self.dep_cap_sticky_set(session_id, need, dep["unique"])
                 elif self.policy.deployment_sticky:
@@ -7113,22 +6724,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # deployment RAFFREDDATO da più tempo (stantio) e con cooldown residuo
         # minore nel dim corrente, PRIMA di escalationare a -go/fallback. Stessa
         # soglia degli "stantii" della scala: un cooldown fresco non si tocca.
-        _chronic_thr = max(1, int(getattr(self.policy,
-                                          "cooldown_retry_max_fail_24h", 10)
-                                  or 10))
-        _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec",
-                                   300) or 300)
-        _cooled = [d for d in self.config.groups.get(group_name, [])
-                   if not background_cautious_enabled()
-                   and getattr(self.policy, "initial_pick_cooldown_wakeup", True)
-                   and self.is_cooled_down(d["unique"])
-                   and not self._gemini_blocked(d)
-                   and not self.is_slow_for_session(d["unique"], ctx=ctx)
-                   and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
-                   and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
-                   and _dep_usable(d)
-                   and (need is None or self._dep_supports(d, need))
-                   and self._cap_fits(d, ctx)]
+        _chronic_thr = max(1, int(getattr(self.policy, "cooldown_retry_max_fail_24h", 10) or 10))
+        _stale_age = float(getattr(self.policy, "stale_cooldown_retry_sec", 300) or 300)
+        _cooled = [
+            d
+            for d in self.config.groups.get(group_name, [])
+            if not background_cautious_enabled()
+            and getattr(self.policy, "initial_pick_cooldown_wakeup", True)
+            and self.is_cooled_down(d["unique"])
+            and not self._gemini_blocked(d)
+            and not self.is_slow_for_session(d["unique"], ctx=ctx)
+            and self.stats_for(d["unique"]).fail_count_24h < _chronic_thr
+            and (self.cooldown_age(d["unique"]) or 0) >= _stale_age
+            and _dep_usable(d)
+            and (need is None or self._dep_supports(d, need))
+            and self._cap_fits(d, ctx)
+        ]
         if _cooled:
             # Cautela opencode: gli zen del gruppo vanno in coda anche qui
             # (non devono vincere la wakeup di cooldown prima dei free).
@@ -7136,18 +6747,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 return opencode_cautious_request() and is_opencode_zen_dep(d)
 
             if self._text_alternation_ok(group_name):
-                _cooled.sort(key=lambda d: (
-                    _zkey(d),
-                    self.cooldown_residual(d["unique"]),
-                    self._prov_avoid_key(d)))
+                _cooled.sort(key=lambda d: (_zkey(d), self.cooldown_residual(d["unique"]), self._prov_avoid_key(d)))
             else:
-                _cooled.sort(
-                    key=lambda d: (_zkey(d),
-                                   self.cooldown_residual(d["unique"])))
+                _cooled.sort(key=lambda d: (_zkey(d), self.cooldown_residual(d["unique"])))
             _wake = _cooled[0]
             _rem = int(self.cooldown_residual(_wake["unique"]))
-            log.info("[cooldown-wakeup] %s: provo lo stantio meno raffreddato: "
-                     "%s (residuo %ds)", group_name, _wake["unique"], _rem)
+            log.info(
+                "[cooldown-wakeup] %s: provo lo stantio meno raffreddato: %s (residuo %ds)",
+                group_name,
+                _wake["unique"],
+                _rem,
+            )
             return _wake
 
         # Nessuna pesca riuscita nel bucket richiesto: prima di rivisitare la
@@ -7160,11 +6770,9 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # niente retry del bucket morto). Se ne trovi una viva, parti da
             # lì; il resto della scala (2a intermedia -> winner) lo gestisce
             # fallback_next con requested_group.
-            _p = self._esc_pin_probe(group_name, _ew, need, ctx, tried=None,
-                                     allow_retry=False)
+            _p = self._esc_pin_probe(group_name, _ew, need, ctx, tried=None, allow_retry=False)
             _use = _p if _p is not None else _ew
-            if session_id and not self._is_renewal_bucket(group_name) \
-                    and not opencode_cautious_request():
+            if session_id and not self._is_renewal_bucket(group_name) and not opencode_cautious_request():
                 if getattr(self.policy, "deployment_sticky_per_capability", False):
                     self.dep_cap_sticky_set(session_id, need, _use["unique"])
                 elif self.policy.deployment_sticky:
@@ -7197,9 +6805,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 _dfree, _dzen = self._zen_split(_dims)
                 dep = self._walk_chain(_dfree, None, need, ctx)
                 if dep is not None:
-                    log.info("[ladder] initial_pick: %s senza candidati "
-                             "vivi -> scala (%d univoci) -> %s",
-                             group_name, len(chain), dep["unique"])
+                    log.info(
+                        "[ladder] initial_pick: %s senza candidati vivi -> scala (%d univoci) -> %s",
+                        group_name,
+                        len(chain),
+                        dep["unique"],
+                    )
                     return dep
                 # PRE-ULTIMA SPIAGGIA (fra dims e -go): dims vivi occupati da
                 # un'ALTRA sessione negli ultimi session_dep_guard_sec.
@@ -7210,8 +6821,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 if _dzen:
                     dep = self._walk_chain(_dzen, None, need, ctx)
                     if dep is not None:
-                        log.info("[ladder] initial_pick: zen block -> %s",
-                                 dep["unique"])
+                        log.info("[ladder] initial_pick: zen block -> %s", dep["unique"])
                         return dep
                 # -go/-fallback vivi
                 dep = self._walk_chain(_gofb, None, need, ctx)
@@ -7235,12 +6845,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 dep = self._walk_chain(_cgofb, None, need, ctx, allow_slow=True)
         return dep
 
-    def _walk_ladder_resilient(self, ladder: list[str],
-                               failed_unique: str | None,
-                               need: frozenset[str] | None = None,
-                               ctx: int | None = None,
-                               tried: set[str] | None = None,
-                               out_tokens: int | None = None) -> dict | None:
+    def _walk_ladder_resilient(
+        self,
+        ladder: list[str],
+        failed_unique: str | None,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        tried: set[str] | None = None,
+        out_tokens: int | None = None,
+    ) -> dict | None:
         """Cammina la scala testo con early-escalation e cooldown lineare.
 
         Sequenza (8 step; sotto cautela opencode gli zen sono un BLOCCO 3bis
@@ -7277,12 +6890,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             return bool(d) and str(d.get("group", "")).endswith(go_suf)
 
         dims = [u for u in ladder if not _is_fb(u) and not _is_go(u)]
-        go   = [u for u in ladder if _is_go(u)]
-        fb   = [u for u in ladder if _is_fb(u)]
+        go = [u for u in ladder if _is_go(u)]
+        fb = [u for u in ladder if _is_fb(u)]
         # Cautela opencode: gli zen sono un BLOCCO separato, provato dopo tutti
         # i free non-zen (vivi, prelast, wakeup, stantii) e prima di -go/-fallback.
         _cautious = opencode_cautious_request()
-        _zen_first = self._zen_first_active()          # nativo opencode
+        _zen_first = self._zen_first_active()  # nativo opencode
         if _cautious:
             dims, zen = self._zen_split(dims)
         else:
@@ -7300,24 +6913,20 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # la catena senza utilità. Viene però provato in un PARACADUTE dedicato
         # (step 4bis) PRIMA del -fallback a pagamento, e se fallisce lì va in
         # pausa minima chronic_fail_cooldown_sec (2h).
-        chronic_thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10)
-                                  or 10))
+        chronic_thr = max(1, int(getattr(pol, "cooldown_retry_max_fail_24h", 10) or 10))
         # max deployment cronici provati per richiesta nel paracadute gratuito
-        ladder_chronic_max = max(0, int(getattr(pol, "ladder_chronic_max", 3)
-                                        or 3))
+        ladder_chronic_max = max(0, int(getattr(pol, "ladder_chronic_max", 3) or 3))
 
         def _is_chronic(u: str) -> bool:
             s = self.stats_for(u)
             return s.fail_count_24h >= chronic_thr
 
-        def _chronic_filter(uniqs: list[str],
-                            exclude_chronic: bool) -> list[str]:
+        def _chronic_filter(uniqs: list[str], exclude_chronic: bool) -> list[str]:
             if not exclude_chronic:
                 return uniqs
             return [u for u in uniqs if not _is_chronic(u)]
 
-        def _chronic_context(ccfg, uniqs: list[str],
-                             cneed, cctx) -> list[str]:
+        def _chronic_context(ccfg, uniqs: list[str], cneed, cctx) -> list[str]:
             """Candidati cronici che possono PROPRIO gestire la richiesta:
             capacità `cneed` e contesto/max_input compatibili (`_cap_fits`)."""
             out = []
@@ -7336,8 +6945,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 out.append(u)
             return out
 
-        def _chronic_media_defer(ccfg, uniqs: list[str],
-                                 cneed, cctx) -> list[str]:
+        def _chronic_media_defer(ccfg, uniqs: list[str], cneed, cctx) -> list[str]:
             """Opzione A — MEDIA DEFER anche nel paracadute cronico: per
             richieste PURE-TESTO, se nel pool cronico esiste almeno un
             text-only (capace e cap-fits), i cronici media-capable vengono
@@ -7347,8 +6955,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             _defer_media)."""
             if cneed and not cneed.isdisjoint(self.MEDIA_TOKENS):
                 return uniqs
-            deps = [d for d in (ccfg.deployment_by_unique(u) for u in uniqs)
-                    if d is not None]
+            deps = [d for d in (ccfg.deployment_by_unique(u) for u in uniqs) if d is not None]
             text_only = [d for d in deps if not self._is_deferrable(d)]
             if text_only and len(text_only) < len(deps):
                 kept = {d["unique"] for d in text_only}
@@ -7360,22 +6967,28 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         #    ctx/need) PRIMA di toccare qualsiasi altro deployment. `allowed`
         #    = univoci della scala corrente: in `force_escalation` (solo
         #    -go/-fallback) il pool e' vuoto di fatto -> nessun effetto.
-        _warm = self._warm_pool(current_session(), set(ladder), need, ctx,
-                                tried, failed_unique,
-                                include_borrowed=self._borrow_selectable(),
-                                out_tokens=out_tokens)
+        _warm = self._warm_pool(
+            current_session(),
+            set(ladder),
+            need,
+            ctx,
+            tried,
+            failed_unique,
+            include_borrowed=self._borrow_selectable(),
+            out_tokens=out_tokens,
+        )
         # Nativi opencode: l'ordine zen-first e' dentro `_warm_pool`. Se non
         # c'e' zen caldo si usa SUBITO il warm non-zen (refill canary zen in
         # background): niente ricerca a freddo sincrona.
         if _warm:
             _dep = _warm[0]
-            log.info("[warm] ladder -> %s (caldo proprio, max_in=%s)",
-                     _dep["unique"], int(_dep.get("max_input_tokens") or 0))
+            log.info(
+                "[warm] ladder -> %s (caldo proprio, max_in=%s)", _dep["unique"], int(_dep.get("max_input_tokens") or 0)
+            )
             return _dep
 
         # 1) dims vivi (max skip)
-        nxt = self._walk_chain(dims, failed_unique, need, ctx,
-                               limit=skip, tried=tried)
+        nxt = self._walk_chain(dims, failed_unique, need, ctx, limit=skip, tried=tried)
         if nxt is not None:
             return nxt
 
@@ -7397,8 +7010,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         #    Filtri allineati a _walk_chain (other_session_recent, retired,
         #    gemini/model breaker, need, cap_fits, slow-sessione/soft-429).
         _now_w = time.time()
-        _win = max(1.0, float(getattr(
-            pol, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
+        _win = max(1.0, float(getattr(pol, "ladder_cooldown_wakeup_window_sec", 3600) or 3600))
         _max_wake = max(0, int(getattr(pol, "ladder_cooldown_wakeups", 20) or 0))
         if _max_wake > 0 and not background_cautious_enabled():  # cautela: no re-probe
             _tried_w = tried or set()
@@ -7410,14 +7022,17 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     continue
                 _cage = self.cooldown_age(u)
                 if _cage is None or _cage < age:
-                    continue                       # cooldown fresco
-                if not _is_quota_evidence(
-                        getattr(self.stats_for(u), "last_reason", None)):
-                    continue                       # solo nati da 429/quota
+                    continue  # cooldown fresco
+                if not _is_quota_evidence(getattr(self.stats_for(u), "last_reason", None)):
+                    continue  # solo nati da 429/quota
                 _du = cfg.deployment_by_unique(u)
-                if _du is None or self.is_retired(u) \
-                        or self._endpoint_quarantined(_du) \
-                        or self._gemini_blocked(_du) or self._model_blocked(_du):
+                if (
+                    _du is None
+                    or self.is_retired(u)
+                    or self._endpoint_quarantined(_du)
+                    or self._gemini_blocked(_du)
+                    or self._model_blocked(_du)
+                ):
                     continue
                 if self.other_session_recent(u):
                     continue
@@ -7434,7 +7049,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                     while _dq and _now_w - _dq[0] > _win:
                         _dq.popleft()
                     if len(_dq) >= _max_wake:
-                        continue                   # budget finestra esaurito
+                        continue  # budget finestra esaurito
                 _cooled_dims.append(u)
             if _cooled_dims:
                 _cooled_dims.sort(key=lambda u: self.cooldown_residual(u))
@@ -7442,9 +7057,13 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 _wake = cfg.deployment_by_unique(_wake_u)
                 if _wake is not None:
                     self._wake_times.setdefault(_wake_u, deque()).append(_now_w)
-                    log.info("[ladder] dims cooldown-wakeup 429 (budget %d/%ds):"
-                             " residuo %ds -> %s", _max_wake, int(_win),
-                             int(self.cooldown_residual(_wake_u)), _wake_u)
+                    log.info(
+                        "[ladder] dims cooldown-wakeup 429 (budget %d/%ds): residuo %ds -> %s",
+                        _max_wake,
+                        int(_win),
+                        int(self.cooldown_residual(_wake_u)),
+                        _wake_u,
+                    )
                     return _wake
 
         # 1quater) PROSEGUI NELLA -DIM SUCCESSIVA (prima di -go): la camminata
@@ -7458,8 +7077,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         #    successiva prima di andare a -go"). Solo dims, mai -go/-fallback.
         _nextd = self._dims_above(dims, failed_unique)
         if _nextd:
-            nxt = self._walk_chain(_nextd, None, need, ctx, limit=skip,
-                                   tried=tried)
+            nxt = self._walk_chain(_nextd, None, need, ctx, limit=skip, tried=tried)
             if nxt is not None:
                 log.info("[ladder] -dim successiva -> %s", nxt["unique"])
                 return nxt
@@ -7468,8 +7086,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             """Ultimo dep -go della sessione se spendibile: da riusare quando
             la scala ARRIVA a -go (cache potenzialmente integra)."""
             u = self.last_go(current_session(), allow_cooled=allow_cooled)
-            if not u or u not in go or u in (tried or set()) \
-                    or u == failed_unique:
+            if not u or u not in go or u in (tried or set()) or u == failed_unique:
                 return None
             d = self.config.deployment_by_unique(u)
             if d is None or not _dep_usable(d):
@@ -7483,8 +7100,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # 2) -go vivi  (sotto cautela opencode E per i nativi zen-first questo
         #    step gira DOPO i dims stantii: vedi 3bis/2bis qui sotto)
         if not _defer_go:
-            nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx,
-                                                 tried=tried)
+            nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx, tried=tried)
             if nxt is not None:
                 log.info("[ladder] escalation a -go -> %s", nxt["unique"])
                 return nxt
@@ -7492,16 +7108,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # 3) dims stantii (max stale_max) — mai i cronici (Leva B).
         #    Opzionale: `ladder_stale_max=0` disattiva (l'autoprobe risveglia).
         if stale_max > 0:
-            _q_dims = [u for u in _chronic_filter(dims, True)
-                       if _is_quota_evidence(
-                           getattr(self.stats_for(u), "last_reason", None))]
-            nxt = self._walk_chain(_q_dims, failed_unique,
-                                   need, ctx,
-                                   min_cooldown_age=age, limit=stale_max,
-                                   tried=tried)
+            _q_dims = [
+                u
+                for u in _chronic_filter(dims, True)
+                if _is_quota_evidence(getattr(self.stats_for(u), "last_reason", None))
+            ]
+            nxt = self._walk_chain(
+                _q_dims, failed_unique, need, ctx, min_cooldown_age=age, limit=stale_max, tried=tried
+            )
             if nxt is not None:
-                log.info("[ladder] dims stantio (>%ds) -> %s",
-                         int(age), nxt["unique"])
+                log.info("[ladder] dims stantio (>%ds) -> %s", int(age), nxt["unique"])
                 return nxt
 
         # 3bis) ZEN (solo cautela opencode): blocco separato DOPO tutti i free
@@ -7514,33 +7130,25 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 log.info("[ladder] zen (vivo) -> %s", nxt["unique"])
                 return nxt
             if stale_max > 0:
-                _q_zen = [u for u in zen
-                          if _is_quota_evidence(
-                              getattr(self.stats_for(u), "last_reason", None))]
-                nxt = self._walk_chain(_q_zen, None, need, ctx,
-                                       min_cooldown_age=age, limit=stale_max,
-                                       tried=tried)
+                _q_zen = [u for u in zen if _is_quota_evidence(getattr(self.stats_for(u), "last_reason", None))]
+                nxt = self._walk_chain(_q_zen, None, need, ctx, min_cooldown_age=age, limit=stale_max, tried=tried)
                 if nxt is not None:
-                    log.info("[ladder] zen stantio (>%ds) -> %s",
-                             int(age), nxt["unique"])
+                    log.info("[ladder] zen stantio (>%ds) -> %s", int(age), nxt["unique"])
                     return nxt
         # 2bis) -go vivi (cautela opencode o nativi zen-first: qui, dopo dims
         #       stantii [+ blocco zen in cautela])
         if _defer_go:
-            nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx,
-                                                 tried=tried)
+            nxt = _go_pref() or self._walk_chain(go, failed_unique, need, ctx, tried=tried)
             if nxt is not None:
                 log.info("[ladder] escalation a -go -> %s", nxt["unique"])
                 return nxt
 
         # 4) -go stantii — mai i cronici (Leva B)
         nxt = _go_pref(allow_cooled=True) or self._walk_chain(
-            _chronic_filter(go, True), failed_unique,
-            need, ctx,
-            min_cooldown_age=age, tried=tried)
+            _chronic_filter(go, True), failed_unique, need, ctx, min_cooldown_age=age, tried=tried
+        )
         if nxt is not None:
-            log.info("[ladder] go stantio (>%ds) -> %s",
-                     int(age), nxt["unique"])
+            log.info("[ladder] go stantio (>%ds) -> %s", int(age), nxt["unique"])
             return nxt
 
         # 4bis) PARACADUTE CRONICI (gratis, PRIMA del -fallback a pagamento):
@@ -7558,39 +7166,38 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             # cronici anche da stantii/ultima spiaggia): li riproviamo qui,
             # PRIMA del -fallback a pagamento, dal meno fallimentare al più
             # fallimentare (a parità: cooldown residuo più breve).
-            chronic_pool = [u for u in ladder
-                            if u != failed_unique
-                            and not (tried and u in tried)
-                            and not (_cautious and is_opencode_zen_dep(
-                                cfg.deployment_by_unique(u)))
-                            and _is_chronic(u)
-                            and not self.is_slow_for_session(u, ctx=ctx)
-                            and not self.is_retired(u)]
+            chronic_pool = [
+                u
+                for u in ladder
+                if u != failed_unique
+                and not (tried and u in tried)
+                and not (_cautious and is_opencode_zen_dep(cfg.deployment_by_unique(u)))
+                and _is_chronic(u)
+                and not self.is_slow_for_session(u, ctx=ctx)
+                and not self.is_retired(u)
+            ]
             # contesto/capacità compatibili e (Opzione A) testo puro -> text-only
             chronic_pool = _chronic_context(cfg, chronic_pool, need, ctx)
             chronic_pool = _chronic_media_defer(cfg, chronic_pool, need, ctx)
             if chronic_pool:
-                chronic_pool.sort(
-                    key=lambda u: (self.stats_for(u).fail_count_24h,
-                                   self.cooldown_residual(u)))
+                chronic_pool.sort(key=lambda u: (self.stats_for(u).fail_count_24h, self.cooldown_residual(u)))
                 for u in chronic_pool[:ladder_chronic_max]:
                     d = cfg.deployment_by_unique(u)
                     if d is None:
                         continue
-                    log.warning("[ladder] paracadute cronico (fail_24h=%d, "
-                                "in_cooldown=%s) -> %s",
-                                self.stats_for(u).fail_count_24h,
-                                self.is_cooled_down(u), u)
+                    log.warning(
+                        "[ladder] paracadute cronico (fail_24h=%d, in_cooldown=%s) -> %s",
+                        self.stats_for(u).fail_count_24h,
+                        self.is_cooled_down(u),
+                        u,
+                    )
                     return d
 
         # 5) -fallback INTERO: ignore cooldown, il servizio deve rispondere
         if fb:
-            nxt = self._walk_chain(fb, failed_unique, need, ctx,
-                                   ignore_cooldown=True, tried=tried,
-                                   allow_slow=True)
+            nxt = self._walk_chain(fb, failed_unique, need, ctx, ignore_cooldown=True, tried=tried, allow_slow=True)
             if nxt is not None:
-                log.info("[ladder] escalation a -fallback (no cooldown) "
-                         "-> %s", nxt["unique"])
+                log.info("[ladder] escalation a -fallback (no cooldown) -> %s", nxt["unique"])
                 return nxt
 
         # 6) ULTIMA SPIAGGIA: tutti in cooldown, ordinati per residuo crescente
@@ -7604,8 +7211,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if tried and u in tried:
                 continue
             if _is_chronic(u):
-                log.info("[ladder] %s cronico (fail_24h>=%d): saltato "
-                         "da ULTIMA SPIAGGIA", u, chronic_thr)
+                log.info("[ladder] %s cronico (fail_24h>=%d): saltato da ULTIMA SPIAGGIA", u, chronic_thr)
                 continue
             if not self.is_cooled_down(u):
                 continue
@@ -7624,13 +7230,12 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             cooled.append((remaining, u, d))
         # Cautela: gli zen (ammessi qui come ultima scelta) vanno in coda.
         # Per i nativi zen-first NON vanno penalizzati (restano in testa).
-        cooled.sort(key=lambda x: (
-            opencode_cautious_request() and is_opencode_zen_dep(x[2]), x[0]))
+        cooled.sort(key=lambda x: (opencode_cautious_request() and is_opencode_zen_dep(x[2]), x[0]))
         if cooled:
             dep = cooled[0][2]
-            log.warning("[ladder] ULTIMA SPIAGGIA (cooldown ignorato, "
-                        "residuo %ds) -> %s",
-                        int(cooled[0][0]), dep["unique"])
+            log.warning(
+                "[ladder] ULTIMA SPIAGGIA (cooldown ignorato, residuo %ds) -> %s", int(cooled[0][0]), dep["unique"]
+            )
             return dep
         # 6bis) ULTIMA SPIAGGIA ESTREMA: anche i RITIRATI, ma solo se non
         #       permanenti (quota/probe-cap) e solo quando non e' rimasto
@@ -7656,21 +7261,22 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             _ret.append((self.cooldown_residual(u), u, _d))
         # Cautela: gli zen (ultima scelta) vanno in coda anche qui. Per i
         # nativi zen-first restano in testa.
-        _ret.sort(key=lambda x: (
-            opencode_cautious_request() and is_opencode_zen_dep(x[2]), x[0]))
+        _ret.sort(key=lambda x: (opencode_cautious_request() and is_opencode_zen_dep(x[2]), x[0]))
         if _ret:
             dep = _ret[0][2]
-            log.warning("[ladder] ULTIMA SPIAGGIA ESTREMA (ritirato "
-                        "non-permanente) -> %s", dep["unique"])
+            log.warning("[ladder] ULTIMA SPIAGGIA ESTREMA (ritirato non-permanente) -> %s", dep["unique"])
             return dep
         return None
 
-    def _free_last_resort(self, cur_dep: dict,
-                          need: frozenset[str] | None = None,
-                          ctx: int | None = None,
-                          tried: set[str] | None = None,
-                          out_tokens: int | None = None,
-                          requested_group: str | None = None) -> dict | None:
+    def _free_last_resort(
+        self,
+        cur_dep: dict,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        tried: set[str] | None = None,
+        out_tokens: int | None = None,
+        requested_group: str | None = None,
+    ) -> dict | None:
         """ULTIMA RISORSA: da un bucket -go/-fallback esaurito si SCENDE ai
         free-dims, cosi' il 503 resta l'ultimissima cosa.
 
@@ -7706,15 +7312,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         # (1) warm di chiunque (proprio + prestato), cap-ok.
         try:
             _warm = self._warm_pool(
-                None, _free_set, need=need, ctx=ctx, tried=_tried,
+                None,
+                _free_set,
+                need=need,
+                ctx=ctx,
+                tried=_tried,
                 failed_unique=cur_dep.get("unique"),
                 include_borrowed=self._borrow_selectable(),
-                out_tokens=out_tokens)
-        except Exception:                              # noqa: BLE001
+                out_tokens=out_tokens,
+            )
+        except Exception:  # noqa: BLE001
             _warm = []
         if _warm:
-            log.warning("[last-resort] %s -> %s (warm free, cap-ok)",
-                        cur_dep.get("unique"), _warm[0]["unique"])
+            log.warning("[last-resort] %s -> %s (warm free, cap-ok)", cur_dep.get("unique"), _warm[0]["unique"])
             return _warm[0]
         # (2) canary freddo (fill, poi wake) sui free-dims. Il ladder del
         # canary parte dal gruppo RICHIESTO: se e' un bucket rinnovo (-go/
@@ -7723,18 +7333,14 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         _req_free = requested_group
         if not _req_free or self._is_renewal_bucket(_req_free):
             _dims = sorted(cfg.profile_dims.get(pname, []))
-            _req_free = (f"{cfg.proxy_prefix}{pname}-{_dims[0]}k"
-                         if _dims else None)
-        for _fn, _lbl in ((self.warm_fill_canary, "canary"),
-                          (self.warm_wake_canary, "wake")):
+            _req_free = f"{cfg.proxy_prefix}{pname}-{_dims[0]}k" if _dims else None
+        for _fn, _lbl in ((self.warm_fill_canary, "canary"), (self.warm_wake_canary, "wake")):
             try:
-                _c = _fn(pname, cur_dep, need, ctx, out_tokens,
-                         tried=_tried, requested_group=_req_free)
-            except Exception:                          # noqa: BLE001
+                _c = _fn(pname, cur_dep, need, ctx, out_tokens, tried=_tried, requested_group=_req_free)
+            except Exception:  # noqa: BLE001
                 _c = None
             if _c:
-                log.warning("[last-resort] %s -> %s (%s free, cap-ok)",
-                            cur_dep.get("unique"), _c["unique"], _lbl)
+                log.warning("[last-resort] %s -> %s (%s free, cap-ok)", cur_dep.get("unique"), _c["unique"], _lbl)
                 return _c
         # (3) estrema: free in cooldown / ritirati non-permanenti.
         if not getattr(self.policy, "free_last_resort_extreme", True):
@@ -7756,8 +7362,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 continue
             if not self._cap_fits(d, ctx):
                 continue
-            if out_tokens and not self.dep_deliverable(d, need, ctx,
-                                                       out_tokens):
+            if out_tokens and not self.dep_deliverable(d, need, ctx, out_tokens):
                 continue
             if not (self.is_cooled_down(u) or self._retired_usable(u)):
                 continue
@@ -7765,29 +7370,36 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if best is None or res < best[0]:
                 best = (res, d)
         if best is not None:
-            _kind = ("retired" if self.is_retired(best[1]["unique"])
-                     else "cooled")
-            log.warning("[last-resort] %s -> %s (free %s, cooldown ignorato)",
-                        cur_dep.get("unique"), best[1]["unique"], _kind)
+            _kind = "retired" if self.is_retired(best[1]["unique"]) else "cooled"
+            log.warning(
+                "[last-resort] %s -> %s (free %s, cooldown ignorato)", cur_dep.get("unique"), best[1]["unique"], _kind
+            )
             return best[1]
         return None
 
-    def fallback_after(self, profile: str, failed_unique: str | None,
-                       need: frozenset[str] | None = None,
-                       ctx: int | None = None,
-                       out_tokens: int | None = None) -> dict | None:
+    def fallback_after(
+        self,
+        profile: str,
+        failed_unique: str | None,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        out_tokens: int | None = None,
+    ) -> dict | None:
         """Prossimo deployment vivo nella catena TESTO piatta del profilo
         (dims crescenti -> -go -> -fallback), filtrata da need. Con
         escalation graduale del rilassamento cooldown."""
-        return self._walk_ladder_resilient(self.config.chains.get(profile, []),
-                                           failed_unique, need, ctx,
-                                           out_tokens=out_tokens)
+        return self._walk_ladder_resilient(
+            self.config.chains.get(profile, []), failed_unique, need, ctx, out_tokens=out_tokens
+        )
 
-    def force_escalation(self, cur_dep: dict,
-                         need: frozenset[str] | None = None,
-                         ctx: int | None = None,
-                         tried: set[str] | None = None,
-                         out_tokens: int | None = None) -> dict | None:
+    def force_escalation(
+        self,
+        cur_dep: dict,
+        need: frozenset[str] | None = None,
+        ctx: int | None = None,
+        tried: set[str] | None = None,
+        out_tokens: int | None = None,
+    ) -> dict | None:
         """Salta DIRETTAMENTE ai gradini -go/-fallback del ladder.
 
         Usato dal rilevamento fake tool-call: niente scala dims, si va
@@ -7796,14 +7408,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         """
         cfg = self.config
         ladder = self._ladder_for_group(cur_dep.get("group", ""))
-        esc = [g for g in ladder
-               if (cfg.go_suffix and g.endswith(cfg.go_suffix))
-               or (cfg.fallback_suffix and g.endswith(cfg.fallback_suffix))]
+        esc = [
+            g
+            for g in ladder
+            if (cfg.go_suffix and g.endswith(cfg.go_suffix))
+            or (cfg.fallback_suffix and g.endswith(cfg.fallback_suffix))
+        ]
         if not esc:
             return None
-        return self._walk_ladder_resilient(esc, cur_dep["unique"], need,
-                                           ctx, tried=tried,
-                                           out_tokens=out_tokens)
+        return self._walk_ladder_resilient(esc, cur_dep["unique"], need, ctx, tried=tried, out_tokens=out_tokens)
 
     def _capable_first(self, ladder: list[str], cur_dep: dict) -> list[str]:
         """Riordina il ladder (lista di UNIQUE, vedi _ladder_for_group) per la
@@ -7828,17 +7441,16 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             intel = int(d.get("intelligence") or 0)
             mi = int(d.get("max_input_tokens") or 0)
             power[u] = (intel, mi)
-            (tail if (g.endswith(go_suf) or g.endswith(fb_suf))
-             else dims).append(u)
+            (tail if (g.endswith(go_suf) or g.endswith(fb_suf)) else dims).append(u)
         idx = (dims.index(cur_u) + 1) if cur_u in dims else 0
 
         def _key(u: str):
             intel, mi = power[u]
             return (0 if mi > cur_mi else 1, -intel, -mi)
+
         return dims[:idx] + sorted(dims[idx:], key=_key) + tail
 
-    def _dims_above(self, dims: list[str],
-                    failed_unique: str | None) -> list[str]:
+    def _dims_above(self, dims: list[str], failed_unique: str | None) -> list[str]:
         """Deployment delle -dim SUPERIORI a quella del fallito.
 
         La scala testo e' ordinata per `order` (tier) e poi dim; dopo un
@@ -7869,14 +7481,18 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 out.append(u)
         return out
 
-    def fallback_next(self, profile: str | None, cur_dep: dict,
-                      need: frozenset[str] | None = None,
-                      scope: str = "chain",
-                      ctx: int | None = None,
-                      tried: set[str] | None = None,
-                      requested_group: str | None = None,
-                      prefer_capable: bool = False,
-                      out_tokens: int | None = None) -> dict | None:
+    def fallback_next(
+        self,
+        profile: str | None,
+        cur_dep: dict,
+        need: frozenset[str] | None = None,
+        scope: str = "chain",
+        ctx: int | None = None,
+        tried: set[str] | None = None,
+        requested_group: str | None = None,
+        prefer_capable: bool = False,
+        out_tokens: int | None = None,
+    ) -> dict | None:
         """Prossimo tentativo DOPO un fallimento, con regole di SCOPO:
 
         - scope="chain": catena DEL MONDO del deployment corrente — cap-group
@@ -7908,32 +7524,40 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             _pname = self._group_profile(cur_dep["group"])
             if _pname:
                 _warm = self._warm_pool(
-                    None, self._warm_allowed(_pname, req_grp),
-                    need=need, ctx=ctx, tried=tried,
+                    None,
+                    self._warm_allowed(_pname, req_grp),
+                    need=need,
+                    ctx=ctx,
+                    tried=tried,
                     failed_unique=cur_dep.get("unique"),
                     include_borrowed=self._borrow_selectable(),
                     out_tokens=out_tokens,
-                    cap_dim=self._group_min_dim(req_grp) or None)
+                    cap_dim=self._group_min_dim(req_grp) or None,
+                )
                 if _warm:
                     _wd = _warm[0]
-                    log.info("[warm] fallback -> %s (caldo proprio, max_in=%s)",
-                             _wd["unique"],
-                             int(_wd.get("max_input_tokens") or 0))
+                    log.info(
+                        "[warm] fallback -> %s (caldo proprio, max_in=%s)",
+                        _wd["unique"],
+                        int(_wd.get("max_input_tokens") or 0),
+                    )
                     return _wd
         # --- CACHE HOLDER: fallback cache-preserving (solo bucket FREE) --
         # Rete di sicurezza storica quando il pool caldi non si applica (profilo
         # non risolvibile / nessun caldo del mondo): riusa il detentore cache
         # della sessione, se free e non gia' tentato.
-        if (getattr(self.policy, "cache_aware_enabled", True)
-                and getattr(self.policy, "cache_prefer_last_success", True)):
+        if getattr(self.policy, "cache_aware_enabled", True) and getattr(
+            self.policy, "cache_prefer_last_success", True
+        ):
             _holder = self.cache_holder(None, need, ctx)
-            if (_holder is not None
-                    and _holder["unique"] != cur_dep.get("unique")
-                    and (not tried or _holder["unique"] not in tried)
-                    and self._free_group(_holder.get("group", ""))
-                    and self._free_group(cur_dep.get("group", ""))):
-                log.info("[cache] fallback -> detentore %s (cache calda)",
-                         _holder["unique"])
+            if (
+                _holder is not None
+                and _holder["unique"] != cur_dep.get("unique")
+                and (not tried or _holder["unique"] not in tried)
+                and self._free_group(_holder.get("group", ""))
+                and self._free_group(cur_dep.get("group", ""))
+            ):
+                log.info("[cache] fallback -> detentore %s (cache calda)", _holder["unique"])
                 return _holder
         if scope == "group":
             cap_cur = self.config.group_caps.get(cur_dep["group"])
@@ -7950,38 +7574,28 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
                 if prefer_capable:
                     _lad = self._capable_first(_lad, cur_dep)
                 nxt = self._walk_ladder_resilient(
-                    _lad,
-                    cur_dep["unique"], need, ctx, tried=tried,
-                    out_tokens=out_tokens)
-                if nxt is None and self._is_renewal_bucket(
-                        str(cur_dep.get("group") or "")):
-                    nxt = self._free_last_resort(
-                        cur_dep, need, ctx, tried, out_tokens, req_grp)
+                    _lad, cur_dep["unique"], need, ctx, tried=tried, out_tokens=out_tokens
+                )
+                if nxt is None and self._is_renewal_bucket(str(cur_dep.get("group") or "")):
+                    nxt = self._free_last_resort(cur_dep, need, ctx, tried, out_tokens, req_grp)
                 if nxt is not None and nxt["group"] != cur_dep["group"]:
-                    log.info("[ladder] rotazione %s -> %s",
-                             cur_dep["group"], nxt["group"])
+                    log.info("[ladder] rotazione %s -> %s", cur_dep["group"], nxt["group"])
                 return nxt
             if self._prefer_same_model(cap_cur, cur_dep.get("model", "")):
-                nxt = self.pick_deployment(cur_dep["group"],
-                                           exclude=cur_dep["unique"],
-                                           restrict_model=cur_dep.get("model"),
-                                           ctx=ctx)
+                nxt = self.pick_deployment(
+                    cur_dep["group"], exclude=cur_dep["unique"], restrict_model=cur_dep.get("model"), ctx=ctx
+                )
                 if nxt is not None:
-                    log.info("[restrict] %s: failover same-model -> %s",
-                             cur_dep["group"], nxt["unique"])
+                    log.info("[restrict] %s: failover same-model -> %s", cur_dep["group"], nxt["unique"])
                     return nxt
-                nxt = self.pick_deployment(cur_dep["group"],
-                                           exclude=cur_dep["unique"],
-                                           ctx=ctx)
+                nxt = self.pick_deployment(cur_dep["group"], exclude=cur_dep["unique"], ctx=ctx)
                 if nxt is not None and nxt.get("model") != cur_dep.get("model"):
-                    self._note_cross(cur_dep["group"], cur_dep.get("model", "?"),
-                                     nxt.get("model", "?"))
+                    self._note_cross(cur_dep["group"], cur_dep.get("model", "?"), nxt.get("model", "?"))
                 return nxt
             # ctx: senza, la rotazione di fallback su un gruppo capacita'
             # poteva scegliere un dep con max_input < contesto richiesto
             # (_cap_fits e' no-op con ctx=None) -> 413 upstream sprecato.
-            return self.pick_deployment(cur_dep["group"],
-                                        exclude=cur_dep["unique"], ctx=ctx)
+            return self.pick_deployment(cur_dep["group"], exclude=cur_dep["unique"], ctx=ctx)
         cap = self.config.group_caps.get(cur_dep["group"])
         if cap is not None:
             # Scorciatoia escalation-winner anche per i cap-group (primario ->
@@ -7991,27 +7605,19 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             if _ew is not None:
                 return _ew
             chain = self.config.chains_cap.get(profile or "", {}).get(cap, [])
-            prefer = cur_dep.get("model") \
-                if self._prefer_same_model(cap, cur_dep.get("model", "")) else None
+            prefer = cur_dep.get("model") if self._prefer_same_model(cap, cur_dep.get("model", "")) else None
             if chain:
                 _cfree, _czen, _ = self._zen_split3(chain)
-                nxt = self._walk_chain(_cfree, cur_dep["unique"], need, ctx,
-                                       prefer_model=prefer, tried=tried)
+                nxt = self._walk_chain(_cfree, cur_dep["unique"], need, ctx, prefer_model=prefer, tried=tried)
                 if nxt is None and _czen:
-                    nxt = self._walk_chain(_czen, cur_dep["unique"], need, ctx,
-                                           prefer_model=prefer, tried=tried)
-                if nxt is None and self._is_renewal_bucket(
-                        str(cur_dep.get("group") or "")):
-                    nxt = self._free_last_resort(
-                        cur_dep, need, ctx, tried, out_tokens, req_grp)
+                    nxt = self._walk_chain(_czen, cur_dep["unique"], need, ctx, prefer_model=prefer, tried=tried)
+                if nxt is None and self._is_renewal_bucket(str(cur_dep.get("group") or "")):
+                    nxt = self._free_last_resort(cur_dep, need, ctx, tried, out_tokens, req_grp)
                 return nxt
             # cap senza catena registrata: ripiega sulla catena testo filtrata
-            nxt = self.fallback_after(profile or "", cur_dep["unique"], need,
-                                      ctx, out_tokens=out_tokens)
-            if nxt is None and self._is_renewal_bucket(
-                    str(cur_dep.get("group") or "")):
-                nxt = self._free_last_resort(
-                    cur_dep, need, ctx, tried, out_tokens, req_grp)
+            nxt = self.fallback_after(profile or "", cur_dep["unique"], need, ctx, out_tokens=out_tokens)
+            if nxt is None and self._is_renewal_bucket(str(cur_dep.get("group") or "")):
+                nxt = self._free_last_resort(cur_dep, need, ctx, tried, out_tokens, req_grp)
             return nxt
         if self.policy.dims_ladder_floor:
             # auto: stessa scala unica, partendo dalla dim corrente (mai giù),
@@ -8025,34 +7631,25 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
             _lad = self._ladder_for_group(cur_dep["group"])
             if prefer_capable:
                 _lad = self._capable_first(_lad, cur_dep)
-            nxt = self._walk_ladder_resilient(
-                _lad,
-                cur_dep["unique"], need, ctx, tried=tried,
-                out_tokens=out_tokens)
+            nxt = self._walk_ladder_resilient(_lad, cur_dep["unique"], need, ctx, tried=tried, out_tokens=out_tokens)
             if nxt is not None:
                 return nxt
             if self._is_renewal_bucket(str(cur_dep.get("group") or "")):
-                return self._free_last_resort(
-                    cur_dep, need, ctx, tried, out_tokens, req_grp)
-            return None                     # scala finita: errore a monte
-        nxt = self.fallback_after(profile or "", cur_dep["unique"], need,
-                                  ctx, out_tokens=out_tokens)
-        if nxt is None and self._is_renewal_bucket(
-                str(cur_dep.get("group") or "")):
-            nxt = self._free_last_resort(
-                cur_dep, need, ctx, tried, out_tokens, req_grp)
+                return self._free_last_resort(cur_dep, need, ctx, tried, out_tokens, req_grp)
+            return None  # scala finita: errore a monte
+        nxt = self.fallback_after(profile or "", cur_dep["unique"], need, ctx, out_tokens=out_tokens)
+        if nxt is None and self._is_renewal_bucket(str(cur_dep.get("group") or "")):
+            nxt = self._free_last_resort(cur_dep, need, ctx, tried, out_tokens, req_grp)
         return nxt
 
     def capability_chains(self, profile: str) -> dict[str, list[str]]:
         """Capacità -> catena completa dei univoci (primario → go → fallback).
         Fonte per /admin/state e schermo TUI 'M'."""
-        return {c: list(ch) for c, ch in
-                self.config.chains_cap.get(profile, {}).items()}
+        return {c: list(ch) for c, ch in self.config.chains_cap.get(profile, {}).items()}
 
     def capability_groups_counts(self, profile: str) -> dict[str, dict[str, int]]:
         """Capacità -> {primary, go, fallback} costruiti per quel profilo."""
-        return {c: dict(cnt) for c, cnt in
-                self.config.cap_counts.get(profile, {}).items()}
+        return {c: dict(cnt) for c, cnt in self.config.cap_counts.get(profile, {}).items()}
 
     def video_gen_candidates(self, model: str) -> list[dict]:
         """Deployment candidati (chiavi diverse) del gruppo video_gen per un
@@ -8060,8 +7657,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin):
         vivono sull'account OR del deployment che ha fatto la submit, quindi
         si prova ogni chiave del gruppo finché qualcuno trova il job."""
         cfg = self.config
-        pname = cfg.profile_of_base(self.policy.canonicalize(model)) \
-            if hasattr(self.policy, "canonicalize") else None
+        pname = cfg.profile_of_base(self.policy.canonicalize(model)) if hasattr(self.policy, "canonicalize") else None
         if not pname:
             base = model.split("__")[0]
             pname = cfg.profile_of_base(base) or cfg.profile_of_base(model)
