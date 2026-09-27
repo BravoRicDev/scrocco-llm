@@ -400,6 +400,9 @@ async def lifespan(_app: FastAPI):
     _load_thought_sigs()  # firme Gemini: sopravvivono al restart
     _maybe_save_adaptive_stats(force=True)  # baseline subito
     _watch_task = asyncio.create_task(_watcher(WATCH_SECONDS))
+    # Battito di vita per l'HEALTHCHECK Docker (vedi app/liveness.py): prova
+    # che il loop gira anche quando e' troppo carico per rispondere a /healthz.
+    _heartbeat_task = asyncio.create_task(heartbeat_loop())
     _cautious = background_cautious_enabled()
     if _cautious:
         log.warning(
@@ -420,7 +423,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        for task in (_watch_task, _health_task, _nightly_task):
+        for task in (_watch_task, _health_task, _nightly_task, _heartbeat_task):
             if task:
                 task.cancel()
         # Graceful shutdown: uvicorn ha gia' smesso di accettare nuove
@@ -477,6 +480,7 @@ from .observability import (
 # aggiunta PRIMA dell'osservabilita' -> il trace ID resta il middleware piu'
 # esterno e copre anche un eventuale 503 di coda.
 from .admission import AdmissionMiddleware  # noqa: E402
+from .liveness import heartbeat_loop  # noqa: E402
 
 app.add_middleware(AdmissionMiddleware, policy_getter=lambda: gw_state.router.policy)
 

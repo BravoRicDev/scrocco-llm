@@ -27,7 +27,19 @@ USER ${UID}:${GID}
 
 EXPOSE 4001
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import os,urllib.request;port=os.environ.get('GATEWAY_PORT','4001');r=urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz',timeout=3);raise SystemExit(0 if r.status==200 else 1)"]
+# LIVENESS, non salute del servizio: il check legge l'eta' del battito che
+# l'event loop scrive ogni 5s (app/liveness.py), senza HTTP. Un gateway sotto
+# carico e' LENTO ma vivo e resta healthy; unhealthy solo se il loop e' fermo
+# da GATEWAY_HEARTBEAT_MAX_AGE (120s). Prima: /healthz via HTTP con timeout 3s
+# -> sotto carico falliva, il container veniva riavviato e ripartiva freddo
+# sotto lo stesso carico (crash-loop). /healthz resta per il monitoraggio.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["python", "-m", "app.liveness"]
 
+# UN solo processo, UN event loop, di proposito: cooldown, reputazione,
+# coalescing, finestre di uso, richieste in volo e probe vivono in memoria
+# (app/state.py). N worker = N copie indipendenti dello stato di routing (una
+# chiave in cooldown sul worker 1 ripescata dal worker 2): prima va
+# esternalizzato lo stato. La protezione dal sovraccarico e' la porta di
+# ammissione (app/admission.py).
 CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host \"${GATEWAY_HOST:-0.0.0.0}\" --port \"${GATEWAY_PORT:-4001}\""]
