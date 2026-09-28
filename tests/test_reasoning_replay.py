@@ -12,6 +12,7 @@ import tempfile
 
 import pytest
 
+from app import chat_stream
 from app.config import GatewayConfig
 from app.forwarder import (UpstreamError, repair_reasoning_replay,
                            restore_reasoning, is_unclear_error,
@@ -169,7 +170,7 @@ def test_streaming_ripara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
     payload["stream"] = True
 
     async def go():
-        resp = await SM._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", a, payload, scope="chain", session="s1", ses="s1",
             ctx=100)
         body = b""
@@ -317,7 +318,7 @@ def test_streaming_errore_oscuro_ripristina_e_ritenta(SM, monkeypatch):
     payload["stream"] = True
 
     async def go():
-        resp = await SM._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", a, payload, scope="chain", session="s1", ses="s1",
             ctx=100, orig_messages=ORIG)
         body = b""
@@ -356,7 +357,7 @@ def test_streaming_proattivo_flag_prima_del_primo_invio(SM, monkeypatch):
     payload["stream"] = True
 
     async def go():
-        resp = await SM._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", a, payload, scope="chain", session="s1", ses="s1",
             ctx=100, orig_messages=ORIG)
         body = b""

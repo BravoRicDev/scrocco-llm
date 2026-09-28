@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from app import main
+from app import chat_completions, chat_stream, main, stream_verdicts  # noqa: F401
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
@@ -58,7 +58,7 @@ TRAIL = [
 
 
 def test_exhausted_espone_trail_e_header():
-    r = main._exhausted(2, "boom", trail=TRAIL, retry_at_ms=1234567890)
+    r = stream_verdicts._exhausted(2, "boom", trail=TRAIL, retry_at_ms=1234567890)
     body = json.loads(bytes(r.body).decode())
     assert r.status_code == 503
     assert body["error"]["attempts"] == TRAIL
@@ -70,7 +70,7 @@ def test_exhausted_espone_trail_e_header():
 
 def test_exhausted_trail_cappata_a_dieci():
     trail = [dict(TRAIL[0], ord=i, dep=f"u{i}") for i in range(1, 15)]
-    r = main._exhausted(14, "boom", trail=trail)
+    r = stream_verdicts._exhausted(14, "boom", trail=trail)
     body = json.loads(bytes(r.body).decode())
     assert len(body["error"]["attempts"]) == 10
     assert r.headers.get("x-scrocco-attempts") == "10"
@@ -99,7 +99,7 @@ _VERDICT_TRAIL = [
 
 
 def test_exhausted_trail_di_verdetti_e_valido():
-    r = main._exhausted(5, "empty_eof", trail=_VERDICT_TRAIL)
+    r = stream_verdicts._exhausted(5, "empty_eof", trail=_VERDICT_TRAIL)
     body = json.loads(bytes(r.body).decode())
     assert r.status_code == 503
     # attempts NON vuoto: e' la lista dei deployment scartati
@@ -113,13 +113,13 @@ def test_exhausted_trail_di_verdetti_e_valido():
 
 def test_exhausted_attempts_non_mai_zero():
     """Con trail vuoto ma n_tries>0 l'header non puo' dire "0" tentativi."""
-    r = main._exhausted(3, "boom", trail=[])
+    r = stream_verdicts._exhausted(3, "boom", trail=[])
     assert r.headers.get("x-scrocco-attempts") == "3"
     assert "x-scrocco-trail" not in r.headers        # niente trail da mostrare
     # nemmeno con n_tries=0 (o None): resta almeno 1, mai 0
-    assert main._exhausted(0, "b").headers.get(  # type: ignore[arg-type]
+    assert stream_verdicts._exhausted(0, "b").headers.get(  # type: ignore[arg-type]
         "x-scrocco-attempts") == "1"
-    assert main._exhausted(None, "b").headers.get(  # type: ignore[arg-type]
+    assert stream_verdicts._exhausted(None, "b").headers.get(  # type: ignore[arg-type]
         "x-scrocco-attempts") == "1"
 
 
@@ -132,7 +132,7 @@ def test_trail_campione_per_verdetto_generato():
     """
     import inspect
 
-    src = inspect.getsource(main._StreamFallback)
+    src = inspect.getsource(chat_stream._StreamFallback)
     # append al trail con classe e status, non un recordon generico
     assert '"cls": self._v_cls' in src and '"status": self._v_st' in src
     assert "self.trail.append(" in src
@@ -150,7 +150,7 @@ def test_ret_popola_il_trail_nel_result_box():
     """Criterio 3 (il percorso dati): _ret consegna il trail al chiamante."""
     import inspect
 
-    src = inspect.getsource(main._StreamFallback)
+    src = inspect.getsource(chat_stream._StreamFallback)
     ret_src = src[src.index("def _ret(self, resp):"):]
     ret_src = ret_src[:ret_src.index("\n    def ")]
     assert 'self.result_box["trail"] = list(self.trail)' in ret_src
@@ -168,7 +168,7 @@ def test_redirect_nonstream_trasporta_il_trail():
     assert getattr(err, "trail", None) is None
     # il tratto di codice che collega i due: la firma deve accettere il trail
     import inspect as _i
-    src = _i.getsource(main.chat_completions)
+    src = _i.getsource(chat_completions.chat_completions)
     assert '_err.trail = _meta.get("trail")' in src
     assert "_ret(" in src
 
@@ -176,9 +176,9 @@ def test_redirect_nonstream_trasporta_il_trail():
 def test_retry_at_ms_dal_cooldown_residuo(r):
     d = _dep(r, "K-B")
     r.mark_failed(d["unique"], seconds=1800, reason="http_429", status=429)
-    t = main._retry_at_ms(r, [{"dep": d["unique"], "cls": "rate_limited"}])
+    t = stream_verdicts._retry_at_ms(r, [{"dep": d["unique"], "cls": "rate_limited"}])
     assert t is not None and abs(t / 1000.0 - (time.time() + 1800)) < 30
-    assert main._retry_at_ms(r, [{"dep": "sconosciuto"}]) is None
+    assert stream_verdicts._retry_at_ms(r, [{"dep": "sconosciuto"}]) is None
 
 
 def test_nonstream_mette_il_trail_sull_errore_finale():

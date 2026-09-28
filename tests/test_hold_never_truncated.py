@@ -19,6 +19,9 @@ import time as _time
 import pytest
 from fastapi.responses import JSONResponse
 
+from app import chat_hedge
+from app import chat_stream
+from app import sse_utils
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
@@ -41,7 +44,7 @@ def _run(M, chunks, fc=500, **kw):
     async def gen():
         for c in chunks:
             yield c
-    return asyncio.run(M._peek_stream(gen(), fc, kw.pop("incl", False),
+    return asyncio.run(sse_utils._peek_stream(gen(), fc, kw.pop("incl", False),
                                       kw.pop("min_chars", 40),
                                       hold_until_finish=True, **kw))
 
@@ -53,7 +56,7 @@ def _run_silent(M, fc=60, **kw):
     out = {}
 
     async def go():
-        v, _buf, task, _m = await M._peek_stream(gen(), fc, False, 40,
+        v, _buf, task, _m = await sse_utils._peek_stream(gen(), fc, False, 40,
                                                   hold_until_finish=True, **kw)
         out["v"] = v
         if task is not None:
@@ -249,7 +252,7 @@ def test_length_vuoto_ruota_senza_cooldown_e_cerca_il_piu_capace(ML, monkeypatch
     async def go():
         payload = {"model": small["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await ML._stream_with_fallback("test", small, payload,
+        return await chat_stream._stream_with_fallback("test", small, payload,
                                               scope="chain")
     resp = asyncio.run(go())
     asyncio.run(_drain(resp))
@@ -268,7 +271,7 @@ def test_clean_stop_vuoto_ruota_senza_cooldown(ML, monkeypatch):
     async def go():
         payload = {"model": small["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await ML._stream_with_fallback("test", small, payload,
+        return await chat_stream._stream_with_fallback("test", small, payload,
                                               scope="chain")
     resp = asyncio.run(go())
     asyncio.run(_drain(resp))
@@ -285,7 +288,7 @@ def test_contenuto_completa_passa_normalmente(ML, monkeypatch):
     async def go():
         payload = {"model": small["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await ML._stream_with_fallback("test", small, payload,
+        return await chat_stream._stream_with_fallback("test", small, payload,
                                               scope="chain")
     resp = asyncio.run(go())
     out = asyncio.run(_drain(resp))
@@ -332,7 +335,7 @@ def _drive_hedge(M, monkeypatch, genA, stream_response, router, *,
     import time as _t
 
     async def go():
-        out = await M._hedge_peek(
+        out = await chat_hedge._hedge_peek(
             DEP_A(), genA, _t.monotonic(), fc, False, 40, 60000, 2048,
             payload={}, profile=None, need=frozenset(), scope="chain",
             ctx=1, tried_set=set(), attempts=[], requested_group=None,
@@ -345,7 +348,7 @@ def _drive_hedge(M, monkeypatch, genA, stream_response, router, *,
     monkeypatch.setattr(gw_state, "forwarder",
                         __import__("types").SimpleNamespace(
                             stream_response=stream_response))
-    monkeypatch.setattr(M, "inject_identity", lambda p, d, router=None: None)
+    monkeypatch.setattr(chat_hedge, "inject_identity", lambda p, d, router=None: None)
     return asyncio.run(go())
 
 

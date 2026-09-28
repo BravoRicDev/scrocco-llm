@@ -6,8 +6,10 @@ import tempfile
 
 import pytest
 
+from app import runtime_persistence
 import app.main as M
-from app.main import _coalesce_key, _forward_coalesced
+from app.runtime_persistence import _coalesce_key
+from app.runtime_persistence import _forward_coalesced
 from app.policy import Policy
 import app.state as gw_state
 
@@ -201,5 +203,5 @@ def test_cache_expiry_rehits_factory():
 
 def test_cache_caps_size():
     for i in range(80):
-        M._coalesce_cache_put(f"k{i}", {"i": i}, 1e12)
+        runtime_persistence._coalesce_cache_put(f"k{i}", {"i": i}, 1e12)
     assert len(gw_state._coalesce_cache) <= gw_state._COALESCE_CACHE_MAX

@@ -30,14 +30,14 @@ def test_cooldown_is_long():
 def test_not_actionable_at_chain_exhaustion():
     """A catena esaurita il 403 NON viene consegnato col suo status reale
     (non azionabile) -> 503 retryable."""
-    from app.main import _actionable_upstream_error
+    from app.stream_verdicts import _actionable_upstream_error
     err = UpstreamError(-403, "whatever the provider says")
     assert not _actionable_upstream_error(err)
 
 
 def test_various_403_bodies_all_not_actionable():
     """QUALSIASI 403 dal provider non e' azionabile dal client."""
-    from app.main import _actionable_upstream_error
+    from app.stream_verdicts import _actionable_upstream_error
     for body in [
         '{"error":{"code":403,"status":"PERMISSION_DENIED"}}',
         '{"error":{"message":"Access denied to this model"}}',
@@ -52,7 +52,7 @@ def test_various_403_bodies_all_not_actionable():
 def test_401_402_upstream_not_actionable():
     """401/402 dell'upstream riguardano la chiave/credito del GATEWAY, non la
     richiesta: a catena esaurita il client riceve un 503 retryable."""
-    from app.main import _actionable_upstream_error
+    from app.stream_verdicts import _actionable_upstream_error
     assert not _actionable_upstream_error(UpstreamError(-401, "Unauthorized"))
     assert not _actionable_upstream_error(UpstreamError(-402, "quota"))
     assert not _actionable_upstream_error(UpstreamError(401, "Unauthorized"))
@@ -60,7 +60,7 @@ def test_401_402_upstream_not_actionable():
 
 def test_request_errors_stay_actionable():
     """Gli errori che dipendono dalla richiesta restano consegnati col loro status."""
-    from app.main import _actionable_upstream_error
+    from app.stream_verdicts import _actionable_upstream_error
     assert _actionable_upstream_error(UpstreamError(-404, "The model `m/x` does not exist"))
 
 
@@ -136,5 +136,5 @@ def test_403_all_exhausted_returns_503():
     # status negativo = -403; a catena esaurita, main.py lo consegna come 503
     assert exc_info.value.status == -403
     # e _actionable lo conferma NON azionabile -> il caller fa 503
-    from app.main import _actionable_upstream_error
+    from app.stream_verdicts import _actionable_upstream_error
     assert not _actionable_upstream_error(exc_info.value)

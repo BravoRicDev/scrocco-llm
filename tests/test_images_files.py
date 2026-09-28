@@ -239,7 +239,7 @@ def _make_client(monkeypatch, tmp_path, csv_text):
 
 
 def _teardown(m, orig):
-    m.imagestore.clear()
+    imagestore.clear()
     gw_state.router._cooldown.clear()
     gw_state.router.policy.cap_groups_enabled = orig[2]
     gw_state.authn.master_key = orig[0]

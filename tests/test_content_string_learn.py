@@ -12,6 +12,7 @@ import tempfile
 
 import pytest
 
+from app import chat_stream
 from app.config import GatewayConfig
 from app.forwarder import UpstreamError, apply_content_string
 from app.policy import Policy
@@ -189,7 +190,7 @@ def test_streaming_impara_e_ritenta_lo_stesso_dep(SM, monkeypatch):
     payload["stream"] = True
 
     async def go():
-        resp = await SM._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", a, payload, scope="chain", session="s1", ses="s1",
             ctx=100)
         body = b""

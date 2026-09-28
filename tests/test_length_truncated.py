@@ -5,7 +5,7 @@ finish_reason=length va trattata come errore (cooldown + rotazione). Guardia
 importante: se il client ha chiesto `max_tokens` e il modello si e' fermato
 esattamente li', e' il cap del client -> nessun cooldown (ruotare non cambia).
 """
-from app.main import _length_truncated_should_fail
+from app.forwarder import _length_truncated_should_fail
 from app.policy import Policy
 
 

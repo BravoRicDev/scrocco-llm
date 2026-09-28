@@ -14,6 +14,7 @@ import os
 import tempfile
 import time
 
+from app import stream_verdicts
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
@@ -83,9 +84,9 @@ def test_soft_cd_uses_escalation():
     # _soft_cd(fail_24h) deve riflettere l'escalation (via router)
     import app.main as m
     r = gw_state.router
-    assert m._soft_cd(1) == gw_state.router.policy.qc_json.watchdog_cooldown_sec
-    assert m._soft_cd(5) > m._soft_cd(1)
-    assert m._soft_cd(18) > m._soft_cd(5)
+    assert stream_verdicts._soft_cd(1) == gw_state.router.policy.qc_json.watchdog_cooldown_sec
+    assert stream_verdicts._soft_cd(5) > stream_verdicts._soft_cd(1)
+    assert stream_verdicts._soft_cd(18) > stream_verdicts._soft_cd(5)
 
 
 # ------------------------------------------------------------ Leva B (cronici)

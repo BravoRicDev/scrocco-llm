@@ -115,7 +115,7 @@ def test_partial_opener_riconosce_il_pipe():
 def test_strip_sse_content_end_to_end():
     """Lo stream consegnato non contiene MAI i marker, e la coda e' flushatta
     sul chunk terminale (nessun testo perso)."""
-    from app.main import _strip_sse_content
+    from app.sse_utils import _strip_sse_content
 
     def chunk(txt, fr=None):
         d = {"delta": {"content": txt}}

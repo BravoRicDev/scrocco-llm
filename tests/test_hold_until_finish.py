@@ -14,6 +14,7 @@ from datetime import date
 
 import pytest
 
+from app import sse_utils
 from app.config import _classify
 from app.policy import Policy
 
@@ -45,7 +46,7 @@ def _run(M, chunks, delay=0.0, min_chars=40, **kw):
             if delay and i:
                 await asyncio.sleep(delay)
             yield c
-    return asyncio.run(M._peek_stream(gen(), 500, False, min_chars, **kw))
+    return asyncio.run(sse_utils._peek_stream(gen(), 500, False, min_chars, **kw))
 
 
 # ------------------------------------------------------------ CSV / policy

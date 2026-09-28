@@ -1,6 +1,7 @@
 """Fingerprint di sessione per client ANONIMI (es. Hermes): id deterministico
 `fq_<hash>` dal prefisso conversazione, cosi' sticky/cache funzionano anche
 senza header di sessione."""
+from app import chat_helpers
 from app import main as M
 from app.policy import Policy
 import app.state as gw_state
@@ -28,49 +29,49 @@ def test_fingerprint_stable_across_turns():
     p1 = _payload()
     p2 = _payload(extra=[{"role": "assistant", "content": "ok"},
                          {"role": "user", "content": _U2}])
-    a = M._session_id(_Req(), p1)
-    b = M._session_id(_Req(), p2)
+    a = chat_helpers._session_id(_Req(), p1)
+    b = chat_helpers._session_id(_Req(), p2)
     assert a and a.startswith("fq_")
     assert a == b
 
 
 def test_fingerprint_differs_by_first_user():
-    a = M._session_id(_Req(), _payload("prima domanda completamente diversa"))
-    b = M._session_id(_Req(), _payload("altra domanda del tutto differente"))
+    a = chat_helpers._session_id(_Req(), _payload("prima domanda completamente diversa"))
+    b = chat_helpers._session_id(_Req(), _payload("altra domanda del tutto differente"))
     assert a != b
 
 
 def test_fingerprint_includes_user_agent():
-    a = M._session_id(_Req({"user-agent": "agent/1.0"}), _payload())
-    b = M._session_id(_Req({"user-agent": "other/9.9"}), _payload())
+    a = chat_helpers._session_id(_Req({"user-agent": "agent/1.0"}), _payload())
+    b = chat_helpers._session_id(_Req({"user-agent": "other/9.9"}), _payload())
     assert a != b
 
 
 def test_explicit_header_wins():
     req = _Req({"x-session-id": "ses_explicit"})
-    assert M._session_id(req, _payload()) == "ses_explicit"
+    assert chat_helpers._session_id(req, _payload()) == "ses_explicit"
 
 
 def test_payload_user_wins():
     p = _payload()
     p["user"] = "utente-42"
-    assert M._session_id(_Req(), p) == "utente-42"
+    assert chat_helpers._session_id(_Req(), p) == "utente-42"
 
 
 def test_metadata_session_wins():
     p = _payload()
     p["metadata"] = {"session_id": "meta-7"}
-    assert M._session_id(_Req(), p) == "meta-7"
+    assert chat_helpers._session_id(_Req(), p) == "meta-7"
 
 
 def test_disabled_via_policy(monkeypatch):
     monkeypatch.setattr(gw_state.policy, "anon_session_fingerprint", False)
-    assert M._session_id(_Req(), _payload()) is None
+    assert chat_helpers._session_id(_Req(), _payload()) is None
 
 
 def test_too_short_basis_is_anonymous():
     p = {"messages": [{"role": "user", "content": "hi"}]}
-    assert M._session_id(_Req(), p) is None
+    assert chat_helpers._session_id(_Req(), p) is None
 
 
 def test_multimodal_content_text_extracted():
@@ -79,12 +80,12 @@ def test_multimodal_content_text_extracted():
         {"role": "user", "content": [
             {"type": "text", "text": _U1},
             {"type": "image_url", "image_url": {"url": "data:..."}}]}]}
-    sid = M._session_id(_Req(), p)
+    sid = chat_helpers._session_id(_Req(), p)
     assert sid and sid.startswith("fq_")
 
 
 def test_no_messages_is_anonymous():
-    assert M._session_id(_Req(), {}) is None
+    assert chat_helpers._session_id(_Req(), {}) is None
 
 
 def test_policy_parsing_flag():

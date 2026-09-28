@@ -253,7 +253,7 @@ def test_recuperabili_usa_warning(relpath, marker):
 # Bassa frequenza e/o spiega una decisione di routing ("perche' succede
 # questo"), con un fratello gia' a info a poche righe di distanza.
 _MOVEMENT_INFO = [
-    ("main.py", "[refill] nessuna sveglia 429 matura"),
+    ("chat_hedge.py", "[refill] nessuna sveglia 429 matura"),
     ("probes.py", "[sveglia] nessun dormiente maturo"),
     ("router.py", "[ladder] %s cronico (fail_24h>=%d)"),
     ("router.py", "[restrict] %s: failover same-model -> %s"),

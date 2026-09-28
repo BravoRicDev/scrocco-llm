@@ -17,6 +17,7 @@ import os
 
 import pytest
 
+from app import sse_utils
 import app.main as M
 from app.protocols import sse_to_chat_obj
 from app.qc import check_response
@@ -34,7 +35,7 @@ def _buggy_qc_tcs(sse: str):
     """Emula il blocco QC attuale: accoda i tool_calls dei delta SENZA unire
     per index."""
     qc_tcs = None
-    for o in M._sse_data_objs(sse.encode()):
+    for o in sse_utils._sse_data_objs(sse.encode()):
         for ch in (o.get("choices") or []):
             d = ch.get("delta") if isinstance(ch, dict) else None
             tc = d.get("tool_calls") if isinstance(d, dict) else None
@@ -98,7 +99,7 @@ def test_merged_assembly_is_valid():
 def test_helper_used_by_qc_merges_by_index():
     """L'helper che il fix introduce deve unire i frammenti per index."""
     rid, v = _tool_samples()[0]
-    tcs = M._merge_qc_tool_calls(v["sse"].encode())
+    tcs = sse_utils._merge_qc_tool_calls(v["sse"].encode())
     # un solo tool-call (index 0), argomenti interi e validi
     assert len(tcs) == 1
     args = (tcs[0].get("function") or {}).get("arguments")

@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from app.capabilities import (count_image_parts, required_caps,
                               wants_image_output)
-from app.main import _trim_chat_images
+from app.chat_media import _trim_chat_images
 import app.state as gw_state
 
 _PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"

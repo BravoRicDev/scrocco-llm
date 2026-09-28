@@ -14,7 +14,10 @@ import asyncio
 
 import pytest
 from fastapi.responses import JSONResponse, StreamingResponse
+from app import chat_stream
+from app import runtime_persistence
 import app.state as gw_state
+from app import chat_completions, chat_helpers, chat_stream
 
 
 @pytest.fixture()
@@ -74,21 +77,21 @@ def test_redirect_decision_cases(M):
     pol = gw_state.router.policy
     dep = {"hold_until_finish": False}
     # stream -> mai redirect
-    assert M._nonstream_hold_redirect(True, dep, qj, pol) is False
+    assert runtime_persistence._nonstream_hold_redirect(True, dep, qj, pol) is False
     # non-stream + hold policy ON -> redirect
     qj.stream_hold_until_finish = True
     pol.nonstream_hold_redirect = True
-    assert M._nonstream_hold_redirect(False, dep, qj, pol) is True
+    assert runtime_persistence._nonstream_hold_redirect(False, dep, qj, pol) is True
     # kill-switch OFF -> no redirect
     pol.nonstream_hold_redirect = False
-    assert M._nonstream_hold_redirect(False, dep, qj, pol) is False
+    assert runtime_persistence._nonstream_hold_redirect(False, dep, qj, pol) is False
     # hold OFF (policy) -> no redirect
     pol.nonstream_hold_redirect = True
     qj.stream_hold_until_finish = False
-    assert M._nonstream_hold_redirect(False, dep, qj, pol) is False
+    assert runtime_persistence._nonstream_hold_redirect(False, dep, qj, pol) is False
     # hold per-deployment ON (policy OFF) -> redirect
     qj.stream_hold_until_finish = False
-    assert M._nonstream_hold_redirect(
+    assert runtime_persistence._nonstream_hold_redirect(
         False, {"hold_until_finish": True}, qj, pol) is True
 
 
@@ -101,7 +104,7 @@ def test_stream_composition_clean_body(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", dep, payload, scope="chain",
             result_box=meta, client_stream=False)
         assert isinstance(resp, StreamingResponse)
@@ -126,7 +129,7 @@ def test_stream_composition_truncated_is_503(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", dep, payload, scope="chain",
             result_box=meta, client_stream=False)
     resp = asyncio.run(_run())
@@ -159,7 +162,7 @@ def test_hold_qc_invalid_json_rotates(M, monkeypatch):
     async def _run():
         payload = {"model": d0["model"],
                    "messages": [{"role": "user", "content": "dammi json"}]}
-        resp = await M._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", d0, payload, scope="chain",
             result_box=meta, client_stream=False)
         assert isinstance(resp, StreamingResponse)
@@ -212,7 +215,7 @@ def test_endpoint_nonstream_hold_redirect_e2e(M, monkeypatch):
              "query_string": b""}
 
     async def _run():
-        return await M.chat_completions(Request(scope, receive), Response())
+        return await chat_completions.chat_completions(Request(scope, receive), Response())
     out = asyncio.run(_run())
     assert isinstance(out, dict)
     assert out["object"] == "chat.completion"
@@ -271,7 +274,7 @@ def test_endpoint_nonstream_hold_repairs_toolcall(M, monkeypatch):
              "query_string": b""}
 
     async def _run():
-        return await M.chat_completions(Request(scope, receive), Response())
+        return await chat_completions.chat_completions(Request(scope, receive), Response())
     out = asyncio.run(_run())
     tcs = out["choices"][0]["message"]["tool_calls"]
     assert _json.loads(tcs[0]["function"]["arguments"]) == {"q": "hi"}
@@ -295,7 +298,7 @@ def test_immediate_upstream_error_no_unboundlocal(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", dep, payload, scope="chain",
             result_box=meta, client_stream=False)
     resp = asyncio.run(_run())
@@ -343,11 +346,13 @@ def test_nonstream_hold_redirect_single_summary(M, monkeypatch):
 
     # count _emit_summary calls
     calls = []
-    _orig = M._emit_summary
+    _orig = chat_helpers._emit_summary
     def _spy(**f):
         calls.append(f)
         return _orig(**f)
-    monkeypatch.setattr(M, "_emit_summary", _spy)
+    # il riepilogo parte dal motore non-stream o da quello stream
+    monkeypatch.setattr(chat_completions, "_emit_summary", _spy)
+    monkeypatch.setattr(chat_stream, "_emit_summary", _spy)
 
     payload = {"model": dep["model"], "stream": False,
                "messages": [{"role": "user", "content": "ciao"}]}
@@ -364,7 +369,7 @@ def test_nonstream_hold_redirect_single_summary(M, monkeypatch):
              "query_string": b""}
 
     async def _run():
-        return await M.chat_completions(Request(scope, receive), Response())
+        return await chat_completions.chat_completions(Request(scope, receive), Response())
     out = asyncio.run(_run())
 
     assert out["object"] == "chat.completion"

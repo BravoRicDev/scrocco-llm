@@ -1,4 +1,4 @@
-"""F3 — hedge del primo contenuto (main._hedge_peek): gara A/B SOLO pre-
+"""F3 — hedge del primo contenuto (chat_hedge._hedge_peek): gara A/B SOLO pre-
 commit, SOLO catena fredda, mai verso bucket pagati. Il perdente NON viene
 annullato: finisce in volo come PROBE REALE (mai cancellato) e le sue
 penali seguono le SOLITE logiche (timeout/errore -> cooldown; vuoto pulito
@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import chat_hedge
 import app.main as main
 import app.state as gw_state
 
@@ -71,7 +72,7 @@ def _run_peek(peek, stream_response, router, *, closed_tag="A",
     genA = FakeGen(closed_tag, closed)
 
     async def go():
-        out = await main._hedge_peek(
+        out = await chat_hedge._hedge_peek(
             DEP_A(), genA, time.monotonic(), 500, False, 40, 1000, 2048,
             payload={}, profile=None, need=frozenset(), scope="chain",
             ctx=1, tried_set=set(), attempts=[], requested_group=None,
@@ -80,17 +81,17 @@ def _run_peek(peek, stream_response, router, *, closed_tag="A",
             _tct_cfg=SimpleNamespace(cooldown_sec=1))
         await _join_probes()
         return out
-    old = (main._peek_stream, gw_state.router, gw_state.forwarder,
-           main.inject_identity)
-    main._peek_stream = peek
+    old = (chat_hedge._peek_stream, gw_state.router, gw_state.forwarder,
+           chat_hedge.inject_identity)
+    chat_hedge._peek_stream = peek
     gw_state.router = router
     gw_state.forwarder = SimpleNamespace(stream_response=stream_response)
-    main.inject_identity = lambda p, d, router=None: None
+    chat_hedge.inject_identity = lambda p, d, router=None: None
     try:
         out = asyncio.run(go())
     finally:
-        (main._peek_stream, gw_state.router, gw_state.forwarder,
-         main.inject_identity) = old
+        (chat_hedge._peek_stream, gw_state.router, gw_state.forwarder,
+         chat_hedge.inject_identity) = old
     return out, closed
 
 

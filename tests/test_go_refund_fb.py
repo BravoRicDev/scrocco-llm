@@ -17,6 +17,7 @@ import time
 
 import pytest
 
+from app import chat_stream
 from app.config import GatewayConfig
 from app.policy import Policy, unknown_yaml_paths
 from app.router import Router
@@ -204,7 +205,7 @@ def test_e2e_served_with_one_fallback_gifts_one(monkeypatch):
     async def _run():
         payload = {"model": d0["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", d0, payload, scope="chain", ses=sid,
             result_box=meta, client_stream=False)
         if hasattr(resp, "body_iterator"):
@@ -249,7 +250,7 @@ def test_e2e_exhausted_keeps_no_gift(monkeypatch):
     async def _run():
         payload = {"model": d0["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", d0, payload, scope="chain", ses=sid,
             result_box={}, client_stream=False)
     try:

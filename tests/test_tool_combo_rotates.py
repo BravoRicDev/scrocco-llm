@@ -103,7 +103,7 @@ def test_tool_combo_400_rotates_without_cooldown():
 def test_tool_combo_400_no_alternative_is_not_actionable():
     """Catena esaurita: si solleva il vero -400 (per il trail), ma la firma
     NON e' actionable -> il chiamante risponde 503 RETRYABLE, mai il 400."""
-    from app.main import _actionable_upstream_error
+    from app.stream_verdicts import _actionable_upstream_error
     router = _mk_router()
     grp = "scrocco-llm-test-fallback"
     broken = next(d for d in router.config.groups[grp] if d["api_key"] == "K1")

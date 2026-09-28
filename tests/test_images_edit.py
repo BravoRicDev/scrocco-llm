@@ -21,6 +21,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app import imagestore
 from app.capabilities import normalize_caps, refs_max_for
 from app.config import parse_caps
 from app.forwarder import (Forwarder, UpstreamError, extract_chat_images,
@@ -167,7 +168,7 @@ def _make_client(monkeypatch, tmp_path, csv_text):
 
 
 def _teardown(m, orig):
-    m.imagestore.clear()
+    imagestore.clear()
     gw_state.router.policy.cap_groups_enabled = orig[2]
     gw_state.router._cooldown.clear()
     gw_state.authn.master_key = orig[0]

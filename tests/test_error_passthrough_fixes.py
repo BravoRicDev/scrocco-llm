@@ -13,6 +13,7 @@ import asyncio
 import os
 import tempfile
 
+from app import chat_stream
 from app.forwarder import (Forwarder, UpstreamError, RETRYABLE_STATUS,
                            _PROVIDER_TRANSIENT_RE, _MODEL_MISSING_RE,
                            _UNKNOWN_FIELD_RE, media_reject_signature)
@@ -145,7 +146,7 @@ def test_streaming_media_reject_never_passthrough(monkeypatch):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"vision"}), scope="chain")
 
     resp = asyncio.run(_run())
@@ -195,7 +196,7 @@ def test_vision_fuorviante_su_testo_va_in_cooldown(monkeypatch):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"text"}), scope="chain")
 
     resp = asyncio.run(_run())
@@ -213,7 +214,7 @@ def test_vision_vera_non_punisce_il_deployment(monkeypatch):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"vision"}), scope="chain")
 
     resp = asyncio.run(_run())
@@ -375,7 +376,7 @@ def test_streaming_bynara_model_not_available_rotates(monkeypatch):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"text"}), scope="chain")
 
     resp = asyncio.run(_run())
@@ -393,7 +394,7 @@ def test_streaming_google_unknown_field_rotates(monkeypatch):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"text"}), scope="chain")
 
     resp = asyncio.run(_run())
@@ -436,7 +437,7 @@ def test_streaming_generic_4xx_rotates_never_passthrough(monkeypatch):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"text"}), scope="chain")
 
     resp = asyncio.run(_run())

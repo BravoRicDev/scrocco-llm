@@ -21,6 +21,7 @@ import math
 import struct
 
 import pytest
+from app import chat_media
 import app.state as gw_state
 
 SR = 16000
@@ -125,7 +126,7 @@ def _providers(m, group):
 
 def _call(m, fwd, used=None):
     import app.main as sm
-    return asyncio.run(sm._stt_bridge_transcribe(
+    return asyncio.run(chat_media._stt_bridge_transcribe(
         _Req(), b"RIFF0000", "test", "raw", None, used if used is not None
         else set()))
 
@@ -246,9 +247,9 @@ def test_chunk_paralleli_non_collidono(monkeypatch, env):
     async def _go():
         used = set()
         return await asyncio.gather(
-            sm._stt_bridge_transcribe(_Req(), b"RIFF", "test", "raw", None,
+            chat_media._stt_bridge_transcribe(_Req(), b"RIFF", "test", "raw", None,
                                       used),
-            sm._stt_bridge_transcribe(_Req(), b"RIFF", "test", "raw", None,
+            chat_media._stt_bridge_transcribe(_Req(), b"RIFF", "test", "raw", None,
                                       used))
     asyncio.run(_go())
     assert len(fwd.calls) >= 2

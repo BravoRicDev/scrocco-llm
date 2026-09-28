@@ -23,6 +23,7 @@ import time
 import httpx
 import pytest
 
+from app import chat_stream
 from app.config import GatewayConfig
 from app.forwarder import (Forwarder, UpstreamError, QUOTA_MIN_COOLDOWN_S,
                            _PAYLOAD_SCHEMA_RE, _QUOTA_EXHAUSTED_RE,
@@ -128,7 +129,7 @@ def test_streaming_quota_cf_va_in_cooldown_lungo(monkeypatch, status):
     async def _run():
         payload = {"model": broken["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", broken, payload, need=frozenset({"text"}), scope="chain")
 
     resp = asyncio.run(_run())

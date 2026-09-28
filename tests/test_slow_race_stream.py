@@ -17,6 +17,7 @@ import os
 import tempfile
 import time
 
+from app import chat_stream
 import app.main as M
 from app.config import GatewayConfig
 from app.policy import Policy
@@ -117,7 +118,7 @@ def _stream(monkeypatch, cfg, router, fwd, first, payload):
     monkeypatch.setattr(gw_state, "forwarder", fwd)
 
     async def _run():
-        resp = await M._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", first, payload, need=frozenset({"text"}), scope="chain")
         out = b""
         async for chunk in resp.body_iterator:
@@ -279,7 +280,7 @@ def test_stream_canary_in_volo_non_viene_cancellato(monkeypatch, caplog):
 
     async def _run():
         with caplog.at_level(logging.INFO, logger="nx.main"):
-            resp = await M._stream_with_fallback(
+            resp = await chat_stream._stream_with_fallback(
                 "test", a, _PAYLOAD, need=frozenset({"text"}), scope="chain")
             out = b""
             async for chunk in resp.body_iterator:

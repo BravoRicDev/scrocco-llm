@@ -9,6 +9,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from app import chat_helpers
 import app.state as gw_state
 
 
@@ -170,7 +171,7 @@ def test_pricing_patch_validation(client):
 
 def test_emit_summary_feeds_ledger_with_profile(client):
     c, m, led = client
-    m._emit_summary(ses="s", req="r", grp="scrocco-llm-test-32k",
+    chat_helpers._emit_summary(ses="s", req="r", grp="scrocco-llm-test-32k",
                     dep="d", tries=1, fb=0, dur_ms=5,
                     usage={"prompt_tokens": 10, "completion_tokens": 5,
                            "total_tokens": 15})

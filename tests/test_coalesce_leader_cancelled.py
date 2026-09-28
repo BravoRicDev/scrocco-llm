@@ -22,7 +22,7 @@ import asyncio
 import pytest
 
 import app.main as M
-from app.main import _forward_coalesced
+from app.runtime_persistence import _forward_coalesced
 from app.policy import Policy
 import app.state as gw_state
 

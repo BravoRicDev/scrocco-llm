@@ -24,6 +24,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app import imagestore
 from app.forwarder import (Forwarder, UpstreamError, extract_chat_images,
                            image_chat_fallback_signature, image_chat_payload)
 import app.state as gw_state
@@ -214,7 +215,7 @@ def _make_client(monkeypatch, tmp_path, csv_text):
 
 
 def _teardown(m, orig):
-    m.imagestore.clear()
+    imagestore.clear()
     gw_state.router.policy.cap_groups_enabled = orig[2]
     gw_state.router._cooldown.clear()
     gw_state.authn.master_key = orig[0]

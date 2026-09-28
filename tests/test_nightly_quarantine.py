@@ -261,7 +261,7 @@ def test_endpoint_quarantine_view(router):
 
 # -------------------------------------------------- seconds_to_midnight
 def test_seconds_to_midnight():
-    from app.main import seconds_to_midnight
+    from app.runtime_persistence import seconds_to_midnight
     s = seconds_to_midnight()
     assert 0 < s <= 86401.0
     # a mezzogiorno locale mancano ~12h

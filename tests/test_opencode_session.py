@@ -203,7 +203,7 @@ class _FakeRequest:
         self.headers = _FakeHeaders(headers)
 
 
-from app.main import _opencode_session
+from app.chat_helpers import _opencode_session
 
 
 def test_opencode_session_x_opencode_session_wins():
@@ -242,7 +242,7 @@ def test_opencode_session_none_when_no_headers():
 # fingerprint anonima instabile => la guardia sessioni auto-escludeva i
 # deployment della stessa conversazione.
 # ---------------------------------------------------------------------------
-from app.main import _session_id
+from app.chat_helpers import _session_id
 
 
 def test_session_id_uses_x_session_affinity():

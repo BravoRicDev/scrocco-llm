@@ -14,6 +14,9 @@ import asyncio
 
 import pytest
 from fastapi.responses import JSONResponse, StreamingResponse
+from app import chat_stream
+from app import sse_utils
+from app import stream_verdicts
 import app.state as gw_state
 
 
@@ -95,7 +98,7 @@ def test_peek_answer_content(M):
 
     async def gen():
         yield chunk
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, False))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, False))
     assert v == "content" and buf == [chunk] and pend is None
 
 
@@ -105,7 +108,7 @@ def test_peek_reasoning_only_is_not_content(M):
     async def gen():
         yield chunk                       # solo reasoning, poi lo stream resta muto
         await asyncio.sleep(1)
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 60, False))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 60, False))
     assert v == "timeout"                 # niente answer entro il budget
     if pend is not None:
         pend.cancel()
@@ -116,7 +119,7 @@ def test_peek_reasoning_counts_when_enabled(M):
 
     async def gen():
         yield chunk
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, True))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, True))
     assert v == "content"
 
 
@@ -126,7 +129,7 @@ def test_peek_one_tiny_token_then_death_does_not_commit(M):
     async def gen():
         yield b'data: {"choices":[{"delta":{"content":"E"}}]}\n\n'
         await asyncio.sleep(1)             # poi muto
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 80, False, 40))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 80, False, 40))
     assert v == "timeout"
     if pend is not None:
         pend.cancel()
@@ -137,7 +140,7 @@ def test_peek_short_but_complete_answer_commits(M):
     async def gen():
         yield b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'
         yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, False, 40))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, False, 40))
     assert v == "content"
 
 
@@ -146,7 +149,7 @@ def test_peek_reaches_min_chars_commits(M):
     async def gen():
         yield ('data: {"choices":[{"delta":{"content":"%s"}}]}\n\n'
                % long).encode()
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, False, 40))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, False, 40))
     assert v == "content"
 
 
@@ -155,7 +158,7 @@ def test_peek_finish_reason_no_content_is_empty_eof(M):
 
     async def gen():
         yield chunk
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, False))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, False))
     assert v == "empty_eof" and meta["finish_reason"] == "length"
 
 
@@ -164,7 +167,7 @@ def test_peek_error_event(M):
 
     async def gen():
         yield chunk
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, False))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, False))
     assert v == "error"
 
 
@@ -177,7 +180,7 @@ def test_peek_provider_error_as_delta_content_is_error(M):
 
     async def gen():
         yield chunk
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 500, False, 40))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 500, False, 40))
     assert v == "error"
 
 
@@ -185,7 +188,7 @@ def test_peek_empty_eof(M):
     async def gen():
         return
         yield b""
-    v, buf, pend, meta = asyncio.run(M._peek_stream(gen(), 200, False))
+    v, buf, pend, meta = asyncio.run(sse_utils._peek_stream(gen(), 200, False))
     assert v == "empty_eof" and buf == []
 
 
@@ -195,7 +198,7 @@ def test_peek_timeout_keeps_pending(M):
         yield b"data: {}\n\n"
 
     async def _run():
-        v, buf, pend, meta = await M._peek_stream(gen(), 50, False)
+        v, buf, pend, meta = await sse_utils._peek_stream(gen(), 50, False)
         assert v == "timeout" and pend is not None
         assert await pend == b"data: {}\n\n"       # non cancellata a meta' frame
     asyncio.run(_run())
@@ -206,10 +209,10 @@ def test_delta_helpers(M):
     ans = {"choices": [{"delta": {"content": "x"}}]}
     rea = {"choices": [{"delta": {"reasoning_content": "y"}}]}
     tc = {"choices": [{"delta": {"tool_calls": [{"id": "a"}]}}]}
-    assert M._delta_has_answer(ans) and not M._delta_has_answer(rea)
-    assert M._delta_has_answer(tc)
-    assert M._delta_has_content(rea)              # reasoning conta come "content"
-    assert M._chunk_finish_reason(
+    assert sse_utils._delta_has_answer(ans) and not sse_utils._delta_has_answer(rea)
+    assert sse_utils._delta_has_answer(tc)
+    assert sse_utils._delta_has_content(rea)              # reasoning conta come "content"
+    assert sse_utils._chunk_finish_reason(
         {"choices": [{"finish_reason": "stop"}]}) == "stop"
 
 
@@ -230,7 +233,7 @@ def test_e2e_happy_stream_passthrough(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, StreamingResponse)
         return await _drain(resp)
     out = asyncio.run(_run())
@@ -255,7 +258,7 @@ def test_e2e_empty_stream_no_alternative_returns_503(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback(None, dep, payload, scope="chain")
+        return await chat_stream._stream_with_fallback(None, dep, payload, scope="chain")
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert b"upstream_unavailable" in resp.body
@@ -282,7 +285,7 @@ def test_e2e_length_empty_rotates_until_exhausted(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback("test", dep, payload, scope="chain")
+        return await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert len(seen) >= 2                        # ha provato piu' alternative
@@ -311,7 +314,7 @@ def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypa
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback("test", dep, payload, scope="chain")
+        return await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
     resp = asyncio.run(_run())
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
     assert len(seen) >= 2                        # ha provato piu' alternative
@@ -338,7 +341,7 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback("test", dep, payload, scope="chain")
+        return await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
     resp = asyncio.run(_run())
     # ogni dep tronca -> ha provato >1 dep, poi 503 retryable (mai turno finto)
     assert isinstance(resp, JSONResponse) and resp.status_code == 503
@@ -364,7 +367,7 @@ def test_e2e_post_commit_truncation_only_cools_down(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, StreamingResponse)
         return await _drain(resp)
     out = asyncio.run(_run())
@@ -407,7 +410,7 @@ def test_parachute_go_timeout_transmits_not_503(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, StreamingResponse), "deve trasmettere, non 503"
         await _drain(resp)
     asyncio.run(_run())
@@ -426,7 +429,7 @@ def test_parachute_go_timeout_hold_empty_buffer_is_503(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, JSONResponse) and resp.status_code == 503
     asyncio.run(_run())
 
@@ -453,7 +456,7 @@ def test_parachute_go_timeout_hold_partial_buffer_transmits(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, StreamingResponse), "hold: consegna il buffer"
         return await _drain(resp)
     out = asyncio.run(_run())
@@ -472,7 +475,7 @@ def test_parachute_go_timeout_legacy_503(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, JSONResponse) and resp.status_code == 503
     asyncio.run(_run())
 
@@ -489,7 +492,7 @@ def test_parachute_does_not_affect_dims(M, monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        resp = await M._stream_with_fallback("test", dep, payload, scope="chain")
+        resp = await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
         assert isinstance(resp, JSONResponse) and resp.status_code == 503
     asyncio.run(_run())
 
@@ -500,19 +503,19 @@ def test_parachute_verdict_helper(M):
     dep_fb = {"group": "scrocco-llm-test-fallback"}
     dep_dim = {"group": "scrocco-llm-test-200k"}
     pol.qc_json.stream_parachute_no_timeout = True
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "content"
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_fb, pol) == "content"
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_dim, pol) == "timeout"
-    assert M._parachute_verdict("empty_eof", pol.qc_json, dep_go, pol) == "empty_eof"
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "content"
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_fb, pol) == "content"
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_dim, pol) == "timeout"
+    assert stream_verdicts._parachute_verdict("empty_eof", pol.qc_json, dep_go, pol) == "empty_eof"
     # HOLD: consegna bufferizzata solo se c'e' un buffer parziale da mandare
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol,
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_go, pol,
                                 hold=True, has_buffer=True) == "content"
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol,
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_go, pol,
                                 hold=True, has_buffer=False) == "timeout"
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_fb, pol,
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_fb, pol,
                                 hold=True, has_buffer=False) == "timeout"
     pol.qc_json.stream_parachute_no_timeout = False
-    assert M._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "timeout"
+    assert stream_verdicts._parachute_verdict("timeout", pol.qc_json, dep_go, pol) == "timeout"
 
 
 # ------------------------------------------------- client disconnesso durante lo stream
@@ -549,7 +552,7 @@ def test_client_disconnect_aborts_upstream_and_no_cooldown(M, monkeypatch):
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
         req = _FakeRequest(disconnect_after=0.1)
-        resp = await M._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", dep, payload, scope="chain", request=req)
         assert isinstance(resp, StreamingResponse)
         # il drain gira in un task figlio: quando il monitor rileva la

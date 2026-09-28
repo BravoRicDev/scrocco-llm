@@ -11,6 +11,7 @@ Il gate distingue:
 """
 import pytest
 
+from app import chat_helpers
 from app.opencode_gate import (allow_opencode_zen, client_can_use_opencode_zen,
                                client_is_opencode, dep_usable, is_opencode_dep,
                                is_opencode_go_dep, is_opencode_zen_dep,
@@ -154,7 +155,7 @@ def test_main_set_opencode_gate_wiring(monkeypatch):
         def __init__(self, headers):
             self.headers = headers
 
-    m._set_opencode_gate(_Req({"user-agent": "opencode/1.18.31"}))
+    chat_helpers._set_opencode_gate(_Req({"user-agent": "opencode/1.18.31"}))
     assert allow_opencode_zen() is True
-    m._set_opencode_gate(_Req({"user-agent": "OpenAI/Python 2.26.0"}))
+    chat_helpers._set_opencode_gate(_Req({"user-agent": "OpenAI/Python 2.26.0"}))
     assert allow_opencode_zen() is False

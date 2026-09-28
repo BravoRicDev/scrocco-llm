@@ -13,6 +13,7 @@ import tempfile
 
 import pytest
 
+from app import chat_completions
 import app.autoprobe as AP
 import app.forwarder as F
 from app import main as M
@@ -176,7 +177,7 @@ def test_f26_flush_unificato_esiste():
 
 # ------------------------------------------------------------------- F27
 def test_f27_warm_deterministico_senza_regex():
-    src = inspect.getsource(M.chat_completions)
+    src = inspect.getsource(chat_completions.chat_completions)
     assert "_grp_is_dim" in src
     assert "_warm = (not explicit_req) or _grp_is_dim" in src
     assert "re.search" not in src.split("_warm")[1].split("\n")[0]
@@ -234,7 +235,7 @@ def test_g3_fail_fast_overflow(router, monkeypatch):
 
 
 def test_g3_main_ha_il_400_context_length_exceeded():
-    src = inspect.getsource(M.chat_completions)
+    src = inspect.getsource(chat_completions.chat_completions)
     assert "context_length_exceeded" in src
     assert "nx_ctx_compacted_forced" in src
 

@@ -15,6 +15,9 @@ import time
 
 import pytest
 
+from fastapi.responses import StreamingResponse
+from app import chat_stream
+from app import chat_hedge
 from app.config import GatewayConfig
 from app.forwarder import Forwarder, UpstreamError
 from app.policy import Policy
@@ -404,15 +407,15 @@ def test_hedge_refill_gara_a_coppie_e_probe_in_warm(M, monkeypatch):
             yield STOP
         return gen()
     monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
-    monkeypatch.setattr(M, "inject_identity",
+    monkeypatch.setattr(chat_hedge, "inject_identity",
                         lambda p, d, router=None: None)
 
     async def go():
-        old = (gw_state.router, M.inject_identity)
+        old = (gw_state.router, chat_hedge.inject_identity)
         gw_state.router = r
         try:
             raced = {"uniq": {"A__m1__0"}, "keys": {"K-A"}}
-            out = await M._hedge_peek(
+            out = await chat_hedge._hedge_peek(
                 dict(DEP_A), genA(), 0.0, 5000, False, 40, 60000, 2048,
                 payload={}, profile="test", need=frozenset(), scope="chain",
                 ctx=100, tried_set=set(), attempts=[], requested_group=None,
@@ -422,7 +425,7 @@ def test_hedge_refill_gara_a_coppie_e_probe_in_warm(M, monkeypatch):
             await _join_probes(M)
             return out, raced
         finally:
-            gw_state.router, M.inject_identity = old
+            gw_state.router, chat_hedge.inject_identity = old
     (dep, gen, t_att, verdict, prebuf, pending, meta), raced = asyncio.run(go())
     assert verdict == "content" and dep["unique"] == "C__m9__9"
     # il picker ha visto escluse: chiave di A + chiavi warm +uniq corsi
@@ -470,15 +473,15 @@ def test_hedge_refill_canary_che_sbaglia_apertura_va_in_cooldown(M,
             yield STOP
         return gen()
     monkeypatch.setattr(gw_state.forwarder, "stream_response", sr)
-    monkeypatch.setattr(M, "inject_identity",
+    monkeypatch.setattr(chat_hedge, "inject_identity",
                         lambda p, d, router=None: None)
 
     async def go():
-        old = (gw_state.router, M.inject_identity)
+        old = (gw_state.router, chat_hedge.inject_identity)
         gw_state.router = r
         try:
             raced = {"uniq": {"A__m1__0"}, "keys": {"K-A"}}
-            out = await M._hedge_peek(
+            out = await chat_hedge._hedge_peek(
                 dict(DEP_A), genA(), 0.0, 5000, False, 40, 60000, 2048,
                 payload={}, profile="test", need=frozenset(), scope="chain",
                 ctx=100, tried_set=set(), attempts=[], requested_group=None,
@@ -488,7 +491,7 @@ def test_hedge_refill_canary_che_sbaglia_apertura_va_in_cooldown(M,
             await _join_probes(M)
             return out
         finally:
-            gw_state.router, M.inject_identity = old
+            gw_state.router, chat_hedge.inject_identity = old
     (dep, gen, t_att, verdict, prebuf, pending, meta) = asyncio.run(go())
     assert verdict == "content" and dep["unique"] == "A__m1__0"
     assert "C__m9__9" in notes["fail"]
@@ -583,7 +586,7 @@ def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
         try:
             payload = {"model": small["model"],
                        "messages": [{"role": "user", "content": "ciao"}]}
-            resp = await ML._stream_with_fallback(
+            resp = await chat_stream._stream_with_fallback(
                 "test", small, payload, scope="chain", session="rf-sess",
                 ses="rf-sess", ctx=100)
             body = b""
@@ -595,7 +598,7 @@ def test_streaming_refill_riscalda_il_warm_a_3(ML, monkeypatch):
         finally:
             set_current_session(None)
     resp, body = asyncio.run(go())
-    assert isinstance(resp, ML.StreamingResponse)
+    assert isinstance(resp, StreamingResponse)
     assert b"VELOCE" in body and b"LENTO" not in body
     # solo A + UN canary: mai i pagati, mai il big (chiave gia' in warm)
     assert sorted(calls) == sorted([small["unique"], mid["unique"]])
@@ -903,7 +906,7 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
         try:
             payload = {"model": small["model"],
                        "messages": [{"role": "user", "content": "ciao"}]}
-            resp = await ML._stream_with_fallback(
+            resp = await chat_stream._stream_with_fallback(
                 "test", small, payload, scope="chain", session="rf-sess",
                 ses="rf-sess", ctx=100)
             body = b""
@@ -915,7 +918,7 @@ def test_streaming_refill_bloccato_a_4_in_volo(ML, monkeypatch):
         finally:
             set_current_session(None)
     resp, body = asyncio.run(go())
-    assert isinstance(resp, ML.StreamingResponse)
+    assert isinstance(resp, StreamingResponse)
     assert b"LENTO" in body
     assert calls == [small["unique"]]           # nessun canario: tetto saturo
     assert gw_state.router.probes_in_flight("rf-sess") == 6   # phantom non toccati
@@ -955,7 +958,7 @@ def test_streaming_refill_libera_il_tetto_quando_i_probe_finiscono(ML,
         try:
             payload = {"model": small["model"],
                        "messages": [{"role": "user", "content": "ciao"}]}
-            resp = await ML._stream_with_fallback(
+            resp = await chat_stream._stream_with_fallback(
                 "test", small, payload, scope="chain", session="rf-sess",
                 ses="rf-sess", ctx=100)
             body = b""

@@ -15,6 +15,7 @@ import time
 
 import httpx
 
+from app import chat_stream
 from app.forwarder import (Forwarder, UpstreamError,
                            PERMISSION_DENIED_COOLDOWN_S)
 from app.config import GatewayConfig
@@ -116,7 +117,7 @@ def test_streaming_401_rotates_never_passthrough(monkeypatch):
     async def _run():
         payload = {"model": dep["model"],
                    "messages": [{"role": "user", "content": "ciao"}]}
-        return await M._stream_with_fallback("test", dep, payload, scope="chain")
+        return await chat_stream._stream_with_fallback("test", dep, payload, scope="chain")
 
     try:
         resp = asyncio.run(_run())

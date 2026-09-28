@@ -12,6 +12,7 @@ import tempfile
 
 import pytest
 
+from app import chat_stream
 from app.forwarder import (Forwarder, UpstreamError, dep_host,
                            is_provider_level, PROVIDER_LEVEL_CLASSES)
 from app.config import GatewayConfig
@@ -144,7 +145,7 @@ def test_streaming_salta_le_chiavi_gemelle_dell_host_morto(monkeypatch):
     async def _run():
         payload = {"model": a1["model"],
                    "messages": [{"role": "user", "content": "x"}]}
-        return await M._stream_with_fallback(
+        return await chat_stream._stream_with_fallback(
             "test", a1, payload, need=frozenset({"text"}), scope="chain")
 
     resp = asyncio.run(_run())

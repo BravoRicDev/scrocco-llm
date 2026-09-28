@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+from app import chat_helpers
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
@@ -197,13 +198,13 @@ def _main():
 
 def test_landing_redirects_dim_to_go(router):
     M = _main()
-    grp, red = M._apply_go_refund(router, "scrocco-llm-gr-200k", "gr", True)
+    grp, red = chat_helpers._apply_go_refund(router, "scrocco-llm-gr-200k", "gr", True)
     assert (grp, red) == ("scrocco-llm-gr-go", True)
 
 
 def test_landing_no_turn_no_redirect(router):
     M = _main()
-    grp, red = M._apply_go_refund(router, "scrocco-llm-gr-200k", "gr", False)
+    grp, red = chat_helpers._apply_go_refund(router, "scrocco-llm-gr-200k", "gr", False)
     assert (grp, red) == ("scrocco-llm-gr-200k", False)
 
 
@@ -211,7 +212,7 @@ def test_landing_skips_go_fallback_and_unique(router):
     M = _main()
     for g in ("scrocco-llm-gr-go", "scrocco-llm-gr-fallback",
               "scrocco-llm-gr__gpt-oss-go__0", "scrocco-llm-gr-vision"):
-        grp, red = M._apply_go_refund(router, g, "gr", True)
+        grp, red = chat_helpers._apply_go_refund(router, g, "gr", True)
         assert (grp, red) == (g, False), g
 
 
@@ -220,7 +221,7 @@ def test_landing_skips_when_no_go_bucket():
     r = _mk(CSV_NOGO)
     try:
         assert "scrocco-llm-gr-go" not in r.config.groups
-        grp, red = M._apply_go_refund(r, "scrocco-llm-gr-200k", "gr", True)
+        grp, red = chat_helpers._apply_go_refund(r, "scrocco-llm-gr-200k", "gr", True)
         assert (grp, red) == ("scrocco-llm-gr-200k", False)
     finally:
         os.unlink(r._tmp_path)
@@ -267,7 +268,7 @@ def test_log_info_on_landing(router, caplog):
     _set_turns(router, sid, 100, go_until=120)
     router.note_session_turn(sid)
     with caplog.at_level(logging.INFO, logger="nx.api"):
-        grp, red = M._apply_go_refund(
+        grp, red = chat_helpers._apply_go_refund(
             router, "scrocco-llm-gr-200k", "gr", True, sid)
     assert red is True
     msgs = [r.getMessage() for r in caplog.records]

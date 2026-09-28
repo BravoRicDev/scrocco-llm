@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import chat_hedge
+from app import probes
 import app.main as main
 from app import forwarder as fwd_mod
 import app.state as gw_state
@@ -117,7 +119,7 @@ def _run_probe(dep, gen, res, router, *, t0=None, race=None, ctx=100):
     gw_state.router = router
 
     async def go():
-        main._spawn_probe(dep, gen, None, res, SESSION, ctx, t0=t0, race=race)
+        probes._spawn_probe(dep, gen, None, res, SESSION, ctx, t0=t0, race=race)
         await _join_probes()
     try:
         asyncio.run(go())
@@ -130,10 +132,10 @@ def _run_peek(peek, stream_response, router, *, slow_race_ms=0,
               t_att_offset=0.0, session=SESSION, hold=False, refill=False):
     closed = []
     genA = FakeGen(WINNER)
-    old = (main._peek_stream, gw_state.router, gw_state.forwarder, main.inject_identity)
+    old = (chat_hedge._peek_stream, gw_state.router, gw_state.forwarder, chat_hedge.inject_identity)
 
     async def go():
-        out = await main._hedge_peek(
+        out = await chat_hedge._hedge_peek(
             DEP_A(), genA, time.monotonic() - t_att_offset, 500, False, 40,
             1000, 2048, payload={}, profile=None, need=frozenset(),
             scope="chain", ctx=1, tried_set=set(), attempts=[],
@@ -145,14 +147,14 @@ def _run_peek(peek, stream_response, router, *, slow_race_ms=0,
         await _join_probes()
         return out, closed
 
-    main._peek_stream = peek
+    chat_hedge._peek_stream = peek
     gw_state.router = router
     gw_state.forwarder = SimpleNamespace(stream_response=stream_response)
-    main.inject_identity = lambda p, d, router=None: None
+    chat_hedge.inject_identity = lambda p, d, router=None: None
     try:
         return asyncio.run(go())
     finally:
-        main._peek_stream, gw_state.router, gw_state.forwarder, main.inject_identity = old
+        chat_hedge._peek_stream, gw_state.router, gw_state.forwarder, chat_hedge.inject_identity = old
 
 
 # ------------------------------------------------------------------ trigger

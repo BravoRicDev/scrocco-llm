@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from app import runtime_persistence
 from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
@@ -145,13 +146,13 @@ def test_coalesce_cache_non_mette_errori():
     import app.main as M
     from starlette.responses import JSONResponse
     gw_state._coalesce_cache.clear()
-    M._coalesce_cache_put("bad-envelope",
+    runtime_persistence._coalesce_cache_put("bad-envelope",
                           ({"error": {"message": "boom"}}, {}), 9e9)
     assert "bad-envelope" not in gw_state._coalesce_cache
-    M._coalesce_cache_put("bad-http",
+    runtime_persistence._coalesce_cache_put("bad-http",
                           JSONResponse(status_code=502, content={}), 9e9)
     assert "bad-http" not in gw_state._coalesce_cache
-    M._coalesce_cache_put("good", ({"choices": []}, {}), 9e9)
+    runtime_persistence._coalesce_cache_put("good", ({"choices": []}, {}), 9e9)
     assert "good" in gw_state._coalesce_cache
 
 
@@ -163,15 +164,15 @@ def test_coalesce_hit_incrementa_metrica():
     gw_state._coalesce_cache.clear()
     payload = {"model": "m", "messages": [{"role": "user", "content": "z"}],
                "stream": False}
-    key = M._coalesce_key(payload, "prof")
-    M._coalesce_cache_put(key, ("R", {}), time.time() + 30)
+    key = runtime_persistence._coalesce_key(payload, "prof")
+    runtime_persistence._coalesce_cache_put(key, ("R", {}), time.time() + 30)
     _b4 = metrics.snapshot(("nx_coalesce_total",)).get(
         "nx_coalesce_total", {}).get(("hit",), 0)
 
     async def fac():
         raise AssertionError("la cache non ha risposto: upstream chiamato")
 
-    res = asyncio.run(M._forward_coalesced(pol, payload, "prof", fac))
+    res = asyncio.run(runtime_persistence._forward_coalesced(pol, payload, "prof", fac))
     assert res == ("R", {})
     _af = metrics.snapshot(("nx_coalesce_total",)).get(
         "nx_coalesce_total", {}).get(("hit",), 0)

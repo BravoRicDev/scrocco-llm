@@ -14,6 +14,8 @@ import tempfile
 
 import pytest
 
+from app import chat_stream
+from app import sse_utils
 import app.main as M
 from app import repairlog
 from app.config import GatewayConfig
@@ -105,7 +107,7 @@ def _stream(monkeypatch, cfg, router, fwd, first, payload):
     monkeypatch.setattr(gw_state, "forwarder", fwd)
 
     async def _run():
-        resp = await M._stream_with_fallback(
+        resp = await chat_stream._stream_with_fallback(
             "test", first, payload, need=frozenset({"text"}), scope="chain")
         out = b""
         async for chunk in resp.body_iterator:
@@ -159,7 +161,7 @@ def test_collapse_sse_content_sostituisce_una_volta():
                              "finish_reason": "stop"}]}),
         b"data: [DONE]\n\n",
     ]
-    out = M._collapse_sse_content(chunks, '{"a": 1}')
+    out = sse_utils._collapse_sse_content(chunks, '{"a": 1}')
     joined = b"".join(out).decode()
     assert _content_of(b"".join(out)) == '{"a": 1}'
     assert "sporco" not in joined and "extra" not in joined
