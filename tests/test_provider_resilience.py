@@ -116,7 +116,7 @@ def test_strikes_persistence_roundtrip():
 
 
 def test_strip_cap_from_map_preserves_glob():
-    from app.admin import strip_cap_from_map
+    from app.caplearn import strip_cap_from_map
     m = {"*vl-*": ["text", "vision"], "other": ["text"]}
     out = strip_cap_from_map(m, "qwen/qwen2.5-vl-72b", "vision")
     # entry esplicita SENZA vision...

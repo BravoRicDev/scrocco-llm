@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from fastapi.routing import APIRoute
 
-from app.admin import _mcp_known_names, _mcp_tool_specs
+from app.admin_mcp import _mcp_known_names, _mcp_tool_specs
 
 REPO = Path(__file__).resolve().parents[1]
 DOC_ENDPOINTS = ("docs/AGENT.md", "docs/OPERATIONS.md")

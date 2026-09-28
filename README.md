@@ -729,7 +729,8 @@ HOW / WHY decisions were made. Read it before changing code.
 
 | File | Role |
 |---|---|
-| `app/main.py` | HTTP endpoints + request pipeline; streaming anti-stall peek; per-request `[summary]` logs |
+| `app/main.py` | app assembly: logging, runtime state, lifespan, middleware, routes |
+| `app/chat_completions.py`, `chat_stream.py`, `chat_relay.py`, `chat_hedge.py`, `chat_media.py` | chat request pipeline; streaming fallback + anti-stall peek; SSE relay; per-request `[summary]` logs |
 | `app/config.py` | credential CSV → dims/capability groups; atomic hot-reload |
 | `app/router.py` | adaptive pick, dims ladder, cooldown escalation, chronic parachute, sticky sessions, escalation-winner pin + pre-pin probe, budget guard scoring |
 | `app/forwarder.py` | all upstream HTTP; precise error taxonomy (incl. timeout) → correct rotation; probe with persistent cache |
@@ -743,7 +744,7 @@ HOW / WHY decisions were made. Read it before changing code.
 | `app/keyhealth.py` | persistent dead-key evidence, retirement lifecycle |
 | `app/ledger.py` | usage/cost ledger feeding `/admin/insights` |
 | `tui/` | Textual TUI: deployment CRUD, policy editor, observability (live/errors/leaderboard/sessions/statistics), session detail, MCP config browser, tuning view |
-| `app/admin.py` (MCP) | MCP config protocol: `/admin/mcp/config/{tools,execute,call}` (59 tools, JSON-RPC 2.0) |
+| `app/admin_mcp.py` | MCP config protocol: `/admin/mcp/config/{tools,execute,call}` (59 tools, JSON-RPC 2.0) |
 
 ## Tuning (policy)
 

@@ -6,7 +6,7 @@ Usage (in app/main.py):
     console_handler = setup_colored_logging()  # returns a handler with color
 
 The colored output is only for the terminal/stdout. File handlers in
-_install_file_logging() must keep a PLAIN (uncolored) formatter so that
+app.logsetup.install_file_logging() must keep a PLAIN (uncolored) formatter so that
 var/gateway.log remains parseable by app/logview.py's regex.
 """
 from __future__ import annotations
@@ -185,19 +185,6 @@ def colorize_tag(tag: str) -> str:
     return f"{tag_color(tag)}[{tag}]{ANSI_RESET}"
 
 
-def colorize_level(level: str) -> str:
-    """Return a colorized level name."""
-    color = LEVEL_COLORS.get(level, "")
-    if color:
-        return f"{color}{level}{ANSI_RESET}"
-    return level
-
-
-def colorize_module(name: str) -> str:
-    """Return a colorized module/logger name."""
-    return f"{module_color(name)}{name}{ANSI_RESET}"
-
-
 def is_terminal_stream(stream) -> bool:
     """Check if the stream is a real TTY (supports colors)."""
     try:
@@ -294,7 +281,7 @@ def setup_colored_logging(level: int = logging.INFO,
 
     Pass ``use_color=False`` semantics via stream check: colors are emitted
     unconditionally; a TTY-aware caller can check is_terminal_stream().
-    The file handler in _install_file_logging() uses a PLAIN formatter so
+    The file handler in app.logsetup.install_file_logging() uses a PLAIN formatter so
     that var/gateway.log remains parseable by app/logview.py.
     """
     if stream is None:

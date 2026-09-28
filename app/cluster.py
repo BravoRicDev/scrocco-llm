@@ -212,10 +212,6 @@ _depth: contextvars.ContextVar[int] = contextvars.ContextVar("nx_cluster_depth",
 _replaying: contextvars.ContextVar[bool] = contextvars.ContextVar("nx_cluster_replaying", default=False)
 
 
-def replaying() -> bool:
-    return _replaying.get()
-
-
 class _ReplayLogFilter(logging.Filter):
     """Niente log durante la replica: la riga l'ha gia' scritta chi ha servito."""
 

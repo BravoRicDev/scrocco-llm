@@ -4,7 +4,7 @@ Motivazione (perche' questi test esistono)
 -----------------------------------------
 In produzione il root logger e l'handler su file sono a INFO
 (`app/main.py`: `basicConfig(level=INFO)` e `h.setLevel(INFO)` dentro
-`_install_file_logging`). Quindi **ogni `log.debug` non finisce MAI in
+`app/logsetup.py::install_file_logging`). Quindi **ogni `log.debug` non finisce MAI in
 `var/gateway.log`**. Storicamente 26 call site che descrivevano ERRORI
 (perdita dati, save falliti, tick abortiti) erano a `debug`: erano
 completamente invisibili in produzione.
@@ -339,12 +339,12 @@ def test_config_logger_default():
     refiasse abbassasse root a DEBUG il file si riempirebbe di rumore; se lo
     alzasse a WARNING sparirebbero gli INFO (inclusi quelli promossi qui).
     """
-    src = (APP_DIR / "main.py").read_text(encoding="utf-8")
-    tree = ast.parse(src, "app/main.py")
+    src = (APP_DIR / "logsetup.py").read_text(encoding="utf-8")
+    tree = ast.parse(src, "app/logsetup.py")
     assert "level=logging.INFO" in src, (
         "root logger non piu' a INFO: cambia la visibilita' di TUTTO il log")
     # l'handler su file deve restare a INFO
-    tree = ast.parse(src, "app/main.py")
+    tree = ast.parse(src, "app/logsetup.py")
     file_levels = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Call)
@@ -355,10 +355,10 @@ def test_config_logger_default():
         and node.args[0].attr == "INFO"
     ]
     assert file_levels, "handler su file non piu' a INFO"
-    # e deve stare dentro _install_file_logging (non altrove)
+    # e deve stare dentro install_file_logging (non altrove)
     install = next(n for n in tree.body
                    if isinstance(n, ast.FunctionDef)
-                   and n.name == "_install_file_logging")
+                   and n.name == "install_file_logging")
     inner = [n for n in ast.walk(install)
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute)

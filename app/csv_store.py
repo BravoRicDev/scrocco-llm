@@ -170,13 +170,9 @@ def row_id(row: dict, endpoint: str) -> str:
              MAX_INPUT_HEADER, PRIORITY_HEADER, CAPS_HEADER,
              TOOL_REPAIR_HEADER, ENABLED_HEADER, ALIAS_HEADER,
              IMAGE_VIA_HEADER} | ENDPOINT_HEADERS
-    # Stabilita' su colonne: includi SOLO i valori (non i nomi), ordinati,
-    # in modo che aggiungere una colonna metadata non cambi l'ID.
-    extra_vals = sorted(v.strip() for v in row.values()
-                        if v and v.strip()
-                        and any(k not in known for k in row
-                                if row.get(k) and row.get(k).strip() == v))
-    # Più robusto: raccogli i valori di tutte le colonne non-note
+    # Stabilita' su colonne: includi SOLO i valori (non i nomi) delle
+    # colonne non-note, ordinati, cosi' aggiungere una colonna metadata non
+    # cambia l'ID.
     extra_vals = sorted(v.strip() for k, v in row.items()
                         if k not in known and v and v.strip())
     if extra_vals:

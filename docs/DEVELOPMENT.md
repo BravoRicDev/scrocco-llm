@@ -77,17 +77,22 @@ docker buildx imagetools inspect <image:tag> --format '{{.Manifest.Digest}}'
 
 ## Code layout & conventions
 
-- The fallback pipelines are method objects: `main._StreamFallback` (+ `_ClientRelay`)
-  and `forwarder._NonStreamFallback`; per-request state is in attributes and each
+- The request pipelines are method objects: `chat_completions._ChatCompletion`,
+  `chat_stream._StreamFallback` (+ `chat_relay._ClientRelay`) and `forwarder._NonStreamFallback`; per-request state is in attributes and each
   step is a method. `tests/golden/test_fallback_golden.py` freezes their
   client-visible behaviour (78 scenarios): regenerate it with `GOLDEN_UPDATE=1`
   ONLY for an intended behaviour change.
 - `app/state.py` — shared runtime state: import it as `gw_state` (`from . import state as gw_state`) instead of reaching into `app.main`; tests monkeypatch `gw_state.<name>`.
-- `app/main.py` — HTTP surface + pipeline; `app/router.py` — routing engine;
-  `app/forwarder.py` — upstream HTTP; `app/admin.py` — admin API.
+- `app/main.py` — app assembly only (logging, state, lifespan, middleware, routes);
+  `app/chat_*.py` — chat pipeline; `app/router.py` + `app/routing/` — routing engine;
+  `app/forwarder.py` — upstream HTTP; `app/admin.py` (+ `admin_mcp.py`) — admin API.
+- Patch a name where it is USED: `from app import chat_hedge;
+  monkeypatch.setattr(chat_hedge, "inject_identity", ...)` (patching `app.main`
+  would silently miss the code under test).
 - Extracted routing mixins live in `app/routing/` (`warm.py`, `canary.py`,
-  `sessions.py`) and are composed into `class Router(WarmMixin, CanaryMixin,
-  SessionMixin)`. Each mixin keeps an explicit interface: it may only rely on
+  `sessions.py`, `circuit_breaker.py`, `usage.py`, `cooldown.py`,
+  `failure.py`, `leases.py`, `draining.py`) and are composed into
+  `class Router(...)`. Each mixin keeps an explicit interface: it may only rely on
   `self.config`, `self.policy`, `self._dep_usable(...)` and a small set of
   router helpers/imports.
 - Per-request state uses `contextvars` (session, effort, thought-sig flags,

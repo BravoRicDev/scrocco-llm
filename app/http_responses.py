@@ -4,7 +4,7 @@
 con `import app.main as M` solo per costruire un 401/403: una dipendenza dal
 modulo radice che non serviva.
 
-[EN] Shared OpenAI-style 401/403 error responses.
+[EN] Shared OpenAI-style 400/401/403 error responses.
 """
 from __future__ import annotations
 
@@ -28,4 +28,11 @@ def forbidden(model: str, profile: str | None) -> JSONResponse:
                 "code": "403",
             }
         },
+    )
+
+
+def invalid_json_body() -> JSONResponse:
+    """400 per un body che non e' JSON valido (endpoint OpenAI-compatibili)."""
+    return JSONResponse(
+        status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
     )

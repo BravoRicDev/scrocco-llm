@@ -17,27 +17,6 @@ class AppError(Exception):
         self.code = code or str(status)
 
 
-class UnauthorizedError(AppError):
-    """Errore 401: Autenticazione richiesta o fallita."""
-
-    def __init__(self, message="Autenticazione richiesta"):
-        super().__init__(401, message, "auth_error", "unauthorized")
-
-
-class NotFoundError(AppError):
-    """Errore 404: Risorsa non trovata."""
-
-    def __init__(self, message="Risorsa non trovata"):
-        super().__init__(404, message, "invalid_request_error", "not_found")
-
-
-class ForbiddenError(AppError):
-    """Errore 403: Permesso negato."""
-
-    def __init__(self, message="Permesso negato"):
-        super().__init__(403, message, "permission_error", "forbidden")
-
-
 class UpstreamError(AppError):
     """Errore upstream (provider LLM)."""
 

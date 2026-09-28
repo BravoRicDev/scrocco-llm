@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from . import imagestore, metrics, offload
 from .offload import request_json
 from . import state as gw_state
+from .http_responses import invalid_json_body
 from .http_responses import unauthorized as _unauthorized
 from .http_responses import forbidden as _forbidden
 from .suppressed import report_suppressed
@@ -61,9 +62,7 @@ async def images_generations(request: Request):
     try:
         payload = await request_json(request)
     except Exception:
-        return JSONResponse(
-            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
-        )
+        return invalid_json_body()
 
     raw_model = payload.get("model") or ""
     if not str(payload.get("prompt") or "").strip():
@@ -419,9 +418,7 @@ async def images_edits(request: Request):
         try:
             payload = await request_json(request)
         except Exception:
-            return JSONResponse(
-                status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
-            )
+            return invalid_json_body()
         refs = image_refs_from_payload(payload)
 
     raw_model = payload.get("model") or ""

@@ -40,28 +40,6 @@ class TextToolcallConfig:
         self.fallback_to_escalation = bool(fallback_to_escalation)
 
 
-def create_text_toolcall_config(policy_dict: dict | None = None) -> TextToolcallConfig:
-    cfg = TextToolcallConfig()
-    if not isinstance(policy_dict, dict):
-        return cfg
-    blk = policy_dict.get("text_toolcall") or {}
-    if not isinstance(blk, dict):
-        return cfg
-    if "enabled" in blk:
-        cfg.enabled = bool(blk["enabled"])
-    if "require_declared_name" in blk:
-        cfg.require_declared_name = bool(blk["require_declared_name"])
-    if blk.get("allow_formats"):
-        cfg.allow_formats = tuple(str(x) for x in blk["allow_formats"])
-    if "max_bytes" in blk:
-        cfg.max_bytes = int(blk["max_bytes"])
-    if "hold_until_close" in blk:
-        cfg.hold_until_close = bool(blk["hold_until_close"])
-    if "fallback_to_escalation" in blk:
-        cfg.fallback_to_escalation = bool(blk["fallback_to_escalation"])
-    return cfg
-
-
 def text_config_from_policy(policy) -> TextToolcallConfig:
     if policy is None:
         return TextToolcallConfig()

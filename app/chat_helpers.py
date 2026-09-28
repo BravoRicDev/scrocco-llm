@@ -330,7 +330,7 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
     if mode == "suggest":
         # righe candidate alla rimozione del token cap (membership CSV)
         try:
-            from .admin import membership_removal_candidates as _mrc
+            from .caplearn import membership_removal_candidates as _mrc
 
             candidates = _mrc(model, cap)
         except Exception:
@@ -373,7 +373,7 @@ def _auto_learn_apply(model: str, cap: str, evidence: str, count: int) -> None:
 
 def _auto_learn_remove(model: str, cap: str, evidence: str, count: int) -> None:
     try:
-        from .admin import remove_cap_for_model
+        from .caplearn import remove_cap_for_model
 
         remove_cap_for_model(model=model, cap=cap, evidence=evidence, count=count)
     except Exception as exc:  # noqa: BLE001

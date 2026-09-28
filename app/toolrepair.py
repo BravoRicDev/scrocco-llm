@@ -965,11 +965,6 @@ def _synth_answer_sse(prefix: str, tool_calls, model: str) -> list[bytes]:
     return out
 
 
-def _synth_toolcall_sse(tool_calls, model: str) -> list[bytes]:
-    """SSE OpenAI sintetico per consegnare tool_calls salvate da un tag rotto."""
-    return _synth_answer_sse("", tool_calls, model)
-
-
 class TruncatedToolcallSSEFilter:
     """Trattiene la coda quando un tool-call testuale resta APERTO (troncato).
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable
+from typing import Iterable
 
 log = logging.getLogger("nx.models")
 
@@ -50,12 +50,6 @@ class ProviderModels:
 def clear_cache() -> None:
     """Svuota la cache (usato nei test e per forzare un refresh globale)."""
     _CACHE.clear()
-
-
-def cache_info() -> dict[str, dict[str, Any]]:
-    now = time.monotonic()
-    return {ep: {"ok": v.ok, "tried": v.tried, "cached_for": round(now - v.fetched_at, 1)}
-            for ep, v in _CACHE.items()}
 
 
 async def fetch_provider_models(http, endpoint: str, keys: Iterable[str], *,

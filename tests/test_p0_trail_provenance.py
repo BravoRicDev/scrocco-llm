@@ -168,7 +168,7 @@ def test_redirect_nonstream_trasporta_il_trail():
     assert getattr(err, "trail", None) is None
     # il tratto di codice che collega i due: la firma deve accettere il trail
     import inspect as _i
-    src = _i.getsource(chat_completions.chat_completions)
+    src = _i.getsource(chat_completions._ChatCompletion)
     assert '_err.trail = _meta.get("trail")' in src
     assert "_ret(" in src
 

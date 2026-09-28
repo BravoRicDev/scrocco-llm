@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import metrics
-from app.admin import _mcp_known_names, _mcp_tool_specs
+from app.admin_mcp import _mcp_known_names, _mcp_tool_specs
 import app.state as gw_state
 
 BASE = "scrocco-llm-test"

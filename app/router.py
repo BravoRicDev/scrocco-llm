@@ -64,6 +64,8 @@ from .routing.circuit_breaker import CircuitBreakerMixin
 from .routing.cooldown import CooldownMixin
 from .routing.failure import FailureMixin
 from .routing.usage import UsageMixin
+from .routing.leases import KeyLeaseMixin
+from .routing.draining import DrainMixin
 from .routing.lazy import lazy_dict
 from .routing.rolling import RollingWindow
 from .routing.evict import drop_expired, entry_ts, evict_oldest
@@ -162,7 +164,8 @@ from app.routing.estimate import (  # noqa: F401
 )
 
 
-class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMixin, CooldownMixin, FailureMixin):
+class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMixin, CooldownMixin, FailureMixin,
+             KeyLeaseMixin, DrainMixin):
     def __init__(self, config: GatewayConfig, policy: Policy | None = None):
         self.config = config
         self.policy = policy or Policy.default()
@@ -2403,113 +2406,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             "since": st.get("since"),
         }
 
-    # ------------------------------------------------- LEASE PER CHIAVE (P2)
-    def _key_leases(self) -> dict:
-        d = getattr(self, "_key_leases_map", None)
-        if d is None:
-            d = self._key_leases_map = {}
-        return d
-
-    def _lease_max_age(self) -> float:
-        return max(1.0, policy_float(self.policy, "key_concurrency_lease_max_age_sec", 120))
-
-    def _prune_key_leases(self, now: float | None = None) -> None:
-        """Scarta le lease piu' vecchie del tetto (una richiesta interrotta
-        non deve saturare la chiave per sempre)."""
-        now = time.time() if now is None else now
-        age = self._lease_max_age()
-        m = self._key_leases()
-        for k in list(m):
-            fresh = [e for e in m[k] if now - e[1] <= age]
-            if fresh:
-                m[k] = fresh
-            else:
-                m.pop(k, None)
-
-    def key_inflight(self, dep: dict | None) -> int:
-        if not dep:
-            return 0
-        return len(self._key_leases().get(dep.get("api_key") or "", ()))
-
-    def key_lease_acquire(self, dep: dict | None) -> tuple | None:
-        """Riserva una "lease" (richiesta in volo) per la api_key del dep.
-
-        Opt-in (`key_concurrency_enabled`): con il cap raggiunto ritorna None
-        — il chiamante NON deve bloccare la richiesta (cap SOFT: la chiave
-        viene solo deprioritizzata finche' esistono alternative), quindi il
-        None serve solo a non incrementare il contatore."""
-        if not dep or not bool(getattr(self.policy, "key_concurrency_enabled", False)):
-            return None
-        now = time.time()
-        self._prune_key_leases(now)
-        key = dep.get("api_key") or ""
-        cap = max(0, policy_int(self.policy, "key_concurrency_max", 2, falsy=0))
-        ent = self._key_leases().setdefault(key, [])
-        if cap and len(ent) >= cap:
-            return None
-        tok = "%s|%s|%d" % (key[:12], dep.get("unique"), now)
-        self._lease_put(dep, tok, now)
-        return (key, tok)
-
-    def key_lease_release(self, lease: tuple | None) -> None:
-        if not lease:
-            return
-        key, tok = lease
-        if not self._key_leases().get(key):
-            return
-        self._lease_drop(tok)
-
-    def _lease_put(self, dep: dict, tok: str, now: float) -> None:
-        self._key_leases().setdefault(dep.get("api_key") or "", []).append((tok, now, dep.get("unique")))
-
-    def _lease_drop(self, tok: str) -> None:
-        """Toglie la lease `tok` (il token contiene gia' chiave e unique:
-        identifica una sola chiave)."""
-        m = self._key_leases()
-        for key, ent in list(m.items()):
-            kept = [e for e in ent if e[0] != tok]
-            if len(kept) == len(ent):
-                continue
-            if kept:
-                m[key] = kept
-            else:
-                m.pop(key, None)
-
-    def _lease_filter(self, deps: list[dict]) -> list[dict]:
-        """Depriorizza (non elimina) i dep la cui api_key e' al cap di
-        concorrenza: se TUTTI sono al cap ritorna la lista intera — il cap
-        non deve mai trasformarsi in un 503."""
-        if not bool(getattr(self.policy, "key_concurrency_enabled", False)):
-            return deps
-        cap = max(0, policy_int(self.policy, "key_concurrency_max", 2, falsy=0))
-        if not cap:
-            return deps
-        self._prune_key_leases()
-        m = self._key_leases()
-        if not m:
-            return deps
-        kept = [d for d in deps if len(m.get(d.get("api_key") or "", ())) < cap]
-        return kept or deps
-
-    def key_leases_view(self) -> dict:
-        self._prune_key_leases()
-        m = self._key_leases()
-        return {k: len(v) for k, v in sorted(m.items())}
-
-    def clear_key_leases(self, unique: str | None = None) -> dict:
-        """Azzera le lease di concorrenza per chiave. Senza `unique` svuota
-        tutto; con `unique` rimuove solo la lease della chiave di quel dep.
-        Nessuna api_key in chiaro nell'output (solo conteggi)."""
-        m = self._key_leases()
-        if not unique:
-            keys = sum(1 for v in m.values() if v)
-            leases = sum(len(v or ()) for v in m.values())
-            m.clear()
-            return {"ok": True, "keys": keys, "leases": leases}
-        dep = self.config.deployment_by_unique(unique) or {}
-        key = str(dep.get("api_key") or "")
-        ent = m.pop(key, None) if key else None
-        return {"ok": True, "keys": 1 if ent else 0, "leases": len(ent or ())}
 
     # ------------------------------------------- VISTE STATO RUNTIME (read-only)
     @staticmethod
@@ -3083,89 +2979,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             if d["inflight"] == 0:
                 self._finish_drain(unique)
 
-    # ------------------------------------------- connection draining (hot-reload)
-    def start_draining(self, unique: str, dep: dict, inflight: int, *, operator: bool = False) -> None:
-        """Archivia un deployment rimosso dal CSV ma con richieste in volo.
-
-        Il dep viene RI-AGGIUNTO alla config (se assente) marcato draining:
-        riferimenti/retry/record_* dello stesso ciclo continuano a risolverlo,
-        mentre pick_deployment lo ignora per le nuove richieste.
-
-        `operator=True` (drain via /admin): alla fine del drain (inflight=0 o
-        TTL) il dep NON viene rimosso dalla config: e' un drain VOLUTO, non un
-        hot-reload, quindi resta attivo e lo si toglie solo con undrain.
-        """
-        n = max(0, int(inflight))
-        self._drain()[unique] = {
-            "ts": time.time(),
-            "inflight": n,
-            "dep": dep,
-            "operator": bool(operator),
-        }
-        grp = (dep or {}).get("group")
-        if grp and self.config is not None:
-            lst = self.config.groups.setdefault(grp, [])
-            if not any(x.get("unique") == unique for x in lst):
-                lst.append(dep)
-
-    def drain_by_operator(self, unique: str, dep: dict, inflight: int) -> None:
-        """Drain voluto dall'operatore (POST /admin/hosts/drain)."""
-        self.start_draining(unique, dep, inflight, operator=True)
-
-    def undrain_by_operator(self, unique: str) -> bool:
-        """Annulla un drain (POST /admin/hosts/undrain): il dep resta in config."""
-        return self.stop_draining(unique, purge_config=False)
-
-    def _drain(self) -> dict:
-        """Accessor lazy di `_draining` (pattern `_esc`): protegge i Router
-        costruiti senza __init__ (`Router.__new__(Router)` nei test)."""
-        return lazy_dict(self, "_draining")
-
-    def is_draining(self, unique: str) -> bool:
-        return unique in self._drain()
-
-    def purge_draining(self) -> int:
-        """Rimuove i draining oltre il TTL (anche con inflight residua)."""
-        now = time.time()
-        ttl = max(1.0, policy_float(self.policy, "hotreload_drain_ttl_sec", 120.0))
-        dead = [u for u, d in list(self._drain().items()) if now - d.get("ts", 0) > ttl]
-        for u in dead:
-            log.info(
-                "[drain] %s: TTL %ds scaduto (%d inflight) -> rimosso definitivamente",
-                u,
-                int(ttl),
-                self._drain()[u].get("inflight", 0),
-            )
-            self._finish_drain(u)
-        return len(dead)
-
-    def stop_draining(self, unique: str, *, purge_config: bool = True) -> bool:
-        """Annulla lo stato draining. purge_config=True (default, TTL/note_end):
-        il dep viene rimosso dalla config. purge_config=False (undrain
-        operatore): il dep resta attivo e torna eleggibile al pick.
-
-        Ritorna True se c'era uno stato draining da annullare, False se non
-        c'era nulla (idempotenza: undrain di un dep non in draining)."""
-        d = self._drain().pop(unique, None)
-        if d is None:
-            return False
-        if purge_config:
-            dep = d.get("dep") or {}
-            grp = dep.get("group")
-            if grp and self.config is not None and grp in self.config.groups:
-                self.config.groups[grp] = [x for x in self.config.groups[grp] if x.get("unique") != unique]
-            log.info("[drain] %s: draining completata -> rimosso dalla config", unique)
-        else:
-            log.warning("[drain] %s: draining ANNULLATA (undrain operatore)", unique)
-        return True
-
-    def _finish_drain(self, unique: str) -> None:
-        d = self._drain().get(unique)
-        # Il flag va letto PRIMA del pop (stop_draining rimuove l'entry): un
-        # drain voluto dall'operatore non deve sparire dalla config su
-        # note_end/TTL, altrimenti undrain non troverebbe piu' l'entry.
-        operator = bool((d or {}).get("operator"))
-        self.stop_draining(unique, purge_config=not operator)
 
     # ------------------------------------------------ persistenza (F4)
     def dump_stats(self) -> dict:
@@ -4337,13 +4150,6 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         same_p = 1 if (p and p == lp) else 0
         same_m = 0 if (same_p == 0 and str(dep.get("model") or "") == lm) else 1
         return (same_p, dim_rank, same_m)
-
-    def _prov_alternate(self, cands: list[dict], req_dim: int | None = None) -> list[dict]:
-        """Riordino STABILE: prima i provider diversi dall'ultimo, poi il -dim
-        richiesto (salite crescenti dopo). Non cambia l'insieme."""
-        if not cands:
-            return cands
-        return sorted(cands, key=lambda d: self._prov_avoid_key(d, req_dim))
 
     def _prov_prefer(self, winner: dict | None, cands: list[dict], group_name: str) -> dict | None:
         """Anti-raffica: se il vincitore ripete l'ultimo provider e tra i

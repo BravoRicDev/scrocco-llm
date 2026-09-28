@@ -177,9 +177,9 @@ def test_f26_flush_unificato_esiste():
 
 # ------------------------------------------------------------------- F27
 def test_f27_warm_deterministico_senza_regex():
-    src = inspect.getsource(chat_completions.chat_completions)
+    src = inspect.getsource(chat_completions._ChatCompletion._pick_first_deployment)
     assert "_grp_is_dim" in src
-    assert "_warm = (not explicit_req) or _grp_is_dim" in src
+    assert "self._warm = (not self.explicit_req) or self._grp_is_dim" in src
     assert "re.search" not in src.split("_warm")[1].split("\n")[0]
 
 
@@ -235,7 +235,7 @@ def test_g3_fail_fast_overflow(router, monkeypatch):
 
 
 def test_g3_main_ha_il_400_context_length_exceeded():
-    src = inspect.getsource(chat_completions.chat_completions)
+    src = inspect.getsource(chat_completions._ChatCompletion)
     assert "context_length_exceeded" in src
     assert "nx_ctx_compacted_forced" in src
 

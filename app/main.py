@@ -32,6 +32,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .admin import admin_api
+from .admin_mcp import mcp_api as admin_mcp_api
 from .suppressed import report_suppressed
 from .bootstrap import bootstrap_api
 from .auth import AuthManager, gateway_env
@@ -44,35 +45,19 @@ from .probes import (
 from . import repairlog
 from .forwarder import (
     Forwarder,
-    set_retry_after_floors,
-    set_stream_stall_sec,
-    set_strip_client_fields,
-    set_adaptive_timeout,
     set_latency_lookup,
-    set_reasoning_reserve,
-    apply_cooldown_policy,
-    set_estimate_defaults,
-    set_ttft_lookup,
     set_nonstream_hook,
-    set_stall_bucket,
-    set_schemaout_config,
 )
 from .health import health_loop
 from .policy import Policy
-from .router import Router, configure_estimate
+from .router import Router
 from .caution import background_cautious_enabled
 from .errors import AppError
 
-# Logging strutturato: [auth] [route] [vigile] [identity] [fallback] [cooldown]
-# basicConfig è no-op se root ha già handler (es. sotto pytest/caplog).
-# Formato con colori per terminali (ANSI escape codes)
-from app.terminal_logging import (
-    setup_colored_logging,
-)
+# Logging (app/logsetup.py): console colorata a INFO, poi i file sotto var/.
+from .logsetup import install_console, install_file_logging  # noqa: E402
 
-console_handler = setup_colored_logging()
-
-logging.basicConfig(level=logging.INFO, handlers=[console_handler], force=True)  # Override any existing basicConfig
+install_console()
 log = logging.getLogger("nx.main")
 
 from .constants import GATEWAY_VERSION  # noqa: E402
@@ -90,54 +75,7 @@ HOST = os.environ.get("GATEWAY_HOST", "127.0.0.1")
 WATCH_SECONDS = float(os.environ.get("GATEWAY_WATCH_SECONDS", "5"))
 
 
-def _install_file_logging() -> None:
-    """Handler su FILE oltre allo stdout (docker logs resta invariato).
-
-    - var/gateway.log  : tutto il log INFO (bind-montato -> sopravvive al
-      redeploy del container, dove lo stdout viene perso).
-    - var/error-audit.log : SOLO i body upstream con "error" (logger
-      nx.erroraudit, alimentato da forwarder.UpstreamError + le righe
-      PASS-THROUGH). File LOCALE, gitignored (var/*), da rivedere ogni tanto.
-    Fail-safe: se un path non e' scrivibile si prosegue col solo stdout.
-    Saltato sotto pytest (PYTEST_CURRENT_TEST) per non sporcare il repo.
-    """
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return
-    from logging.handlers import RotatingFileHandler, WatchedFileHandler
-
-    def _file_handler(path: str) -> logging.Handler:
-        # Multi-worker: stessi file per tutti i processi, ma ruota SOLO il
-        # leader; gli altri appendono e riaprono il file quando e' stato
-        # ruotato (WatchedFileHandler), senza rinominarlo in parallelo.
-        if cluster.enabled() and not cluster.is_leader():
-            return WatchedFileHandler(path, encoding="utf-8")
-        return RotatingFileHandler(path, maxBytes=mb * 1024 * 1024, backupCount=bk, encoding="utf-8")
-
-    # Same format as console for consistency
-    fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
-    mb = int(os.environ.get("GATEWAY_LOG_MAX_MB", "20"))
-    bk = int(os.environ.get("GATEWAY_LOG_BACKUPS", "5"))
-    main_path = os.environ.get("GATEWAY_LOG_FILE", str(gw_state.VAR_DIR / "gateway.log"))
-    audit_path = os.environ.get("GATEWAY_ERROR_LOG_FILE", str(gw_state.VAR_DIR / "error-audit.log"))
-    try:
-        h = _file_handler(main_path)
-        h.setFormatter(logging.Formatter(fmt))
-        h.setLevel(logging.INFO)
-        logging.getLogger().addHandler(h)
-    except OSError as exc:  # noqa: BLE001
-        log.warning("[log] file %s non scrivibile (%s): solo stdout", main_path, exc)
-    try:
-        ah = _file_handler(audit_path)
-        ah.setFormatter(logging.Formatter(fmt))
-        ah.setLevel(logging.INFO)
-        eaudit = logging.getLogger("nx.erroraudit")
-        eaudit.addHandler(ah)
-        eaudit.propagate = True  # va anche in gateway.log/stdout
-    except OSError as exc:  # noqa: BLE001
-        log.warning("[log] file %s non scrivibile (%s)", audit_path, exc)
-
-
-_install_file_logging()
+install_file_logging(gw_state.VAR_DIR)
 
 # La POLITICA (gateway.yaml) è separata dalle CREDENZIALI (keys_rotation.csv):
 # file assente/corrotto -> default, il servizio parte comunque.
@@ -159,15 +97,7 @@ gw_state.router = Router(gw_state.config, gw_state.policy)
 # provider callable: l'hot-reload della policy aggiorna anche le chiavi client
 gw_state.authn = AuthManager(gw_state.config, client_keys_provider=lambda: gw_state.policy.client_keys)
 gw_state.forwarder = Forwarder(keepalive_pool=gw_state.policy.http_keepalive_pool)
-set_retry_after_floors(gw_state.policy.retry_after_min_sec, gw_state.policy.retry_after_floor_by_provider)
-set_stream_stall_sec(gw_state.policy.stream_stall_sec)
-set_strip_client_fields(gw_state.policy.strip_client_fields)
 set_latency_lookup(lambda u, ctx=None: gw_state.router.bucket_latency_ms(u, ctx))
-# F21: lo stall guard si calibra sul TTFT per bucket e sul moltiplicatore/
-# tetto di policy; F20: divisore+immagini condivisi per le stime "senza router".
-set_ttft_lookup(lambda u, ctx=None: gw_state.router.bucket_latency_ms(u, ctx, "ttft"))
-set_stall_bucket(multiplier=gw_state.policy.stream_stall_ttft_mult, max_sec=gw_state.policy.stream_stall_max_sec)
-set_estimate_defaults(gw_state.policy.estimate_divisor, getattr(gw_state.policy, "image_token_estimate", 0) or 0)
 
 
 # P4: i dep che IGNORANO stream:true vengono annotati (json_fallback++) e poi
@@ -181,24 +111,6 @@ def _note_json_fallback(_u):
 
 
 set_nonstream_hook(_note_json_fallback)
-set_adaptive_timeout(
-    enabled=gw_state.policy.adaptive_timeout_enabled,
-    floor_sec=gw_state.policy.adaptive_timeout_floor_sec,
-    multiplier=gw_state.policy.adaptive_timeout_multiplier,
-    max_sec=gw_state.policy.adaptive_timeout_max_sec,
-)
-set_reasoning_reserve(1.0 - float(getattr(gw_state.policy, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
-apply_cooldown_policy(gw_state.policy)
-from .schemaout import schemaout_config_from_policy as _so_cfg_from_policy
-
-set_schemaout_config(_so_cfg_from_policy(gw_state.policy))
-configure_estimate(
-    adaptive=gw_state.policy.estimate_adaptive_enabled,
-    shadow=gw_state.policy.estimate_adaptive_shadow,
-    auto_enable=gw_state.policy.estimate_adaptive_auto_enable,
-    auto_min_n=gw_state.policy.estimate_adaptive_auto_min_n,
-    auto_max_delta_pct=gw_state.policy.estimate_adaptive_auto_max_delta_pct,
-)
 
 _watch_task: asyncio.Task | None = None
 _health_task: asyncio.Task | None = None
@@ -255,11 +167,11 @@ gw_state._coalesce_cache = {}
 gw_state._COALESCE_CACHE_MAX = 64
 
 
-# Import statico (non late/break-cycle): _apply_misc_policy e' chiamata QUI
-# a livello di modulo, prima che `app` esista.
-from .runtime_persistence import _apply_misc_policy  # noqa: E402
+# Policy -> moduli (forwarder, stime, cooldown, store, ...): la stessa
+# funzione dell'hot-reload del watcher, a stato runtime gia' costruito.
+from .runtime_persistence import apply_policy  # noqa: E402
 
-_apply_misc_policy(gw_state.policy)
+apply_policy(gw_state.policy)
 
 
 # --- thought_signature sidecar: persistenza firme Gemini 3 (tool calling) ----
@@ -356,6 +268,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title=gw_state.policy.service_name, version=GATEWAY_VERSION, lifespan=lifespan)
 app.include_router(admin_api)
+app.include_router(admin_mcp_api)  # /admin/mcp/config/*: subito dopo, come quando stava in admin_api
 app.include_router(bootstrap_api)
 
 # --- Observability: Trace ID, JSON logging, Prometheus /metrics ---

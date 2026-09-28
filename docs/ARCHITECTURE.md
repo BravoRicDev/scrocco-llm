@@ -16,12 +16,17 @@ cools down failing ones.
 
 | Module | Responsibility |
 |---|---|
-| `app/main.py` | FastAPI app, HTTP routes, request lifecycle, streaming pipeline, lifespan tasks, persistence writers |
+| `app/main.py` | App assembly only: logging, shared runtime state, lifespan (load/save state, cluster join, background tasks), middleware, error handlers, route registration |
+| `app/chat_completions.py` | `POST /v1/chat/completions`: method object `_ChatCompletion`, whose `run()` reads as the pipeline (read payload → auth → session/needs → context estimate → group → first deployment → preprocessing/compaction → stream or non-stream) |
+| `app/chat_stream.py`, `chat_relay.py`, `chat_hedge.py`, `chat_media.py` | Streaming engine with fallback (`_StreamFallback`), client SSE relay (`_ClientRelay`), first-content hedge race, image cap + STT bridge |
+| `app/logsetup.py`, `runtime_persistence.py` | Process logging (console + files); state persistence, watcher/hot-reload and `apply_policy` (policy → modules, one list for startup, reload and admin writes) |
 | `app/state.py` | Process-wide runtime state (config, policy, router, forwarder, auth, ledger, keyhealth, state-file paths, coalescing/video/probe registries). Created by `app/main.py` at import; every other module reads it as `gw_state.<name>` and tests patch it there |
 | `app/router.py` | Core routing engine: `initial_pick`, `pick_deployment`, `_walk_ladder_resilient`, `_walk_chain`, cooldowns, sticky sessions, reputation, `fallback_after` |
-| `app/routing/warm.py`, `canary.py`, `sessions.py` | Mixins extracted from `router.py` (Phase 4 refactor): warm pool/borrows, canary/hedge, sticky sessions |
+| `app/routing/*.py` | Router mixins: warm pool/borrows, canary/hedge, sticky sessions, circuit breakers, usage windows, cooldowns, failure handling, per-key leases, connection draining |
 | `app/forwarder.py` | Upstream HTTP: `call`, `stream_response`, `call_with_fallback`, token clamping, session/opencode headers, cooldown classification |
-| `app/admin.py` | `/admin/*` API: deployments, policy, CSV, backups, probes, stats, sessions, MCP config tools |
+| `app/admin.py` | `/admin/*` API: deployments, policy, CSV, backups, probes, stats, sessions |
+| `app/admin_mcp.py` | MCP config tools over the admin API (`/admin/mcp/config/*`) |
+| `app/policy_store.py`, `caplearn.py`, `config_writes.py` | Atomic validated `gateway.yaml` writes; capability auto-learn; single writer lock for CSV/policy |
 | `app/policy.py` | Runtime policy model (`var/gateway.yaml`), hot-reloadable |
 | `app/config.py` | Loads `var/keys_rotation.csv` into deployment groups; validation and hot-reload |
 | `app/auth.py` | Three-level auth: master (admin) → explicit client keys → deterministic `sk-<profile>` (dev only) |
@@ -42,10 +47,10 @@ cools down failing ones.
 
 ### Streaming
 
-1. **Ingress & auth** — `main.chat_completions` (`app/main.py`) parses the body,
+1. **Ingress & auth** — `chat_completions._ChatCompletion` (`app/chat_completions.py`) parses the body,
    sets per-request effort/flags, authenticates (`auth.AuthManager.authenticate`,
    `authorize_model`), and derives the session id (`_session_id`).
-2. **Client gating** — `main._set_opencode_gate` calls
+2. **Client gating** — `chat_helpers._set_opencode_gate` calls
    `opencode_gate.set_allow_opencode_zen` / `set_spoofing_request`; generic
    caution comes from `caution.background_cautious_enabled`.
 3. **Group/profile resolution** — `policy.canonicalize`, capability need
@@ -57,9 +62,9 @@ cools down failing ones.
    `pick_deployment` / `_walk_ladder_resilient` (dims ladder) or `_walk_chain`
    (capability chains). Every candidate passes `opencode_gate.dep_usable`,
    cooldown and circuit-breaker checks.
-5. **Forwarding with fallback** — `main._stream_with_fallback` (delegates to the
-   method object `main._StreamFallback`, whose `run()` reads as the attempt loop;
-   the client-side SSE relay is `main._ClientRelay`):
+5. **Forwarding with fallback** — `chat_stream._stream_with_fallback` (delegates
+   to the method object `chat_stream._StreamFallback`, whose `run()` reads as the
+   attempt loop; the client-side SSE relay is `chat_relay._ClientRelay`):
    `_peek_stream` streams one attempt upstream via `forwarder.stream_response`;
    speculative helpers (warm refill, slow-race, hedge canaries) may run in
    parallel when enabled. On failure it asks the router for the next candidate
@@ -82,10 +87,10 @@ failure → 503 with `Retry-After` only once the ladder is exhausted.
 
 | File | Writer | Content |
 |---|---|---|
-| `gateway.log`, `error-audit.log` | `main.py` (RotatingFileHandler) | runtime logs, `[summary]` lines, error audit |
+| `gateway.log`, `error-audit.log` | `logsetup.py` (RotatingFileHandler) | runtime logs, `[summary]` lines, error audit |
 | `keys_rotation.csv` | `csv_store.py` / admin / `csvlearn.py` | source of truth for deployments/keys |
 | `gateway.yaml` | admin policy API (backups in `var/backups/`) | hot-reloaded policy |
-| `adaptive_stats.json` | `main.py` (atomic) | per-deployment EMA/latency stats |
+| `adaptive_stats.json` | `runtime_persistence.py` (atomic) | per-deployment EMA/latency stats |
 | `cooldown_state.json` | `router` | active cooldowns |
 | `routing_state.json` | `router` | sticky sessions / warm owners |
 | `usage_ledger.jsonl` | `ledger.py` | usage & estimated cost |

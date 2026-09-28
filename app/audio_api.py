@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from . import metrics, sttscrub
 from .offload import request_json
 from . import state as gw_state
+from .http_responses import invalid_json_body
 from .http_responses import unauthorized as _unauthorized
 from .http_responses import forbidden as _forbidden
 from .suppressed import report_suppressed
@@ -109,9 +110,7 @@ async def audio_speech(request: Request):
     try:
         payload = await request_json(request)
     except Exception:
-        return JSONResponse(
-            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
-        )
+        return invalid_json_body()
     raw_model = payload.get("model") or ""
     if not str(payload.get("input") or "").strip():
         return JSONResponse(
@@ -246,9 +245,7 @@ async def systemone(request: Request):
     try:
         payload = await request_json(request)
     except Exception:
-        return JSONResponse(
-            status_code=400, content={"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}
-        )
+        return invalid_json_body()
     if not isinstance(payload, dict):
         return JSONResponse(
             status_code=400,

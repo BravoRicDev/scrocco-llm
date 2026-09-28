@@ -98,19 +98,6 @@ def _strip_fence(text: str) -> str:
     return m.group(1).strip() if m else (text or "").strip()
 
 
-def _looks_json(text: str) -> bool:
-    if not isinstance(text, str):
-        return False
-    s = _strip_fence(text)
-    if not s:
-        return False
-    if s[0] == "{" and s[-1] == "}":
-        return True
-    if s[0] == "[" and s[-1] == "]":
-        return True
-    return bool(_FENCE.search(text)) and (s.startswith("{") or s.startswith("["))
-
-
 def clean_json_content(content):
     """Estrae un documento JSON puro da content (fence/prosa). None se fallisce."""
     if not isinstance(content, str) or not content.strip():

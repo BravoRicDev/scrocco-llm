@@ -91,11 +91,6 @@ def apply_auth(dep: dict, headers: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def extra_headers(dep: dict) -> dict[str, str]:
-    """Header extra richiesti dallo stile (es. beta Responses)."""
-    return {}
-
-
 # ------------------------------------------------------------- data-url helpers
 def split_data_url(url: str) -> tuple[str, str] | None:
     """'data:image/png;base64,AAAA' -> ('image/png', 'AAAA'); altrimenti None."""

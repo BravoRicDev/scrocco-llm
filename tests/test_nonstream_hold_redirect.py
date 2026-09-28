@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import chat_stream
 from app import runtime_persistence
 import app.state as gw_state
-from app import chat_completions, chat_helpers, chat_stream
+from app import chat_completions, chat_helpers, chat_relay, chat_stream
 
 
 @pytest.fixture()
@@ -353,6 +353,7 @@ def test_nonstream_hold_redirect_single_summary(M, monkeypatch):
     # il riepilogo parte dal motore non-stream o da quello stream
     monkeypatch.setattr(chat_completions, "_emit_summary", _spy)
     monkeypatch.setattr(chat_stream, "_emit_summary", _spy)
+    monkeypatch.setattr(chat_relay, "_emit_summary", _spy)
 
     payload = {"model": dep["model"], "stream": False,
                "messages": [{"role": "user", "content": "ciao"}]}

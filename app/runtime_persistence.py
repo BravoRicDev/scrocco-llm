@@ -77,6 +77,41 @@ def set_coalesce_cache_max(value=None) -> None:
             pass
 
 
+def apply_policy(pol) -> None:
+    """Propaga la policy ai moduli che ne tengono una copia (forwarder,
+    stime, cooldown, schemaout, store, ...). UNA sola lista, usata all'avvio
+    (app/main.py), a ogni hot-reload (watcher) e dopo le scritture admin:
+    prima le stesse ~13 chiamate erano ripetute in due posti."""
+    set_retry_after_floors(pol.retry_after_min_sec, pol.retry_after_floor_by_provider)
+    set_stream_stall_sec(pol.stream_stall_sec)
+    set_strip_client_fields(pol.strip_client_fields)
+    # F21: lo stall guard si calibra sul TTFT per bucket e sul moltiplicatore/
+    # tetto di policy; F20: divisore+immagini condivisi per le stime "senza router".
+    set_ttft_lookup(lambda u, ctx=None: gw_state.router.bucket_latency_ms(u, ctx, "ttft"))
+    set_stall_bucket(multiplier=pol.stream_stall_ttft_mult, max_sec=pol.stream_stall_max_sec)
+    set_estimate_defaults(pol.estimate_divisor, getattr(pol, "image_token_estimate", 0) or 0)
+    set_adaptive_timeout(
+        enabled=pol.adaptive_timeout_enabled,
+        floor_sec=pol.adaptive_timeout_floor_sec,
+        multiplier=pol.adaptive_timeout_multiplier,
+        max_sec=pol.adaptive_timeout_max_sec,
+    )
+    set_reasoning_reserve(1.0 - float(getattr(pol, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
+    apply_cooldown_policy(pol)
+    _apply_misc_policy(pol)
+    set_schemaout_config(_so_cfg_from_policy(pol))
+    fwd_obj = vars(gw_state).get("forwarder")   # all'avvio puo' non esserci ancora
+    if fwd_obj is not None:
+        fwd_obj._keepalive_pool = pol.http_keepalive_pool
+    configure_estimate(
+        adaptive=pol.estimate_adaptive_enabled,
+        shadow=pol.estimate_adaptive_shadow,
+        auto_enable=pol.estimate_adaptive_auto_enable,
+        auto_min_n=pol.estimate_adaptive_auto_min_n,
+        auto_max_delta_pct=pol.estimate_adaptive_auto_max_delta_pct,
+    )
+
+
 def _apply_misc_policy(pol) -> None:
     """Propaga i parametri di policy alle costanti runtime dei moduli minori.
 
@@ -654,30 +689,7 @@ async def _watcher(interval: float) -> None:
                 else:
                     gw_state.router.policy = fresh  # swap atomico dei riferimenti
                     gw_state.policy = fresh  # deviazione documentata: globals() qui puntava a main.py, non piu valido dopo lo spostamento
-                    set_retry_after_floors(fresh.retry_after_min_sec, fresh.retry_after_floor_by_provider)
-                    set_stream_stall_sec(fresh.stream_stall_sec)
-                    set_strip_client_fields(fresh.strip_client_fields)
-                    set_ttft_lookup(lambda u, ctx=None: gw_state.router.bucket_latency_ms(u, ctx, "ttft"))
-                    set_stall_bucket(multiplier=fresh.stream_stall_ttft_mult, max_sec=fresh.stream_stall_max_sec)
-                    set_estimate_defaults(fresh.estimate_divisor, getattr(fresh, "image_token_estimate", 0) or 0)
-                    set_adaptive_timeout(
-                        enabled=fresh.adaptive_timeout_enabled,
-                        floor_sec=fresh.adaptive_timeout_floor_sec,
-                        multiplier=fresh.adaptive_timeout_multiplier,
-                        max_sec=fresh.adaptive_timeout_max_sec,
-                    )
-                    set_reasoning_reserve(1.0 - float(getattr(fresh, "cache_ctx_reasoning_headroom_ratio", 0.7) or 0.0))
-                    apply_cooldown_policy(fresh)
-                    _apply_misc_policy(fresh)
-                    set_schemaout_config(_so_cfg_from_policy(fresh))
-                    gw_state.forwarder._keepalive_pool = fresh.http_keepalive_pool
-                    configure_estimate(
-                        adaptive=fresh.estimate_adaptive_enabled,
-                        shadow=fresh.estimate_adaptive_shadow,
-                        auto_enable=fresh.estimate_adaptive_auto_enable,
-                        auto_min_n=fresh.estimate_adaptive_auto_min_n,
-                        auto_max_delta_pct=(fresh.estimate_adaptive_auto_max_delta_pct),
-                    )
+                    apply_policy(fresh)
                     log.info(
                         "[policy] ricaricata: step_up=%s%% aliases=%d per-profilo=%s",
                         fresh.step_up_pct,
