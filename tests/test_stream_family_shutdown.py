@@ -74,7 +74,7 @@ def test_canonical_family_aliases():
 
 
 def test_same_family_suppresses_switch():
-    cfg = CtxCompactConfig(min_ctx_tokens=50000, switch_min_tokens=8000)
+    cfg = CtxCompactConfig(enabled=True, min_ctx_tokens=50000, switch_min_tokens=8000)
     d = should_compact(cfg, 10000, 0, "A", "B", False)
     assert "switch" in d["reason"]
     d2 = should_compact(cfg, 10000, 0, "A", "B", False, same_family=True)
@@ -82,7 +82,7 @@ def test_same_family_suppresses_switch():
 
 
 def test_same_family_keeps_overflow():
-    cfg = CtxCompactConfig(min_ctx_tokens=0, switch_min_tokens=8000)
+    cfg = CtxCompactConfig(enabled=True, min_ctx_tokens=0, switch_min_tokens=8000)
     d = should_compact(cfg, 10000, 5000, "A", "B", False, same_family=True)
     assert d["overflow"] is True
     assert "overflow" in d["reason"]

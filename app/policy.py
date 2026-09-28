@@ -1232,7 +1232,11 @@ class Policy:
     cache_prefer_last_success: bool = True
     cache_holder_ttl_sec: int = 3600
     cache_skip_probe_when_holder: bool = True
-    cache_ctx_truncation_enabled: bool = True
+    # Default OFF (2026-09-28): la compattazione del contesto degrada le
+    # prestazioni (riscrive il prefisso in uscita -> prompt-cache upstream
+    # fredda). Per accenderla serve `cache_aware.context_truncation.enabled:
+    # true` in gateway.yaml.
+    cache_ctx_truncation_enabled: bool = False
     cache_ctx_keep_turns: int = 4
     cache_ctx_max_tool_output_chars: int = 2000
     cache_ctx_min_saved_tokens: int = 500

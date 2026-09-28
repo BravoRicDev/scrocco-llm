@@ -80,7 +80,11 @@ def set_min_protected_msgs(value=None) -> None:
 
 
 class CtxCompactConfig:
-    def __init__(self, enabled: bool = True, keep_turns: int = 4,
+    # Default OFF (2026-09-28): la compattazione del contesto degrada le
+    # prestazioni (riscrive il prefisso in uscita -> prompt-cache upstream
+    # fredda). Va accesa ESPLICITAMENTE via policy
+    # `cache_aware.context_truncation.enabled`.
+    def __init__(self, enabled: bool = False, keep_turns: int = 4,
                  max_tool_output_chars: int = 2000,
                  min_saved_tokens: int = 500,
                  stub_text: str = DEFAULT_STUB,
@@ -200,7 +204,7 @@ def ctxcompact_config_from_policy(policy) -> CtxCompactConfig:
     if policy is None:
         return CtxCompactConfig()
     return CtxCompactConfig(
-        enabled=bool(getattr(policy, "cache_ctx_truncation_enabled", True)),
+        enabled=bool(getattr(policy, "cache_ctx_truncation_enabled", False)),
         keep_turns=int(getattr(policy, "cache_ctx_keep_turns", 4) or 4),
         max_tool_output_chars=int(
             getattr(policy, "cache_ctx_max_tool_output_chars", 2000) or 2000),

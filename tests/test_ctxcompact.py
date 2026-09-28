@@ -21,7 +21,7 @@ class TestH1H2H3:
         ]
 
     def _cfg(self, **kw):
-        base = dict(keep_turns=1, max_tool_output_chars=50,
+        base = dict(enabled=True, keep_turns=1, max_tool_output_chars=50,
                     min_saved_tokens=0)
         base.update(kw)
         return CtxCompactConfig(**base)
@@ -69,7 +69,7 @@ class TestH1H2H3:
             msgs.append({"role": "assistant", "content": "a" * 3000})
             msgs.append({"role": "tool", "tool_call_id": f"c{i}",
                          "content": "t" * 3000})
-        cfg = CtxCompactConfig(keep_turns=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1)
         b4 = frontier_boundary(msgs, cfg, max_in=30000, divisor=4.0)
         b32 = frontier_boundary(msgs, cfg, max_in=30000, divisor=3.2)
         assert b32 >= b4
@@ -80,7 +80,7 @@ class TestH1H2H3:
         assert r32.get("saved_tokens_est", 0) != r4.get("saved_tokens_est", 0)
 
     def test_h3_riserva_reasoning_fa_scattare_abs_prima(self):
-        cfg = CtxCompactConfig(min_ctx_tokens=100000,
+        cfg = CtxCompactConfig(enabled=True, min_ctx_tokens=100000,
                                abs_headroom_ratio=0.85,
                                reasoning_headroom_ratio=0.0,
                                reasoning_reserve_ratio=0.15)
@@ -93,7 +93,7 @@ class TestH1H2H3:
         assert on["eff_ctx"] == 145000 + 30000
 
     def test_h3_riserva_zero_disattiva(self):
-        cfg = CtxCompactConfig(min_ctx_tokens=100000,
+        cfg = CtxCompactConfig(enabled=True, min_ctx_tokens=100000,
                                abs_headroom_ratio=0.85,
                                reasoning_headroom_ratio=0.0,
                                reasoning_reserve_ratio=0.0)
@@ -126,14 +126,24 @@ def _conversation(t1=5000, t2=5000, t3=5000):
 
 class TestConfig:
     def test_defaults(self):
+        """Default OFF dal 2026-09-28: la compattazione degrada le
+        prestazioni, si accende esplicitamente via policy."""
         c = CtxCompactConfig()
-        assert c.enabled is True
+        assert c.enabled is False
         assert c.keep_turns == 4
         assert c.min_saved_tokens == 500
         assert "{n}" in c.stub_text
         assert c.min_ctx_tokens == 50000
         assert c.on_deployment_switch is True
         assert c.switch_min_tokens == 8000
+
+    def test_default_off_lato_policy(self):
+        """Con nessuna chiave `enabled`: config e Policy restano SPENTE."""
+        from app.policy import Policy as _P
+        assert _P().cache_ctx_truncation_enabled is False
+        c = create_ctxcompact_config({"cache_aware": {"context_truncation": {
+            "keep_turns": 2}}})
+        assert c.enabled is False
 
     def test_from_dict(self):
         c = create_ctxcompact_config({"cache_aware": {"context_truncation": {
@@ -175,59 +185,59 @@ class TestShouldCompact:
         assert d["compact"] is False
 
     def test_overflow(self):
-        d = should_compact(CtxCompactConfig(), 150000, max_in=100000)
+        d = should_compact(CtxCompactConfig(enabled=True), 150000, max_in=100000)
         assert d["compact"] is True
         assert "overflow" in d["reason"]
 
     def test_abs_threshold(self):
         # Con l'isteresi anti-churn la soglia assoluta scatta solo avvicinandosi
         # alla saturazione della finestra del deployment (qui 90% di 1M).
-        d = should_compact(CtxCompactConfig(), 900000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 900000, max_in=1000000,
                            holder="d1", dep_unique="d1")
         assert d["compact"] is True
         assert "abs" in d["reason"]
 
     def test_abs_deferred_with_headroom(self):
         # cache calda + ampio margine: NON riscrivere il prefisso (no churn).
-        d = should_compact(CtxCompactConfig(), 60000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 60000, max_in=1000000,
                            holder="d1", dep_unique="d1")
         assert d["compact"] is False
 
     def test_below_all_thresholds(self):
-        d = should_compact(CtxCompactConfig(), 5000, max_in=1000000)
+        d = should_compact(CtxCompactConfig(enabled=True), 5000, max_in=1000000)
         assert d["compact"] is False
 
     def test_switch_cold(self):
-        d = should_compact(CtxCompactConfig(), 10000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 10000, max_in=1000000,
                            holder=None, dep_unique="d1")
         assert d["compact"] is True
         assert "switch" in d["reason"]
         assert d["cold"] is True
 
     def test_switch_holder_differs(self):
-        d = should_compact(CtxCompactConfig(), 10000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 10000, max_in=1000000,
                            holder="other", dep_unique="d1")
         assert d["compact"] is True and "switch" in d["reason"]
 
     def test_no_switch_when_hot(self):
-        d = should_compact(CtxCompactConfig(), 10000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 10000, max_in=1000000,
                            holder="d1", dep_unique="d1")
         assert d["compact"] is False
         assert d["cold"] is False
 
     def test_switch_below_min(self):
-        d = should_compact(CtxCompactConfig(), 4000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 4000, max_in=1000000,
                            holder=None, dep_unique="d1")
         assert d["compact"] is False
 
     def test_switch_disabled(self):
-        cfg = CtxCompactConfig(on_deployment_switch=False)
+        cfg = CtxCompactConfig(enabled=True, on_deployment_switch=False)
         d = should_compact(cfg, 10000, max_in=1000000, holder=None,
                            dep_unique="d1")
         assert d["compact"] is False
 
     def test_sticky(self):
-        d = should_compact(CtxCompactConfig(), 1000, max_in=1000000,
+        d = should_compact(CtxCompactConfig(enabled=True), 1000, max_in=1000000,
                            session_compact=True)
         assert d["compact"] is True
         assert "sticky" in d["reason"]
@@ -236,7 +246,7 @@ class TestShouldCompact:
 class TestCompact:
     def test_stubs_only_old(self):
         msgs = _conversation()
-        new, rep = compact_tool_outputs(msgs, CtxCompactConfig(keep_turns=2))
+        new, rep = compact_tool_outputs(msgs, CtxCompactConfig(enabled=True, keep_turns=2))
         assert rep["changed"] is True
         assert rep["stubbed"] == 1                 # solo il primo tool
         assert new[3]["content"].startswith("[tool output omesso")
@@ -246,14 +256,14 @@ class TestCompact:
 
     def test_pairing_preserved(self):
         msgs = _conversation()
-        new, _ = compact_tool_outputs(msgs, CtxCompactConfig(keep_turns=1))
+        new, _ = compact_tool_outputs(msgs, CtxCompactConfig(enabled=True, keep_turns=1))
         assert len(new) == len(msgs)
         assert [m["role"] for m in new] == [m["role"] for m in msgs]
         assert new[2].get("tool_calls") and new[3]["role"] == "tool"
 
     def test_idempotent(self):
         msgs = _conversation()
-        cfg = CtxCompactConfig(keep_turns=2)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=2)
         once, rep1 = compact_tool_outputs(msgs, cfg)
         assert rep1["changed"] is True
         twice, rep2 = compact_tool_outputs(once, cfg)
@@ -263,19 +273,19 @@ class TestCompact:
     def test_small_output_untouched(self):
         msgs = _conversation(t1=50)
         new, rep = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=2, max_tool_output_chars=2000))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=2, max_tool_output_chars=2000))
         assert rep["changed"] is False
 
     def test_min_saved_gate(self):
         msgs = _conversation(t1=800)
         new, rep = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=2, min_saved_tokens=100000))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=2, min_saved_tokens=100000))
         assert rep["changed"] is False
         assert new == msgs
 
     def test_no_user_message(self):
         msgs = [{"role": "system", "content": "s"}, _asst(), _tool("x" * 9000)]
-        new, rep = compact_tool_outputs(msgs, CtxCompactConfig())
+        new, rep = compact_tool_outputs(msgs, CtxCompactConfig(enabled=True))
         assert rep["changed"] is False
 
 
@@ -296,7 +306,7 @@ def _conv2(calls):
 
 class TestConfigV2:
     def test_defaults_v2(self):
-        c = CtxCompactConfig()
+        c = CtxCompactConfig(enabled=True)
         assert c.head_chars == 600 and c.tail_chars == 600
         assert c.keep_tail_pct == 2.0 and c.keep_error_outputs is True
 
@@ -322,7 +332,7 @@ class TestRichStub:
         body = "\n".join(lines) + "\n"          # ~13200 char
         msgs = _conv2([body, "piccolo"])
         new, rep = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=1, min_saved_tokens=10))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10))
         content = new[2]["content"]
         assert content.startswith("[tool output omesso:")   # riga 1 legacy
         assert "[bash]" in content.splitlines()[1]          # summary riga 2
@@ -336,13 +346,13 @@ class TestRichStub:
         assert tail_part.startswith("riga-") and "\nriga-" in tail_part
         # puro: stesso input -> stessi byte
         new2, _ = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=1, min_saved_tokens=10))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10))
         assert new2[2]["content"] == content
         assert rep["stubbed"] == 1
 
     def test_plain_stub_when_no_head_tail(self):
         msgs = _conv2(["y" * 9000])
-        cfg = CtxCompactConfig(keep_turns=1, head_chars=0, tail_chars=0)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, head_chars=0, tail_chars=0)
         new, rep = compact_tool_outputs(msgs, cfg, )
         assert new[2]["content"] == "[tool output omesso: 9000 caratteri]"
         assert rep["changed"] is True
@@ -350,7 +360,7 @@ class TestRichStub:
     def test_exit_zero_visible_and_stubbed(self):
         body = ("output\n" * 300) + "exit code: 0\n"
         msgs = _conv2([body])
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=10)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["changed"] is True
         assert ", exit 0" in new[2]["content"]
@@ -360,19 +370,19 @@ class TestRichStub:
                  + "z" * 9000)
         msgs = _conv2([corpo])
         new, rep = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=0, min_saved_tokens=0))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=0, min_saved_tokens=0))
         assert rep["changed"] is False
         assert new[2]["content"] == corpo
         # ValueError/ENOSPC riconosciuti allo stesso modo
         msgs2 = _conv2(["bla\nValueError: boom\n" + "w" * 9000])
         new2, _ = compact_tool_outputs(
-            msgs2, CtxCompactConfig(keep_turns=1, min_saved_tokens=0))
+            msgs2, CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=0))
         assert new2[2]["content"] == msgs2[2]["content"]
 
     def test_error_guard_disattivabile(self):
         corpo = "ValueError: boom\n" + "q" * 9000
         msgs = _conv2([corpo])
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=10,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10,
                                keep_error_outputs=False)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["changed"] is True
@@ -382,12 +392,12 @@ class TestRichStub:
                {"type": "image_url", "image_url": {"url": "dataright"}}]
         msgs = _conv2([big])
         new, rep = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=1, min_saved_tokens=10))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10))
         assert new[2]["content"] == big
 
     def test_custom_stub_text_prima_riga(self):
         msgs = _conv2(["l" * 9000])
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=10,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10,
                                stub_text="[cut {n}]")
         new, _ = compact_tool_outputs(msgs, cfg)
         assert new[2]["content"].startswith("[cut 9000]")
@@ -398,7 +408,7 @@ class TestDedup:
     def test_rimando_al_doppione(self):
         corpo = "ripeti\n" * 2000                          # 14000 char
         msgs = _conv2([corpo, corpo])
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=10)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=10)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["deduped"] == 1
         assert new[2]["content"].startswith("[rimando:")
@@ -414,7 +424,7 @@ class TestDedup:
         corpo = "Traceback x\n" + "e" * 9000
         msgs = _conv2([corpo, corpo])
         new, rep = compact_tool_outputs(
-            msgs, CtxCompactConfig(keep_turns=1, min_saved_tokens=0))
+            msgs, CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=0))
         assert rep["deduped"] == 0 and rep["changed"] is False
 
 
@@ -446,7 +456,7 @@ class TestDynamicBoundary:
         msgs = self._three_big_turns()
         users = [i for i, m in enumerate(msgs) if m["role"] == "user"]
         b_user = users[-2]                    # keep_turns=2 -> penultimo user
-        cfg = CtxCompactConfig(keep_turns=2, min_saved_tokens=0,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=2, min_saved_tokens=0,
                                keep_tail_pct=1.0)          # 1% di 400k = 4000tok
         new, rep = compact_tool_outputs(msgs, cfg, max_in=400000)
         assert rep["boundary"] > b_user        # pota DENTRO i turni tenuti
@@ -459,7 +469,7 @@ class TestDynamicBoundary:
     def test_budget_generoso_non_prune_piu_di_keep_turns(self):
         msgs = self._three_big_turns()
         users = [i for i, m in enumerate(msgs) if m["role"] == "user"]
-        cfg = CtxCompactConfig(keep_turns=2, min_saved_tokens=0,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=2, min_saved_tokens=0,
                                keep_tail_pct=50.0)         # 200k tok: tutto
         new, rep = compact_tool_outputs(msgs, cfg, max_in=400000)
         assert rep["boundary"] == users[-2]    # max(B_user, 0) = B_user
@@ -468,7 +478,7 @@ class TestDynamicBoundary:
     def test_budget_disattivato_usa_keep_turns(self):
         msgs = self._three_big_turns()
         users = [i for i, m in enumerate(msgs) if m["role"] == "user"]
-        cfg = CtxCompactConfig(keep_turns=2, min_saved_tokens=0,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=2, min_saved_tokens=0,
                                keep_tail_pct=0.0)
         new, rep = compact_tool_outputs(msgs, cfg, max_in=400000)
         assert rep["boundary"] == users[-2]
@@ -476,7 +486,7 @@ class TestDynamicBoundary:
     def test_floor_8_messaggi(self):
         msgs = self._three_big_turns(2)       # 16 msg: floor 8
         n = len(msgs)
-        cfg = CtxCompactConfig(keep_turns=3, min_saved_tokens=0,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=3, min_saved_tokens=0,
                                keep_tail_pct=0.001)        # budget ~0
         new, rep = compact_tool_outputs(msgs, cfg, max_in=100000)
         assert rep["boundary"] == n - 8        # floor: gli ultimi 8 integri
@@ -488,7 +498,7 @@ class TestDynamicBoundary:
 class TestEstimator:
     def test_saved_uses_estimator(self):
         msgs = _conv2(["m" * 9000])
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=50)
         new, rep = compact_tool_outputs(
             msgs, cfg, estimator=lambda ms: sum(len(str(m)) for m in ms) // 100)
         # //100 e' piu' severo del //4: il gate 50 puo' bloccare il //4-only?
@@ -498,7 +508,7 @@ class TestEstimator:
 
     def test_gate_estimator_severo(self):
         msgs = _conv2(["n" * 3000])
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=100)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=100)
         new, rep = compact_tool_outputs(
             msgs, cfg, estimator=lambda ms: sum(len(str(m)) for m in ms) // 1000)
         assert rep["changed"] is False
@@ -526,7 +536,7 @@ class TestBoundaryFloor:
         grande: senza floor la frontiera INDIETREGGIA (gli stub 6..21
         tornerebbero originali: byte diversi a meta' prefisso). Con il floor
         (watermark) i byte restano identici -> cache della famiglia salva."""
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         msgs = self._fat()
         new1, rep1 = compact_tool_outputs(msgs, cfg, max_in=30_000)
         assert rep1["changed"] and rep1["boundary"] == 22
@@ -541,7 +551,7 @@ class TestBoundaryFloor:
         assert new2 == new1
 
     def test_floor_ignora_valori_stupidi(self):
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         new, rep = compact_tool_outputs(self._fat(), cfg, boundary_floor=0)
         assert rep["boundary"] == 5                           # solo keep_turns
         new, rep = compact_tool_outputs(self._fat(), cfg, boundary_floor=999)
@@ -567,7 +577,7 @@ class TestRimandoStabile:
         ]
 
     def test_msg_ref_indipendente_dagli_indici(self):
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         _, rep_a = compact_tool_outputs(self._msgs(), cfg)
         shifted = self._msgs(prefix=[{"role": "user", "content": "extra"},
                                      {"role": "assistant", "content": "eh"},
@@ -589,7 +599,7 @@ class TestRimandoStabile:
                     if str(m["content"]).startswith("[rimando"))
 
     def test_rimando_contiene_hash_non_indice(self):
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         new, _ = compact_tool_outputs(self._msgs(), cfg)
         r = next(m["content"] for m in new
                  if str(m["content"]).startswith("[rimando"))
@@ -609,7 +619,7 @@ class TestErrorAnchors:
         ]
 
     def test_pytest_failed_e_git_fatal_protetti(self):
-        cfg = CtxCompactConfig(keep_turns=0, min_saved_tokens=0)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=0, min_saved_tokens=0)
         for corpo in ("FAILED tests/test_x.py::test_y\n" + "z" * 6000,
                       "ERROR: network unreachable\n" + "z" * 6000,
                       "fatal: not a git repository\n" + "z" * 6000):
@@ -617,7 +627,7 @@ class TestErrorAnchors:
             assert rep["stubbed"] == 0, corpo[:20]
 
     def test_parole_normali_non_anchorate_passano(self):
-        cfg = CtxCompactConfig(keep_turns=0, min_saved_tokens=0)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=0, min_saved_tokens=0)
         corpo = ("il test log FAILED e fatal: compaiono solo perche' il "
                  "test e' passato\n" + "q" * 6000)
         # "FAILED" e "fatal:" sono a meta' riga: NON anchor -> comprimibile
@@ -625,7 +635,7 @@ class TestErrorAnchors:
         assert rep["stubbed"] == 1
 
     def test_FAILED_a_inizio_riga_protetto(self):
-        cfg = CtxCompactConfig(keep_turns=0, min_saved_tokens=0)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=0, min_saved_tokens=0)
         corpo = "q" * 6000 + "\nFAILED hard\n" + "q" * 6000
         new, rep = compact_tool_outputs(self._one(corpo), cfg)
         assert rep["stubbed"] == 0
@@ -644,7 +654,7 @@ class TestArgsTruncation:
         ]
 
     def _cfg(self, **kw):
-        k = dict(keep_turns=0, min_saved_tokens=0,
+        k = dict(enabled=True, keep_turns=0, min_saved_tokens=0,
                  tool_args_max_chars=500)
         k.update(kw)
         return CtxCompactConfig(**k)
@@ -718,7 +728,7 @@ class TestRimandoOnesto:
             {"role": "tool", "tool_call_id": "t2", "content": corpo},
             {"role": "user", "content": "u2"},
         ]
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert "(già compresso)" in new[2]["content"]
         assert "t2" in new[2]["content"]
@@ -731,7 +741,7 @@ class TestRimandoOnesto:
             {"role": "tool", "tool_call_id": "t2", "content": corpo},
             {"role": "user", "content": "u2"},
         ]
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1,
                                head_chars=0, tail_chars=0)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert "(già compresso)" not in new[1]["content"]
@@ -755,7 +765,7 @@ class TestReportV2:
             {"role": "tool", "tool_call_id": "s1", "content": "y" * 8000},
             {"role": "user", "content": "u2"},
         ]
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["stubbed"] == 2
         assert rep["tools"].get("bash") == 1
@@ -765,7 +775,7 @@ class TestReportV2:
 # ========================================================== REASONING HEADROOM
 class TestReasoningHeadroom:
     def test_compatta_prima_sui_modelli_che_pensano(self):
-        cfg = CtxCompactConfig(min_ctx_tokens=1, abs_headroom_ratio=0.8,
+        cfg = CtxCompactConfig(enabled=True, min_ctx_tokens=1, abs_headroom_ratio=0.8,
                                reasoning_headroom_ratio=0.7)
         # ctx = 0.75 della finestra: storico NO, reasoning SI'
         assert should_compact(cfg, 7500, 10000)["compact"] is False
@@ -773,7 +783,7 @@ class TestReasoningHeadroom:
                               reasoning=True)["compact"] is True
 
     def test_ratio_a_zero_non_cambia_niente(self):
-        cfg = CtxCompactConfig(min_ctx_tokens=1, abs_headroom_ratio=0.8,
+        cfg = CtxCompactConfig(enabled=True, min_ctx_tokens=1, abs_headroom_ratio=0.8,
                                reasoning_headroom_ratio=0.0,
                                reasoning_reserve_ratio=0.0)  # H3 knob a parte
         assert should_compact(cfg, 7500, 10000, reasoning=True)["compact"] \
@@ -805,7 +815,7 @@ class TestJsonStructure:
         items = [{"id": i, "path": f"/src/file{i}.py", "line": i}
                  for i in range(200)]
         msgs = _conv_json(json.dumps(items))
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["stubbed"] == 1
         body = _body(new[2]["content"])
@@ -823,7 +833,7 @@ class TestJsonStructure:
         d = {f"chiave_{i:04d}": {"valore": i, "nota": "y" * 30}
              for i in range(120)}
         msgs = _conv_json(json.dumps(d))
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["stubbed"] == 1
         parsed = json.loads(_body(new[2]["content"]))
@@ -834,7 +844,7 @@ class TestJsonStructure:
         """Pochi elementi (sotto soglia) ma output lungo: taglio a riga."""
         items = [{"id": i, "blob": "z" * 3000} for i in range(10)]
         msgs = _conv_json(json.dumps(items))
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["stubbed"] == 1
         try:
@@ -846,7 +856,7 @@ class TestJsonStructure:
 
     def test_non_json_invariato_dal_ramo_strutturato(self):
         msgs = _conv_json("x" * 9000)
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["stubbed"] == 1
         assert "..." in new[2]["content"]
@@ -854,7 +864,7 @@ class TestJsonStructure:
     def test_struttura_disattivabile(self):
         items = [{"id": i, "path": f"/src/f{i}.py"} for i in range(200)]
         msgs = _conv_json(json.dumps(items))
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000,
                                json_struct_max_items=0)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["stubbed"] == 1
@@ -867,7 +877,7 @@ class TestJsonStructure:
 
     def test_idempotente_e_deterministico(self):
         items = [{"id": i, "path": f"/src/f{i}.py"} for i in range(200)]
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         a1, _ = compact_tool_outputs(_conv_json(json.dumps(items)), cfg)
         a2, _ = compact_tool_outputs(_conv_json(json.dumps(items)), cfg)
         b, rep = compact_tool_outputs(a1, cfg)
@@ -893,7 +903,7 @@ class TestCiteRetention:
         msgs = self._msgs("rileggi /etc/scrocco/mio_special.cfg e poi "
                           "/etc/scrocco/mio_special.cfg, ancora "
                           "/etc/scrocco/mio_special.cfg")
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["cite_kept"] == 1
         assert rep["stubbed"] == 0
@@ -901,14 +911,14 @@ class TestCiteRetention:
 
     def test_token_generico_non_protegge(self):
         msgs = self._msgs("arguments type function content role id bash")
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["cite_kept"] == 0
         assert rep["stubbed"] == 1
 
     def test_citazione_una_volta_sola_non_basta(self):
         msgs = self._msgs("guarda /etc/scrocco/mio_special.cfg")
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000,
                                cite_min_freq=2)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["cite_kept"] == 0 and rep["stubbed"] == 1
@@ -916,7 +926,7 @@ class TestCiteRetention:
     def test_retention_disattivabile(self):
         msgs = self._msgs("rileggi /etc/scrocco/mio_special.cfg e poi "
                           "/etc/scrocco/mio_special.cfg")
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000,
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000,
                                cite_retention=False)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep.get("cite_kept", 0) == 0
@@ -925,7 +935,7 @@ class TestCiteRetention:
     def test_nome_tool_non_conta_come_citazione(self):
         """Citare il NOME del tool (bash) non trattiene il suo output."""
         msgs = self._msgs("bash bash")
-        cfg = CtxCompactConfig(keep_turns=1, max_tool_output_chars=2000)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, max_tool_output_chars=2000)
         new, rep = compact_tool_outputs(msgs, cfg)
         assert rep["cite_kept"] == 0 and rep["stubbed"] == 1
 
@@ -946,7 +956,7 @@ class TestEstimatorSaturated:
         return lambda ms: 500_000
 
     def test_floor_attivo_comprime(self):
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=500)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=500)
         msgs = self._msgs()
         new, rep = compact_tool_outputs(msgs, cfg, estimator=self._saturato())
         assert rep["saved_chars"] > 100_000
@@ -958,7 +968,7 @@ class TestEstimatorSaturated:
     def test_delta_zero_senza_salvato_non_inventa_risparmio(self):
         """Se non e' cambiato nulla, il risparmio deve restare 0: la regola
         vale solo quando `saved > 0`."""
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=500)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=500)
         small = _conv2(["piccolo"])
         _new, rep = compact_tool_outputs(small, cfg, estimator=self._saturato())
         assert rep["saved_chars"] == 0
@@ -966,14 +976,14 @@ class TestEstimatorSaturated:
         assert rep["changed"] is False
 
     def test_divisore_esplicito_rispettato(self):
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         _new, rep = compact_tool_outputs(self._msgs(), cfg,
                                          estimator=self._saturato(),
                                          divisor=3.0)
         assert rep["saved_tokens_est"] == rep["saved_chars"] // 3
 
     def test_divisore_invalido_usa_4(self):
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=1)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=1)
         _new, rep = compact_tool_outputs(self._msgs(), cfg,
                                          estimator=self._saturato(),
                                          divisor=0)
@@ -983,7 +993,7 @@ class TestEstimatorSaturated:
         """Floor presente ma NON BINDING: l'output deve essere identico a
         quello senza floor, cioe' esattamente quello di prima della fix.
         Questo e' il test di non-regressione del valore."""
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=50)
         msgs = self._msgs()
         n_none, rep_none = compact_tool_outputs(
             msgs, cfg, estimator=lambda ms: sum(len(str(m)) for m in ms) // 4)
@@ -1003,7 +1013,7 @@ class TestEstimatorSaturated:
 
     def test_floor_alto_satura_e_ripara(self):
         """Con floor alto il max() satura: il fallback deve sbloccare."""
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=50)
         msgs = self._msgs()
         _n, rep = compact_tool_outputs(
             msgs, cfg,
@@ -1013,7 +1023,7 @@ class TestEstimatorSaturated:
     def test_comportamento_invariato_senza_saturazione(self):
         """L'estimatore NON saturo deve dare esattamente il valore di prima
         della fix: il ramo di fallback non entra mai."""
-        cfg = CtxCompactConfig(keep_turns=1, min_saved_tokens=50)
+        cfg = CtxCompactConfig(enabled=True, keep_turns=1, min_saved_tokens=50)
         msgs = self._msgs()
         est = lambda ms: sum(len(str(m)) for m in ms) // 100   # noqa: E731
         _new, rep = compact_tool_outputs(msgs, cfg, estimator=est)

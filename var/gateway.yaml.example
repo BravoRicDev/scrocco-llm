@@ -897,7 +897,10 @@ cache_aware:
   # contro le invalidazioni fantasma della cache (histnorm/ctxcompact/chiavi).
   prefix_audit: true
   context_truncation:
-    enabled: true
+    # OFF di default (2026-09-28): degrada le prestazioni, riscrive il
+    # prefisso in uscita e quindi raffredda la prompt-cache upstream.
+    # Accendere solo se serve davvero.
+    enabled: false
     keep_turns: 4
     max_tool_output_chars: 2000
     # dedup (I2): duplicati riconosciuti sul contenuto NORMALIZZATO (date,

@@ -41,8 +41,9 @@ def _cfg_head(**kw):
     """head/tail piccoli cosi' lo stub e' DAVVERO piu' corto del contenuto
     (col default 600+600 un body da 400 char verrebbe "gonfiato" e la guardia
     `len(stub) >= n` lo salterebbe)."""
-    base = dict(head_chars=50, tail_chars=50, max_tool_output_chars=50,
-                min_saved_tokens=0, keep_turns=2, cite_min_freq=3)
+    base = dict(enabled=True, head_chars=50, tail_chars=50,
+                max_tool_output_chars=50, min_saved_tokens=0,
+                keep_turns=2, cite_min_freq=3)
     base.update(kw)
     return CtxCompactConfig(**base)
 
@@ -71,7 +72,7 @@ def test_i1_path_ripetuto_protegge():
 # --------------------------------------------------------------------- I2
 def test_i2_dedup_su_contenuto_normalizzato():
     """Output che differiscono solo per date/ms/hex collassano in un rimando."""
-    cfg = CtxCompactConfig(max_tool_output_chars=50, min_saved_tokens=0,
+    cfg = CtxCompactConfig(enabled=True, max_tool_output_chars=50, min_saved_tokens=0,
                            keep_turns=2)
     b1 = ("ROWS\n2026-09-15 12:00:00\n0xdeadbeef\n" + "x" * 400 + "\n72 ms")
     b2 = ("ROWS\n2026-09-16 13:11:22\n0xfeedface\n" + "x" * 400 + "\n91 ms")
@@ -83,7 +84,7 @@ def test_i2_dedup_su_contenuto_normalizzato():
 
 
 def test_i2_rimando_porta_un_head_del_contenuto():
-    cfg = CtxCompactConfig(max_tool_output_chars=50, min_saved_tokens=0,
+    cfg = CtxCompactConfig(enabled=True, max_tool_output_chars=50, min_saved_tokens=0,
                            keep_turns=2)
     body = "PRIMA RIGA UTILE\n" + ("z" * 400)
     msgs = _msgs(body, body)
@@ -94,7 +95,7 @@ def test_i2_rimando_porta_un_head_del_contenuto():
 
 # --------------------------------------------------------------------- I3
 def test_i3_json_fenced_tagliato_strutturalmente():
-    cfg = CtxCompactConfig(json_struct_max_items=40, json_struct_head=20,
+    cfg = CtxCompactConfig(enabled=True, json_struct_max_items=40, json_struct_head=20,
                            json_struct_tail=5)
     items = [{"n": i, "v": "x" * 20} for i in range(200)]
     fenced = "```json\n" + json.dumps(items) + "\n```"
@@ -109,7 +110,7 @@ def test_i3_json_fenced_tagliato_strutturalmente():
 
 
 def test_i3_dict_con_valore_dominante():
-    cfg = CtxCompactConfig(json_struct_max_items=40, json_struct_head=20,
+    cfg = CtxCompactConfig(enabled=True, json_struct_max_items=40, json_struct_head=20,
                            json_struct_tail=5)
     obj = {"count": 200, "files": [{"i": i} for i in range(200)]}
     out = _json_struct_cut(json.dumps(obj), cfg)
@@ -121,7 +122,7 @@ def test_i3_dict_con_valore_dominante():
 
 
 def test_i3_json_piccolo_non_tagliato():
-    cfg = CtxCompactConfig(json_struct_max_items=40)
+    cfg = CtxCompactConfig(enabled=True, json_struct_max_items=40)
     small = json.dumps([{"i": i} for i in range(3)])
     assert _json_struct_cut(small, cfg) is None
 

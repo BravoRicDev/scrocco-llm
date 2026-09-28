@@ -110,7 +110,7 @@ def test_f23_abort_finalize_closes_truncated_tool_call():
 # ------------------------------------------------------------------- F24
 def test_f24_dedup_identico_per_contenuto_non_per_id():
     from app.ctxcompact import CtxCompactConfig
-    cfg = CtxCompactConfig(max_tool_output_chars=50, min_saved_tokens=0,
+    cfg = CtxCompactConfig(enabled=True, max_tool_output_chars=50, min_saved_tokens=0,
                            keep_turns=2)
     body = "ROWS\n" + ("x" * 400)
 

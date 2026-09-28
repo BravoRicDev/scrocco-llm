@@ -89,7 +89,9 @@ def test_unwrap_noop_on_plain():
 # ------------------------------------------------------- H) ctxcompact hysteresis
 def _warm(**kw):
     """compatta solo per soglia assoluta (cache calda, nessuno switch)."""
-    cfg = CtxCompactConfig(min_ctx_tokens=1000, switch_min_tokens=1000, **kw)
+    kw.setdefault("enabled", True)      # OFF di default dal 2026-09-28
+    cfg = CtxCompactConfig(min_ctx_tokens=1000, switch_min_tokens=1000,
+                           **kw)
     return cfg
 
 

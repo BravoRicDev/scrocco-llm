@@ -815,7 +815,7 @@ template. The ones that matter most:
 | `sniff_max_b64_chars` / `sniff_max_str_chars` / `sniff_max_sse_bytes` | 2048 / 20000 / 1500000 | sniffing safety caps: base64 string, text string, total SSE bytes |
 | `cache_aware.holder_ttl_sec` | 3600 | how long the per-session cache holder is remembered |
 | `cache_aware.skip_probe_when_holder` | true | skip the escalation-pin probe when the pinned winner is the holder |
-| `cache_aware.context_truncation.enabled` | true | stub old tool outputs (overflow / absolute / cache-cold switch triggers) |
+| `cache_aware.context_truncation.enabled` | false | stub old tool outputs (overflow / absolute / cache-cold switch triggers). **Default OFF dal 2026-09-28**: riscrive il prefisso in uscita, quindi degrada le prestazioni (prompt-cache upstream fredda); va acceso esplicitamente |
 | `cache_aware.context_truncation.keep_turns` | 4 | number of most recent user turns kept intact |
 | `cache_aware.context_truncation.head_chars` / `tail_chars` | 600 / 600 | fixed head/tail chars kept (line-boundary cut) inside each old tool output; 0/0 = bare legacy stub |
 | `cache_aware.context_truncation.keep_tail_pct` | 2.0 | dynamic frontier: the message tail is protected while it fits in this % of the deployment window (tightens inside `keep_turns` on huge windows; 0 = off; floor 8 msgs) |
