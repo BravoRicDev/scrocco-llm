@@ -18,6 +18,7 @@ from app import chat_stream
 from app import sse_utils
 from app import stream_verdicts
 import app.state as gw_state
+from conftest import register_fake_deployment, stub_fallback_chain
 
 
 @pytest.fixture()
@@ -69,7 +70,11 @@ def _a_dep(M):
     for _grp, deps in gw_state.config.groups.items():
         if deps:
             return deps[0]
-    raise RuntimeError("nessun deployment nella config globale")
+    # due deployment nello stesso gruppo: serve un'alternativa per la
+    # rotazione (i test "rotates_until_exhausted" richiedono len(seen) >= 2).
+    first = register_fake_deployment()
+    register_fake_deployment(name=first["group"], idx=1)
+    return first
 
 
 def _set(M, first_ms=20000, deadline_ms=90000, incl_reason=False,
@@ -272,6 +277,8 @@ def test_e2e_length_empty_rotates_until_exhausted(M, monkeypatch):
     retryable (semantica decisa: 503 al client solo se non c'e' nulla altro)."""
     _set(M, first_ms=2000, rotate_length=False)
     dep = _a_dep(M)
+    stub_fallback_chain(monkeypatch, gw_state.router,
+                        gw_state.config.groups[dep["group"]][1:])
     seen = []
 
     async def _len_empty(d, payload, **kwargs):
@@ -298,6 +305,8 @@ def test_e2e_reasoning_then_finish_no_answer_rotates_until_exhausted(M, monkeypa
     (la mancanza di risposta non e' un troncamento: nessuna penale)."""
     _set(M, first_ms=2000)
     dep = _a_dep(M)
+    stub_fallback_chain(monkeypatch, gw_state.router,
+                        gw_state.config.groups[dep["group"]][1:])
     gw_state.router._cooldown.pop(dep["unique"], None)
     seen = []
 
@@ -326,6 +335,8 @@ def test_e2e_reasoning_truncated_no_finish_rotates(M, monkeypatch):
     si ROTA verso un altro deployment (+ mark_failed sul primo)."""
     _set(M, first_ms=2000)
     dep = _a_dep(M)
+    stub_fallback_chain(monkeypatch, gw_state.router,
+                        gw_state.config.groups[dep["group"]][1:])
     gw_state.router._cooldown.pop(dep["unique"], None)
     seen = []
 

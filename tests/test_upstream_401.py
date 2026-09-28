@@ -22,6 +22,7 @@ from app.config import GatewayConfig
 from app.policy import Policy
 from app.router import Router
 import app.state as gw_state
+from conftest import register_fake_deployment
 
 # Body del 401 realmente osservato (Bynara).
 BYNARA_401 = ('{"error":{"type":"unauthorized","message":'
@@ -94,7 +95,8 @@ def test_streaming_401_rotates_never_passthrough(monkeypatch):
     import app.main as M
     from fastapi.responses import JSONResponse, StreamingResponse
 
-    dep = next(iter(next(deps for deps in gw_state.config.groups.values() if deps)))
+    deps = next((deps for deps in gw_state.config.groups.values() if deps), None)
+    dep = deps[0] if deps else register_fake_deployment()
     gw_state.router._cooldown.pop(dep["unique"], None)
     first = dep["unique"]
     seen = []

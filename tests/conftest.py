@@ -37,3 +37,41 @@ def _isolate_gateway_state(tmp_path, monkeypatch):
                        ("_thought_sigs_file", "thought_sigs.json")):
         if hasattr(gw_state, attr):
             monkeypatch.setattr(gw_state, attr, tmp_path / name, raising=False)
+
+    groups_keys = set(gw_state.config.groups)
+    yield
+    for k in list(gw_state.config.groups):
+        if k not in groups_keys:
+            gw_state.config.groups.pop(k, None)
+
+
+def register_fake_deployment(name="scrocco-llm-test-fake", idx=0):
+    """Registra un deployment finto in `gw_state.config.groups` per i test
+    che devono attraversare il percorso reale di scelta del deployment.
+
+    Auto-pulente: la fixture autouse `_isolate_gateway_state` rimuove in
+    teardown ogni gruppo comparso durante il test.
+    """
+    dep = {"unique": "%s__fake__%d" % (name, idx), "group": name,
+           "model": "fake-model", "api_key": "sk-fake-%d" % idx,
+           "api_base": "https://fake.test/v1"}
+    gw_state.config.groups.setdefault(name, []).append(dep)
+    return dep
+
+
+def stub_fallback_chain(monkeypatch, router, deps):
+    """Sostituisce `router.fallback_next` con una rotazione lineare su `deps`.
+
+    Il gruppo finto di `register_fake_deployment` non appartiene a nessun
+    profilo/capacita' noto (niente `chains_cap`/`profile_dims`), quindi la
+    catena di routing reale (dims/cap-group) lo tratterebbe come esaurito
+    dopo un solo tentativo. Questo stub isola le regole di verdict/rotazione
+    di `chat_stream` (l'oggetto sotto test) dalla catena di routing reale,
+    che e' gia' coperta altrove (es. test_capability_groups.py).
+    """
+    remaining = list(deps)
+
+    def _next(*_a, **_k):
+        return remaining.pop(0) if remaining else None
+
+    monkeypatch.setattr(router, "fallback_next", _next)
