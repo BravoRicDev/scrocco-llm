@@ -308,6 +308,63 @@ def test_systemone_client_error_no_rotation(client, monkeypatch):
     assert len(fwd.calls) == 1
 
 
+def test_systemone_questions_limit_rotates_with_one_hour_cooldown(client, monkeypatch):
+    """Errore di conteggio 'questions' (bynara: tetto 20) e' deployment-side:
+    ruota E raffredda il deployment per ~1 ora (proprieta' del provider, non
+    guasto: non va riproposto a ogni richiesta lunga, ma non va nemmeno
+    negata la risposta al client)."""
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    dep_a = gw_state.config.deployment_by_unique(
+        next(u for u in gw_state.config.chains_cap["test"]["decision"]
+             if gw_state.config.deployment_by_unique(u)["model"] == "jev-a"))
+    cur_a = dep_a["unique"]
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(
+        -400, "Field 'questions' must contain no more than 20 entries")})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 200, r.text
+    assert r.json()["nx_deployment"] != cur_a
+    assert len(fwd.calls) >= 2
+    assert gw_state.router.is_cooled_down(cur_a) is True
+
+
+def test_systemone_questions_limit_mark_failed_seconds_3600(client, monkeypatch):
+    """Prova diretta: mark_failed riceve seconds=3600 esplicito per l'errore
+    di conteggio (non err.retry_after, che qui e' None: e' un 400 di
+    validazione, non un 429 con Retry-After)."""
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    calls = []
+    orig_mark_failed = gw_state.router.mark_failed
+
+    def _spy_mark_failed(*a, **k):
+        calls.append((a, k))
+        return orig_mark_failed(*a, **k)
+
+    monkeypatch.setattr(gw_state.router, "mark_failed", _spy_mark_failed)
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(
+        -400, "Field 'questions' must contain no more than 20 entries")})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 200, r.text
+    assert len(calls) == 1
+    assert calls[0][1]["seconds"] == 3600
+
+
+def test_systemone_questions_limit_all_fail_503_with_trail(client, monkeypatch):
+    """Se TUTTI i deployment falliscono con l'errore di conteggio, l'esito e'
+    l'esaurimento (503+trail), non il 400 raw del primo tentativo."""
+    c, m = client
+    _pin_initial_pick(monkeypatch, m, "jev-a")
+    msg = "Field 'questions' must contain no more than 20 entries"
+    fwd = _FakeFwd(fail={"jev-a": UpstreamError(-400, msg),
+                         "jev-b": UpstreamError(-400, msg)})
+    r = _post(c, monkeypatch, m, fwd)
+    assert r.status_code == 503
+    err = r.json()["error"]
+    assert err.get("code") == "no_healthy_deployment"
+    assert len(err.get("attempts") or []) == 2
+
+
 def test_systemone_all_fail_503_with_trail(client, monkeypatch):
     c, m = client
     _pin_initial_pick(monkeypatch, m, "jev-a")

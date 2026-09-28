@@ -1332,6 +1332,20 @@ _PROVIDER_TRANSIENT_RE = re.compile(
     re.IGNORECASE)
 PROVIDER_TRANSIENT_COOLDOWN_S = 60
 
+# Rifiuto per conteggio 'questions' oltre il tetto del provider (es. bynara:
+# "Field 'questions' must contain no more than 20 entries"). Il tetto e'
+# una proprieta' del provider, non un guasto: ruota SUBITO (il client ha
+# comunque la risposta) ma raffredda il deployment per un'ora, cosi' non
+# viene riproposto a ogni richiesta con troppe domande. Regex stretta:
+# aggancia solo il limite su questions, mai un 400 generico (es. "invalid
+# state schema" non deve entrare qui).
+_QUESTIONS_LIMIT_RE = re.compile(
+    r"questions['\"]?\s+(?:must (?:contain|have)\s+)?no more than \d+"
+    r"|too many questions"
+    r"|(?:max(?:imum)?|at most|limit(?:ed)? to)\s+\d+\s+questions",
+    re.IGNORECASE)
+QUESTIONS_LIMIT_COOLDOWN_S = 3600
+
 # 403 upstream (permission denied / project banned / key disabled...): la key
 # non torna presto -> cooldown lungo, poi si ruota sul successivo.
 PERMISSION_DENIED_COOLDOWN_S = 1800          # 30min

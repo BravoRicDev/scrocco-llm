@@ -30,9 +30,11 @@ from .chat_helpers import (
     _usage_of,
 )
 from .forwarder import (
+    QUESTIONS_LIMIT_COOLDOWN_S,
     UpstreamError,
     _MODEL_MISSING_RE,
     _PROVIDER_TRANSIENT_RE,
+    _QUESTIONS_LIMIT_RE,
     classify_error_class,
     media_reject_signature,
 )
@@ -379,11 +381,13 @@ async def systemone(request: Request):
             status = err.status if err.status is not None else 0
             # status==0 (timeout/rete/non-JSON) e' transiente del deployment:
             # DEVE ruotare (i path audio lo consegnano invece come 502).
+            questions_limit_hit = bool(_QUESTIONS_LIMIT_RE.search(detail))
             deployment_side = (
                 status >= 0
                 or -status in (401, 402, 403, 404, 405, 415, 422)
                 or _MODEL_MISSING_RE.search(detail)
                 or _PROVIDER_TRANSIENT_RE.search(detail)
+                or questions_limit_hit
             )
             trail.append(
                 {
@@ -413,7 +417,8 @@ async def systemone(request: Request):
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                cooldown_s = QUESTIONS_LIMIT_COOLDOWN_S if questions_limit_hit else err.retry_after
+                gw_state.router.mark_failed(cur, seconds=cooldown_s, status=abs(err.status) if err.status else None)
             metrics.inc("nx_systemone_total", (dep["group"], "retry"))
             nxt = (
                 gw_state.router.fallback_next(
