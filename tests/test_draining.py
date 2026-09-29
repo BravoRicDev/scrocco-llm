@@ -87,3 +87,21 @@ def test_no_dup_when_start_draining_already_present(router):
     router.start_draining(a["unique"], a, inflight=1)
     router.start_draining(a["unique"], a, inflight=1)  # secondo reload
     assert len(router.config.groups[GRP]) == n         # nessun duplicato
+
+
+def test_stop_draining_invalida_la_cache_dei_conteggi(router):
+    """`stop_draining(purge_config=True)` muta config.groups IN PLACE: la cache
+    dei conteggi provider/chiave (usata dal bias in `_reputation_score`) va
+    invalidata a mano, altrimenti resta quella di prima della rimozione."""
+    a = _dep(router, "m-a")
+    pk, ak = router._provider_key(a), router._api_key_str(a)
+    assert router._provider_key_counts(pk, ak) == (1, 1)
+    holder = router.config.__dict__
+    assert holder.get("_provider_key_counts_cache") is not None
+
+    router.start_draining(a["unique"], a, inflight=2)
+    assert router.stop_draining(a["unique"], purge_config=True) is True
+
+    assert "_provider_key_counts_cache" not in holder, "cache non invalidata dal drain"
+    # ricalcolata dopo l'invalidazione: il deployment rimosso non conta piu'
+    assert router._provider_key_counts(pk, ak) == (0, 0)

@@ -91,6 +91,13 @@ class DrainMixin:
             grp = dep.get("group")
             if grp and self.config is not None and grp in self.config.groups:
                 self.config.groups[grp] = [x for x in self.config.groups[grp] if x.get("unique") != unique]
+                # Qui la config viene mutata IN PLACE (non ricostruita, come
+                # invece fa il reload della CSV): i conteggi provider/chiave
+                # messi in cache da `_provider_key_counts` vanno invalidati a
+                # mano, altrimenti restano quelli di prima della rimozione.
+                _holder = getattr(self.config, "__dict__", None)
+                if isinstance(_holder, dict):
+                    _holder.pop("_provider_key_counts_cache", None)
             log.info("[drain] %s: draining completata -> rimosso dalla config", unique)
         else:
             log.warning("[drain] %s: draining ANNULLATA (undrain operatore)", unique)

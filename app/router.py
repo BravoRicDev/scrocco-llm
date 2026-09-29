@@ -707,6 +707,46 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
             return ""
         return dep.get("api_key", "")
 
+    def _provider_key_counts(self, pk: str, ak: str) -> tuple[int, int]:
+        """Conteggio (provider, api_key) su TUTTI i deployment, con cache.
+
+        La normalizzazione del bias provider/chiave in `_reputation_score` ha
+        bisogno di sapere quanti deployment condividono lo stesso provider o la
+        stessa api_key. Contarli a ogni chiamata e' O(N) e quella funzione gira
+        per OGNI deployment della catena (`router.py` ne valuta tutti, vedi
+        `rep_scores = [...]`): il costo complessivo era O(N^2) eseguito SULL'EVENT
+        LOOP, e bloccava il gateway per decine di secondi (misurati 31 s di loop
+        fermo con ~9800 deployment: stack di tutti i thread in var/stall-*.txt).
+
+        Qui il conteggio si fa UNA volta e si aggancia all'oggetto Config: ogni
+        reload costruisce un Config nuovo, quindi la cache si invalida da sola.
+        """
+        cfg = getattr(self, "config", None)
+        groups = getattr(cfg, "groups", None)
+        if not groups:
+            return 0, 0
+        # La cache si legge/scrive dal `__dict__` dell'oggetto, non con getattr:
+        # con un config finto (i test usano MagicMock) getattr restituisce un
+        # figlio-Mock per QUALSIASI nome, la cache sembrerebbe gia' piena e lo
+        # spacchettamento fallirebbe (6 test rossi: ValueError, expected 2 got 0).
+        holder = getattr(cfg, "__dict__", None)
+        holder = holder if isinstance(holder, dict) else None
+        cache = holder.get("_provider_key_counts_cache") if holder is not None else None
+        if not (isinstance(cache, tuple) and len(cache) == 2):
+            prov: dict[str, int] = {}
+            keys: dict[str, int] = {}
+            for lst in groups.values():
+                for d in lst:
+                    p = self._provider_key(d)
+                    prov[p] = prov.get(p, 0) + 1
+                    k = self._api_key_str(d)
+                    keys[k] = keys.get(k, 0) + 1
+            cache = (prov, keys)
+            if holder is not None:
+                holder["_provider_key_counts_cache"] = cache
+        prov, keys = cache
+        return prov.get(pk, 0), keys.get(ak, 0)
+
     def record_attempt(self, unique: str) -> None:
         """Registra un tentativo: incrementa il punteggio del provider e della chiave."""
         if not hasattr(self, "config") or self.config is None:
@@ -1238,15 +1278,15 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         # log(n+1) dove n = deployment count per provider/key
         norm = PROVIDER_BIAS_NORMALIZATION
         if norm != "none" and hasattr(self, "config") and self.config and hasattr(self.config, "groups"):
+            # I conteggi provider/chiave arrivano da una cache (una passata per
+            # Config): ricalcolarli qui per ogni deployment valutato costava
+            # O(N^2) sull'event loop (31 s di blocco misurati con ~9800
+            # deployment: vedi `_provider_key_counts` e var/stall-*.txt).
+            prov_count, key_count = self._provider_key_counts(pk, ak)
             if norm == "log":
-                # Conta deployment per questo provider/model e per api_key
-                prov_count = sum(1 for lst in self.config.groups.values() for d in lst if self._provider_key(d) == pk)
-                key_count = sum(1 for lst in self.config.groups.values() for d in lst if self._api_key_str(d) == ak)
                 prov_score = prov_score / math.log(prov_count + 1) if prov_count > 0 else prov_score
                 key_score = key_score / math.log(key_count + 1) if key_count > 0 else key_score
             elif norm == "sqrt":
-                prov_count = sum(1 for lst in self.config.groups.values() for d in lst if self._provider_key(d) == pk)
-                key_count = sum(1 for lst in self.config.groups.values() for d in lst if self._api_key_str(d) == ak)
                 prov_score = prov_score / math.sqrt(prov_count) if prov_count > 0 else prov_score
                 key_score = key_score / math.sqrt(key_count) if key_count > 0 else key_score
         # "none" = no normalization
