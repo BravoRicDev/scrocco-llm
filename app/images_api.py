@@ -5,6 +5,7 @@ Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
 da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
 il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
+
 import logging
 import time
 
@@ -129,7 +130,9 @@ async def images_generations(request: Request):
     if dep is None:
         dep = gw_state.router.pick_deployment(group_or_explicit, need)
     if dep is None and auth.profile:
-        dep = gw_state.router.fallback_after(auth.profile, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy))
+        dep = gw_state.router.fallback_after(
+            auth.profile, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+        )
     if dep is None:
         return JSONResponse(
             status_code=503,
@@ -144,7 +147,9 @@ async def images_generations(request: Request):
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
 
-    profile = auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
+    profile = (
+        auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
+    )
 
     metrics.inc("nx_images_total", (dep["group"], "attempt"))
     log.info("[images] %s -> %s (prompt=%d chars)", model, dep["unique"], len(str(payload.get("prompt") or "")))
@@ -223,7 +228,12 @@ async def images_generations(request: Request):
                 metrics.inc("nx_images_total", (dep["group"], "retry"))
                 nxt = (
                     gw_state.router.fallback_next(
-                        profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+                        profile,
+                        dep,
+                        need,
+                        scope,
+                        tried=tried,
+                        out_tokens=refill_out_budget(payload, gw_state.router.policy),
                     )
                     if profile
                     else None
@@ -265,7 +275,11 @@ async def images_generations(request: Request):
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
             deployment_side = (
-                status > 0  # retryable (429/5xx/timeout)
+                # >= 0 INCLUDE lo 0 = errore di TRASPORTO (timeout/connect/DNS,
+                # es. container locale spento): SEMPRE del deployment, quindi
+                # cooldown + rotazione. Mai un 5xx al client senza cooldown
+                # (regola utente).
+                status >= 0  # retryable (429/5xx/timeout/trasporto)
                 # chiave senza crediti / chiave rifiutata (401) / progetto
                 # negato / endpoint o schema non gestiti: condizioni del
                 # DEPLOYMENT, non del client -> ruota (la catena porta al
@@ -322,11 +336,18 @@ async def images_generations(request: Request):
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(
+                    cur, seconds=err.retry_after, status=abs(err.status) if err.status else None
+                )
             metrics.inc("nx_images_total", (dep["group"], "retry"))
             nxt = (
                 gw_state.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+                    profile,
+                    dep,
+                    need,
+                    scope,
+                    tried=tried,
+                    out_tokens=refill_out_budget(payload, gw_state.router.policy),
                 )
                 if profile
                 else None
@@ -398,7 +419,8 @@ async def images_edits(request: Request):
                     mraw = b""
                 if mraw:
                     payload["mask"] = await offload.run(
-                        _data_uri, mraw, getattr(mask_up, "content_type", "") or "", size=len(mraw))
+                        _data_uri, mraw, getattr(mask_up, "content_type", "") or "", size=len(mraw)
+                    )
                 else:
                     log.warning("[images] campo 'mask' presente ma vuoto")
         for field in ("image", "image[]", "images"):
@@ -412,8 +434,7 @@ async def images_edits(request: Request):
                 except Exception:
                     raw = b""
                 if raw:
-                    refs.append(await offload.run(
-                        _data_uri, raw, getattr(up, "content_type", "") or "", size=len(raw)))
+                    refs.append(await offload.run(_data_uri, raw, getattr(up, "content_type", "") or "", size=len(raw)))
     else:
         try:
             payload = await request_json(request)
@@ -490,4 +511,3 @@ async def images_files(file_id: str):
             "Content-Disposition": f'inline; filename="image.{ext}"',
         },
     )
-

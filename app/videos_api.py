@@ -7,6 +7,7 @@ il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 `gw_state._videos_jobs` e' il dict dei job (mutato, mai riassegnato) che il
 watcher di pulizia scorre.
 """
+
 import logging
 import asyncio
 import time
@@ -111,7 +112,9 @@ async def videos_generations(request: Request):
             out_tokens=refill_out_budget(payload, gw_state.policy),
         )
     if dep is None and auth.profile and not explicit_req:
-        dep = gw_state.router.fallback_after(auth.profile, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy))
+        dep = gw_state.router.fallback_after(
+            auth.profile, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+        )
     if dep is None:
         return JSONResponse(
             status_code=503,
@@ -126,7 +129,9 @@ async def videos_generations(request: Request):
     _sess = _opencode_session(request) or session_id
     _cip = _client_ip(request)
     _attr = _client_attribution(request)
-    _prof = auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
+    _prof = (
+        auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
+    )
     t_req = time.monotonic()
     last_err: UpstreamError | None = None
     while dep is not None and len(tried) < 32:
@@ -227,7 +232,11 @@ async def videos_generations(request: Request):
                 # gateway), quindi si RUOTA come il 403/404/402. Criterio
                 # gia' presente e testato sul path chat
                 # (tests/test_upstream_401.py).
-                status > 0
+                # >= 0 INCLUDE lo 0 = errore di TRASPORTO (timeout/connect/DNS,
+                # es. container locale spento): SEMPRE del deployment, quindi
+                # cooldown + rotazione. Mai un 5xx al client senza cooldown
+                # (regola utente).
+                status >= 0
                 or -status in (401, 402, 404)
                 or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
                 or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
@@ -249,11 +258,18 @@ async def videos_generations(request: Request):
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(
+                    cur, seconds=err.retry_after, status=abs(err.status) if err.status else None
+                )
             metrics.inc("nx_videos_total", (dep["group"], "retry"))
             nxt = (
                 gw_state.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+                    profile,
+                    dep,
+                    need,
+                    scope,
+                    tried=tried,
+                    out_tokens=refill_out_budget(payload, gw_state.router.policy),
                 )
                 if (
                     profile := auth.profile
@@ -381,4 +397,3 @@ async def videos_content(job_id: str, request: Request, model: str | None = None
         st = abs(e.status) if e.status and e.status > 0 else 502
         return JSONResponse(status_code=st if st >= 400 else 502, content={"error": {"message": e.detail}})
     return Response(content=content, media_type=ctype)
-

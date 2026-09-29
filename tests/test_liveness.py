@@ -40,3 +40,56 @@ def test_healthcheck_command(tmp_path):
     assert subprocess.run(cmd, env=env, cwd=root).returncode == 1
     p.write_text("x")
     assert subprocess.run(cmd, env=env, cwd=root).returncode == 0
+
+
+def test_thread_beater_tiene_fresco_il_file_senza_loop(tmp_path):
+    """Il battito da thread non dipende dall'event loop: un worker occupato
+    (loop fermo) risulta VIVO e non viene piu' SIGKILLato dal supervisore."""
+    p = tmp_path / "hb"
+    t, stop = liveness.start_thread_beater(str(p), interval=0.05)
+    try:
+        deadline = time.time() + 3
+        while not p.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert p.exists()
+        old = time.time() - 300
+        os.utime(p, (old, old))
+        time.sleep(0.2)
+        assert liveness.check(str(p), max_age=5) is True     # il thread ha ribattuto
+    finally:
+        stop.set()
+        t.join(timeout=2)
+
+
+def test_stall_watchdog_scrive_le_stack_quando_il_loop_e_fermo(tmp_path):
+    """Loop fermo -> stack di TUTTI i thread su file (diagnosi, non kill)."""
+    liveness._mark_tick(time.monotonic() - 999)
+    t, stop = liveness.start_stall_watchdog(
+        dump_dir=str(tmp_path), stall_sec=0.05, interval=0.02, cooldown_sec=0.05)
+    try:
+        deadline = time.time() + 3
+        files: list = []
+        while time.time() < deadline:
+            files = list(tmp_path.glob("stall-*.txt"))
+            if files:
+                break
+            time.sleep(0.02)
+        assert files, "nessun dump scritto dal watchdog"
+        text = files[0].read_text(encoding="utf-8")
+        assert "event loop fermo" in text
+        assert "Thread" in text or 'File "' in text
+    finally:
+        stop.set()
+        t.join(timeout=2)
+
+
+def test_stall_watchdog_tace_se_il_loop_gira(tmp_path):
+    liveness._mark_tick()
+    t, stop = liveness.start_stall_watchdog(
+        dump_dir=str(tmp_path), stall_sec=5.0, interval=0.02)
+    try:
+        time.sleep(0.2)
+        assert list(tmp_path.glob("stall-*.txt")) == []
+    finally:
+        stop.set()
+        t.join(timeout=2)

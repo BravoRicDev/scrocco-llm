@@ -5,6 +5,7 @@ Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
 da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
 il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
+
 import logging
 import time
 
@@ -83,7 +84,9 @@ def _audio_route(profile: str | None, model: str, raw_model: str, session_id: st
     if dep is None:
         dep = gw_state.router.pick_deployment(group_or_explicit, need)
     if dep is None and profile:
-        dep = gw_state.router.fallback_after(profile, None, need, out_tokens=refill_out_budget({}, gw_state.router.policy))
+        dep = gw_state.router.fallback_after(
+            profile, None, need, out_tokens=refill_out_budget({}, gw_state.router.policy)
+        )
     if dep is None:
         return (
             None,
@@ -186,7 +189,11 @@ async def audio_speech(request: Request):
                 # gateway), quindi si RUOTA come il 403/404/402. Criterio
                 # gia' presente e testato sul path chat
                 # (tests/test_upstream_401.py).
-                status > 0
+                # status >= 0 INCLUDE lo 0 = errore di TRASPORTO (timeout o
+                # connessione/DNS, es. container locale spento): e' SEMPRE del
+                # deployment, che va in cooldown e si ruota. Mai un 502 al
+                # client senza cooldown (regola utente).
+                status >= 0
                 or -status in (401, 402, 404)
                 or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
                 or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
@@ -208,11 +215,18 @@ async def audio_speech(request: Request):
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(
+                    cur, seconds=err.retry_after, status=abs(err.status) if err.status else None
+                )
             metrics.inc("nx_tts_total", (dep["group"], "retry"))
             nxt = (
                 gw_state.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+                    profile,
+                    dep,
+                    need,
+                    scope,
+                    tried=tried,
+                    out_tokens=refill_out_budget(payload, gw_state.router.policy),
                 )
                 if profile
                 else None
@@ -280,7 +294,9 @@ async def systemone(request: Request):
     session_id = _session_id(request, payload)
     # Ruota anche con master key: il profilo si ricava dal nome richiesto,
     # altrimenti la rotazione resterebbe spenta (bug dei path audio).
-    _prof = auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
+    _prof = (
+        auth.profile or gw_state.config.profile_of_base(model.split("__")[0]) or gw_state.config.profile_of_base(model)
+    )
 
     group_or_explicit = gw_state.router.resolve_group_for_request(model, [], session_id, need, profile=_prof)
     if group_or_explicit is None:
@@ -312,7 +328,10 @@ async def systemone(request: Request):
         dep = _cap_chain_pick(_prof, need)
     if dep is None:
         dep = gw_state.router.initial_pick(
-            _prof, group_or_explicit, None if explicit_req else need, out_tokens=refill_out_budget(payload, gw_state.policy)
+            _prof,
+            group_or_explicit,
+            None if explicit_req else need,
+            out_tokens=refill_out_budget(payload, gw_state.policy),
         )
     if dep is None and _prof and not explicit_req:
         dep = _cap_chain_pick(_prof, need) or gw_state.router.fallback_after(
@@ -434,7 +453,10 @@ async def systemone(request: Request):
             gw_state.router.note_end(cur)
 
     return _exhausted(
-        len(attempts), last_err.detail if last_err else None, trail=trail, retry_at_ms=_retry_at_ms(gw_state.router, trail)
+        len(attempts),
+        last_err.detail if last_err else None,
+        trail=trail,
+        retry_at_ms=_retry_at_ms(gw_state.router, trail),
     )
 
 
@@ -566,7 +588,11 @@ async def _audio_transcribe(request: Request, path: str):
                 # gateway), quindi si RUOTA come il 403/404/402. Criterio
                 # gia' presente e testato sul path chat
                 # (tests/test_upstream_401.py).
-                status > 0
+                # status >= 0 INCLUDE lo 0 = errore di TRASPORTO (timeout o
+                # connessione/DNS, es. container locale spento): e' SEMPRE del
+                # deployment, che va in cooldown e si ruota. Mai un 502 al
+                # client senza cooldown (regola utente).
+                status >= 0
                 or -status in (401, 402, 404)
                 or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
                 or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
@@ -588,7 +614,9 @@ async def _audio_transcribe(request: Request, path: str):
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(
+                    cur, seconds=err.retry_after, status=abs(err.status) if err.status else None
+                )
             metrics.inc("nx_stt_total", (dep["group"], "retry"))
             nxt = (
                 gw_state.router.fallback_next(

@@ -186,6 +186,7 @@ async def lifespan(_app: FastAPI):
     # NON vengono avviati. Senza questo, `_health_task` resterebbe una locale
     # non associata -> UnboundLocalError allo shutdown.
     _watch_task = _health_task = _nightly_task = None
+    _heartbeat_task = _hb_stop = _wd_stop = None
     # Fail-fast in produzione: master key reale + client_keys esplicite.
     # In development (default) e' un no-op.
     gw_state.authn.enforce_startup()
@@ -203,6 +204,13 @@ async def lifespan(_app: FastAPI):
     # Battito di vita per l'HEALTHCHECK Docker (vedi app/liveness.py): prova
     # che il loop gira anche quando e' troppo carico per rispondere a /healthz.
     _heartbeat_task = asyncio.create_task(heartbeat_loop())
+    # Battito anche da un THREAD: il task qui sopra vive sull'event loop e
+    # sotto carico non gira, cosi' il supervisore scambiava "occupato" per
+    # "morto" e SIGKILLava il worker (buttando le richieste in volo). Il
+    # thread tiene fresco il file finche' il processo vive; se il loop e'
+    # davvero fermo lo documenta il watchdog, con le stack di tutti i thread.
+    _, _hb_stop = start_thread_beater()
+    _, _wd_stop = start_stall_watchdog(dump_dir=gw_state.VAR_DIR)
     _cautious = background_cautious_enabled()
     if _cautious:
         log.warning(
@@ -222,6 +230,9 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        for _stop in (_hb_stop, _wd_stop):
+            if _stop is not None:
+                _stop.set()
         for task in (_watch_task, _health_task, _nightly_task, _heartbeat_task):
             if task:
                 task.cancel()
@@ -282,6 +293,7 @@ from .observability import (
 # esterno e copre anche un eventuale 503 di coda.
 from .admission import AdmissionMiddleware  # noqa: E402
 from .liveness import heartbeat_loop  # noqa: E402
+from .liveness import start_stall_watchdog, start_thread_beater  # noqa: E402,F401
 
 app.add_middleware(AdmissionMiddleware, policy_getter=lambda: gw_state.router.policy)
 
@@ -319,8 +331,6 @@ async def generic_error_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500, content={"error": {"message": "errore interno", "type": "server_error", "code": "500"}}
     )
-
-
 
 
 # ------------------------------------------------------- PROBE (warm-refill)

@@ -5,6 +5,7 @@ Lo stato runtime condiviso (router, config, policy, forwarder, ...) si legge
 da `app.state` (`gw_state.<nome>`), popolato da `app/main.py` all'avvio;
 il logger e' quello di main (`nx.main`), cosi' i record restano identici.
 """
+
 import logging
 import base64
 import time
@@ -307,7 +308,9 @@ def _images_pick_dep(
     if dep is None:
         dep = gw_state.router.pick_deployment(group_or_explicit, need)
     if dep is None and prof:
-        dep = gw_state.router.fallback_after(prof, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy))
+        dep = gw_state.router.fallback_after(
+            prof, None, need, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+        )
     if dep is None:
         return (
             None,
@@ -717,7 +720,11 @@ async def _images_chat_loop(
             detail = err.detail or ""
             status = err.status if err.status is not None else 0
             deployment_side = (
-                status > 0
+                # >= 0 INCLUDE lo 0 = errore di TRASPORTO (timeout/connect/DNS,
+                # es. container locale spento): SEMPRE del deployment, quindi
+                # cooldown + rotazione. Mai un 5xx al client senza cooldown
+                # (regola utente).
+                status >= 0
                 # 401: la NOSTRA chiave upstream e' rifiutata -> SEMPRE
                 # deployment-side (il client si e' gia' autenticato verso il
                 # gateway). Sul path chat lo stesso criterio e' gia' presente
@@ -750,11 +757,18 @@ async def _images_chat_loop(
                     cur, reason=str(err.detail or "")[:80], status=abs(err.status) if err.status else None
                 )
             else:
-                gw_state.router.mark_failed(cur, seconds=err.retry_after, status=abs(err.status) if err.status else None)
+                gw_state.router.mark_failed(
+                    cur, seconds=err.retry_after, status=abs(err.status) if err.status else None
+                )
             metrics.inc("nx_images_total", (dep["group"], "retry"))
             nxt = (
                 gw_state.router.fallback_next(
-                    profile, dep, need, scope, tried=tried, out_tokens=refill_out_budget(payload, gw_state.router.policy)
+                    profile,
+                    dep,
+                    need,
+                    scope,
+                    tried=tried,
+                    out_tokens=refill_out_budget(payload, gw_state.router.policy),
                 )
                 if profile
                 else None
@@ -775,4 +789,3 @@ async def _images_chat_loop(
             }
         },
     )
-
