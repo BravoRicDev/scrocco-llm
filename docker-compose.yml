@@ -15,8 +15,17 @@ services:
     build:
       context: .
       args:
-        UID: 1001          # allinea al tuo utente host (id -u) per i permessi di var/
-        GID: 1001
+        # UID/GID del processo DENTRO il container: devono combaciare col
+        # proprietario di var/ (e di var/keys_rotation.csv, che e' 600),
+        # altrimenti il gateway non legge la config e va in crash-loop con
+        # `PermissionError: /app/var/keys_rotation.csv`.
+        # Caso reale (2026-09-29): viemmegi, utente host 1000 vs container
+        # 1001. Per host diversi si sovrascrive SENZA toccare questo file,
+        # creando un .env accanto al compose (gitignored):
+        #   SCROCCO_UID=1000
+        #   SCROCCO_GID=1000
+        UID: ${SCROCCO_UID:-1001}  # id -u utente host (permessi var/)
+        GID: ${SCROCCO_GID:-1001}
     image: scrocco-llm:latest
     container_name: scrocco-llm
     env_file: .env.gateway
