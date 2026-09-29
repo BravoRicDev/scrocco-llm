@@ -77,22 +77,30 @@ def _tabelle(raw: str) -> tuple[list[str], list[list[str]]]:
     return righe[0], righe[1:]
 
 
-def chiavi_locali(head: list[str], rows: list[list[str]]) -> dict[str, list[str]]:
-    """provider -> chiavi locali (dedup, in ordine di comparsa)."""
-    prov_i, prof_i = head.index("provider"), None
-    for i, h in enumerate(head):
+def profilo_locale(head: list[str]) -> str:
+    """Nome della colonna profilo di questo host (es. scrocco-llm-lumon).
+
+    Serve nel payload di create: il gateway scrive la chiave in QUESTA colonna,
+    che e' per-host (`campi obbligatori mancanti: ['profile']` se assente).
+    """
+    for h in head:
         if h.startswith("scrocco-llm-"):
-            prof_i = i
-            break
-    if prof_i is None:
-        raise SystemExit("nessuna colonna profilo nell'header locale")
+            return h
+    raise SystemExit("nessuna colonna profilo nell'header locale")
+
+
+def chiavi_locali(head: list[str], rows: list[list[str]]) -> tuple[dict[str, list[str]], str]:
+    """(provider -> chiavi locali dedup in ordine, nome colonna profilo)."""
+    prov_i = head.index("provider")
+    prof = profilo_locale(head)
+    prof_i = head.index(prof)
     out: dict[str, list[str]] = {}
     for r in rows:
         p = r[prov_i] if prov_i < len(r) else ""
         k = r[prof_i] if prof_i < len(r) else ""
         if p and k and k not in out.setdefault(p, []):
             out[p].append(k)
-    return out
+    return out, prof
 
 
 def esistenti(head: list[str], rows: list[list[str]]) -> set[tuple[str, str, str]]:
@@ -119,8 +127,9 @@ def main() -> None:
 
     locale = _api("/admin/csv", key=key)
     head, rows = _tabelle(locale.get("raw") or "")
-    print("host     : righe=%d colonne=%d" % (len(rows), len(head)))
-    chiavi = chiavi_locali(head, rows)
+    chiavi, profilo = chiavi_locali(head, rows)
+    print("host     : righe=%d colonne=%d profilo=%s" % (len(rows), len(head), profilo))
+    chiavi = chiavi_locali(head, rows)[0]
     print("chiavi locali per provider: %s"
           % {p: len(v) for p, v in sorted(chiavi.items())})
     gia = esistenti(head, rows)
@@ -152,6 +161,7 @@ def main() -> None:
             op.setdefault("modello", modello)
             op.setdefault("provider", provider)
             op.setdefault("endpoint", endpoint)
+            op["profile"] = profilo             # colonna profilo di QUESTO host
             op["key"] = pool[i % len(pool)]          # chiave LOCALE, mai stampata
             piani.setdefault(provider, []).append(op)
 
