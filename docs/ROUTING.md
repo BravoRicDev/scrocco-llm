@@ -88,6 +88,33 @@ Order of attempts (`Router.initial_pick`):
   is started. If the gateway merely *fell back* to `-go`, speculative work stays
   active so it can climb back to the warm free tier.
 
+### Effort-driven amplification — `superscrocco`
+
+The speculative work above has a **per-request multiplier**. A request asking for
+`reasoning_effort: superscrocco` is canonicalised to `high`, so the routing bias,
+the temperature override and the upstream `reasoning_effort` are **identical to a
+normal `high`** — what changes is only the *ceilings* of the speculative work,
+multiplied by `effort_super_ratio` (default `2.0`, valid `1.0`–`8.0`).
+
+- **Scaled**: `warm_refill_max_inflight` (also bounded by the absolute cap
+  `effort_super_max_inflight_abs`, default `16`), `warm_ready_min` together with
+  `warm_ready_min_max`, `stream_hedge_tiers`, the refill `_hh_k`,
+  `slow_race_max_warm`, `warm_refill_wake_max_attempts` and
+  `stream_slow_race_canaries`.
+- **Timers are never scaled.** `hedge_delay_ms` and the `*_slow_race_after_ms`
+  are calibrated on upstream physiology (`TTFT_bucket × frac`): starting a canary
+  before the physiological TTFT is *noise, not speed*.
+- **Not scaled**: booleans (multiplying a flag is meaningless),
+  `admission_max_inflight` (a per-deployment safety cap against upstream 429s)
+  and `warm_borrow_idle_sec` (a time, not a ceiling).
+- `stream_hedge_max_races` has an inverted zero (**0 = unlimited**) and stays `0`.
+
+The amplification is per-request state, and `effort_super_enabled: false` makes a
+super request behave **exactly** like `high`. Observability: the `[effort]` log
+line carries `super=` and `ratio=`, because `effort=high` alone **cannot**
+distinguish a super request from a normal one. Full rationale and the knob table:
+`docs/EFFORT_SUPERSCROCCO_SPEC.md`.
+
 ## The resilient ladder — `_walk_ladder_resilient`
 
 Walked with early escalation and linear cooldown. Steps (8, plus the zen block):
