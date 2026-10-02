@@ -48,6 +48,23 @@ effort resta congelato.
 
 Alias accettati: `superscrocco`, `super-scrocco`, `super`, `xhigh`, `max`, `ultra`.
 
+**I separatori non contano.** `_super_key()` confronta la minuscola *senza* `-`,
+`_` e spazi, quindi `x-high`, `x_high`, `x high` e `X-HIGH` valgono `xhigh`, e
+`super_scrocco` vale `super-scrocco`. La tolleranza è una proprietà della
+**regola**, non una lista di grafie da tenere aggiornata una per una: col
+confronto letterale ogni variante non elencata cadeva su `default` **in
+silenzio** (nessun bias, nessuna iniezione, nessuna spinta, nessun errore).
+
+⚠ Il token super **non va a monte così com'è**: `apply_effort_policy` riscrive al
+livello canonico `high` un `reasoning_effort` che sia un alias super — il client
+vince solo per i livelli canonici (`low`/`medium`/`high`). Un provider che valida
+l'enum rifiuta `xhigh`/`x-high`/`superscrocco`, e `protocols._reasoning_from_body`
+scarta tutto ciò che non è `low|medium|high`: il token grezzo spegneva anche il
+budget di thinking sui protocolli nativi (Anthropic/Gemini/Responses).
+
+Gli alias accettati sono pubblicati in `/v1/models` via `advertised_efforts()`,
+così un client li scopre senza indovinare la grafia.
+
 ### 4.1 Il token deve sopravvivere all'estrazione
 
 ⚠ `effort_from_request()` canonicalizza già a `"high"`, quindi `set_effort()`
@@ -73,6 +90,7 @@ Stato (`ContextVar`): aggiungere `"super": bool` e `"ratio": float`.
 
 ```python
 _SUPER = ("superscrocco", "super-scrocco", "super", "xhigh", "max", "ultra")
+_SUPER_KEYS = frozenset(...)   # confronto senza separatori: x-high == xhigh
 _SUPER_RATIO_DEFAULT = 2.0
 _RATIO_MAX = 8.0
 ```

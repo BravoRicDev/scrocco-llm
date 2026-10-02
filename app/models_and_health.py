@@ -16,6 +16,7 @@ from starlette.requests import Request
 from . import capmeta, cluster
 from . import state as gw_state
 from . import metrics
+from .effort import advertised_efforts
 from .http_responses import unauthorized as _unauthorized
 from .observability import render_prometheus
 
@@ -217,7 +218,7 @@ def _model_entry(name: str, *, rich: bool = True) -> dict:
         "object": "model",
         "created": int(time.time()),
         "owned_by": gw_state.policy.service_name,
-        "reasoning_effort": ["default", "low", "medium", "high"],
+        "reasoning_effort": advertised_efforts(),
         "reasoning_effort_default": "default",
     }
     caps, deps = _caps_and_deps(name)

@@ -80,6 +80,7 @@ from .effort import (
     get_speculation_ratio,
     get_temperature_config,
     is_super,
+    is_super_effort,
     max_inflight_effective,
     slow_race_max_warm_effective,
 )
@@ -157,8 +158,11 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
 
     - effort=default: nessuna modifica.
     - deployment effort_capable (e provider compatibile): garantisce
-      `reasoning_effort` (il valore del client vince sempre; se assente si usa
-      il livello richiesto).
+      `reasoning_effort`. Il valore del client vince se e' un livello canonico
+      (`low`/`medium`/`high`); se invece e' un alias di `superscrocco`
+      (`xhigh`, `x-high`, `superscrocco`, ...) viene riscritto al livello
+      canonico `high`, perche' il token grezzo non e' un valore che il
+      provider conosce. Se assente si usa il livello richiesto.
     - deployment NON capace o provider incompatibile: rimuove
       `reasoning_effort` (evita un 400 upstream).
     - override temperatura: applicato SOLO se la policy lo abilita e il client
@@ -179,7 +183,17 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
     capable = bool(dep.get("effort_capable"))
     incompatible = any(h in host for h in EFFORT_INCOMPATIBLE_HOSTS)
     if capable and not incompatible:
-        body.setdefault("reasoning_effort", effort)
+        cur = body.get("reasoning_effort")
+        if cur is None or is_super_effort(cur):
+            # `setdefault` da solo lascerebbe passare il token GREZZO del client
+            # (`xhigh`, `x-high`, `superscrocco`): un valore che il provider non
+            # conosce (400) e che `protocols._reasoning_from_body` scarta,
+            # spegnendo il budget di thinking sui protocolli nativi
+            # (Anthropic/Gemini/Responses). `superscrocco` NON e' un quinto
+            # livello: a monte va il livello canonico, `high`.
+            body["reasoning_effort"] = effort
+        # altrimenti il valore del client (`low`/`medium`/`high`) vince: e' un
+        # valore che ogni provider capisce, riscriverlo non aggiungerebbe nulla.
     else:
         body.pop("reasoning_effort", None)
     enabled, overrides = get_temperature_config()

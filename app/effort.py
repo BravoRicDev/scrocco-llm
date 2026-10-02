@@ -34,11 +34,49 @@ _VALID = (DEFAULT, "low", "medium", "high")
 
 # Alias che NON sono un quinto livello: `superscrocco` e' `high` + ratio di
 # spinta. Canonicalizzati a "high" da `normalize_effort`, una volta sola.
+# Questa e' la lista delle grafie CANONICHE; il confronto vero passa da
+# `_super_key`, che ignora i separatori (vedi sotto).
 _SUPER = ("superscrocco", "super-scrocco", "super", "xhigh", "max", "ultra")
+
+# Separatori ignorati nel confronto: `x-high`, `x_high` e `x high` sono la
+# STESSA cosa di `xhigh`.
+_SEP = str.maketrans("", "", "-_ \t")
+_SUPER_KEYS = frozenset(str(a).translate(_SEP).strip().lower() for a in _SUPER)
+
+# Grafie aggiuntive PUBBLICATE in `/v1/models` solo per rendere VISIBILE la
+# regola dei separatori: `x-high` e' la stessa cosa di `xhigh`, e un client che
+# legge la capability non deve scoprirlo provando.
+_ADVERTISED_EXTRA = ("x-high",)
 
 SUPER_RATIO_DEFAULT = 2.0
 RATIO_MIN = 1.0
 RATIO_MAX = 8.0
+
+
+def _super_key(raw: Any) -> str:
+    """Chiave di confronto di un token effort: minuscola, SENZA separatori.
+
+    Perche' non un confronto letterale: i client scrivono la grafia che
+    vogliono (`xhigh`, `x-high`, `x_high`, `X-HIGH`) e con `in _SUPER` ogni
+    variante non elencata cadeva in silenzio su `default` — nessun bias,
+    nessuna iniezione, nessuna spinta, e nessun errore che lo dicesse. Cosi'
+    la tolleranza e' una proprieta' della REGOLA, non una lista da tenere
+    aggiornata una grafia per volta.
+    """
+    return str(raw or "").translate(_SEP).strip().lower()
+
+
+def advertised_efforts() -> list[str]:
+    """Valori `reasoning_effort` accettati, per la capability di `/v1/models`.
+
+    I 4 livelli canonici PIU' gli alias di `superscrocco`: un client che legge
+    la capability deve poter scoprire `xhigh`/`x-high`/`superscrocco` senza
+    indovinare la grafia. Una sola fonte di verita' (`_SUPER`) piu' una grafia
+    con separatore pubblicata apposta per rendere visibile la regola, cosi' la
+    lista pubblicata non puo' divergere da quella accettata.
+    """
+    return [DEFAULT, "low", "medium", "high", *_SUPER, *_ADVERTISED_EXTRA]
+
 
 # Chiave di default neutra: nessun deployment e' penalizzato, nessuna iniezione,
 # nessuna spinta extra (ratio 1.0).
@@ -54,7 +92,7 @@ def is_super_effort(raw: Any) -> bool:
     Da usare sul token non canonicalizzato: dopo `normalize_effort` l'origine
     super e' irriconoscibile (il livello canonico e' `high`).
     """
-    return str(raw or "").strip().lower() in _SUPER
+    return _super_key(raw) in _SUPER_KEYS
 
 
 def normalize_effort(raw: Any) -> str:
@@ -62,9 +100,12 @@ def normalize_effort(raw: Any) -> str:
 
     `superscrocco` (e i suoi alias) diventa `high`: il COMPORTAMENTO e' identico,
     la differenza sta solo nel ratio di spinta (`get_speculation_ratio`).
+
+    Il confronto ignora i separatori (`_super_key`), quindi `x-high` vale
+    `xhigh` e `super_scrocco` vale `super-scrocco`.
     """
-    m = str(raw or "").strip().lower()
-    if m in _SUPER:
+    m = _super_key(raw)
+    if m in _SUPER_KEYS:
         return "high"
     if m in ("low", "medium", "high"):
         return m
@@ -102,7 +143,10 @@ def effort_token_from_request(payload: Any, headers: Any = None) -> str:
     sopravvive; ogni altro valore resta normalizzato come sempre.
     """
     m = _raw_effort(payload, headers)
-    return m if m in _SUPER else normalize_effort(m)
+    # `is_super_effort` (NON `m in _SUPER`): il confronto letterale lascerebbe
+    # fuori le grafie con separatori (`x-high`), che verrebbero canonicalizzate
+    # a "high" PRIMA di `set_effort` e perderebbero il ratio in silenzio.
+    return m if is_super_effort(m) else normalize_effort(m)
 
 
 def set_effort(

@@ -23,6 +23,7 @@ from app.effort import (
     effort_token_from_request,
     is_super,
     is_super_effort,
+    advertised_efforts,
     get_speculation_ratio,
     scale_speculation,
     spinta,
@@ -102,6 +103,62 @@ def test_effort_token_from_request_preserves_super():
     assert effort_token_from_request({"reasoning_effort": "minimal"}) == "low"
     assert effort_token_from_request({"reasoning_effort": "boh"}) == "default"
     assert effort_token_from_request({}, {}) == "default"
+
+
+def test_super_alias_spelling_is_irrelevant():
+    """Il separatore non conta: la tolleranza e' una REGOLA, non una lista.
+
+    `x-high`, `x_high`, `x high` e `X-HIGH` sono la stessa cosa di `xhigh`.
+    Prima cadevano tutte su `default` in silenzio: nessun bias, nessuna
+    iniezione, nessuna spinta, e nessun errore che lo dicesse.
+    """
+    for alias in ("xhigh", "x-high", "x_high", "x high", "X-HIGH", "X_High",
+                  "superscrocco", "super-scrocco", "super_scrocco", "SuperScrocco",
+                  "super scrocco", "super", "max", "ultra"):
+        assert is_super_effort(alias) is True, alias
+        assert normalize_effort(alias) == "high", alias
+    # la grafia con separatori non deve perdersi all'estrazione, o il ratio
+    # andrebbe perso in silenzio PRIMA di `set_effort`
+    assert effort_token_from_request({"reasoning_effort": "x-high"}) == "x-high"
+    assert effort_token_from_request({}, {"x-effort": "X_HIGH"}) == "x_high"
+
+
+def test_x_high_is_superscrocco_end_to_end():
+    """`x-high` chiesto dal client == superscrocco: super=True e ratio 2.0."""
+    with effort_ctx(effort_token_from_request({"reasoning_effort": "x-high"})):
+        assert get_effort() == "high"
+        assert is_super() is True
+        assert get_speculation_ratio() == 2.0
+
+
+def test_apply_effort_policy_sends_canonical_effort_upstream():
+    """Il token GREZZO super non va a monte: il provider riceve `high`.
+
+    Un provider che valida l'enum rifiuta `xhigh`/`x-high`/`superscrocco`, e
+    `protocols._reasoning_from_body` scarta tutto cio' che non e'
+    low|medium|high: il token grezzo spegneva anche il budget di thinking sui
+    protocolli nativi (Anthropic/Gemini/Responses).
+    """
+    dep = {"unique": "u", "api_base": "https://api.example.com/v1", "effort_capable": True}
+    with effort_ctx("superscrocco"):
+        for raw in ("x-high", "superscrocco", "xhigh"):
+            body = apply_effort_policy({"reasoning_effort": raw}, dict(dep))
+            assert body["reasoning_effort"] == "high", raw
+        # un livello canonico chiesto dal client resta SUO
+        body = apply_effort_policy({"reasoning_effort": "low"}, dict(dep))
+        assert body["reasoning_effort"] == "low"
+        # assente -> si usa il livello richiesto (canonico)
+        assert apply_effort_policy({}, dict(dep))["reasoning_effort"] == "high"
+
+
+def test_advertised_efforts_are_accepted():
+    """La capability pubblicata non puo' divergere da cio' che accettiamo."""
+    adv = advertised_efforts()
+    assert adv[:4] == ["default", "low", "medium", "high"]
+    assert "xhigh" in adv and "x-high" in adv
+    assert adv[4:], "gli alias super devono essere pubblicati"
+    for alias in adv[4:]:
+        assert is_super_effort(alias) is True, alias
 
 
 def test_super_is_high_for_consumers_but_ratio_is_two():
