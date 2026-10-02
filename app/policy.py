@@ -914,6 +914,20 @@ class Policy:
     effort_temperature_overrides: dict[str, float] = field(
         default_factory=lambda: {"low": 1.0, "medium": 0.7, "high": 0.2})
     effort_intel_weight: float = 10.0
+    # SUPERSROCCO: non e' un quinto livello di effort, ma `high` PIU' un
+    # moltiplicatore della SPINTA speculativa (tetti di warm pool, canary in
+    # volo, gare) della sola richiesta che lo chiede. Vedi app/effort.py.
+    # `False` lo fa tornare identico a `high` (ratio 1.0).
+    effort_super_enabled: bool = True
+    # Ratio applicato ai TETTI (mai ai timer: sono calibrati sul TTFT
+    # fisiologico dell'upstream). Valido 1.0..8.0 — sotto 1.0 sarebbe un
+    # footgun, rallenterebbe la spinta invece di accelerarla.
+    effort_super_ratio: float = 2.0
+    # Tetto assoluto sui conteggi INFLIGHT: il ratio non lo supera mai.
+    # Esiste perche' la spinta si paga in 429 (`warm_refill_max_inflight`
+    # esiste proprio per non riaccendere a ogni turno una tempesta di
+    # chiamate che poi prende 429).
+    effort_super_max_inflight_abs: int = 16
 
 # DYNAMIC SCORING: feature osservate per-deployment (latency p95, error rate, throughput)
     # per aggiustare il punteggio di reputazione oltre l'EMA di latenza base.
@@ -2373,6 +2387,22 @@ def _parse_selection_and_scoring(p: Policy, raw: dict[str, Any]) -> None:
                     f"effort_temperature_overrides.{lk}: numero >= 0 richiesto")
             clean[lk] = float(v)
         p.effort_temperature_overrides = clean
+    _set_bool(p, raw, "effort_super_enabled", skip_none=True)
+    _esr = raw.get("effort_super_ratio")
+    if _esr is not None:
+        if isinstance(_esr, bool) or not isinstance(_esr, (int, float)):
+            raise ValueError("effort_super_ratio deve essere un numero")
+        if not (1.0 <= float(_esr) <= 8.0):
+            raise ValueError(
+                "effort_super_ratio deve essere compreso fra 1.0 e 8.0 "
+                "(sotto 1.0 rallenterebbe la spinta invece di accelerarla)")
+        p.effort_super_ratio = float(_esr)
+    _esa = raw.get("effort_super_max_inflight_abs")
+    if _esa is not None:
+        if isinstance(_esa, bool) or not isinstance(_esa, int) or _esa < 1:
+            raise ValueError(
+                "effort_super_max_inflight_abs deve essere un intero >= 1")
+        p.effort_super_max_inflight_abs = int(_esa)
 
     # --- DYNAMIC SCORING ---
     _ds = raw.get("dynamic_scoring")

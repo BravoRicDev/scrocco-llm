@@ -7,21 +7,40 @@ Copre:
 - parsing delle colonne CSV `effort_capable` e `intelligence_score`;
 - bias di intelligence nel pick del router.
 """
+
 import contextlib
 from datetime import date
 
+import pytest
+
 from app.config import _classify
-from app.effort import (normalize_effort, effort_from_request, set_effort,
-                        reset_effort, get_effort)
+from app.effort import (
+    normalize_effort,
+    effort_from_request,
+    set_effort,
+    reset_effort,
+    get_effort,
+    effort_token_from_request,
+    is_super,
+    is_super_effort,
+    get_speculation_ratio,
+    scale_speculation,
+    spinta,
+)
 from app.forwarder import apply_effort_policy
 from app.policy import Policy
 from app.router import Router, EFFORT_CAPABLE_BONUS
 
 
 @contextlib.contextmanager
-def effort_ctx(effort, *, temp_enabled=False, temp_overrides=None):
-    tok = set_effort(effort, temp_enabled=temp_enabled,
-                     temp_overrides=temp_overrides)
+def effort_ctx(effort, *, temp_enabled=False, temp_overrides=None, super_ratio=2.0, super_enabled=True):
+    tok = set_effort(
+        effort,
+        temp_enabled=temp_enabled,
+        temp_overrides=temp_overrides,
+        super_ratio=super_ratio,
+        super_enabled=super_enabled,
+    )
     try:
         yield
     finally:
@@ -29,6 +48,7 @@ def effort_ctx(effort, *, temp_enabled=False, temp_overrides=None):
 
 
 # --------------------------------------------------------------- normalizza
+
 
 def test_normalize_effort():
     assert normalize_effort("high") == "high"
@@ -44,25 +64,143 @@ def test_effort_from_request_body_and_header():
     assert effort_from_request({"reasoning_effort": "high"}) == "high"
     assert effort_from_request({"effort": "low"}) == "low"
     # il body vince sull'header
-    assert effort_from_request({"reasoning_effort": "medium"},
-                               {"x-effort": "high"}) == "medium"
+    assert effort_from_request({"reasoning_effort": "medium"}, {"x-effort": "high"}) == "medium"
     # header come fallback
     assert effort_from_request({}, {"x-effort": "low"}) == "low"
     assert effort_from_request({}, {}) == "default"
 
 
+# ------------------------------------------------ superscrocco (spinta x ratio)
+
+
+def test_normalize_effort_superscrocco_is_high():
+    """`superscrocco` NON e' un quinto livello: e' `high`."""
+    assert normalize_effort("superscrocco") == "high"
+    assert normalize_effort("SuperScrocco") == "high"
+    for alias in ("super-scrocco", "super", "xhigh", "max", "ultra"):
+        assert normalize_effort(alias) == "high"
+    # il riconoscimento super vale solo sul valore GREZZO
+    assert is_super_effort("superscrocco") is True
+    assert is_super_effort("XHIGH") is True
+    assert is_super_effort("high") is False
+    assert is_super_effort("boh") is False
+    assert is_super_effort(None) is False
+
+
+def test_effort_from_request_superscrocco_still_high():
+    """`effort_from_request` resta invariata: canonicalizza a `high`."""
+    assert effort_from_request({"reasoning_effort": "superscrocco"}) == "high"
+    assert effort_from_request({}, {"x-effort": "superscrocco"}) == "high"
+
+
+def test_effort_token_from_request_preserves_super():
+    """Il token super deve sopravvivere all'estrazione, o il ratio si perde."""
+    assert effort_token_from_request({"reasoning_effort": "superscrocco"}) == "superscrocco"
+    assert effort_token_from_request({}, {"x-effort": "XHIGH"}) == "xhigh"
+    # ogni altro valore resta normalizzato come prima
+    assert effort_token_from_request({"effort": "low"}) == "low"
+    assert effort_token_from_request({"reasoning_effort": "minimal"}) == "low"
+    assert effort_token_from_request({"reasoning_effort": "boh"}) == "default"
+    assert effort_token_from_request({}, {}) == "default"
+
+
+def test_super_is_high_for_consumers_but_ratio_is_two():
+    """Le due dimensioni: livello canonico = high, ratio di spinta = 2.0."""
+    with effort_ctx("superscrocco"):
+        assert get_effort() == "high"  # router/forwarder/protocoli: identico
+        assert is_super() is True
+        assert get_speculation_ratio() == 2.0
+
+
+def test_high_is_not_super_and_ratio_is_one():
+    with effort_ctx("high"):
+        assert get_effort() == "high"
+        assert is_super() is False
+        assert get_speculation_ratio() == 1.0
+
+
+def test_super_disabled_falls_back_to_high_ratio_one():
+    """`effort_super_enabled=False` -> comportamento IDENTICO a `high`."""
+    with effort_ctx("superscrocco", super_enabled=False):
+        assert get_effort() == "high"
+        assert is_super() is False
+        assert get_speculation_ratio() == 1.0
+
+
+def test_super_ratio_is_parametrable_and_clamped():
+    with effort_ctx("superscrocco", super_ratio=3.0):
+        assert get_speculation_ratio() == 3.0
+    # sotto 1.0 non ha senso (rallenterebbe la spinta) -> clamp a 1.0
+    with effort_ctx("superscrocco", super_ratio=0.5):
+        assert get_speculation_ratio() == 1.0
+    # sopra il massimo -> clamp
+    with effort_ctx("superscrocco", super_ratio=99.0):
+        assert get_speculation_ratio() == 8.0
+    # valore non numerico -> default
+    with effort_ctx("superscrocco", super_ratio="boh"):  # type: ignore[arg-type]
+        assert get_speculation_ratio() == 2.0
+
+
+def test_scale_speculation_rules():
+    with effort_ctx("superscrocco"):
+        assert scale_speculation(6) == 12
+        assert scale_speculation(3) == 6
+        assert scale_speculation(1) == 2
+        assert scale_speculation(2) == 4
+        # 0 = feature SPENTA: il ratio non la resuscita
+        assert scale_speculation(0) == 0
+        # None resta None
+        assert scale_speculation(None) is None
+        # un flag non e' una manopola di spinta
+        with pytest.raises(TypeError):
+            scale_speculation(True)
+        # clamp superiore e inferiore
+        assert scale_speculation(6, hi=10) == 10
+        assert scale_speculation(6, lo=20) == 20
+        # floor_one: un valore > 0 non scende mai sotto 1
+        assert scale_speculation(1, floor_one=True) == 2
+    with effort_ctx("high"):
+        # nessun ratio: il valore passa intatto
+        assert scale_speculation(6) == 6
+        assert scale_speculation(0) == 0
+
+
+def test_scale_speculation_respects_absolute_cap():
+    """Il tetto assoluto si applica via `hi`: il ratio non lo supera mai."""
+    with effort_ctx("superscrocco", super_ratio=4.0):
+        assert scale_speculation(6) == 24
+        assert scale_speculation(6, hi=16) == 16  # tetto assoluto
+        assert scale_speculation(2, hi=16) == 8
+
+
+def test_spinta_reads_policy_and_scales():
+    """`spinta` unisce policy e ratio: e' il punto unico di applicazione."""
+    pol = Policy()
+    pol.warm_refill_max_inflight = 6
+    with effort_ctx("high"):
+        assert spinta(pol, "warm_refill_max_inflight", 6) == 6
+    with effort_ctx("superscrocco"):
+        assert spinta(pol, "warm_refill_max_inflight", 6) == 12
+    # manopola assente -> si usa il default, scalato
+    with effort_ctx("superscrocco"):
+        assert spinta(pol, "manopola_inesistente", 3) == 6
+    # 0 = spenta, resta 0 anche sotto superscrocco
+    pol.warm_refill_max_inflight = 0
+    with effort_ctx("superscrocco"):
+        assert spinta(pol, "warm_refill_max_inflight", 6) == 0
+
+
 # ------------------------------------------------------- apply_effort_policy
 
+
 def _dep(*, capable=False, base="https://openrouter.ai/api/v1"):
-    return {"api_base": base, "effort_capable": capable, "model": "m",
-            "provider": "p", "api_key": "k"}
+    return {"api_base": base, "effort_capable": capable, "model": "m", "provider": "p", "api_key": "k"}
 
 
 def test_default_effort_leaves_body_untouched():
     with effort_ctx("default"):
         body = {"model": "m", "messages": []}
-        assert apply_effort_policy(body, _dep(capable=True)) == {
-            "model": "m", "messages": []}
+        assert apply_effort_policy(body, _dep(capable=True)) == {"model": "m", "messages": []}
 
 
 def test_effort_capable_gets_reasoning_effort():
@@ -82,8 +220,7 @@ def test_non_capable_strips_reasoning_effort():
 def test_groq_strips_even_if_capable():
     with effort_ctx("high"):
         body = {"model": "m"}
-        apply_effort_policy(
-            body, _dep(capable=True, base="https://api.groq.com/openai/v1"))
+        apply_effort_policy(body, _dep(capable=True, base="https://api.groq.com/openai/v1"))
         assert "reasoning_effort" not in body
 
 
@@ -95,30 +232,28 @@ def test_client_reasoning_effort_wins():
 
 
 def test_temperature_override_applied_when_enabled_and_absent():
-    with effort_ctx("high", temp_enabled=True,
-                    temp_overrides={"high": 0.2}):
+    with effort_ctx("high", temp_enabled=True, temp_overrides={"high": 0.2}):
         body = {"model": "m"}
         apply_effort_policy(body, _dep(capable=False))
         assert body["temperature"] == 0.2
 
 
 def test_temperature_override_disabled():
-    with effort_ctx("high", temp_enabled=False,
-                    temp_overrides={"high": 0.2}):
+    with effort_ctx("high", temp_enabled=False, temp_overrides={"high": 0.2}):
         body = {"model": "m"}
         apply_effort_policy(body, _dep(capable=False))
         assert "temperature" not in body
 
 
 def test_client_temperature_wins_over_override():
-    with effort_ctx("high", temp_enabled=True,
-                    temp_overrides={"high": 0.2}):
+    with effort_ctx("high", temp_enabled=True, temp_overrides={"high": 0.2}):
         body = {"model": "m", "temperature": 0.9}
         apply_effort_policy(body, _dep(capable=False))
         assert body["temperature"] == 0.9
 
 
 # ------------------------------------------------------------- config parse
+
 
 def _row(**over):
     row = {"modello": "m", "provider": "p", "endpoint": "e", "data": "free"}
@@ -127,8 +262,7 @@ def _row(**over):
 
 
 def test_classify_reads_effort_columns():
-    meta = _classify(_row(effort_capable="true", intelligence_score="8"),
-                     date.today())
+    meta = _classify(_row(effort_capable="true", intelligence_score="8"), date.today())
     assert meta["effort_capable"] is True
     assert meta["intelligence"] == 8
 
@@ -146,13 +280,13 @@ def test_classify_clamps_intelligence():
 
 # --------------------------------------------------------------- router bias
 
+
 def _router():
     r = Router.__new__(Router)
     r.policy = Policy()
-    r.config = object()          # non-None: il bias deve essere calcolato
+    r.config = object()  # type: ignore[assignment]  # non-None: il bias deve essere calcolato
     # base score non-zero per test moltiplicativo (score=0*moltiplicatore=0 sempre)
-    r._base_scores = {"s2": 100.0, "s5": 100.0, "s8": 100.0,
-                      "s1": 100.0, "s10": 100.0}
+    r._base_scores = {"s2": 100.0, "s5": 100.0, "s8": 100.0, "s1": 100.0, "s10": 100.0}
     r._provider_scores = {}
     r._key_scores = {}
     r._avg_latencies = {}
@@ -164,9 +298,14 @@ def _score(r, dep):
 
 
 def _d(unique, intel, capable=False):
-    return {"unique": unique, "intelligence": intel,
-            "effort_capable": capable, "api_base": "https://x/v1",
-            "model": "m", "api_key": "k"}
+    return {
+        "unique": unique,
+        "intelligence": intel,
+        "effort_capable": capable,
+        "api_base": "https://x/v1",
+        "model": "m",
+        "api_key": "k",
+    }
 
 
 def test_default_effort_no_intelligence_bias():

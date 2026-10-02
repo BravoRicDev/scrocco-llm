@@ -14,6 +14,7 @@ import time
 from . import metrics, repairlog
 from . import state as gw_state
 from .csvlearn import learn_no_thinking, learn_strip_reasoning, learn_thinking_replay
+from .effort import max_inflight_effective, slow_race_max_warm_effective, spinta
 from .forwarder import maybe_account_quota_cooldown, reasoning_err_kind
 from .probes import _probe_late_open, _spawn_probe
 from .router import inject_identity
@@ -269,7 +270,9 @@ async def _hedge_peek(
     # in-volo contano tutti: refill, legacy, A/loser staccati come probe).
     if refill and cands:
         try:
-            _mx = int(getattr(gw_state.router.policy, "warm_refill_max_inflight", 6) or 6)
+            # Lettore UNICO: scalato dal ratio superscrocco e tappato dal tetto
+            # assoluto. Stessa manopola di chat_stream/forwarder.
+            _mx = max_inflight_effective(gw_state.router.policy)
         except Exception:
             _mx = 6
         try:
@@ -488,10 +491,22 @@ async def _hedge_peek(
                 log.info(
                     "[slow-race] %s: warm gia' pieno (>=%s), niente canario",
                     dep.get("unique"),
-                    getattr(gw_state.router.policy, "slow_race_max_warm", 6),
+                    slow_race_max_warm_effective(gw_state.router.policy),
                 )
             else:
                 metrics.inc("nx_slow_race_total", ("open",))
+                # N canari (default 1). `stream_slow_race_canaries` era MORTA:
+                # il commento in policy.py prometteva N canari, il codice ne
+                # apriva sempre UNO (`k=1` cablato e poi `_lc[0]`). Questa e'
+                # la gara STREAM (`_hedge_peek` e' chiamata solo da
+                # chat_stream._run_peek), quindi e' qui che la manopola vive.
+                # Il canario lento NON concorre al tetto per-sessione, quindi
+                # N non e' limitato da `warm_refill_max_inflight`.
+                # `hedge_canaries` ritorna fino a k candidati NUOVI (mai A,
+                # mai i gia' provati); il filtro sotto ripulisce comunque.
+                _ns_k = max(1, spinta(
+                    gw_state.router.policy, "stream_slow_race_canaries",
+                    1, lo=1))
                 _lc: list[dict] = []
                 with contextlib.suppress(Exception):
                     _lc = gw_state.router.hedge_canaries(
@@ -501,7 +516,7 @@ async def _hedge_peek(
                         ctx,
                         tried_set,
                         requested_group,
-                        k=1,
+                        k=_ns_k,
                         exclude=None,
                         fresh_only=False,
                         out_tokens=out_tokens,
@@ -516,15 +531,16 @@ async def _hedge_peek(
                     metrics.inc("nx_slow_race_total", ("no_canary",))
                     log.info("[slow-race] %s: nessun canario libero (chiavi/uniq in gara escluse)", dep.get("unique"))
                 else:
-                    # Apertura NON bloccante anche qui: il canario lento entra
-                    # in gara appena arrivano le headers (task in coda).
-                    _t2 = asyncio.ensure_future(_open_canary(_lc[0]))
-                    _tasks[_t2] = None
-                    running.add(_t2)
-                    if raced is not None:
-                        raced.setdefault("uniq", set()).add(_lc[0]["unique"])
-                        raced.setdefault("keys", set()).add(str(_lc[0].get("api_key") or ""))
-                    log.info("[hedge] slow-race: %s in gara con A (fuori dal tetto)", _lc[0]["unique"])
+                    # Apertura NON bloccante anche qui: ogni canario lento
+                    # entra in gara appena arrivano le headers (task in coda).
+                    for _cc2 in _lc:
+                        _t2 = asyncio.ensure_future(_open_canary(_cc2))
+                        _tasks[_t2] = None
+                        running.add(_t2)
+                        if raced is not None:
+                            raced.setdefault("uniq", set()).add(_cc2["unique"])
+                            raced.setdefault("keys", set()).add(str(_cc2.get("api_key") or ""))
+                        log.info("[hedge] slow-race: %s in gara con A (fuori dal tetto)", _cc2["unique"])
     if winner is None:
         # fallback: risolvi prima le aperture ancora in corso, poi attendi
         # tutti i verdetti (A compreso).

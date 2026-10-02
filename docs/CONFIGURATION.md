@@ -96,6 +96,16 @@ Every field is optional; defaults live in `app/policy.py`. Groups:
   `latency_rotate_threshold_ms`, `soft_slow_*`, `ctx_bucket_edges`,
   `ttft_rate_*`, `slow_*`, `effort_*`, `scoring_weights`,
   `provider_bias_normalization`.
+  Dentro `effort_*`, tre manopole governano l'effort **`superscrocco`**
+  (`effort_super_enabled`, `effort_super_ratio` 1.0–8.0 con default 2.0,
+  `effort_super_max_inflight_abs` default 16): la richiesta si comporta
+  **esattamente come `high`** — stesso bias di reputazione, stesso
+  `reasoning_effort` inviato all'upstream — ma la **spinta speculativa di quella
+  singola richiesta** (numero di canari e tetti di volo per-sessione) viene
+  moltiplicata per il ratio. Regola ferma: **si scalano i tetti, mai i timer**
+  (un timer piu' corto cambierebbe il comportamento, non solo l'audacia). Il
+  tetto assoluto `effort_super_max_inflight_abs` si applica **solo** alle
+  richieste super: con `effort` normale un tetto configurato a 24 resta 24.
 - **Warm / sessions**: `sticky_ttl`, `session_dep_guard_*`, `warm_pool_*`,
   `warm_refill_*`, `warm_borrow_*`, `warm_pick_fastest`,
   `anon_session_fingerprint`, `cache_aware_*`.

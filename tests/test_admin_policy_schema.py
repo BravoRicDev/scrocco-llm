@@ -55,7 +55,9 @@ def test_schema_endpoint(client):
     r = client.get("/admin/policy/schema", headers=MK)
     assert r.status_code == 200, r.text
     j = r.json()
-    assert j["count"] == 405
+    # Deve combaciare con EXPECTED_SCHEMA_COUNT in tests/test_policy_schema.py
+    # (408 = 405 + i 3 campi effort_super_*).
+    assert j["count"] == 408
     assert "warm_pool" in j["yaml_keys"]
     assert any(f["yaml_path"] == "warm_pool.refill_enabled" for f in j["fields"])
 

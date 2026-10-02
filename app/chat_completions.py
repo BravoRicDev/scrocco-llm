@@ -54,7 +54,7 @@ from .chat_helpers import (
 from .chat_media import _stt_bridge
 from .chat_stream import _stream_with_fallback
 from .ctxcompact import compact_tool_outputs, ctxcompact_config_from_policy, frontier_boundary, should_compact
-from .effort import effort_from_request, set_effort
+from .effort import effort_token_from_request, set_effort
 from .forwarder import UpstreamError, _client_attribution
 from .histnorm import hist_config_from_policy, normalize_messages
 from .http_responses import forbidden as _forbidden
@@ -149,10 +149,16 @@ class _ChatCompletion:
         # header `x-effort`. Lo stato vive in una ContextVar legata al task della
         # richiesta: il router lo usa per il bias di intelligence, il forwarder per
         # iniettare/rimuovere reasoning_effort e per l'override di temperatura.
+        _pol = gw_state.policy
         set_effort(
-            effort_from_request(self.payload, self.request.headers),
-            temp_enabled=gw_state.policy.enable_effort_temperature_override,
-            temp_overrides=gw_state.policy.effort_temperature_overrides,
+            # `effort_token_from_request` (NON `effort_from_request`): preserva il
+            # token `superscrocco`, che altrimenti verrebbe canonicalizzato a
+            # `high` e il ratio di spinta andrebbe perso in silenzio.
+            effort_token_from_request(self.payload, self.request.headers),
+            temp_enabled=_pol.enable_effort_temperature_override,
+            temp_overrides=_pol.effort_temperature_overrides,
+            super_ratio=_pol.effort_super_ratio,
+            super_enabled=_pol.effort_super_enabled,
         )
 
         self.raw_model = self.payload.get("model") or ""

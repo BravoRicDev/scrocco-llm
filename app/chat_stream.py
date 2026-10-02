@@ -70,6 +70,7 @@ from .protocols import sse_to_chat_obj as _sse2obj
 from .qc import check_response, check_sanity
 from .router import inject_identity
 from .sampling import sampling_config_from_policy
+from .effort import max_inflight_effective, scale_speculation, spinta
 from .schemaout import enforce_response, schemaout_config_from_policy
 from .sse_utils import (
     _buffered_answer_text,
@@ -450,7 +451,9 @@ class _StreamFallback:
             and bool(getattr(self._pol, "warm_pool_enabled", True))
         ):
             self._ready = gw_state.router.warm_ready_effective(self.session, self._pol)
-            self._maxif = max(0, int(getattr(self._pol, "warm_refill_max_inflight", 6) or 0))
+            # Lettore UNICO (app/effort.max_inflight_effective): scalato dal
+            # ratio superscrocco e tappato dal tetto assoluto.
+            self._maxif = max_inflight_effective(self._pol)
             try:
                 self._fly = gw_state.router.probes_in_flight(self.session)
             except Exception:
@@ -533,7 +536,7 @@ class _StreamFallback:
             except Exception:
                 self._h_u = None
             self._warm_useful = bool(self._h_u and self._h_u not in self.tried_set and self._h_u != self.dep["unique"])
-            self._races_max = int(getattr(self.qcp, "stream_hedge_max_races", 0) or 0)
+            self._races_max = spinta(self.qcp, "stream_hedge_max_races", 0, lo=0)
             self._legacy = (
                 not self._warm_useful
                 and (self._races_max == 0 or self._races_done < self._races_max)
@@ -566,10 +569,12 @@ class _StreamFallback:
                 self._refill_rounds += 1
             self._dep_before = self.dep["unique"]
             if self._refill:
-                self._hh_k = 2
+                # Canary per giro nel refill: 2 di base, raddoppiati da
+                # superscrocco. E' parte della "spinta", non un timer.
+                self._hh_k = max(1, int(scale_speculation(2, lo=1) or 2))
             else:
                 self._hh_k = (
-                    max(1, int(getattr(self.qcp, "stream_hedge_tiers", 1) or 1))
+                    max(1, spinta(self.qcp, "stream_hedge_tiers", 1, lo=1))
                     if bool(getattr(self.qcp, "stream_hedge_cross_tier", True))
                     else 1
                 )

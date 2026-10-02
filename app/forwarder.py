@@ -75,7 +75,14 @@ from .opencode_gate import (is_opencode_dep as _is_opencode_dep,
                             opencode_cautious_request as _opencode_cautious_request)
 from .thought_sig import (THOUGHT_SIGS, extract_signatures, get_dummy_fill,
                           is_gemini_deployment)
-from .effort import get_effort, get_temperature_config
+from .effort import (
+    get_effort,
+    get_speculation_ratio,
+    get_temperature_config,
+    is_super,
+    max_inflight_effective,
+    slow_race_max_warm_effective,
+)
 from .toolrepair import (ToolRepairConfig, ToolRepairSSEFilter,
                          TruncatedToolcallSSEFilter, create_tool_repair_config,
                          repair_tool_calls, sanitize_response)
@@ -181,8 +188,8 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
             body["temperature"] = float(overrides[effort])
         except (TypeError, ValueError):
             pass
-    log.info("[effort] %s effort=%s capable=%s reasoning=%s temp=%s",
-             dep.get("unique", "?"), effort, capable,
+    log.info("[effort] %s effort=%s super=%s ratio=%s capable=%s reasoning=%s temp=%s",
+             dep.get("unique", "?"), effort, bool(is_super()), get_speculation_ratio(), capable,
              body.get("reasoning_effort"), body.get("temperature"))
     return body
 
@@ -3215,8 +3222,9 @@ class _NonStreamFallback:
                       and bool(getattr(self._pol, "warm_pool_enabled", True))
                       and bool(self.ses) and bool(self.profile))
         self._ready_min = self.router.warm_ready_effective(self.ses, self._pol)
-        self._maxif = max(0, int(getattr(self._pol, "warm_refill_max_inflight",
-                                     6) or 0))
+        # Lettore UNICO (app/effort.max_inflight_effective): scalato dal ratio
+        # superscrocco e tappato dal tetto assoluto.
+        self._maxif = max_inflight_effective(self._pol)
         self._raced: set[str] = set()
         self._raced_keys: set[str] = set()
         self._refill_rounds = 0
@@ -3524,8 +3532,7 @@ class _NonStreamFallback:
                                     ("warm_full",))
                         log.info("[slow-race] ns %s: warm gia' pieno "
                                  "(>=%s), niente canario", self.cur,
-                                 getattr(self._pol, "slow_race_max_warm",
-                                         6))
+                                 slow_race_max_warm_effective(self._pol))
                     if self._op is None:
                         # Nessun canario: si attende A, ma il FLAG
                         # lento scatta comunque alla sua soglia.
@@ -3638,14 +3645,18 @@ class _NonStreamFallback:
                         self._raced.add(self.cur)
                         self._raced_keys.add(
                             str(self.dep.get("api_key") or ""))
+                        # UN canario: questa e' la gara NON-stream (le
+                        # variabili `_ns_*` vengono da
+                        # `nonstream_slow_race_after_ms`). La manopola
+                        # `stream_slow_race_canaries` NON si applica qui:
+                        # governa la gara stream in `chat_hedge._hedge_peek`.
                         self._op = self._open_canary("slow-race")
                     else:
                         metrics.inc("nx_slow_race_total",
                                     ("warm_full",))
                         log.info("[slow-race] ns %s: warm gia' pieno "
                                  "(>=%s), niente canario", self.cur,
-                                 getattr(self._pol, "slow_race_max_warm",
-                                         6))
+                                 slow_race_max_warm_effective(self._pol))
                     if self._op is not None:
                         self._C, self._fC, self._tC, self._wake_c = self._op
                         self._parts.append({"fut": self._fC, "dep": self._C,

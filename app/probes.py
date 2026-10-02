@@ -14,6 +14,7 @@ import time
 
 from . import autoprobe
 from . import state as gw_state
+from .effort import spinta
 from .stream_verdicts import _soft_cd
 from .suppressed import report_suppressed
 from . import metrics
@@ -256,7 +257,7 @@ async def _wake_sweep(
 
     try:
         _pol = gw_state.router.policy
-        _n = int(getattr(_pol, "warm_refill_wake_max_attempts", 10) or 0)
+        _n = spinta(_pol, "warm_refill_wake_max_attempts", 10, lo=0)
         _age = float(getattr(_pol, "warm_refill_wake_min_cooldown_age_sec", 3600.0) or 3600.0)
     except Exception:  # noqa: BLE001
         return

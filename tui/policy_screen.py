@@ -125,6 +125,13 @@ SCALAR_ROWS: list[tuple[str, str, str, str]] = [
      "Pool: connessioni max", "int"),
     ("HTTP upstream", "upstream_keepalive_expiry_sec",
      "Pool: expiry keep-alive (s)", "num"),
+    # SUPERSROCCO: effort `high` + ratio di spinta speculativa.
+    ("Effort", "effort_super_enabled",
+     "Superscrocco: spinta extra attiva", "bool"),
+    ("Effort", "effort_super_ratio",
+     "Superscrocco: ratio tetti spinta (1.0-8.0)", "num"),
+    ("Effort", "effort_super_max_inflight_abs",
+     "Superscrocco: tetto assoluto canary inflight", "int"),
 ]
 
 # liste (virgola) — valori validati dal gateway al PATCH

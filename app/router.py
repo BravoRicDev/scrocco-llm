@@ -47,7 +47,7 @@ from .config import GatewayConfig, CAP_PRIORITY_ORDER, ORDER_FIRST, ORDER_LAST
 from .suppressed import report_suppressed
 from .policy import Policy, policy_float, policy_int
 from .capabilities import count_image_parts
-from .effort import get_effort
+from .effort import get_effort, slow_race_max_warm_effective
 from .caution import background_cautious_enabled
 from .opencode_gate import (
     dep_usable as _dep_usable,
@@ -1861,7 +1861,7 @@ class Router(WarmMixin, CanaryMixin, SessionMixin, CircuitBreakerMixin, UsageMix
         timer >45s (`_slow_timer_flagged`): un pool fatto di soli lenti non
         blocca il canario (li si lascia esaurire, senza penalita'). Cap <= 0 =
         nessun gate."""
-        cap = policy_int(self.policy, "slow_race_max_warm", 6, falsy=0)
+        cap = slow_race_max_warm_effective(self.policy)
         if cap <= 0:
             return True
         if not session_id or not profile:

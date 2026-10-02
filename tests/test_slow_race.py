@@ -12,12 +12,14 @@ Convenzione del repo: test sincroni che guidano coroutine con asyncio.run.
 NB: `_spawn_probe` e `_hedge_peek` usano il `router` GLOBALE di app.main.
 """
 import asyncio
+import contextlib
 import time
 from types import SimpleNamespace
 
 import pytest
 
 from app import chat_hedge
+from app.effort import reset_effort, set_effort
 from app import probes
 import app.main as main
 from app import forwarder as fwd_mod
@@ -179,6 +181,98 @@ def test_slow_race_apre_il_canario_e_consegna_il_primo():
     assert opened == [B["unique"]], "il canario deve partire una volta sola"
     assert out[0]["unique"] == B["unique"]
     assert out[3] == "content"
+
+
+@contextlib.contextmanager
+def _effort_ctx(effort, ratio=2.0):
+    """Imposta l'effort per il blocco e lo ripristina (come test_effort_routing)."""
+    tok = set_effort(effort, temp_enabled=False, temp_overrides=None,
+                     super_ratio=ratio, super_enabled=True)
+    try:
+        yield
+    finally:
+        reset_effort(tok)
+
+
+def _due_canari(r, B1, B2):
+    """Router finto che sa aprire DUE canari distinti (rispetta k)."""
+    r.hedge_canaries = lambda *a, **k: [B1, B2][: max(1, int(k.get("k", 1)))]
+    return r
+
+
+def test_slow_race_canaries_apre_n_canari():
+    """`stream_slow_race_canaries` era MORTA: `k=1` cablato e si usava solo
+    `_lc[0]`, quindi la gara lenta apriva sempre UN canario. Con la manopola a 2
+    ne devono partire DUE.
+
+    Serve `hold=True` + A che emette il primo byte: solo allora `_a_streaming`
+    e' True, `_skip_classic` azzera i candidati classici e resta SOLO il timer
+    lento. Senza, l'hedge classico a 60ms apre lui un canario, quello consegna
+    in 0.02s e chiude la gara PRIMA dei 100ms della soglia lenta (era il motivo
+    per cui questo test falliva: un canario solo, quello dell'hedge)."""
+    B1 = DEP_B()
+    B2 = {"unique": "C__m3__2", "group": "scrocco-t-64k", "model": "m3"}
+    r, notes = _fake_router(B=B1)
+    r.policy.stream_slow_race_canaries = 2
+    _due_canari(r, B1, B2)
+    opened = []
+
+    async def sr(dep, payload, **kw):
+        opened.append(dep["unique"])
+        return FakeGen(dep["unique"])
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        _fb = kw.get("first_byte")
+        if _fb is not None:
+            _fb.set()                      # A ha emesso: A sta streammando
+        if gen.name == WINNER:
+            await asyncio.sleep(0.4)       # A lento: non chiude la gara
+        else:
+            await asyncio.sleep(0.02)
+        return CONTENT
+
+    _run_peek(peek, sr, r, slow_race_ms=100, hold=True)
+    assert sorted(opened) == [B1["unique"], B2["unique"]], (
+        f"con stream_slow_race_canaries=2 devono partire 2 canari, partiti {opened}")
+
+
+def test_superscrocco_raddoppia_i_canari_lenti():
+    """End-to-end: con effort `superscrocco` (ratio 2) la gara lenta apre il
+    DOPPIO dei canari anche con la manopola al default 1; e senza superscrocco
+    resta UNO (nessuna regressione).
+
+    Prova anche che il ContextVar dell'effort ATTRAVERSA `asyncio.run`
+    (contesto copiato nel Task): senza, `spinta` vedrebbe il default e questo
+    test resterebbe verde per il motivo sbagliato."""
+    B1 = DEP_B()
+    B2 = {"unique": "C__m3__2", "group": "scrocco-t-64k", "model": "m3"}
+    r, notes = _fake_router(B=B1)              # stream_slow_race_canaries=1
+    _due_canari(r, B1, B2)
+    opened = []
+
+    async def sr(dep, payload, **kw):
+        opened.append(dep["unique"])
+        return FakeGen(dep["unique"])
+
+    async def peek(gen, fcm, incl_reason=None, min_ch=None, **kw):
+        _fb = kw.get("first_byte")
+        if _fb is not None:
+            _fb.set()
+        if gen.name == WINNER:
+            await asyncio.sleep(0.4)
+        else:
+            await asyncio.sleep(0.02)
+        return CONTENT
+
+    with _effort_ctx("superscrocco"):
+        _run_peek(peek, sr, r, slow_race_ms=100, hold=True)
+    assert sorted(opened) == [B1["unique"], B2["unique"]], (
+        f"superscrocco deve raddoppiare i canari lenti, partiti {opened}")
+
+    opened.clear()
+    _run_peek(peek, sr, r, slow_race_ms=100, hold=True)
+    assert opened == [B1["unique"]], (
+        f"senza superscrocco deve restare UN canario, partiti {opened}")
 
 
 def test_slow_race_a_veloce_non_apre_nulla():

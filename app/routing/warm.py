@@ -12,6 +12,7 @@ import math
 import time
 from collections import Counter
 
+from ..effort import spinta
 from ..opencode_gate import (dep_usable as _dep_usable,
                              is_opencode_zen_dep,
                              opencode_cautious_request)
@@ -355,12 +356,16 @@ class WarmMixin:
             ready = min(ready_min + ceil((rpm-base)/step), min_max)
         con ceil solo se rpm > base. `adaptive=False` -> soglia fissa."""
         pol = policy or self.policy
-        rmin = max(0, int(getattr(pol, "warm_ready_min", 3) or 0))
+        # Superscrocco: scala anche la SOGLIA del warm. Con la spinta
+        # raddoppiata servono piu' caldi PRONTI, non solo piu' canary: senza
+        # questo il refill aprirebbe il doppio dei canary per riempire una
+        # soglia rimasta bassa.
+        rmin = max(0, spinta(pol, "warm_ready_min", 3, lo=0))
         if not session_id or not bool(
                 getattr(pol, "warm_ready_rpm_adaptive", True)):
             return rmin
         ready = rmin
-        cap = max(rmin, int(getattr(pol, "warm_ready_min_max", rmin) or rmin))
+        cap = max(rmin, spinta(pol, "warm_ready_min_max", rmin, lo=0))
         rpm = self.session_rpm(session_id, getattr(
             pol, "warm_ready_rpm_window_sec", 180))
         b = float(getattr(pol, "warm_ready_rpm_base", 5.0) or 0.0)

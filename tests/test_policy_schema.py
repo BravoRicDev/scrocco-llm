@@ -19,7 +19,7 @@ from app.policy import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-EXPECTED_SCHEMA_COUNT = 405
+EXPECTED_SCHEMA_COUNT = 408
 
 
 def _by_path() -> dict:
@@ -96,6 +96,47 @@ def test_effort_intel_weight_parsed():
 def test_effort_intel_weight_invalid(bad):
     with pytest.raises(ValueError):
         Policy.from_dict({"effort_intel_weight": bad})
+
+
+def test_effort_super_defaults():
+    p = Policy.from_dict({})
+    assert p.effort_super_enabled is True
+    assert p.effort_super_ratio == 2.0
+    assert p.effort_super_max_inflight_abs == 16
+
+
+@pytest.mark.parametrize("good", [1.0, 3, 8])
+def test_effort_super_ratio_parsed(good):
+    assert Policy.from_dict({"effort_super_ratio": good}) \
+        .effort_super_ratio == float(good)
+
+
+@pytest.mark.parametrize("bad", [0.5, 0.0, 9.0, -2, "x", True, [2]])
+def test_effort_super_ratio_invalid(bad):
+    # Sotto 1.0 rifiutato: rallenterebbe la spinta invece di accelerarla.
+    with pytest.raises(ValueError):
+        Policy.from_dict({"effort_super_ratio": bad})
+
+
+@pytest.mark.parametrize("good", [1, 32])
+def test_effort_super_max_inflight_abs_parsed(good):
+    assert Policy.from_dict({"effort_super_max_inflight_abs": good}) \
+        .effort_super_max_inflight_abs == good
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "x", True])
+def test_effort_super_max_inflight_abs_invalid(bad):
+    with pytest.raises(ValueError):
+        Policy.from_dict({"effort_super_max_inflight_abs": bad})
+
+
+def test_effort_super_enabled_parsed():
+    assert Policy.from_dict({"effort_super_enabled": False}) \
+        .effort_super_enabled is False
+    assert Policy.from_dict({"effort_super_enabled": "false"}) \
+        .effort_super_enabled is False
+    assert Policy.from_dict({"effort_super_enabled": True}) \
+        .effort_super_enabled is True
 
 
 def test_retire_after_days_parsed():
