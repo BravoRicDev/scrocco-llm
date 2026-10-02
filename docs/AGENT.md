@@ -210,7 +210,8 @@ the earlier `reasoning_headroom_ratio` trigger **and** a
 `reasoning_reserve_ratio` window reserve added to `ctx_est` in the
 compaction gate; the frontier walk and the saved-token estimate use the
 deployment's learned divisor (`[latency]`/`estimate_correction`)), `[effort]` (`reasoning_effort` injected/
-removed per the row's `effort_capable`), `[key-soft]` (a 429 puts the whole
+removed per the row's `effort_capable`; a `superscrocco` request is logged under
+`[effort-super]` instead — same canonical `high` upstream, dedicated tag), `[key-soft]` (a 429 puts the whole
 API KEY in soft-skip for the Retry-After window: no reputation damage; the
 autoprobe treats a saturated key the same way and never spends another model's
 probe on it), `[autoprobe]` (conservative probes: per-key 24 h budget, hourly

@@ -9,6 +9,7 @@ Copre:
 """
 
 import contextlib
+import logging
 from datetime import date
 
 import pytest
@@ -149,6 +150,39 @@ def test_apply_effort_policy_sends_canonical_effort_upstream():
         assert body["reasoning_effort"] == "low"
         # assente -> si usa il livello richiesto (canonico)
         assert apply_effort_policy({}, dict(dep))["reasoning_effort"] == "high"
+
+
+def test_super_request_logs_a_dedicated_tag(caplog):
+    """Una richiesta super si riconosce dal TAG, non solo dal campo.
+
+    `effort=high` e' identico a una `high` normale (canonicalizzazione
+    voluta): l'unico altro segnale e' `super=True`, che pero' nel file di log
+    (PLAIN: lo parsa logview.py) non ha colore. Il tag `[effort-super]` e' il
+    marcatore grep-abile, e in console riceve colore ed emoji propri.
+    """
+    dep = {"unique": "u", "api_base": "https://api.example.com/v1",
+           "effort_capable": True}
+    with caplog.at_level(logging.INFO):
+        with effort_ctx("superscrocco"):
+            apply_effort_policy({}, dict(dep))
+        with effort_ctx("high"):
+            apply_effort_policy({}, dict(dep))
+    heads = [r.getMessage().split()[0] for r in caplog.records
+             if r.getMessage().startswith("[effort")]
+    assert "[effort-super]" in heads, heads
+    assert "[effort]" in heads, heads
+
+
+def test_super_tag_has_a_registered_color_and_emoji():
+    """Il tag dedicato non deve cadere nel fallback: tinte scelte a mano."""
+    from app import logview
+    from app import terminal_logging as tl
+
+    assert "effort-super" in tl.TAG_COLORS
+    assert "effort-super" in tl.TAG_EMOJI
+    assert tl.tag_color("effort-super") == tl.TAG_COLORS["effort-super"]
+    assert tl.colorize_tag("effort-super").endswith(tl.ANSI_RESET)
+    assert logview._get_tag_color_name("effort-super") == "magenta"
 
 
 def test_advertised_efforts_are_accepted():

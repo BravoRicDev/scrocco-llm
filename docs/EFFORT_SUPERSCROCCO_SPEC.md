@@ -226,15 +226,24 @@ classico a 60ms apre lui un canario e chiude la gara prima della soglia lenta.
 
 ## 6. Metriche e log
 
-**Fatto** — la riga `[effort]` (`app/forwarder.py:184-187`) ora riporta anche
-`super=` e `ratio=`:
+**Fatto** — la riga `[effort]` (`app/forwarder.py`, `apply_effort_policy`) riporta
+anche `super=` e `ratio=`, e per le richieste super il TAG diventa
+`[effort-super]`:
 
-    [effort] <dep> effort=high super=True ratio=2.0 capable=... reasoning=high temp=...
+    [effort]       <dep> effort=high super=False ratio=1.0 capable=... reasoning=high temp=...
+    [effort-super] <dep> effort=high super=True  ratio=2.0 capable=... reasoning=high temp=...
 
 E' l'osservabilita' giusta per questo caso: senza `ratio` **non si distingue una
 richiesta super da una `high` normale**, perche' l'`effort` loggato e' `high` in
 entrambi i casi (canonicalizzazione voluta). E' l'unico modo per misurare se
 superscrocco *serve* (TTFT piu' basso) o solo *costa* di piu'.
+
+Il tag dedicato esiste perche' i file di log sono **PLAIN** (`app/logsetup.py`
+usa un `logging.Formatter` semplice: `var/gateway.log` dev'essere parse-abile da
+`app/logview.py`): il colore non li attraversa, quindi dev'essere un `grep` a
+poter trovare la richiesta super. In console `[effort-super]` ha colore ed emoji
+propri (bright_magenta + 🔥) contro il blu + 🎚️ di `[effort]`; lo stesso tag e'
+registrato anche in `app/logview.py` per la UI.
 
 **Volutamente NON fatto**: una metrica dedicata `nx_effort_total("superscrocco")`
 e label super su `nx_refill_total`/`nx_hedge_total`. Il ratio e' per-richiesta e

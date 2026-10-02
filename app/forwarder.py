@@ -202,8 +202,14 @@ def apply_effort_policy(body: dict, dep: dict) -> dict:
             body["temperature"] = float(overrides[effort])
         except (TypeError, ValueError):
             pass
-    log.info("[effort] %s effort=%s super=%s ratio=%s capable=%s reasoning=%s temp=%s",
-             dep.get("unique", "?"), effort, bool(is_super()), get_speculation_ratio(), capable,
+    super_ = bool(is_super())
+    # Tag DEDICATO per le richieste super: `effort=high` e' identico a una
+    # `high` normale (canonicalizzazione voluta) e il file di log e' PLAIN
+    # (logview.py lo parsa), quindi il colore da solo non basterebbe: il TAG
+    # e' il marcatore grep-abile, oltre a dare colore/emoji propri in console.
+    log.info("%s %s effort=%s super=%s ratio=%s capable=%s reasoning=%s temp=%s",
+             "[effort-super]" if super_ else "[effort]",
+             dep.get("unique", "?"), effort, super_, get_speculation_ratio(), capable,
              body.get("reasoning_effort"), body.get("temperature"))
     return body
 

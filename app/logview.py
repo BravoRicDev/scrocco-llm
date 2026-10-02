@@ -117,6 +117,8 @@ def _get_tag_color_name(tag: str) -> str:
         "qc": "yellow",
         "config": "gray",
         "erroraudit": "red",
+        "effort": "blue",
+        "effort-super": "magenta",
     }
     return _TAG_COLOR_NAMES.get(tag, "")
 

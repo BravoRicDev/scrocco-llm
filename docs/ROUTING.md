@@ -112,8 +112,10 @@ multiplied by `effort_super_ratio` (default `2.0`, valid `1.0`–`8.0`).
 The amplification is per-request state, and `effort_super_enabled: false` makes a
 super request behave **exactly** like `high`. Observability: the `[effort]` log
 line carries `super=` and `ratio=`, because `effort=high` alone **cannot**
-distinguish a super request from a normal one. Full rationale and the knob table:
-`docs/EFFORT_SUPERSCROCCO_SPEC.md`.
+distinguish a super request from a normal one; a super request is logged under
+its own `[effort-super]` tag, so it stands out both in `grep` (the log files are
+plain) and in the colored console (bright magenta + 🔥 against blue + 🎚️). Full
+rationale and the knob table: `docs/EFFORT_SUPERSCROCCO_SPEC.md`.
 
 ## The resilient ladder — `_walk_ladder_resilient`
 

@@ -121,6 +121,9 @@ TAG_COLORS = {
     "retry": ANSI_COLORS["yellow"],
     "estimate": ANSI_COLORS["blue"],
     "effort": ANSI_COLORS["blue"],
+    # Richieste `superscrocco`: colore proprio, cosi' la riga salta all'occhio
+    # in mezzo alle `[effort]` normali (che restano blu).
+    "effort-super": ANSI_COLORS["bright_magenta"],
     "images": ANSI_COLORS["bright_magenta"],
     "videos": ANSI_COLORS["bright_magenta"],
     "tts": ANSI_COLORS["bright_magenta"],
@@ -225,7 +228,8 @@ TAG_EMOJI = {
     "config": "⚙️", "policy": "📜", "sniff": "🐽", "ledger": "📒",
     "atomic": "🗄️", "admin": "🛠️", "csv": "📄", "erroraudit": "🚨",
     "log": "📝", "purge": "🗑️", "retry": "🔂", "estimate": "🧮",
-    "effort": "🎚️", "images": "🖼️", "videos": "🎬", "tts": "🔊",
+    "effort": "🎚️", "effort-super": "🔥",
+    "images": "🖼️", "videos": "🎬", "tts": "🔊",
     "stt": "🎙️", "text": "💬",
 }
 
