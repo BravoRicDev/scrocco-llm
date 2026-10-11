@@ -125,3 +125,46 @@ def test_put_csv_identical_is_ok(client):
 
 def test_put_csv_requires_master(client):
     assert client.put("/admin/csv", json={"raw": CSV_TEXT}).status_code == 401
+
+
+# ---------------------------------------------------------------- rail anti-troncamento
+def _big_csv(n: int) -> str:
+    rows = "\n".join(
+        f"t@x,model-{i},groq,https://a{i}.test/v1,free,1000,8000,5,K-{i},"
+        for i in range(n)
+    )
+    return HEADER + "\n" + rows + "\n"
+
+
+def test_put_csv_shrink_blocked_by_rail(client):
+    """Incidente 2026-10-11: un body di prova ("x\n") ha sostituito 1620 righe
+    di catalogo con 1 e il gateway e' rimasto senza deployment (ogni chat 400)."""
+    gw_state.CSV_PATH.write_text(_big_csv(120))
+    before = gw_state.CSV_PATH.read_text()
+    r = client.put("/admin/csv", json={"raw": "x\n"}, headers=MK)
+    assert r.status_code == 409, r.text
+    assert "force" in r.json()["error"]["message"]
+    assert gw_state.CSV_PATH.read_text() == before      # file LIVE intatto
+
+
+def test_put_csv_shrink_allowed_with_force(client):
+    gw_state.CSV_PATH.write_text(_big_csv(120))
+    small = HEADER + "\nt@x,model-z,groq,https://z.test/v1,free,1000,8000,5,K,\n"
+    r = client.put("/admin/csv", json={"raw": small, "force": True}, headers=MK)
+    assert r.status_code == 200, r.text
+    assert r.json()["rows"] == 1
+
+
+def test_put_csv_force_must_be_true(client):
+    """Un valore verosimile non basta: serve esattamente `true`."""
+    gw_state.CSV_PATH.write_text(_big_csv(120))
+    r = client.put("/admin/csv", json={"raw": "x\n", "force": "true"}, headers=MK)
+    assert r.status_code == 409, r.text
+
+
+def test_put_csv_rail_skipped_on_small_catalog(client):
+    """Sotto le 100 righe attuali il rail non entra (test/VM usa e getta): la
+    fixture ha 2 deployment e il PUT di 1 riga deve passare."""
+    small = HEADER + "\nt@x,model-z,groq,https://z.test/v1,free,1000,8000,5,K,\n"
+    r = client.put("/admin/csv", json={"raw": small}, headers=MK)
+    assert r.status_code == 200, r.text

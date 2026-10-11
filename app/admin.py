@@ -1269,6 +1269,14 @@ async def admin_csv_put(request: Request):
     Body {"raw": "<csv testuale>"}. Valida su tmp (csv_store.load_table +
     save_table via _commit_csv, che fa GIA' backup+reload). 400 se il CSV e'
     invalido (file live INTATTO). Idempotente. -> {ok, backup, rows}.
+
+    RAIL ANTI-TRONCAMENTO: questo endpoint sostituisce l'INTERO catalogo. Se il
+    nuovo CSV perde oltre meta' dei deployment esistenti risponde 409 e NON
+    scrive, a meno di una conferma esplicita `"force": true` nel body. Nasce
+    dall'incidente 2026-10-11: un body di prova (`"x\n"`) sostitui' 1620 righe
+    con 1, lasciando il gateway senza deployment (ogni chat -> 400). Sotto le
+    100 righe attuali il rail non entra (installazioni piccole, test, VM usa e
+    getta), cosi' non blocca chi lavora su un catalogo gia' minimo.
     """
     if err := _require_master(request):
         return err
@@ -1292,6 +1300,26 @@ async def admin_csv_put(request: Request):
             os.unlink(tmp.name)
         except OSError:
             pass
+
+    if body.get("force") is not True:
+        try:
+            _cur_header, _cur_rows = csv_store.load_table(str(gw_state.CSV_PATH))
+            cur_rows = len(_cur_rows)
+        except (csv_store.CsvStoreError, OSError, ValueError):
+            cur_rows = 0
+        if cur_rows >= 100 and len(rows) * 2 < cur_rows:
+            log.warning(
+                "[config] CSV PUT RIFIUTATO (rail anti-troncamento): %d deployment contro %d attuali",
+                len(rows),
+                cur_rows,
+            )
+            return _err(
+                409,
+                (
+                    f"CSV rifiutato: {len(rows)} deployment contro {cur_rows} attuali "
+                    '(perdita oltre il 50%). Se e\' voluto, ripetere con "force": true.'
+                ),
+            )
 
     try:
         _commit_csv(header, rows)          # backup + save_table (valida) + reload
