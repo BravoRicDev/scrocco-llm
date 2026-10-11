@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
-"""Catalogo Cloudflare Workers AI (free, non-deprecati) -> keys_rotation.csv.
+"""Catalogo Cloudflare Workers AI -> keys_rotation.csv. AGGIORNA, non rigenera.
 
-- Individua gli account CF univoci gia' presenti nel CSV (chiave + endpoint +
-  commento/email).
-- Rimuove TUTTE le righe provider=cloudflare.
-- Reinserisce ogni modello del catalogo per OGNI account.
-- context = contesto dichiarato da Cloudflare (in k, arrotondato);
-  max_input = 50% del contesto in token.
-- data=free, priority=0, caps da catalogo (text / text,vision).
+CONTRATTO CAMBIATO (2026-10-11), dopo un incidente reale su cubotto.
 
-Default: dry-run. Usare --apply per scrivere (backup + validazione + atomic).
+La versione precedente cancellava TUTTE le righe provider=cloudflare e le
+riscriveva con le sole colonne del catalogo (modello, endpoint, data, context,
+max_input, priority, caps). Eseguirla su un catalogo curato a mano distrugge
+tutto il resto: alias, effort_capable, intelligence_score, model_preference,
+media_defer, order, hold_until_finish, image_via. Misurato: da 9343 a 8251
+deployment (-1092, tutte le alias) e 204 alias su 204 spariti.
+
+REGOLA NUOVA - solo aggiunte e, su richiesta, aggiornamenti:
+  - riga ESISTENTE     -> NON toccata (nemmeno context/max_input), salvo
+                          --update-context: allora aggiorna SOLO
+                          context/max_input/caps stampando ogni differenza;
+  - riga MANCANTE      -> creata CLONANDO una riga CF sorella dello stesso
+                          account (stesso caps, la piu' capiente), cosi' tutti i
+                          campi curati restano coerenti. L'alias resta VUOTO:
+                          un alias inventato instraderebbe male, e chi cura il
+                          catalogo decide se e come esporlo;
+  - riga FUORI catalogo-> lasciata intatta (prima veniva cancellata).
+
+GATE prima di scrivere: nessuna identita' di deployment puo' sparire e il numero
+di deployment non puo' calare. Se accade, la scrittura e' annullata.
+
+Nota: il valore `context` nel CSV e' in k e `max_input` NON e' sempre il 50% del
+contesto dichiarato dallo script: sul catalogo vivo divergono in 5 casi su 17,
+segno di tarature successive. Per questo gli aggiornamenti sono opt-in.
 """
 from __future__ import annotations
 
@@ -19,9 +36,12 @@ import shutil
 import sys
 from datetime import datetime
 
-CSV = "var/keys_rotation.csv"
+CSV = os.environ.get("SCROCCO_CSV", "var/keys_rotation.csv")
 PROFILE_COL = os.environ.get("SCROCCO_PROFILE_COL", "scrocco-llm-example")
 PROVIDER = "cloudflare"
+
+# Campi di cui questo script e' proprietario (tutti gli altri sono intoccabili).
+OWNED = ("context", "max_input", "caps")
 
 # (modello, context_k, context_tokens, caps)
 CATALOG: list[tuple[str, int, int, str]] = [
@@ -48,10 +68,9 @@ CATALOG: list[tuple[str, int, int, str]] = [
 ]
 
 
-def load_rows(path: str):
+def load_rows(path: str = CSV):
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
-        all_rows = list(reader)
+        all_rows = list(csv.reader(f))
     hdr = all_rows[0]
     rows = [dict(zip(hdr, r + [""] * (len(hdr) - len(r)))) for r in all_rows[1:]]
     return hdr, rows
@@ -75,61 +94,146 @@ def make_row(hdr, **kw) -> dict:
     return row
 
 
+def _ctx(r: dict) -> int:
+    try:
+        return int((r.get("context") or "0").strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _n_deployments(path: str) -> tuple[int, set]:
+    """(deployment, identita' semantiche) di un CSV, via il codice dell'app.
+
+    Le identita' sono il contenuto dei deployment SENZA `unique`/`sort_key`:
+    l'`unique` e' funzione del contenuto del CSV, quindi togliendo o aggiungendo
+    righe si RINUMERA (config.py:447) e un confronto per `unique` darebbe falsi
+    allarmi. 9343 deployment corrispondono a soli 1876 unique distinti perche'
+    lo stesso unique vive in piu' gruppi dimensionali (config.py:565).
+    """
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from app.config import GatewayConfig
+    cfg = GatewayConfig(path)
+    ident = set()
+    for gname, lst in cfg.groups.items():
+        for d in lst:
+            sig = tuple(sorted((k, str(v)) for k, v in d.items()
+                               if k not in ("unique", "sort_key")))
+            ident.add((gname, sig))
+    return sum(len(v) for v in cfg.groups.values()), ident
+
+
+def pick_template(by_model: dict[str, dict], caps: str) -> dict | None:
+    """Riga sorella da clonare: stesso caps se esiste, altrimenti la piu' capiente."""
+    if not by_model:
+        return None
+    same = [r for r in by_model.values() if (r.get("caps") or "").strip() == caps]
+    pool = same or list(by_model.values())
+    return max(pool, key=_ctx)
+
+
 def main() -> None:
     apply = "--apply" in sys.argv
+    update_ctx = "--update-context" in sys.argv
     hdr, rows = load_rows(CSV)
 
-    cf = [r for r in rows if r["provider"].strip().lower() == PROVIDER]
+    if PROFILE_COL not in hdr:
+        cands = [c for c in hdr if c.startswith("scrocco-llm-")]
+        print(f"[ERR] colonna profilo '{PROFILE_COL}' assente nel CSV.")
+        print(f"      Nel file ci sono: {cands}")
+        print(f"      Esporta SCROCCO_PROFILE_COL={cands[0] if cands else '<colonna>'} e riprova.")
+        sys.exit(2)
+
+    cf_rows = [r for r in rows if (r.get("provider") or "").strip().lower() == PROVIDER]
+    by_account: dict[str, dict[str, dict]] = {}
     accounts: dict[str, dict] = {}
-    for r in cf:
-        key = r[PROFILE_COL].strip()
+    for r in cf_rows:
+        key = (r.get(PROFILE_COL) or "").strip()
         if not key:
             continue
-        accounts.setdefault(key, {
-            "endpoint": r["endpoint"].strip(),
-            "commento": r.get("commento", "").strip(),
-        })
+        accounts.setdefault(key, {"endpoint": (r.get("endpoint") or "").strip(),
+                                  "commento": (r.get("commento") or "").strip()})
+        by_account.setdefault(key, {}).setdefault((r.get("modello") or "").strip(), r)
+
     if not accounts:
         print("[ERR] nessun account Cloudflare nel CSV")
         sys.exit(1)
 
-    print(f"[INFO] account CF univoci: {len(accounts)}")
-    print(f"[INFO] modelli catalogo: {len(CATALOG)}")
-    print(f"[INFO] righe da inserire: {len(accounts) * len(CATALOG)}")
-    print(f"[INFO] righe CF esistenti da rimuovere: {len(cf)}")
+    print(f"[INFO] account CF: {len(accounts)} | modelli a catalogo: {len(CATALOG)}")
+    print(f"[INFO] righe CF esistenti: {len(cf_rows)}"
+          f" | aggiornamento contesti: {'SI (--update-context)' if update_ctx else 'no'}")
 
-    remaining = [r for r in rows if r["provider"].strip().lower() != PROVIDER]
-    new_rows: list[dict] = []
+    added = updated = 0
     for key, acc in accounts.items():
+        by_model = by_account.setdefault(key, {})
         for model, ctx_k, ctx_tok, caps in CATALOG:
-            new_rows.append(make_row(
-                hdr,
-                commento=acc["commento"],
-                modello=model,
-                provider=PROVIDER,
-                endpoint=acc["endpoint"],
-                data="free",
-                context=str(ctx_k),
-                max_input=str(ctx_tok // 2),
-                priority="0",
-                caps=caps,
-                **{PROFILE_COL: key},
-            ))
+            want = {"context": str(ctx_k), "max_input": str(ctx_tok // 2), "caps": caps}
+            ex = by_model.get(model)
+            if ex is not None:
+                if not update_ctx:
+                    continue
+                diff = {f: ((ex.get(f) or "").strip(), v) for f, v in want.items()
+                        if (ex.get(f) or "").strip() != v}
+                if diff:
+                    for f, (_old, new) in diff.items():
+                        ex[f] = new
+                    updated += 1
+                    print(f"  ~ {model:46} {key[:6]}… " +
+                          " ".join(f"{f}:{o}->{n}" for f, (o, n) in diff.items()))
+                continue
+            tpl = pick_template(by_model, caps)
+            row = dict(tpl) if tpl else make_row(hdr)
+            row.update(want)
+            row["modello"] = model
+            row["provider"] = PROVIDER
+            row["endpoint"] = acc["endpoint"]
+            row["commento"] = acc["commento"]
+            row[PROFILE_COL] = key
+            row["alias"] = ""          # mai inventare un alias
+            if not tpl:
+                row["data"] = "free"
+                row["priority"] = "0"
+            rows.append(row)
+            by_model[model] = row
+            added += 1
+            print(f"  + {model:46} {key[:6]}… clonata da "
+                  f"{tpl['modello'] if tpl else 'SCHEMA VUOTO'}")
 
-    print("\n--- anteprima (primo account) ---")
-    for r in new_rows[:len(CATALOG)]:
-        print(f"  {r['modello']:48s} ctx={r['context']:>4s} max_in={r['max_input']:>7s} caps={r['caps']}")
+    fuori = sorted({m for acc in by_account.values() for m in acc}
+                   - {m for m, _, _, _ in CATALOG})
+    if fuori:
+        print(f"[INFO] {len(fuori)} righe CF fuori catalogo lasciate intatte: {fuori[:4]}")
+
+    print(f"\n[ESITO] da aggiungere: {added} | da aggiornare: {updated}")
 
     if not apply:
-        print("\n[DRY-RUN] nessuna modifica. Usa --apply per scrivere.")
+        print("[DRY-RUN] nessuna modifica. Usa --apply per scrivere.")
         return
+    if not added and not updated:
+        print("[SKIP] nulla da fare: il catalogo e' gia' allineato.")
+        return
+
+    n0, i0 = _n_deployments(CSV)
+    tmp = CSV + ".gate." + datetime.now().strftime("%Y%m%d%H%M%S")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=hdr)
+        w.writeheader()
+        w.writerows(rows)
+    n1, i1 = _n_deployments(tmp)
+    perse = i0 - i1
+    print(f"[GATE] deployment {n0} -> {n1} | identita' perse: {len(perse)}")
+    if n1 < n0 or perse:
+        print("[GATE FALLITO] si perderebbe qualcosa: scrittura ANNULLATA.")
+        for g, s in list(perse)[:5]:
+            print("   -", dict(s).get("model"), "|", g[:34])
+        os.unlink(tmp)
+        sys.exit(3)
+    os.unlink(tmp)
 
     bak = CSV + f".bak.cf-catalog.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     shutil.copy2(CSV, bak)
-    print(f"\n[BACKUP] {bak}")
-    save_rows(CSV, hdr, remaining + new_rows)
-    print(f"[OK] CSV: {len(rows)} -> {len(remaining) + len(new_rows)} righe "
-          f"({len(remaining)} non-CF + {len(new_rows)} CF)")
+    save_rows(CSV, hdr, rows)
+    print(f"[BACKUP] {bak}")
+    print(f"[OK] CSV: {len(rows)} righe (+{added}, ~{updated})")
 
 
 if __name__ == "__main__":
