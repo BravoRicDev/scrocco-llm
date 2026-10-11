@@ -71,7 +71,7 @@ const initialRaw = (typeof raw === "string") ? raw : "";
 
 <script>
   window.POLICY_RAW_STATE = {
-    activeRaw: <%- JSON.stringify(initialRaw) %>,
+    activeRaw: <%- JSON.stringify(initialRaw).replace(/</g, '\\u003c') %>,
   };
 </script>
 <script src="/js/vendor/js-yaml.min.js"></script>

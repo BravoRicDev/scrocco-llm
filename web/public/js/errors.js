@@ -38,8 +38,8 @@
     if (current) {
       var q = current.toLowerCase();
       filtered = events.filter(function (e) {
-        return statusOf(e).toLowerCase().indexOf(q) !== -1
-          || typeOf(e).toLowerCase().indexOf(q) !== -1
+        return String(statusOf(e)).toLowerCase().indexOf(q) !== -1
+          || String(typeOf(e)).toLowerCase().indexOf(q) !== -1
           || String(msgOf(e)).toLowerCase().indexOf(q) !== -1;
       });
     }
@@ -58,7 +58,10 @@
       t.textContent = fmtTs(e.ts);
       tr.appendChild(t);
       t = document.createElement("td");
-      t.innerHTML = '<span class="badge">' + statusOf(e) + '</span>';
+      var badgeSpan = document.createElement("span");
+      badgeSpan.className = "badge";
+      badgeSpan.textContent = String(statusOf(e));
+      t.appendChild(badgeSpan);
       tr.appendChild(t);
       t = document.createElement("td");
       t.textContent = typeOf(e);

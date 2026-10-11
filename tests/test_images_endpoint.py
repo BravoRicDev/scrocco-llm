@@ -481,3 +481,298 @@ def test_e2e_401_chiave_rifiutata_ruota_su_stt(monkeypatch, tmp_path):
         assert calls == ["groq", "openrouter"]
     finally:
         _teardown(m, orig)
+
+
+# ----------------------------------------------- fix roadmap backend (Fase 0)
+# Finding A-E della web/docs/BACKEND-BUG-ROADMAP-OPERATIONAL.md, tutti su
+# app/audio_api.py (i tre path media). Righe al checkout bf02a8c: guardia D
+# ~L122, chiamate B ~L135/311/534, guardie C ~L149 (TTS) e ~L353 (STT),
+# predicati E ~L208 (TTS) e ~L620 (STT).
+
+_TTS_ROWS = ("tts1,openai/tts-1,groq,https://api.groq.com/openai/v1,"
+             "free,0,0,1,sk-tts-key,tts\n"
+             "tts2,openai/tts-1,openrouter,https://openrouter.ai/api/v1,"
+             "fallback,0,0,0,sk-or-tts-key,tts\n")
+_STT_ROWS = ("stt1,openai/whisper-large-v3,groq,https://api.groq.com/openai/v1,"
+             "free,0,0,1,sk-stt-key,stt\n"
+             "stt2,openai/whisper-large-v3,openrouter,https://openrouter.ai/api/v1,"
+             "fallback,0,0,0,sk-or-stt-key,stt\n")
+_TTS_BODY = {"model": "scrocco-llm-test", "input": "ciao", "voice": "alloy"}
+_SYSTEMONE_BODY = {"model": "scrocco-llm-test", "state": "x",
+                   "questions": {"q": {"type": "noul", "instructions": "si?"}}}
+_STT_FILE = {"file": ("a.wav", b"RIFF0000WAVE", "audio/wav")}
+_STT_DATA = {"model": "scrocco-llm-test"}
+# Chiave di PROFILO: con la master il profilo e' assente e i path audio non
+# ruotano (fallback_next richiede `profile`).
+_SK_TEST = {"Authorization": "Bearer sk-test"}
+# 403 di CREDENZIALE upstream: nessun marker di rifiuto di modalita', quindi
+# non passa da `media_reject_signature`.
+_UPSTREAM_403_DENIED = ('{"error":{"code":403,"message":"Forbidden: generic '
+                        'provider denial"}}')
+
+
+class _FwdVietato:
+    """Forwarder che registra e fa fallire OGNI metodo: serve ai path che non
+    devono nemmeno arrivarci (400 di schema, 401, 503 difensivo)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str):
+        if name.startswith("__"):
+            raise AttributeError(name)
+
+        async def _rec(*a, **kw):
+            self.calls.append(name)
+            raise AssertionError(f"forwarder.{name} non doveva essere chiamato")
+
+        return _rec
+
+
+def _fwd_vietato(monkeypatch) -> _FwdVietato:
+    f = _FwdVietato()
+    monkeypatch.setattr(gw_state, "forwarder", f)
+    return f
+
+
+def _cooldown_pulito() -> None:
+    gw_state.router._cooldown.clear()
+
+
+def test_finding_d_body_json_non_oggetto_400(monkeypatch, tmp_path):
+    """Finding D (roadmap §7): un JSON sintatticamente valido ma non-oggetto
+    (`null`, `[]`, 42, `"x"`) faceva esplodere `payload.get` -> 500.
+    E' un body fuori schema: 400 invalid_request_error, mai 500."""
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    f = _fwd_vietato(monkeypatch)
+    try:
+        for raw in (b"null", b"[]", b"42", b'"x"'):
+            r = c.post("/v1/audio/speech",
+                       headers={"Content-Type": "application/json"},
+                       content=raw)
+            assert r.status_code == 400, (raw, r.status_code, r.text)
+            err = r.json()["error"]
+            assert err["type"] == "invalid_request_error", (raw, err)
+            assert err["message"] == "il body deve essere un oggetto JSON", (raw, err)
+        # Contro-prova: body oggetto valido ma senza `input` -> 400 preesistente
+        r = c.post("/v1/audio/speech",
+                   json={"model": "scrocco-llm-test", "voice": "alloy"})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["message"] == "'input' è obbligatorio", r.text
+        assert f.calls == [], f.calls
+    finally:
+        _teardown(m, orig)
+
+
+def test_finding_b_401_senza_dettaglio_messaggio_non_vuoto(monkeypatch, tmp_path):
+    """Finding B (roadmap §5): `AuthResult.error` e' `str | None` mentre
+    `_unauthorized(detail: str)`. Con `error=None` il body 401 aveva
+    `message: null`. Contratto: 401 auth_error con messaggio leggibile su
+    tutti e tre i path audio, senza toccare il forwarder."""
+    from app.auth import AuthResult
+
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    f = _fwd_vietato(monkeypatch)
+    try:
+        monkeypatch.setattr(
+            gw_state.authn, "authenticate",
+            lambda _h: AuthResult(ok=False, profile=None, mode=None, error=None))
+        got = (
+            ("/v1/audio/speech",
+             c.post("/v1/audio/speech", headers=MK, json=_TTS_BODY)),
+            ("/v1/systemone",
+             c.post("/v1/systemone", headers=MK, json=_SYSTEMONE_BODY)),
+            ("/v1/audio/transcriptions",
+             c.post("/v1/audio/transcriptions", headers=MK,
+                    files=_STT_FILE, data=_STT_DATA)),
+        )
+        for path, r in got:
+            assert r.status_code == 401, (path, r.status_code, r.text)
+            err = r.json()["error"]
+            assert err["type"] == "auth_error", (path, err)
+            assert err["message"] == "Authentication failed", (path, err)
+        assert f.calls == [], f.calls
+    finally:
+        _teardown(m, orig)
+
+
+def test_finding_b_401_dettaglio_presente_preservato(monkeypatch, tmp_path):
+    """Contro-prova del finding B: quando il dettaglio C'E' non si sostituisce
+    (il fallback copre solo il caso mancante)."""
+    from app.auth import AuthResult
+
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    _fwd_vietato(monkeypatch)
+    try:
+        monkeypatch.setattr(
+            gw_state.authn, "authenticate",
+            lambda _h: AuthResult(ok=False, profile=None, mode=None,
+                                  error="chiave scaduta"))
+        r = c.post("/v1/audio/speech", headers=MK, json=_TTS_BODY)
+        assert r.status_code == 401
+        err = r.json()["error"]
+        assert err["type"] == "auth_error"
+        assert err["message"] == "chiave scaduta"
+    finally:
+        _teardown(m, orig)
+
+
+def test_finding_c_routing_fallito_normale_invariato(monkeypatch, tmp_path):
+    """Finding C (roadmap §6): quando `_audio_route` produce un errore proprio,
+    TTS e STT consegnano QUELLO (status e body invariati), non un 503."""
+    import app.audio_api as audio_api
+    from fastapi.responses import JSONResponse
+
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    f = _fwd_vietato(monkeypatch)
+    corpo = {"error": {"message": "modello sconosciuto",
+                       "type": "invalid_request_error"}}
+
+    def _route_404(*_a, **_kw):
+        return (None, None, JSONResponse(status_code=404, content=corpo))
+
+    try:
+        monkeypatch.setattr(audio_api, "_audio_route", _route_404)
+        for r in (c.post("/v1/audio/speech", headers=MK, json=_TTS_BODY),
+                  c.post("/v1/audio/transcriptions", headers=MK,
+                         files=_STT_FILE, data=_STT_DATA)):
+            assert r.status_code == 404, r.text
+            assert r.json() == corpo, r.text
+        assert f.calls == [], f.calls
+    finally:
+        _teardown(m, orig)
+
+
+def test_finding_c_audio_route_dep_none_503(monkeypatch, tmp_path):
+    """Finding C (roadmap §6): se `_audio_route` torna `(None, profile, None)`
+    l'endpoint risponde 503 server_error invece di esplodere con un subscript
+    su None (500), e non prova il forwarder."""
+    import app.audio_api as audio_api
+
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    f = _fwd_vietato(monkeypatch)
+    try:
+        monkeypatch.setattr(audio_api, "_audio_route",
+                            lambda *a, **kw: (None, None, None))
+        got = (
+            ("/v1/audio/speech",
+             c.post("/v1/audio/speech", headers=MK, json=_TTS_BODY), "tts"),
+            ("/v1/audio/transcriptions",
+             c.post("/v1/audio/transcriptions", headers=MK,
+                    files=_STT_FILE, data=_STT_DATA), "stt"),
+        )
+        for path, r, cap in got:
+            assert r.status_code == 503, (path, r.status_code, r.text)
+            err = r.json()["error"]
+            assert err["type"] == "server_error", (path, err)
+            assert err["message"] == (
+                f"nessun deployment disponibile per ['{cap}']"), (path, err)
+        assert f.calls == [], f.calls
+    finally:
+        _teardown(m, orig)
+
+
+def test_finding_e_403_upstream_ruota_su_tts(monkeypatch, tmp_path):
+    """Finding E (roadmap §8): un 403 upstream non e' azionabile dal client
+    (contratto di tests/test_permission_denied.py): si marca fallito e si
+    RUOTA. Prima il 403 usciva subito col primo deployment."""
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    _cooldown_pulito()
+    provati: list[str] = []
+    uniques: list[str] = []
+
+    class _F:
+        async def call_speech(self, dep, payload, **kw):
+            provati.append(dep["provider"])
+            uniques.append(dep["unique"])
+            if len(provati) == 1:
+                raise UpstreamError(-403, _UPSTREAM_403_DENIED)
+            return b"audio", "audio/mpeg"
+
+    monkeypatch.setattr(gw_state, "forwarder", _F())
+    try:
+        r = c.post("/v1/audio/speech", headers=_SK_TEST, json=_TTS_BODY)
+        assert r.status_code == 200, r.text
+        assert provati == ["groq", "openrouter"], provati
+        assert r.content == b"audio", r.content
+        assert r.headers["content-type"].startswith("audio/mpeg")
+        assert gw_state.router._cooldown.get(uniques[0], 0) > 0, "403 senza cooldown"
+    finally:
+        _cooldown_pulito()
+        _teardown(m, orig)
+
+
+def test_finding_e_403_upstream_ruota_su_stt(monkeypatch, tmp_path):
+    """Stessa rotazione sul path STT (predicato duplicato)."""
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _STT_ROWS)
+    _cooldown_pulito()
+    provati: list[str] = []
+    uniques: list[str] = []
+
+    class _F:
+        async def transcribe(self, dep, *a, **kw):
+            provati.append(dep["provider"])
+            uniques.append(dep["unique"])
+            if len(provati) == 1:
+                raise UpstreamError(-403, _UPSTREAM_403_DENIED)
+            return {"text": "ok", "nx_deployment": dep["unique"]}
+
+    monkeypatch.setattr(gw_state, "forwarder", _F())
+    try:
+        r = c.post("/v1/audio/transcriptions", headers=_SK_TEST,
+                   files=_STT_FILE, data=_STT_DATA)
+        assert r.status_code == 200, r.text
+        assert r.json()["text"] == "ok", r.text
+        assert provati == ["groq", "openrouter"], provati
+        assert gw_state.router._cooldown.get(uniques[0], 0) > 0, "403 senza cooldown"
+    finally:
+        _cooldown_pulito()
+        _teardown(m, orig)
+
+
+def test_finding_e_403_esaurimento_consegna_403(monkeypatch, tmp_path):
+    """Finding E, coda della catena: la route audio consegna l'ULTIMO status
+    upstream (403), non un 503: e' il contratto fissato dai test e2e sui 401
+    e da test_e2e_403_progetto_negato_ruota_senza_chat (roadmap §8 punto 3)."""
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    _cooldown_pulito()
+    provati: list[str] = []
+
+    class _F:
+        async def call_speech(self, dep, payload, **kw):
+            provati.append(dep["provider"])
+            raise UpstreamError(-403, _UPSTREAM_403_DENIED)
+
+    monkeypatch.setattr(gw_state, "forwarder", _F())
+    try:
+        r = c.post("/v1/audio/speech", headers=_SK_TEST, json=_TTS_BODY)
+        assert provati == ["groq", "openrouter"], provati
+        assert r.status_code == 403, (r.status_code, r.text)
+    finally:
+        _cooldown_pulito()
+        _teardown(m, orig)
+
+
+def test_finding_e_400_senza_firma_non_ruota(monkeypatch, tmp_path):
+    """Contro-prova del finding E: un -400 SENZA le due firme body-specifiche
+    resta un errore del CLIENT (nessuna rotazione, nessun cooldown)."""
+    c, m, orig = _make_client(monkeypatch, tmp_path, _CSV_HEADER + _TTS_ROWS)
+    _cooldown_pulito()
+    provati: list[str] = []
+    uniques: list[str] = []
+
+    class _F:
+        async def call_speech(self, dep, payload, **kw):
+            provati.append(dep["provider"])
+            uniques.append(dep["unique"])
+            raise UpstreamError(-400, '{"error":{"message":"invalid payload"}}')
+
+    monkeypatch.setattr(gw_state, "forwarder", _F())
+    try:
+        r = c.post("/v1/audio/speech", headers=_SK_TEST, json=_TTS_BODY)
+        assert r.status_code == 400, (r.status_code, r.text)
+        assert provati == ["groq"], provati
+        assert gw_state.router._cooldown.get(uniques[0], 0) == 0, "400 in cooldown"
+    finally:
+        _cooldown_pulito()
+        _teardown(m, orig)

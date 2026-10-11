@@ -3,23 +3,6 @@
   var flashEl = document.getElementById("policy-flash");
   if (!table) return;
 
-  // FIX: Sanitize input to prevent XSS when policy fields are displayed
-  // NB: le entita' sono costruite via \u0026 (codice di '&') per evitare
-  // che un editor/tool decodifichi "&amp;" in "&".
-  function htmlEscape(text) {
-    var AMP = "\u0026";
-    var map = {
-      "\u0026": AMP + "amp;",
-      "\u003c": AMP + "lt;",
-      "\u003e": AMP + "gt;",
-      "\u0022": AMP + "quot;",
-      "\u0027": AMP + "#39;"
-    };
-    return String(text).replace(/[\u0026\u003c\u003e\u0022\u0027]/g, function (c) {
-      return map[c];
-    });
-  }
-
   function showFlash(msg, type) {
     if (!flashEl) return;
     flashEl.textContent = msg || "";
@@ -134,8 +117,10 @@
     } else if (type === "int" || type === "num") {
       payload = raw === "" ? null : Number(raw);
     } else {
-      // FIX: Sanitize raw value to prevent XSS
-      payload = htmlEscape(String(raw));
+      // Il valore va inviato GREZZO: l'escaping HTML qui corrompeva il dato
+      // persistito in YAML (`foo & bar` finiva come `foo &amp; bar`). L'output
+      // e' gia' escapato in fase di render, che e' il posto giusto.
+      payload = String(raw ?? "");
     }
 
     var body = JSON.stringify({ field: field, value: payload });

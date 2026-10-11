@@ -10,6 +10,10 @@
 
 <div id="csvBanner" class="alert" style="display:none;"></div>
 
+<div class="alert alert-warning" style="margin-bottom:12px;">
+  <strong>Nota sul formato:</strong> I commenti iniziali (<code>#</code>) antecedenti l'intestazione non vengono conservati dal motore di scrittura del gateway. Il gateway crea un backup automatico prima di ogni salvataggio. La sequenza di puntini di sospensione <code>...</code> o <code>…</code> è riservata dal sistema di protezione credenziali e non può essere utilizzata nei campi.
+</div>
+
 <div class="card" style="max-width:100%;">
   <div class="form-inline" style="margin-bottom:8px;">
     <button type="button" class="btn" id="btnView" data-mode="table">Vista: Tabella</button>
@@ -24,8 +28,12 @@
       <tbody>
         <% (rows || []).forEach(function(row){ %>
           <tr>
-            <% (header || []).forEach(function(h){ %>
-              <td contenteditable="true"><%= row[h] %></td>
+            <% (header || []).forEach(function(h, i){
+                 const isKey = keyIdx && keyIdx.has(i);
+                 const val = row[h];
+                 const isMasked = isKey && (typeof val === 'string') && (val.includes('…') || val.includes('***') || val.includes('...'));
+            %>
+              <td contenteditable="true"<% if (isKey) { %> data-key-col="true"<% } %><% if (isMasked) { %> data-masked="true" data-original="<%= escapeAttr(val) %>"<% } %>><%= val %></td>
             <% }); %>
           </tr>
         <% }); %>
@@ -37,5 +45,6 @@
     style="display:none;width:100%;min-height:60vh;font-family:monospace;font-size:12px;"><%= raw %></textarea>
 </div>
 
-<script>window.__csvHeader = <%- JSON.stringify(header || []) %>;</script>
+<script>window.__csvHeader = <%- JSON.stringify(header || []).replace(/</g, '\\u003c') %>;
+  window.__csvHash = <%- JSON.stringify(hash || "").replace(/</g, '\\u003c') %>;</script>
 <script src="/js/csv-editor.js"></script>

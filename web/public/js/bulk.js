@@ -122,8 +122,10 @@
   if ($("#bulk-submit")) {
     $("#bulk-submit").addEventListener("click", async function () {
       if (!operations.length) { alert("Nessuna operazione in anteprima"); return; }
-      if (!window.scw || !window.scw.confirm) return;
-      if (!window.confirm("Eseguire " + operations.length + " operazioni?")) return;
+      var confirmFn = (window.scw && typeof window.scw.confirm === "function")
+        ? window.scw.confirm
+        : window.confirm;
+      if (!confirmFn("Eseguire " + operations.length + " operazioni?")) return;
       try {
         var resp = await window.scw.fetch("/deployments/bulk", {
           method: "POST",

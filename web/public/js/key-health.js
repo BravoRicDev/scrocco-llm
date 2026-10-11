@@ -15,33 +15,43 @@
     sel.addEventListener("change", applyFilter);
   }
 
-  if (!table || !window.scw) return;
+  // app.js (che definisce window.scw) e' caricato dal layout DOPO il body:
+  // registrare i click a DOMContentLoaded garantisce che sia disponibile.
+  function initActions() {
+    if (!table || !window.scw) return;
 
-  document.querySelectorAll(".kh-unretire").forEach((btn) => {
-    btn.addEventListener("click", async function () {
-      const unique = btn.getAttribute("data-unique");
-      if (!unique) return;
-      if (!window.confirm("Riativare il deployment ritirato? L'operazione è distruttiva per lo stato retired.")) {
-        return;
-      }
-      btn.disabled = true;
-      btn.textContent = "…";
-      try {
-        const res = await window.scw.fetch("/key-health/" + encodeURIComponent(unique) + "/unretire", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
-        let data = null;
-        try { data = await res.json(); } catch (e) { data = null; }
-        if (res.ok && data && data.ok) {
-          window.location.href = "/key-health?flash=" + encodeURIComponent("deployment riattivato") + "&flashType=success";
+    document.querySelectorAll(".kh-unretire").forEach((btn) => {
+      btn.addEventListener("click", async function () {
+        const unique = btn.getAttribute("data-unique");
+        if (!unique) return;
+        if (!window.confirm("Riativare il deployment ritirato? L'operazione è distruttiva per lo stato retired.")) {
           return;
         }
-        window.location.href = "/key-health?flash=" + encodeURIComponent("Gateway: " + (data && data.error ? data.error : "errore")) + "&flashType=error";
-      } catch (err) {
-        window.location.href = "/key-health?flash=" + encodeURIComponent("errore di rete") + "&flashType=error";
-      }
+        btn.disabled = true;
+        btn.textContent = "…";
+        try {
+          const res = await window.scw.fetch("/key-health/" + encodeURIComponent(unique) + "/unretire", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          let data = null;
+          try { data = await res.json(); } catch (e) { data = null; }
+          if (res.ok && data && data.ok) {
+            window.location.href = "/key-health?flash=" + encodeURIComponent("deployment riattivato") + "&flashType=success";
+            return;
+          }
+          window.location.href = "/key-health?flash=" + encodeURIComponent("Gateway: " + (data && data.error ? data.error : "errore")) + "&flashType=error";
+        } catch (err) {
+          window.location.href = "/key-health?flash=" + encodeURIComponent("errore di rete") + "&flashType=error";
+        }
+      });
     });
-  });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initActions);
+  } else {
+    initActions();
+  }
 })();

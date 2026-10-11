@@ -3,11 +3,6 @@ window.scw = {
     const headers = { ...opts.headers };
     const requestId = 'scw-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
     headers['X-Request-Id'] = requestId;
-    
-    const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-    if (csrfMeta && !headers['X-CSRF-Token']) {
-      headers['X-CSRF-Token'] = csrfMeta.content;
-    }
 
     // comodità: opts.json -> body JSON serializzato + Content-Type
     const fetchOpts = { ...opts, headers };
@@ -53,6 +48,10 @@ window.scw = {
     
     form.submit();
     return true;
+  },
+
+  confirm(message) {
+    return window.confirm(message || 'Sei sicuro di voler continuare?');
   },
 
   escapeHTML(str) {
@@ -215,6 +214,10 @@ window.scw = {
   },
 
   init() {
+    // Idempotente: la vista key-health includeva app.js una seconda volta, quindi
+    // i listener di tema e scorciatoie venivano registrati due volte (e si annullavano).
+    if (this._initialized) return;
+    this._initialized = true;
     this.theme.init();
     this.search.init();
     this.keys.init();

@@ -116,6 +116,14 @@ async def audio_speech(request: Request):
         payload = await request_json(request)
     except Exception:
         return invalid_json_body()
+    # Un JSON sintatticamente valido ma non-oggetto (`null`, `[]`, `"x"`, 42)
+    # farebbe esplodere `payload.get` con un AttributeError -> 500. Il body
+    # malformato a livello di schema e' un errore del CLIENT: 400.
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "il body deve essere un oggetto JSON", "type": "invalid_request_error"}},
+        )
     raw_model = payload.get("model") or ""
     if not str(payload.get("input") or "").strip():
         return JSONResponse(
@@ -124,7 +132,7 @@ async def audio_speech(request: Request):
     model = gw_state.policy.canonicalize(raw_model)
     auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return _unauthorized(auth.error)
+        return _unauthorized(auth.error or "Authentication failed")
     if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
@@ -134,6 +142,20 @@ async def audio_speech(request: Request):
     dep, profile, err = _audio_route(auth.profile, model, raw_model, _session_id(request, payload), need)
     if err:
         return err
+    # Difesa locale: `_audio_route` non ha un tipo di ritorno dichiarato, quindi
+    # un checker non puo' dedurre che `err is None` implica `dep is not None`.
+    # Il contratto copre il caso normale; questa guardia chiude il caso anomalo
+    # senza un 500 da subscript su None.
+    if dep is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": f"nessun deployment disponibile per {sorted(need) or model}",
+                    "type": "server_error",
+                }
+            },
+        )
 
     metrics.inc("nx_tts_total", (dep["group"], "attempt"))
     log.info("[tts] %s -> %s (input=%d chars)", model, dep["unique"], len(str(payload.get("input") or "")))
@@ -194,9 +216,11 @@ async def audio_speech(request: Request):
                 # deployment, che va in cooldown e si ruota. Mai un 502 al
                 # client senza cooldown (regola utente).
                 status >= 0
-                or -status in (401, 402, 404)
+                # 403 = QUALSIASI 403 upstream non e' azionabile dal client:
+                # ruota come 401/402/404 (contratto in tests/test_permission_denied.py).
+                or -status in (401, 402, 403, 404)
                 or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
-                or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
+                or (-status == 400 and ("openai_error" in detail or "bad_response_status_code" in detail))
             )
             if not deployment_side:
                 metrics.inc("nx_tts_total", (dep["group"], "client_error"))
@@ -284,7 +308,7 @@ async def systemone(request: Request):
     model = gw_state.policy.canonicalize(raw_model)
     auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return _unauthorized(auth.error)
+        return _unauthorized(auth.error or "Authentication failed")
     if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
@@ -507,7 +531,7 @@ async def _audio_transcribe(request: Request, path: str):
     model = gw_state.policy.canonicalize(raw_model)
     auth: AuthResult = gw_state.authn.authenticate(request.headers.get("authorization"))
     if not auth.ok:
-        return _unauthorized(auth.error)
+        return _unauthorized(auth.error or "Authentication failed")
     if not gw_state.authn.authorize_model(auth, model):
         return _forbidden(model, auth.profile)
 
@@ -518,6 +542,17 @@ async def _audio_transcribe(request: Request, path: str):
     dep, profile, err = _audio_route(auth.profile, model, raw_model, session_id, need)
     if err:
         return err
+    # Vedi la guardia equivalente in `audio_speech`: stesso narrowing locale.
+    if dep is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": f"nessun deployment disponibile per {sorted(need) or model}",
+                    "type": "server_error",
+                }
+            },
+        )
 
     metrics.inc("nx_stt_total", (dep["group"], "attempt"))
     log.info("[stt] %s -> %s (%s, %d bytes, via /%s)", model, dep["unique"], filename, len(file_bytes), path)
@@ -593,9 +628,11 @@ async def _audio_transcribe(request: Request, path: str):
                 # deployment, che va in cooldown e si ruota. Mai un 502 al
                 # client senza cooldown (regola utente).
                 status >= 0
-                or -status in (401, 402, 404)
+                # 403 = QUALSIASI 403 upstream non e' azionabile dal client:
+                # ruota come 401/402/404 (contratto in tests/test_permission_denied.py).
+                or -status in (401, 402, 403, 404)
                 or _MODEL_MISSING_RE.search(detail)  # "No such model" stile CF
-                or (-status in (400, 403) and ("openai_error" in detail or "bad_response_status_code" in detail))
+                or (-status == 400 and ("openai_error" in detail or "bad_response_status_code" in detail))
             )
             if not deployment_side:
                 metrics.inc("nx_stt_total", (dep["group"], "client_error"))

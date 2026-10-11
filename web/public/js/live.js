@@ -27,13 +27,13 @@
   function rowFor(e) {
     const tr = document.createElement("tr");
     tr.innerHTML =
-      "<td data-ts=\"" + (e.ts || "") + "\">" + esc(e.ts || "—") + "</td>" +
+      "<td data-ts=\"" + escapeAttr(e.ts || "") + "\">" + esc(e.ts || "—") + "</td>" +
       "<td>" + esc(e.group || "—") + "</td>" +
       "<td><code>" + esc(e.dep || "—") + "</code></td>" +
       "<td>" + esc(e.model || "—") + "</td>" +
-      "<td>" + (e.tries ?? "—") + "</td>" +
-      "<td>" + (e.fb ?? 0) + "</td>" +
-      "<td>" + (e.ms ?? "—") + "</td>" +
+      "<td>" + esc(e.tries ?? "—") + "</td>" +
+      "<td>" + esc(e.fb ?? 0) + "</td>" +
+      "<td>" + esc(e.ms ?? "—") + "</td>" +
       "<td>" + statusBadge(e.status) + "</td>";
     return tr;
   }
@@ -41,7 +41,7 @@
   function statusBadge(st) {
     if (st === undefined || st === null) return "—";
     const ok = Number(st) < 400;
-    return '<span class="badge ' + (ok ? "badge-active" : "badge-disabled") + '">' + st + "</span>";
+    return '<span class="badge ' + (ok ? "badge-active" : "badge-disabled") + '">' + esc(String(st)) + "</span>";
   }
 
   function esc(v) {
@@ -129,6 +129,16 @@
     });
   }
 
-  setInterval(poll, 2000);
-  poll();
+  // `window.scw` e' definito da app.js, che il layout carica DOPO il body:
+  // partire a DOMContentLoaded evita il falso banner "gateway giu" al bootstrap.
+  function startPolling() {
+    setInterval(poll, 2000);
+    poll();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startPolling);
+  } else {
+    startPolling();
+  }
 })();

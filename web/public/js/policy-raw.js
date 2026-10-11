@@ -194,21 +194,32 @@
     }, 500);
   });
 
-  // sincronizza lo stato attivo dall'endpoint di lettura (best-effort)
-  window.scw.fetch("/api/policy-raw/data")
-    .then(function (resp) {
-      if (!resp || !resp.ok) return null;
-      return resp.json();
-    })
-    .then(function (data) {
-      if (data && typeof data.raw === "string") {
-        state.activeRaw = data.raw;
-        if (document.activeElement !== ta) ta.value = data.raw;
-        if (data.path) {
-          var pathEl = document.getElementById("pr-path");
-          if (pathEl) pathEl.textContent = data.path;
+  // sincronizza lo stato attivo dall'endpoint di lettura (best-effort).
+  // `window.scw` arriva da app.js, caricato dal layout DOPO il body: senza un
+  // guard su readyState questa riga solleva TypeError al bootstrap.
+  function syncActiveRaw() {
+    if (!window.scw || !window.scw.fetch) return;
+    window.scw.fetch("/api/policy-raw/data")
+      .then(function (resp) {
+        if (!resp || !resp.ok) return null;
+        return resp.json();
+      })
+      .then(function (data) {
+        if (data && typeof data.raw === "string") {
+          state.activeRaw = data.raw;
+          if (document.activeElement !== ta) ta.value = data.raw;
+          if (data.path) {
+            var pathEl = document.getElementById("pr-path");
+            if (pathEl) pathEl.textContent = data.path;
+          }
         }
-      }
-    })
-    .catch(function () { /* best-effort: usa il valore renderizzato dal server */ });
+      })
+      .catch(function () { /* best-effort: usa il valore renderizzato dal server */ });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", syncActiveRaw);
+  } else {
+    syncActiveRaw();
+  }
 })();
